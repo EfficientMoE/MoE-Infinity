@@ -126,7 +126,7 @@ void Logger::Impl::formatTime() {
       tm_time = g_logTimeZone.toLocalTime(seconds);
     } else {
       //::gmtime_r(&seconds, &tm_time); // FIXME TimeZone::fromUtcTime
-      ::localtime_r(&seconds, &tm_time);  //使用本地时间
+      ::localtime_r(&seconds, &tm_time);  // 使用本地时间
     }
 
     int len =
