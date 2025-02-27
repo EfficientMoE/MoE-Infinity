@@ -6,7 +6,7 @@
 #include "copyable.h"
 #include "types.h"
 
-//#include <boost/operators.hpp>
+// #include <boost/operators.hpp>
 
 namespace base {
 
