@@ -1,6 +1,3 @@
-# This workflow will upload a Python Package to Release asset
-# For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions
-
 name: Create Release
 
 on:
@@ -8,13 +5,11 @@ on:
     tags:
       - v*
 
-# Needed to create release and upload assets
 permissions:
   contents: write
 
 jobs:
   release:
-    # Retrieve tag and create release
     name: Create Release
     runs-on: ubuntu-latest
     outputs:
@@ -30,7 +25,7 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: "actions/github-script@v6"
+        uses: actions/github-script@v6
         env:
           RELEASE_TAG: ${{ env.release_tag }}
         with:
@@ -41,60 +36,55 @@ jobs:
 
   wheel:
     name: Build Wheel
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-20.04
     needs: release
-    permissions: write-all
-
+    container:
+      image: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu20.04
+      options: --gpus all
     strategy:
       fail-fast: false
       matrix:
-          os: ['ubuntu-20.04']
-          python-version: ['3.8', '3.9', '3.10', '3.11']
-          cuda-version: ['11.7']
+        python-version: ['3.8', '3.9', '3.10', '3.11']
+        cuda-version: ['12.1']
 
     steps:
-      - name: Checkout
+      - name: Checkout Source Code
         uses: actions/checkout@v3
 
-    #   - name: Set up Linux Env
-    #     if: ${{ runner.os == 'Linux' }}
-    #     run: |
-    #       bash -x .github/workflows/scripts/env.sh
-
-      - name: Free disk space
+      - name: Free Disk Space
         run: |
           sudo rm -rf /usr/local/cuda-* /opt/cuda
           sudo rm -rf /usr/local/cuda
           bash -x .github/workflows/scripts/free-disk-space.sh
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4
         with:
-            python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python-version }}
 
-      - name: Install CUDA ${{ matrix.cuda-version }}
+      - name: Install Dependencies
         run: |
-          bash -x .github/workflows/scripts/cuda-install.sh ${{ matrix.cuda-version }} ${{ matrix.os }}
+          apt update && apt install -y python3-pip rename
+          python3 -m pip install --upgrade pip
+          python3 -m pip install build
 
-      - name: Build wheel
+      - name: Build Wheel
         shell: bash
         run: |
-          sudo apt update && sudo apt install rename -y && sudo apt clean
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install build
-          BUILD_OPS=1 python -m build --wheel
+          BUILD_OPS=1 python3 -m build --wheel
           wheel_name=$(ls dist/*whl | xargs -n 1 basename)
           asset_name=${wheel_name//"linux"/"manylinux1"}
           echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
           echo "asset_name=${asset_name}" >> $GITHUB_ENV
 
-
-      # only build source when the python version is 3.8
       - name: Build Source
         if: ${{ matrix.python-version == '3.8' }}
         run: |
-          python -m build --sdist
+          python3 -m build --sdist
+
+      - name: Rename Wheel
+        run: |
+          mv dist/${{ env.wheel_name }} dist/${{ env.asset_name }}
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
@@ -102,17 +92,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.release.outputs.upload_url }}
-          asset_path: ./dist/${{ env.wheel_name }}
+          asset_path: ./dist/${{ env.asset_name }}
           asset_name: ${{ env.asset_name }}
           asset_content_type: application/*
 
-      - name: Rename wheel
-        run: |
-          mv dist/${{ env.wheel_name }} dist/${{ env.asset_name }}
-
-    #   (Danielkinz): This last step will publish the .whl to pypi. Warning: untested
-      - name: Publish package
+      - name: Publish Package to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1.8
         with:
-        #   repository-url: https://test.pypi.org/legacy/
           skip-existing: true
+        env:
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}

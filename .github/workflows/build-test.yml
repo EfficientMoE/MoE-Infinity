@@ -1,10 +1,6 @@
-# This workflow will upload a Python Package to Release asset
-# For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions
-
 name: Build Test
 
 on:
-    # push or pull request to main or dev branch
   push:
     branches:
       - main
@@ -17,38 +13,20 @@ on:
 jobs:
   build:
     runs-on: ubuntu-20.04
+    container:
+      image: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu20.04
+
     steps:
-      - name: Checkout
+      - name: Checkout Source Code
         uses: actions/checkout@v3
-
-      - name: Set up Python 3.8
-        uses: actions/setup-python@v4
-        with:
-          python-version: 3.8
-
-      - name: Free disk space
+          
+      - name: Install Dependencies
         run: |
-          sudo rm -rf /usr/local/cuda-* /opt/cuda
-          sudo rm -rf /usr/local/cuda
-          bash -x .github/workflows/scripts/free-disk-space.sh
+          apt update && apt install -y python3-pip
+          python3 -m pip install --upgrade pip
+          python3 -m pip install build
 
-      - name: Cache Python packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install CUDA 11.7
+      - name: Build Wheel
         run: |
-          bash -x .github/workflows/scripts/cuda-install.sh 11.7 ubuntu-20.04
+          BUILD_OPS=1 python3 -m build
 
-      - name: Install build dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install build
-
-      - name: Build package
-        run: BUILD_OPS=1 python -m build
