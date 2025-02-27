@@ -38,8 +38,6 @@ jobs:
     name: Build Wheel
     runs-on: ubuntu-20.04
     needs: release
-    container:
-      image: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu20.04
     strategy:
       fail-fast: false
       matrix:
