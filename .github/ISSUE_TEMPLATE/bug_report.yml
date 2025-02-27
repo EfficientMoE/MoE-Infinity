@@ -1,5 +1,5 @@
 name: Bug Report
-description: File an issue about a bug in ServerlessLLM.
+description: File an issue about a bug in MoE-Infinity.
 title: "[BUG] "
 labels: [bug]
 assignees: []
@@ -14,9 +14,9 @@ body:
     attributes:
       label: Prerequisites
       options:
-        - label: I have read the [ServerlessLLM documentation](https://serverlessllm.github.io/).
+        - label: I have read the [MoE-Infinity documentation]().
           required: true
-        - label: I have searched the [Issue Tracker](https://github.com/ServerlessLLM/ServerlessLLM/issues) to ensure this hasn't been reported before.
+        - label: I have searched the [Issue Tracker](https://github.com/TorchMoE/MoE-Infinity/issues) to ensure this hasn't been reported before.
           required: true
 
   - type: textarea
@@ -70,6 +70,6 @@ body:
     attributes:
       label: Usage Statistics (Optional)
       description: |
-        We'd love to know how you're using ServerlessLLM! If you're comfortable, please share details like your affiliation and use case to help us improve the project.
+        We'd love to know how you're using MoE-Infinity! If you're comfortable, please share details like your affiliation and use case to help us improve the project.
     validations:
       required: false
