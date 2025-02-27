@@ -40,7 +40,6 @@ jobs:
     needs: release
     container:
       image: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu20.04
-      options: --gpus all
     strategy:
       fail-fast: false
       matrix:
@@ -64,7 +63,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          apt update && apt install -y python3-pip rename
+          apt update && apt install --no-install-recommends -y python3-pip rename python3-dev
           python3 -m pip install --upgrade pip
           python3 -m pip install build
 
