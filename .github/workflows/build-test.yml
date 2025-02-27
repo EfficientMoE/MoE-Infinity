@@ -19,7 +19,7 @@ jobs:
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v3
-          
+
       - name: Install Dependencies
         run: |
           apt update && apt install -y python3-pip
@@ -29,4 +29,3 @@ jobs:
       - name: Build Wheel
         run: |
           BUILD_OPS=1 python3 -m build
-
