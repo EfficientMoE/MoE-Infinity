@@ -12,17 +12,17 @@ jobs:
   setup-version:
     runs-on: ubuntu-latest
     steps:
-      - name: Generate version number
-        run: |
-          VERSION_HASH=$(date +"%Y%m%d%H%M%S")
-          echo "Generated version hash: $VERSION_HASH"
-          echo $VERSION_HASH > version.txt
+    - name: Generate version number
+      run: |
+        VERSION_HASH=$(git log -1 --format=%cd --date=format:%Y%m%dh%H%M%S)
+        echo "Generated version hash: $VERSION_HASH"
+        echo $VERSION_HASH > version.txt
 
-      - name: Upload version number as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: version
-          path: version.txt
+    - name: Upload version number as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: version
+        path: version.txt
 
   wheel:
     name: Build Wheel
@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.8', '3.9', '3.10', '3.11']
-        cuda-version: ['12.1']
+        cuda-version: ['11.8', '12.1']
 
     steps:
       - name: Checkout Source Code
@@ -47,8 +47,8 @@ jobs:
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/cuda-* /opt/cuda
-          sudo rm -rf /usr/local/cuda
+          rm -rf /usr/local/cuda-* /opt/cuda
+          rm -rf /usr/local/cuda
           bash -x .github/workflows/scripts/free-disk-space.sh
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -58,9 +58,12 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          apt update && apt install --no-install-recommends -y python3-pip python3-dev
           python3 -m pip install --upgrade pip
           python3 -m pip install build
+
+      - name: Install CUDA ${{ matrix.cuda-version }}
+        run: |
+          bash -x .github/workflows/scripts/cuda-install.sh ${{ matrix.cuda-version }} ${{ matrix.os }}
 
       - name: Build Wheel
         shell: bash

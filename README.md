@@ -161,10 +161,15 @@ We plan to release two functions in the following months:
 
 If you use MoE-Inifity for your research, please cite our [paper](https://arxiv.org/abs/2401.14361):
 ```bibtex
-@inproceedings{moe-infinity2024,
-  title={MoE-Infinity: Offloading-Efficient MoE Model Serving},
-  author={Leyang Xue, Yao Fu, Zhan Lu, Luo Mai, Mahesh Marina},
-  booktitle={https://arxiv.org/abs/2401.14361},
-  year={2024}
+@misc{moe-infinity,
+  author       = {Leyang Xue and
+                  Yao Fu and
+                  Zhan Lu and
+                  Luo Mai and
+                  Mahesh Marina},
+  title        = {MoE-Infinity: Offloading-Efficient MoE Model Serving},
+  archivePrefix= {arXiv},
+  eprint       = {2401.14361},
+  year         = {2024}
 }
 ```
