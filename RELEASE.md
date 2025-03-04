@@ -26,7 +26,7 @@ For developers who prefer to manually build and publish their package to PyPI, t
 
 1. Start by cloning the repository and navigating to the root directory of the package:
     ```bash
-    git clone https://github.com/TorchMoE/MoE-Infinity.git
+    git clone https://github.com/EfficientMoE/MoE-Infinity.git
     cd MoE-Infinity
     ```
 2. Install the required dependencies to build the package:

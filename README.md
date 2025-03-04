@@ -85,7 +85,7 @@ pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/
 ### Install from Source
 
 ```bash
-git clone https://github.com/TorchMoE/MoE-Infinity.git
+git clone https://github.com/EfficientMoE/MoE-Infinity.git
 cd MoE-Infinity
 pip install -e .
 ```

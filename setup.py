@@ -1,7 +1,7 @@
-# Copyright (c) TorchMoE.
+# Copyright (c) EfficientMoE.
 # SPDX-License-Identifier: Apache-2.0
 
-# TorchMoE Team
+# EfficientMoE Team
 
 import io
 import os
@@ -93,11 +93,11 @@ setup(
     },
     include_package_data=True,
     install_requires=install_requires,
-    author="TorchMoE Team",
+    author="EfficientMoE Team",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
-    url="https://github.com/TorchMoE/MoE-Infinity",
-    project_urls={"Homepage": "https://github.com/TorchMoE/MoE-Infinity"},
+    url="https://github.com/EfficientMoE/MoE-Infinity",
+    project_urls={"Homepage": "https://github.com/EfficientMoE/MoE-Infinity"},
     classifiers=[
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",

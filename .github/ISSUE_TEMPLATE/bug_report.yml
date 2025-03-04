@@ -16,7 +16,7 @@ body:
       options:
         - label: I have read the [MoE-Infinity documentation]().
           required: true
-        - label: I have searched the [Issue Tracker](https://github.com/TorchMoE/MoE-Infinity/issues) to ensure this hasn't been reported before.
+        - label: I have searched the [Issue Tracker](https://github.com/EfficientMoE/MoE-Infinity/issues) to ensure this hasn't been reported before.
           required: true
 
   - type: textarea

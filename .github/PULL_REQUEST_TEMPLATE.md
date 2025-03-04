@@ -12,6 +12,6 @@ If it fixes an issue, link it (e.g., `close #123`).
 - [ ] Documentation update
 
 ## Checklist
-- [ ] I have read the [CONTRIBUTION](https://github.com/TorchMoE/MoE-Infinity/blob/main/CONTRIBUTING.md) guide.
+- [ ] I have read the [CONTRIBUTION](https://github.com/EfficientMoE/MoE-Infinity/blob/main/CONTRIBUTING.md) guide.
 - [ ] I have updated the tests (if applicable).
 - [ ] I have updated the documentation (if applicable).

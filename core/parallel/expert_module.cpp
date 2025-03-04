@@ -1,7 +1,7 @@
-// Copyright (c) TorchMoE.
+// Copyright (c) EfficientMoE.
 // SPDX-License-Identifier: Apache-2.0
 
-// TorchMoE Team
+// EfficientMoE Team
 
 #include "expert_module.h"
 #include "aio/archer_tensor_handle.h"

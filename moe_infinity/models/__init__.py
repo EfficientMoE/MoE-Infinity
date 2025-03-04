@@ -1,7 +1,7 @@
-# Copyright (c) TorchMoE.
+# Copyright (c) EfficientMoE.
 # SPDX-License-Identifier: Apache-2.0
 
-# TorchMoE Team
+# EfficientMoE Team
 
 from .arctic import ArcticConfig, SyncArcticMoeBlock
 from .deepseek import DeepseekMoEBlock
