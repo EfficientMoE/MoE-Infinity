@@ -14,7 +14,7 @@ jobs:
     steps:
     - name: Generate version number
       run: |
-        VERSION_HASH=$(git log -1 --format=%cd --date=format:%Y%m%dh%H%M%S)
+        VERSION_HASH=$(date +"%Y%m%d%H%M%S")
         echo "Generated version hash: $VERSION_HASH"
         echo $VERSION_HASH > version.txt
 
