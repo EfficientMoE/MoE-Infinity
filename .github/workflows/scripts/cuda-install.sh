@@ -5,15 +5,15 @@ cuda_version=$(echo $1 | tr "." "-")
 # Removes '-' and '.' ex: ubuntu-20.04 -> ubuntu2004
 OS=$(echo $2 | tr -d ".\-")
 
-apt -qq update
-apt install -y wget gnupg2
+sudo apt -qq update
+sudo apt install -y wget gnupg2
 
 # Installs CUDA
 wget -nv https://developer.download.nvidia.com/compute/cuda/repos/${OS}/x86_64/cuda-keyring_1.1-1_all.deb
 dpkg -i cuda-keyring_1.1-1_all.deb
 rm cuda-keyring_1.1-1_all.deb
-apt --no-install-recommends -y install cuda-nvcc-${cuda_version} cuda-libraries-dev-${cuda_version}
-apt clean
+sudo apt --no-install-recommends -y install cuda-nvcc-${cuda_version} cuda-libraries-dev-${cuda_version}
+sudo apt clean
 
 # Test nvcc
 PATH=/usr/local/cuda-$1/bin:${PATH}
