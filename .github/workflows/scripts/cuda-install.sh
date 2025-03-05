@@ -12,6 +12,7 @@ sudo apt install -y wget gnupg2
 wget -nv https://developer.download.nvidia.com/compute/cuda/repos/${OS}/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
 rm cuda-keyring_1.1-1_all.deb
+sudo apt -qq update
 sudo apt --no-install-recommends -y install cuda-nvcc-${cuda_version} cuda-libraries-dev-${cuda_version}
 sudo apt clean
 
