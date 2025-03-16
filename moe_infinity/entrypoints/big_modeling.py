@@ -17,6 +17,8 @@ from moe_infinity.models.modeling_arctic import ArcticConfig
 from moe_infinity.runtime import OffloadEngine
 from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
 
+import warnings
+warnings.filterwarnings("ignore")
 
 class MoE:
     """

@@ -112,13 +112,13 @@ We provide a simple API for diverse setups, including single GPU, multiple GPUs,
 ```python
 import torch
 import os
-from transformers import AutoTokenizer, SwitchTransformersForConditionalGeneration
+from transformers import AutoTokenizer
 from moe_infinity import MoE
 
 user_home = os.path.expanduser('~')
 
-checkpoint = 'TheBloke/Mixtral-8x7B-v0.1-GPTQ'
-tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+checkpoint = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote=True)
 
 config = {
     "offload_path": os.path.join(user_home, "moe-infinity"),
@@ -167,7 +167,7 @@ If you use MoE-Inifity for your research, please cite our [paper](https://arxiv.
                   Zhan Lu and
                   Luo Mai and
                   Mahesh Marina},
-  title        = {MoE-Infinity: Offloading-Efficient MoE Model Serving},
+  title        = {MoE-Infinity: Efficient MoE Inference on Personal Machines with Sparsity-Aware Expert Cache},
   archivePrefix= {arXiv},
   eprint       = {2401.14361},
   year         = {2024}
