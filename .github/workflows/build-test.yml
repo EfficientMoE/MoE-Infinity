@@ -6,7 +6,7 @@ on:
       - main
       - dev
     paths-ignore:
-      - '*.md'
+      - '**.md'
       - 'examples/**'
       - 'tests/**'
       - 'docs/**'

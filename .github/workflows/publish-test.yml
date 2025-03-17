@@ -6,7 +6,7 @@ on:
       - main
 
     paths-ignore:
-      - '*.md'
+      - '**.md'
       - 'examples/**'
       - 'tests/**'
       - 'docs/**'
