@@ -5,6 +5,11 @@ on:
     branches:
       - main
       - dev
+    paths-ignore:
+      - '*.md'
+      - 'examples/**'
+      - 'tests/**'
+      - 'docs/**'
 
 jobs:
   build:

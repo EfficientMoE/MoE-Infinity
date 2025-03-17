@@ -5,6 +5,12 @@ on:
     branches:
       - main
 
+    paths-ignore:
+      - '*.md'
+      - 'examples/**'
+      - 'tests/**'
+      - 'docs/**'
+
 permissions:
   contents: write
 

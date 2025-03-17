@@ -65,11 +65,10 @@ Higher throughput is preferable.
 
 We recommend installing MoE-Infinity in a virtual environment. To install MoE-Infinity, you can either install it from PyPI or build it from source.
 
-### Install from conda environment
-
 ```bash
-conda env create --file environment.yml
+conda create -n moe-infinity python=3.9
 conda activate moe-infinity
+# install from either PyPI or Source will trigger requirements.txt automatically
 ```
 
 ### Install from PyPI
