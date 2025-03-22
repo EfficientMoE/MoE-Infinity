@@ -155,7 +155,7 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
     print(f"prompt: {prompt}")
 
     token_ids = tokenizer.encode(prompt, return_tensors="pt")
-    # token_ids = token_ids.to("cuda:0")
+    token_ids = token_ids.to("cuda:0")
     print(f"token_ids: {token_ids}")
     num_prompt_tokens = token_ids.size(1)
 
