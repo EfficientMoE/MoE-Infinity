@@ -1,11 +1,11 @@
+import logging
 import sys
-from moe_infinity.memory.expert_priority_score import *
-from moe_infinity.memory.expert_entry import ExpertCacheEntry
-
-import numpy as np
 from collections import Counter
 
-import logging
+import numpy as np
+
+from moe_infinity.memory.expert_entry import ExpertCacheEntry
+from moe_infinity.memory.expert_priority_score import *
 
 
 class ExpertCache:
@@ -63,14 +63,6 @@ class ExpertCache:
     def set_cache_policy(self, policy: str):
         self.cache_policy = policy
 
-    # def set_score_func(self, type:str):
-    #     if type == "lfu":
-    #         self.score_func = lfu_score
-    #     elif type == "priority":
-    #         self.score_func = priority_score
-    #     else:
-    #         assert False, "Should not reach here"
-
     def get_gpu_sorted_candidates(self):
         if type == "lfu":
             expert_freq = {
@@ -85,9 +77,6 @@ class ExpertCache:
 
     def add_tracer(self, tracer):
         self.tracer = tracer
-
-    # def add_predictor(self, predictor):
-    #     self.predictor = predictor
 
     def unprotect_expert(self, expert_idx: int, layer_idx: int):
         try:
@@ -137,12 +126,8 @@ class ExpertCache:
             )
         else:
             assert False, "Should not reach here"
-        # cache_candidates = lru_score_with_layers(cache_entries, layer_idx)
-        # cache_candidates = lru_score(cache_entries)
-        # cache_candidates = lfu_score(expert_visit_freq)
-        # cache_candidates = oracle_score(expert_freq, decoder_entry)
 
-        cache_candidates.sort(key=lambda x: x.r)  # sort by r acending
+        cache_candidates.sort(key=lambda x: x.r)  # sort by r ascending
         cache_candidates_in_gpu = [
             x
             for x in cache_candidates
@@ -154,9 +139,9 @@ class ExpertCache:
             for candidate in cache_candidates:
                 candidate_key = (candidate.expert_idx, candidate.layer_idx)
                 if (
-                    not candidate_key in self.experts_protected_ondemand
-                    and not candidate_key in self.experts_protected_prefetch
-                    and not candidate_key in self.experts_protected_by_layer
+                    candidate_key not in self.experts_protected_ondemand
+                    and candidate_key not in self.experts_protected_prefetch
+                    and candidate_key not in self.experts_protected_by_layer
                 ):
                     if candidate_key in self.gpu_expert_cache:
                         del self.gpu_expert_cache[candidate_key]
@@ -168,20 +153,17 @@ class ExpertCache:
             candidate_key = (candidate.expert_idx, candidate.layer_idx)
             if candidate_key in self.gpu_expert_cache:
                 if self.cache_policy == "priority":
-                    if not candidate_key in self.experts_protected_ondemand:
+                    if candidate_key not in self.experts_protected_ondemand:
                         del self.gpu_expert_cache[candidate_key]
-                        self.logger.debug(f"Force evicting expert {candidate_key}")
+                        self.logger.debug(
+                            f"Force evicting expert {candidate_key}"
+                        )
                         return True
                 else:
                     del self.gpu_expert_cache[candidate_key]
                     self.logger.debug(f"Force evicting expert {candidate_key}")
                     return True
 
-        # self.logger.debug("cache_candidates", cache_candidates)
-        # self.logger.debug("gpu_expert_caches", self.gpu_expert_cache.keys())
-        # self.logger.debug("experts_protected_ondemand", self.experts_protected_ondemand.keys())
-        # self.logger.debug("experts_protected_prefetch", self.experts_protected_prefetch.keys())
-        # self.logger.warning("Cannot evict expert", cache_candidates_in_gpu[0], "from GPU")
         return False
 
     def cpu_evict(self, seq_id, layer_idx):
@@ -200,13 +182,13 @@ class ExpertCache:
             layer_idx,
             self.tracer.num_layers,
         )
-        cache_candidates.sort(key=lambda x: x.r)  # sort by r acending
+        cache_candidates.sort(key=lambda x: x.r)  # sort by r ascending
 
         for candidate in cache_candidates:
             candidate_key = (candidate.expert_idx, candidate.layer_idx)
             if (
-                not candidate_key in self.experts_protected_ondemand
-                and not candidate_key in self.experts_protected_prefetch
+                candidate_key not in self.experts_protected_ondemand
+                and candidate_key not in self.experts_protected_prefetch
             ):
                 if candidate_key in self.cpu_expert_cache:
                     del self.cpu_expert_cache[candidate_key]
@@ -283,7 +265,8 @@ class ExpertCache:
 
     def protect_experts_by_layer(self, layer_idx: int):
         self.experts_protected_by_layer = {
-            (expert_idx, layer_idx): ExpertCacheEntry(expert_idx, layer_idx) for expert_idx in range(self.tracer.num_experts)
+            (expert_idx, layer_idx): ExpertCacheEntry(expert_idx, layer_idx)
+            for expert_idx in range(self.tracer.num_experts)
         }
 
     def protect_experts_on_demand(
@@ -299,7 +282,8 @@ class ExpertCache:
             )
 
         self.experts_protected_ondemand = {
-            (entry.expert_idx, entry.layer_idx): entry for entry in cache_entries
+            (entry.expert_idx, entry.layer_idx): entry
+            for entry in cache_entries
         }
 
     def protect_experts_prefetch(self, matrix, layer_idx: int):
@@ -310,7 +294,8 @@ class ExpertCache:
                     cache_entries.append(ExpertCacheEntry(e, l, matrix[l, e]))
 
         self.experts_protected_prefetch = {
-            (entry.expert_idx, entry.layer_idx): entry for entry in cache_entries
+            (entry.expert_idx, entry.layer_idx): entry
+            for entry in cache_entries
         }
 
 

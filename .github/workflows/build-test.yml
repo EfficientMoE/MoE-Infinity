@@ -1,0 +1,32 @@
+name: Build Test
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+    paths-ignore:
+      - '**.md'
+      - 'examples/**'
+      - 'tests/**'
+      - 'docs/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    container:
+      image: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu20.04
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v3
+
+      - name: Install Dependencies
+        run: |
+          apt update && apt install --no-install-recommends -y python3-pip python3-dev
+          python3 -m pip install --upgrade pip
+          python3 -m pip install build
+
+      - name: Build Wheel
+        run: |
+          BUILD_OPS=1 python3 -m build

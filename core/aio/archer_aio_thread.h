@@ -1,7 +1,7 @@
-// Copyright (c) TorchMoE.
+// Copyright (c) EfficientMoE.
 // SPDX-License-Identifier: Apache-2.0
 
-// TorchMoE Team
+// EfficientMoE Team
 
 #pragma once
 
@@ -14,26 +14,26 @@
 #include "archer_aio_utils.h"
 
 class ArcherAioThread {
-public:
-    explicit ArcherAioThread(int thread_id);
-    ~ArcherAioThread();
+ public:
+  explicit ArcherAioThread(int thread_id);
+  ~ArcherAioThread();
 
-    void Start();
-    void Stop();
+  void Start();
+  void Stop();
 
-    void Enqueue(AioCallback& callback);
-    void Wait();
+  void Enqueue(AioCallback& callback);
+  void Wait();
 
-private:
-    void Run();
+ private:
+  void Run();
 
-private:
-    int thread_id_;
-    std::thread thread_;
-    bool is_running_;
+ private:
+  int thread_id_;
+  std::thread thread_;
+  bool is_running_;
 
-    std::list<AioCallback> callbacks_;
+  std::list<AioCallback> callbacks_;
 
-    std::mutex mutex_;
-    std::atomic<int> pending_callbacks_;
+  std::mutex mutex_;
+  std::atomic<int> pending_callbacks_;
 };

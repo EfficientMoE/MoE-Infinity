@@ -1,0 +1,105 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - v*
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-20.04
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Extract branch info
+        shell: bash
+        run: |
+          echo "release_tag=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+
+      - name: Create Release
+        id: create_release
+        uses: actions/github-script@v6
+        env:
+          RELEASE_TAG: ${{ env.release_tag }}
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+          script: |
+            const script = require('.github/workflows/scripts/create-release.js')
+            await script(github, context, core)
+
+  wheel:
+    name: Build Wheel
+    runs-on: ubuntu-20.04
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11']
+        cuda-version: ['11.8', '12.1']
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v3
+
+      - name: Free Disk Space
+        run: |
+          rm -rf /usr/local/cuda-* /opt/cuda
+          rm -rf /usr/local/cuda
+          bash -x .github/workflows/scripts/free-disk-space.sh
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install build
+
+      - name: Install CUDA ${{ matrix.cuda-version }}
+        run: |
+          bash -x .github/workflows/scripts/cuda-install.sh ${{ matrix.cuda-version }} ${{ matrix.os }}
+
+      - name: Build Wheel
+        shell: bash
+        run: |
+          BUILD_OPS=1 python3 -m build --wheel
+          wheel_name=$(ls dist/*whl | xargs -n 1 basename)
+          asset_name=${wheel_name//"linux"/"manylinux1"}
+          echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
+          echo "asset_name=${asset_name}" >> $GITHUB_ENV
+
+      - name: Build Source
+        if: ${{ matrix.python-version == '3.8' }}
+        run: |
+          python3 -m build --sdist
+
+      - name: Rename Wheel
+        run: |
+          mv dist/${{ env.wheel_name }} dist/${{ env.asset_name }}
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.release.outputs.upload_url }}
+          asset_path: ./dist/${{ env.asset_name }}
+          asset_name: ${{ env.asset_name }}
+          asset_content_type: application/*
+
+      - name: Publish Package to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1.8
+        with:
+          skip-existing: true
+        env:
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
