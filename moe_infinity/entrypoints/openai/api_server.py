@@ -30,8 +30,8 @@ import uvicorn
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from transformers import (
-    AutoTokenizer,
     AutoModelForCausalLM,
+    AutoTokenizer,
     TextStreamer,
 )
 
@@ -262,7 +262,9 @@ if __name__ == "__main__":
     print(f"args: {args}")
 
     model_name = args.model
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, trust_remote_code=True
+    )
 
     config = {
         "offload_path": os.path.join(args.offload_dir, model_name),

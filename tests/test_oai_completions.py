@@ -7,6 +7,7 @@ client = OpenAI(
     base_url=openai_api_base,
 )
 completion = client.completions.create(
-    model="deepseek-ai/DeepSeek-V2-Lite-Chat", prompt="Write a story about a cat."
+    model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+    prompt="Write a story about a cat.",
 )
 print("Completion result:", completion)
