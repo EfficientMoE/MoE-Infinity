@@ -738,6 +738,7 @@ class CUDAOpBuilder(OpBuilder):
     def hipify_extension(self):
         if self.is_rocm_pytorch():
             from torch.utils.hipify import hipify_python
+
             hipify_python.hipify(
                 project_directory=os.getcwd(),
                 output_directory=os.getcwd(),

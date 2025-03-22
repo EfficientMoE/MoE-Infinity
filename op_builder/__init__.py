@@ -26,6 +26,7 @@ __deepspeed__ = True
 # List of all available op builders from deepspeed op_builder
 try:
     import moe_infinity.ops.op_builder  # noqa: F401
+
     op_builder_dir = "moe_infinity.ops.op_builder"
 except ImportError:
     op_builder_dir = "op_builder"

@@ -9,10 +9,10 @@ client = OpenAI(
 )
 
 chat_response = client.chat.completions.create(
-    model="facebook/opt-125m",
+    model="deepseek-ai/DeepSeek-V2-Lite-Chat",
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Tell me a joke"},
-    ]
+    ],
 )
 print("Chat response:", chat_response)

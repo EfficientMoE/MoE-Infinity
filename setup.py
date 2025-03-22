@@ -46,6 +46,7 @@ def abort(msg):
     print(f"{ERROR} {msg}")
     assert False, msg
 
+
 def read_readme() -> str:
     """Read the README file if present."""
     p = get_path("README.md")

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This file includes source code adapted from vLLM 
+# This file includes source code adapted from vLLM
 # (https://github.com/vllm-project/vllm),
 # which is also licensed under the Apache License, Version 2.0.
 
@@ -21,37 +21,38 @@ import asyncio
 import json
 import os
 import time
-from typing import Tuple
 from queue import Queue
-
-from transformers import TextStreamer
-from moe_infinity import MoE
-import torch
-from transformers import AutoTokenizer, SwitchTransformersForConditionalGeneration
+from typing import Tuple
 
 import fastapi
+import torch
 import uvicorn
 from fastapi import Request
-from fastapi.responses import JSONResponse, StreamingResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    TextStreamer,
+)
 
-# from moe_infinity.entrypoints.openai.protocol import (
-#     ChatCompletionRequest, ChatCompletionResponse,
-#     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-#     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-#     CompletionRequest, CompletionResponse,
-#     CompletionResponseChoice,
-#     ModelPermission, ModelCard, ModelList,
-#     UsageInfo)
-# from moe_infinity.entrypoints.openai.protocol import random_uuid
+from moe_infinity import MoE
 
-from protocol import (
-    ChatCompletionRequest, ChatCompletionResponse, 
-    ChatCompletionResponseChoice, ChatMessage, DeltaMessage, ErrorResponse,
-    CompletionRequest, CompletionResponse,
+from .protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatMessage,
+    CompletionRequest,
+    CompletionResponse,
     CompletionResponseChoice,
-    ModelPermission, ModelCard, ModelList,
-    UsageInfo)
-from protocol import random_uuid
+    DeltaMessage,
+    ErrorResponse,
+    ModelCard,
+    ModelList,
+    ModelPermission,
+    UsageInfo,
+    random_uuid,
+)
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 # logger = init_logger(__name__)
@@ -74,7 +75,7 @@ class TokenStreamer(TextStreamer):
             self.token_cache.append(value)
         else:
             self.encoded = True
-    
+
     def end(self):
         pass
 
@@ -109,16 +110,17 @@ def parse_prompt_format(prompt) -> Tuple[bool, list]:
 def get_available_models() -> ModelList:
     """Show available models. Right now we only have one model."""
     model_cards = [
-        ModelCard(id=model_name,
-                    root=model_name,
-                    permission=[ModelPermission()])
+        ModelCard(
+            id=model_name, root=model_name, permission=[ModelPermission()]
+        )
     ]
     return ModelList(data=model_cards)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="MoE-Infinity OpenAI-Compatible RESTful API server.")
+        description="MoE-Infinity OpenAI-Compatible RESTful API server."
+    )
     parser.add_argument("--host", type=str, default=None, help="host name")
     parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument("--model", type=str, required=True)
@@ -141,8 +143,7 @@ async def health() -> Response:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completion(request: ChatCompletionRequest,
-                                 raw_request: Request):
+async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
     model_name = request.model
     created_time = int(time.monotonic())
     request_id = random_uuid()
@@ -154,18 +155,14 @@ async def chat_completion(request: ChatCompletionRequest,
     print(f"prompt: {prompt}")
 
     token_ids = tokenizer.encode(prompt, return_tensors="pt")
-    token_ids = token_ids.to("cuda:0")
+    # token_ids = token_ids.to("cuda:0")
     print(f"token_ids: {token_ids}")
     num_prompt_tokens = token_ids.size(1)
 
     streamer = TokenStreamer(tokenizer)
 
     token = model_queue.get()
-    _ = model.generate(
-        token_ids,
-        streamer=streamer,
-        **request.to_hf_params()
-    )
+    _ = model.generate(token_ids, streamer=streamer, **request.to_hf_params())
     model_queue.put(token)
 
     outputs = torch.tensor(streamer.get_tokens())
@@ -177,7 +174,7 @@ async def chat_completion(request: ChatCompletionRequest,
 
     choices = []
     # role = self.get_chat_request_role(request)
-    role = "assistant" # FIXME: hardcoded
+    role = "assistant"  # FIXME: hardcoded
     # for output in final_res.outputs:
     choice_data = ChatCompletionResponseChoice(
         index=0,
@@ -189,7 +186,7 @@ async def chat_completion(request: ChatCompletionRequest,
     usage = UsageInfo(
         prompt_tokens=num_prompt_tokens,
         completion_tokens=num_generated_tokens,
-        total_tokens=num_prompt_tokens + num_generated_tokens
+        total_tokens=num_prompt_tokens + num_generated_tokens,
     )
     response = ChatCompletionResponse(
         id=request_id,
@@ -224,9 +221,7 @@ async def completion(request: CompletionRequest, raw_request: Request):
 
         token = model_queue.get()
         _ = model.generate(
-            input_ids,
-            streamer=streamer,
-            **request.to_hf_params()
+            input_ids, streamer=streamer, **request.to_hf_params()
         )
         model_queue.put(token)
 
@@ -245,7 +240,7 @@ async def completion(request: CompletionRequest, raw_request: Request):
 
         num_prompt_tokens += input_ids.size(1)
         num_generated_tokens += len(outputs)
-        
+
     usage = UsageInfo(
         prompt_tokens=num_prompt_tokens,
         completion_tokens=num_generated_tokens,
@@ -267,20 +262,21 @@ if __name__ == "__main__":
     print(f"args: {args}")
 
     model_name = args.model
-    tokenizer = AutoTokenizer.from_pretrained("google/switch-base-16")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
     config = {
         "offload_path": os.path.join(args.offload_dir, model_name),
         "device_memory_ratio": args.device_memory_ratio,
     }
-    model = MoE("google/switch-base-16", config)
-    # model = SwitchTransformersForConditionalGeneration.from_pretrained("google/switch-base-16", torch_dtype=torch.float16)
-    # model = OPTForCausalLM.from_pretrained(model_name)
+    model = MoE(model_name, config)
+    # model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.bfloat16)
     model_queue = Queue()
     model_queue.put("token")
 
-    uvicorn.run(app,
-                host=args.host,
-                port=args.port,
-                log_level="info",
-                timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+    )

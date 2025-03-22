@@ -21,8 +21,8 @@ extern void InitLogger();
 #define ARCHER_LOG_DEBUG(...) kLogger->debug(__VA_ARGS__)
 #define ARCHER_LOG_TRACE(...) SPDLOG_LOGGER_TRACE(kLogger, __VA_ARGS__)
 #define ARCHER_LOG_CRITICAL(...) SPDLOG_LOGGER_CRITICAL(kLogger, __VA_ARGS__)
-#define ARCHER_LOG_FATAL(...)                             \
-    do {                                                  \
-        SPDLOG_LOGGER_CRITICAL(kLogger, __VA_ARGS__);     \
-        throw std::runtime_error("Logged a FATAL error"); \
-    } while (0)
+#define ARCHER_LOG_FATAL(...)                         \
+  do {                                                \
+    SPDLOG_LOGGER_CRITICAL(kLogger, __VA_ARGS__);     \
+    throw std::runtime_error("Logged a FATAL error"); \
+  } while (0)

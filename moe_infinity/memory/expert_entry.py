@@ -13,6 +13,7 @@ class ExpertTraceEntry:
     def __hash__(self):
         return hash(self.seq_id)
 
+
 @dataclass
 class ExpertCacheEntry:
     expert_idx: int = None

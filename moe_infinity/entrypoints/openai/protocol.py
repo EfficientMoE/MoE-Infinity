@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This file includes source code adapted from vLLM 
+# This file includes source code adapted from vLLM
 # (https://github.com/vllm-project/vllm),
 # which is also licensed under the Apache License, Version 2.0.
 
@@ -23,6 +23,7 @@ import uuid
 from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
+
 
 def random_uuid():
     return str(uuid.uuid4())
@@ -86,13 +87,15 @@ class ChatCompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
 
-    def to_hf_params(self) -> Dict[str, Union[str, int, float, List[int], List[str]]]:
+    def to_hf_params(
+        self,
+    ) -> Dict[str, Union[str, int, float, List[int], List[str]]]:
         return {
             "temperature": self.temperature,
             "top_p": self.top_p,
             "logit_bias": self.logit_bias,
         }
-    
+
 
 class CompletionRequest(BaseModel):
     model: str
@@ -113,14 +116,16 @@ class CompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
 
-    def to_hf_params(self) -> Dict[str, Union[str, int, float, List[int], List[str]]]:
+    def to_hf_params(
+        self,
+    ) -> Dict[str, Union[str, int, float, List[int], List[str]]]:
         echo_without_generation = self.echo and self.max_tokens == 0
 
         return {
             "temperature": self.temperature,
             "top_p": self.top_p,
             "logit_bias": self.logit_bias,
-            "best_of": self.best_of
+            "best_of": self.best_of,
         }
 
 
