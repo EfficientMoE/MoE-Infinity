@@ -1,18 +1,5 @@
 #pragma once
 
-#ifndef CUR_OS
-
-  #if !defined(IS_WIN) && (defined(_WIN32) || defined(_WIN64))
-    #define IS_WIN
-  #elif !defined IS_NIX &&                                                 \
-      (defined(unix) || defined(__unix) || defined(__unix__) ||            \
-       defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__) || \
-       defined(__MACH__))
-    #define IS_NIX
-  #endif
-
-#endif  // CUR_OS
-
 #include <cassert>      // assert
 #include <cstddef>      // ptrdiff_t, size_t
 #include <unistd.h>     // STDERR_FILENO
