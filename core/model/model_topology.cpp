@@ -529,10 +529,11 @@ void ArcherTopologyHandle::InitializeTopology(
   }
   dense_nodes.back()->default_device = torch::Device(torch::kCUDA, num_gpu - 1);
 
-  // split evenly sparse nodes among GPUs
-  for (auto& node_ptr : sparse_nodes) {
+  DLOG_INFO("Moving sparse parameters to CPU");
+  for (auto& node_ptr : tqdm::tqdm(sparse_nodes)) {
     node_ptr->default_device = torch::Device(torch::kCUDA, target_device_id);
     target_device_id = (target_device_id + 1) % num_gpu;
+    node_ptr->SetDevice(CPU_DEVICE, false);
   }
 
   DLOG_TRACE("InitializeTopology pipeline_.stages.size() {}",

@@ -46,7 +46,7 @@ struct Params {
   std::string desc;
   size_t total = -1;
   bool leave = true;
-  FILE *f = stderr;
+  FILE* f = stderr;
   int ncols = -1;
   float mininterval = 0.1f, maxinterval = 10.0f;
   unsigned miniters = -1;
@@ -64,19 +64,19 @@ struct Params {
 
 template <typename _Iterator>
 class Tqdm : public MyIteratorWrapper<_Iterator> {
-private:
+ private:
   using TQDM_IT = MyIteratorWrapper<_Iterator>;
   _Iterator e;  // end
   Params self;  // ha, ha
 
-public:
+ public:
   /**
    containter-like methods
    */
   // actually current value
   // virtual _Iterator begin() { return this->get(); }
-  Tqdm &begin() { return *this; }
-  const Tqdm &begin() const { return *this; }
+  Tqdm& begin() { return *this; }
+  const Tqdm& begin() const { return *this; }
   // virtual _Iterator end() { return e; }
   Tqdm end() const { return Tqdm(e, e); }
 
@@ -105,7 +105,7 @@ public:
   template <typename _Container,
             typename = typename std::enable_if<
                 !std::is_same<_Container, Tqdm>::value>::type>
-  Tqdm(_Container &v) : TQDM_IT(std::begin(v)), e(std::end(v)), self() {
+  Tqdm(_Container& v) : TQDM_IT(std::begin(v)), e(std::end(v)), self() {
     self.total = e - this->get();
   }
 
@@ -120,12 +120,12 @@ public:
     TQDM_IT::_incr();
     if (this->get() == e) {
       printf("\nfinished: %" PRIu64 "/%" PRIu64 "\n",
-        static_cast<std::uint64_t>(self.total),
-        static_cast<std::uint64_t>(self.total));
+             static_cast<std::uint64_t>(self.total),
+             static_cast<std::uint64_t>(self.total));
     } else
       printf("\r%" PRIi64 " left", (int64_t)(e - this->get()));
   }
-  virtual void _incr() override { ((Tqdm const &)*this)._incr(); }
+  virtual void _incr() override { ((Tqdm const&)*this)._incr(); }
 };
 
 template <typename _Iterator, typename _Tqdm = Tqdm<_Iterator>>
@@ -140,18 +140,19 @@ _Tqdm tqdm(_Iterator begin, size_t total) {
 
 template <typename _Container,
           typename _Tqdm = Tqdm<typename _Container::iterator>>
-_Tqdm tqdm(_Container &v) {
+_Tqdm tqdm(_Container& v) {
   return _Tqdm(v);
 }
 
-template <size_t N, typename T, typename _Tqdm = Tqdm<T *>>
+template <size_t N, typename T, typename _Tqdm = Tqdm<T*>>
 _Tqdm tqdm(T (&tab)[N]) {
   return _Tqdm(tab, N);
 }
 
 template <typename SizeType = int>
 using RangeTqdm = Tqdm<RangeIterator<SizeType>>;
-template <typename SizeType> RangeTqdm<SizeType> range(SizeType n) {
+template <typename SizeType>
+RangeTqdm<SizeType> range(SizeType n) {
   return RangeTqdm<SizeType>(RangeIterator<SizeType>(n),
                              RangeIterator<SizeType>(n));
 }
@@ -166,7 +167,7 @@ RangeTqdm<SizeType> range(SizeType start, SizeType end, SizeType step) {
                              RangeIterator<SizeType>(start, end, step));
 }
 
-}  // tqdm
+}  // namespace tqdm
 
 /** Things to port:
 
