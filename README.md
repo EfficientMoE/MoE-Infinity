@@ -1,6 +1,6 @@
 # MoE-Infinity
 
-MoE-Infinity is a cost-effective, fast, and easy-to-use library for Mixture-of-Experts (MoE) inference and serving.
+MoE-Infinity is a cost-effective, fast, and easy-to-use library for Mixture-of-Experts (MoE) inference.
 
 MoE-Infinity is cost-effective yet fast:
 
@@ -8,12 +8,12 @@ MoE-Infinity is cost-effective yet fast:
 - Minimizing the expert offloading overheads through several novel techniques: expert activation tracing, activation-aware expert prefetching, and activation-aware expert caching.
 - Supporting LLM acceleration techniques (such as [FlashAttention](https://github.com/Dao-AILab/flash-attention)).
 - Supporting multi-GPU environments with numeorous OS-level performance optimizations.
-- Achieving SOTA latency and throughput performance when serving MoEs in a resource-constrained GPU environment (in comparison with HuggingFace [Accelerate](https://github.com/huggingface/accelerate), [DeepSpeed](https://github.com/microsoft/DeepSpeed), [Mixtral-Offloading](https://github.com/dvmazur/mixtral-offloading), and [Ollama/LLama.cpp](https://github.com/ollama/ollama)).
+- Achieving SOTA latency performance when serving MoEs in a resource-constrained GPU environment (in comparison with [vLLM](https://github.com/vllm-project/vllm), HuggingFace [Accelerate](https://github.com/huggingface/accelerate), [DeepSpeed](https://github.com/microsoft/DeepSpeed), [Mixtral-Offloading](https://github.com/dvmazur/mixtral-offloading), and [Ollama/LLama.cpp](https://github.com/ollama/ollama)).
 
 MoE-Infinity is easy-to-use:
 
 - HuggingFace model compatible, and HuggingFace programmer friendly.
-- Supporting all available MoE checkpoints (including [Google Switch Transformers](https://huggingface.co/google/switch-large-128), [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b), and [Mixtral](mistralai/Mixtral-8x7B-Instruct-v0.1)).
+- Supporting all available MoE checkpoints (including [Deepseek-V2](https://huggingface.co/collections/deepseek-ai/deepseek-v2-669a1c8b8f2dbc203fbd7746), [Google Switch Transformers](https://huggingface.co/google/switch-large-128), [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b), and [Mixtral](mistralai/Mixtral-8x7B-Instruct-v0.1)).
 
 Note that: The open-sourced MoE-Infinity has been redesigned for making it HuggingFace-users friendly. This version is different from the version reported in the paper, which takes extreme performance as the top priority. As a result, distributed inference is currently not supported in this open-sourced version.
 
@@ -33,7 +33,7 @@ Note that: The open-sourced MoE-Infinity has been redesigned for making it Huggi
 
 ## Performance
 
-Single GPU A5000 (24GB Memory), per-token-latency (seconds) for generation with a mixed dataset that includes [FLAN](https://huggingface.co/datasets/Muennighoff/flan), [BIG-Bench](https://huggingface.co/datasets/bigbench) and [MMLU](https://huggingface.co/datasets/lukaemon/mmlu) datasets.
+Single GPU A5000 (24GB Memory), per-token-latency (seconds) for generation with a mixed dataset that includes [LongBench](https://huggingface.co/datasets/THUDM/LongBench), [GSM8K](https://huggingface.co/datasets/openai/gsm8k),  [FLAN](https://huggingface.co/datasets/Muennighoff/flan), [BIG-Bench](https://huggingface.co/datasets/bigbench) and [MMLU](https://huggingface.co/datasets/lukaemon/mmlu) datasets.
 Lower per-token-latency is preferable.
 
 |  | Switch-large-128 | NLLB-MoE-54B | Mixtral-8x7b | DeepSeek-V2-Lite
