@@ -21,11 +21,12 @@
 #include "parallel/expert_dispatcher.h"
 #include "prefetch/task_scheduler.h"
 #include "utils/logger.h"
+#include "utils/tqdm.h"
 
 // cudaStream_t kCudaStreamH2D = NULL;
 std::unique_ptr<ArcherTopologyHandle> kTopologyHandle = nullptr;
 
-const std::string Node::str() noexcept {
+const std::string Node::str() {
   // write same string using c style sprintf
   std::stringstream ss;
   for (auto& tensor_id : tensor_ids) {
@@ -50,7 +51,7 @@ Node::Node()
       default_device(DEFAULT_CUDA_DEVICE) {}
 
 void Node::SetDevice(const torch::Device& target_device, bool on_demand,
-                     cudaStream_t stream) noexcept {
+                     cudaStream_t stream) {
   DLOG_TRACE("SetDevice: " + str() + " to " + target_device.str());
   if (device == target_device) {
     DLOG_TRACE("SetDevice: " + str() + " to " + target_device.str() +
@@ -517,13 +518,14 @@ void ArcherTopologyHandle::InitializeTopology(
   int num_dense_nodes_per_device = std::ceil(dense_nodes.size() / num_gpu / 2);
   // int total_dense_nodes = dense_nodes.size();
   int counter = 0;
-  for (auto& node_ptr : dense_nodes) {
-    // split dense node evenly among GPUs
+  DLOG_INFO("Moving dense parameters to GPU");
+  for (auto& node_ptr : tqdm::tqdm(dense_nodes)) {
     node_ptr->default_device = torch::Device(torch::kCUDA, target_device_id);
     counter++;
     if (counter % num_dense_nodes_per_device == 0) {
       target_device_id = (target_device_id + 1) % num_gpu;
     }
+    node_ptr->SetDevice(node_ptr->default_device, false);
   }
   dense_nodes.back()->default_device = torch::Device(torch::kCUDA, num_gpu - 1);
 

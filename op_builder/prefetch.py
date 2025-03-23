@@ -73,7 +73,7 @@ class PrefetchBuilder(OpBuilder):
         return [
             "-g",
             "-Wall",
-            "-O2",
+            "-O3",
             "-std=c++17",
             "-shared",
             "-fPIC",

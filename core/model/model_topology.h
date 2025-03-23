@@ -60,9 +60,9 @@ struct Node {
 
  public:
   explicit Node();
-  const std::string str() noexcept;
+  const std::string str();
   void SetDevice(const torch::Device& target_device, bool ondemand = false,
-                 cudaStream_t stream = nullptr) noexcept;
+                 cudaStream_t stream = nullptr);
 };
 
 typedef std::shared_ptr<Node> NodePtr;
