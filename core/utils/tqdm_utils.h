@@ -276,7 +276,7 @@ class AbstractLine : public AtomicNode<AbstractLine> {
  public:
   AbstractLine() : flags{} {}
   // Due to how vtables work, it is cheaper to *not* inline this.
-  virtual ~AbstractLine(){};
+  virtual ~AbstractLine() {};
 
   virtual void write(int fd) = 0;
 
@@ -304,7 +304,7 @@ struct SinkOptions {
   int tty_height;
 
   // Additional options will be added in future.
-  SinkOptions(int fd) : fd(fd){};
+  SinkOptions(int fd) : fd(fd) {};
 };
 
 class Sink;

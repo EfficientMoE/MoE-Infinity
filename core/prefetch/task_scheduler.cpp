@@ -571,8 +571,7 @@ std::string ArcherTaskPool::DebugString(
       }
       ss << std::hex << node->id << "[" << node->device << "->"
          << task->dst_device.str() << "," << task->remove_nodes.size() << ","
-         << "]"
-         << " " << std::dec;
+         << "]" << " " << std::dec;
     }
     ss << std::endl;
   }
