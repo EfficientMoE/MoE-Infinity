@@ -151,6 +151,7 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
     prompt = tokenizer.apply_chat_template(
         conversation=request.messages,
         tokenize=False,
+        add_generation_prompt=True,
     )
     print(f"prompt: {prompt}")
 
