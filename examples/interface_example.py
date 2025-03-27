@@ -122,7 +122,7 @@ cnt = 0
 max_seq_length = 512
 for input_text in all_inputs:
     # repeat the input text 100 times to test the performance
-    input_text = input_text * 1000
+    # input_text = input_text * 1000
     inputs = tokenizer(
         input_text,
         truncation=True,

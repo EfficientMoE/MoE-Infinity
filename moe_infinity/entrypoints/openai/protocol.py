@@ -94,6 +94,7 @@ class ChatCompletionRequest(BaseModel):
             "temperature": self.temperature,
             "top_p": self.top_p,
             "logit_bias": self.logit_bias,
+            "max_new_tokens": self.max_tokens,
         }
 
 
@@ -102,7 +103,7 @@ class CompletionRequest(BaseModel):
     # a string, array of strings, array of tokens, or array of token arrays
     prompt: Union[List[int], List[List[int]], str, List[str]]
     suffix: Optional[str] = None
-    max_tokens: Optional[int] = 16
+    max_tokens: Optional[int] = 1024
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
@@ -126,6 +127,7 @@ class CompletionRequest(BaseModel):
             "top_p": self.top_p,
             "logit_bias": self.logit_bias,
             "best_of": self.best_of,
+            "max_new_tokens": self.max_tokens,
         }
 
 
