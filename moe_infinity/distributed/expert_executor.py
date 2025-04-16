@@ -52,7 +52,9 @@ class DistributedExpertExecutor:
             self.expert_dispatcher.enqueue_expert(
                 layer_id, expert_id, gpu_id, False
             )
+        self.expert_dispatcher.notify_fetch_start()
 
+    def wait_dispatch_local(self):
         result = self.expert_dispatcher.wait_expert()
 
         return result

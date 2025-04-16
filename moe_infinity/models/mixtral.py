@@ -84,15 +84,17 @@ class SyncMixtralSparseMoeBlock(nn.Module):
         #     )
         #     # print("prefetch", time.time() - start_time)
 
+        self.expert_executor.dispatch_local(
+            hidden_states, router_mask, self.layer_id
+        )
+
         final_hidden_states = torch.zeros(
             (batch_size * sequence_length, hidden_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
 
-        results = self.expert_executor.dispatch_local(
-            hidden_states, router_mask, self.layer_id
-        )
+        results = self.expert_executor.wait_dispatch_local()
         for output, _, idx, _ in results:
             token_indices = router_mask[:, idx].bool()
             final_hidden_states[token_indices, :] += (

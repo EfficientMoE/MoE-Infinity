@@ -38,7 +38,7 @@ Lower per-token-latency is preferable.
 
 |  | Switch-large-128 | NLLB-MoE-54B | Mixtral-8x7b | DeepSeek-V2-Lite
 | :---: | :---: | :---: | :---: | :---: |
-| <ins>MoE-Infinity</ins> | <ins>*0.130*</ins>	| <ins>*0.119*</ins> | <ins>*0.735*</ins> | <ins>*0.155*</ins> |
+| <ins>MoE-Infinity</ins> | <ins>*0.130*</ins>	| <ins>*0.119*</ins> | <ins>*0.735*</ins> | <ins>*0.120*</ins> |
 | Accelerate | 1.043 | 3.071 | 6.633 |  1.743  |
 |DeepSpeed | 4.578 | 8.381 | 2.486 | 0.737 |
 |Mixtral Offloading| X | X | 1.752 | X |
