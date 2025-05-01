@@ -112,7 +112,10 @@ elif "grok" in args.model_name_or_path.lower():
     custom_kwargs = {}
 elif "arctic" in args.model_name_or_path.lower():
     custom_kwargs = {"pad_token_id": tokenizer.eos_token_id}
-elif "deepseek" in args.model_name_or_path.lower():
+elif (
+    "deepseek" in args.model_name_or_path.lower()
+    or "qwen3" in args.model_name_or_path.lower()
+):
     custom_kwargs = {"pad_token_id": tokenizer.eos_token_id}
 else:
     raise ValueError(f"Model {args.model_name_or_path} not supported")

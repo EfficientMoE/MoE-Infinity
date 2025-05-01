@@ -37,7 +37,7 @@ def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
         num_decoder_layers = config.num_hidden_layers
         num_layers = config.num_hidden_layers
         num_experts = config.num_local_experts
-    elif "grok" in arch:
+    elif "grok" in arch or "qwen3" in arch:
         num_encoder_layers = 0
         num_decoder_layers = config.num_hidden_layers
         num_layers = config.num_hidden_layers
@@ -100,7 +100,7 @@ def parse_expert_id(
             # print(f"layer_id: {layer_id}, expert_id: {expert_id}")
             layer_id = int(layer_id)
             expert_id = int(expert_id)
-    elif "deepseek" in arch:
+    elif "deepseek" in arch or "qwen3" in arch:
         encoder_sparse_step = None
         decoder_sparse_step = 1
         layer_type = "decoder"

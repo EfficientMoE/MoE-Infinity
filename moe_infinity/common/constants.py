@@ -3,6 +3,7 @@ from transformers import (
     NllbMoeForConditionalGeneration,
     OPTForCausalLM,
     PretrainedConfig,
+    Qwen3MoeForCausalLM,
     SwitchTransformersForConditionalGeneration,
 )
 
@@ -24,6 +25,7 @@ MODEL_MAPPING_NAMES = {
     "arctic": ArcticForCausalLM,
     "deepseek": DeepseekV2ForCausalLM,
     "deepseek_v3": DeepseekV3ForCausalLM,
+    "qwen3": Qwen3MoeForCausalLM,
 }
 
 MODEL_MAPPING_TYPES = {
@@ -34,6 +36,7 @@ MODEL_MAPPING_TYPES = {
     "arctic": 4,
     "deepseek": 5,
     "deepseek_v3": 5,
+    "qwen3": 5,
 }
 
 

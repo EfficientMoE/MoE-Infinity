@@ -29,6 +29,7 @@ from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
 from moe_infinity.models import (
     DeepseekMoEBlock,
+    Qwen3MoEBlock,
     SyncArcticMoeBlock,
     SyncGrokMoeBlock,
     SyncMixtralSparseMoeBlock,
@@ -295,6 +296,9 @@ class OffloadEngine(object):
             SyncMixtralSparseMoeBlock
         )
 
+        transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
+        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = Qwen3MoEBlock
+
         moe_infinity.models.modeling_grok.modeling_grok1._old_sparse_mlp = (
             moe_infinity.models.modeling_grok.MoeBlock
         )
@@ -560,6 +564,7 @@ class OffloadEngine(object):
                         or isinstance(module, SyncGrokMoeBlock)
                         or isinstance(module, SyncArcticMoeBlock)
                         or isinstance(module, DeepseekMoEBlock)
+                        or isinstance(module, Qwen3MoEBlock)
                     ):
                         # module.archer_prefetch = self.archer_prefetch
                         # module.archer_tracer = self.archer_tracer
