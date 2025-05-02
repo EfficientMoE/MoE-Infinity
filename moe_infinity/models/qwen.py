@@ -1,3 +1,4 @@
+import nvtx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,6 +25,7 @@ class Qwen3MoEBlock(nn.Module):
             ]
         )
 
+    @nvtx.annotate("Qwen3MoEBlock", color="blue")
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape

@@ -12,7 +12,11 @@ chat_response = client.chat.completions.create(
     model="deepseek-ai/DeepSeek-V2-Lite-Chat",
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Tell me a joke"},
+        {
+            "role": "user",
+            "content": "Write a piece of code in cpp about LRU cache",
+        },
     ],
+    max_tokens=1024,
 )
 print("Chat response:", chat_response)

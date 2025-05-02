@@ -40,7 +40,6 @@ class PrefetchBuilder(OpBuilder):
             "core/memory/stream_pool.cpp",
             "core/memory/host_caching_allocator.cpp",
             "core/memory/device_caching_allocator.cpp",
-            "core/python/py_archer_prefetch.cpp",
             "core/parallel/expert_dispatcher.cpp",
             "core/parallel/expert_module.cpp",
             "core/aio/archer_aio_thread.cpp",
@@ -61,6 +60,7 @@ class PrefetchBuilder(OpBuilder):
             "core/base/timezone.cc",
             "core/base/log_stream.cc",
             "core/base/thread_pool.cc",
+            "core/python/py_archer_prefetch.cpp",
         ]
 
     def include_paths(self):
@@ -70,6 +70,7 @@ class PrefetchBuilder(OpBuilder):
         # -O0 for improved debugging, since performance is bound by I/O
         CPU_ARCH = self.cpu_arch()
         SIMD_WIDTH = self.simd_width()
+
         return [
             "-g",
             "-Wall",

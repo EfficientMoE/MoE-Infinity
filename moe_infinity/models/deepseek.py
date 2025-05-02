@@ -1,5 +1,6 @@
 from typing import Dict, Optional, Tuple
 
+import nvtx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -48,6 +49,7 @@ class DeepseekMoEBlock(nn.Module):
         self.archer_engine = None
         self.expert_tensor_ids: Dict[int, int] = None
 
+    @nvtx.annotate(message="DeepseekMoEBlock", color="blue")
     def forward(self, hidden_states):
         identity = hidden_states
         orig_shape = hidden_states.shape
@@ -82,13 +84,15 @@ class DeepseekMoEBlock(nn.Module):
         )
         routing_weights_mask = torch.sum(routing_weights_mask, dim=-1)
         router_mask = router_mask.permute(0, 2, 1)
+        router_mask = torch.any(router_mask, dim=-1)
 
         # use logical or to merge last dimension
-        for i in range(self.config.num_experts_per_tok):
-            router_mask[:, :, 0] = torch.logical_or(
-                router_mask[:, :, 0], router_mask[:, :, i]
-            )
-        router_mask = router_mask[:, :, 0]
+        # for i in range(self.config.num_experts_per_tok):
+        #     router_mask[:, :, 0] = torch.logical_or(
+        #         router_mask[:, :, 0], router_mask[:, :, i]
+        #     )
+        # router_mask = router_mask[:, :, 0]
+
         # print("router_mask", router_mask.shape)
         # print("routing_weights_mask", routing_weights_mask.shape)
 
@@ -112,14 +116,15 @@ class DeepseekMoEBlock(nn.Module):
         #         self.layer_id, expert_matrix
         #     )
 
+        self.expert_executor.dispatch_local(
+            hidden_states, router_mask, self.layer_id
+        )
         final_hidden_states = torch.zeros(
             (batch_size * sequence_length, hidden_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        results = self.expert_executor.dispatch_local(
-            hidden_states, router_mask, self.layer_id
-        )
+        results = self.expert_executor.wait_dispatch_local()
         for output, _, idx, _ in results:
             token_indices = router_mask[:, idx].bool()
             final_hidden_states[token_indices, :] += (

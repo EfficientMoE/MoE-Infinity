@@ -56,7 +56,6 @@ class SyncNllbMoeSparseMLP(nn.Module):
         )
         router_mask = combining_weights.bool()
 
-        next_states = torch.zeros_like(hidden_states)
         top_1_expert_index = torch.argmax(top_1_mask, dim=-1)
 
         # logits_except_top_1 = router_probs.masked_fill(
@@ -78,9 +77,11 @@ class SyncNllbMoeSparseMLP(nn.Module):
         #         self.layer_id, expert_matrix
         #     )
 
-        results = self.expert_executor.dispatch_local(
+        self.expert_executor.dispatch_local(
             hidden_states, router_mask, self.layer_id
         )
+        next_states = torch.zeros_like(hidden_states)
+        results = self.expert_executor.wait_dispatch_local()
         for output, _, idx, _ in results:
             token_indices = router_mask[..., idx].bool()
             weights = combining_weights[..., idx]
