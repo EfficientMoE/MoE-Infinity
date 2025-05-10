@@ -42,12 +42,6 @@ class Qwen3MoEBlock(nn.Module):
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
 
-        final_hidden_states = torch.zeros(
-            (batch_size * sequence_length, hidden_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-
         # print(f"hidden_states shape: {hidden_states.shape}")
         # print(f"routing_weights shape: {routing_weights.shape}")
 
@@ -67,9 +61,17 @@ class Qwen3MoEBlock(nn.Module):
             )
         router_mask = router_mask[:, :, 0]
 
-        results = self.expert_executor.dispatch_local(
+        self.expert_executor.dispatch_local(
             hidden_states, router_mask, self.layer_id
         )
+
+        final_hidden_states = torch.zeros(
+            (batch_size * sequence_length, hidden_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        results = self.expert_executor.wait_dispatch_local()
         for output, _, idx, _ in results:
             token_indices = router_mask[:, idx].bool()
             final_hidden_states[token_indices, :] += (
