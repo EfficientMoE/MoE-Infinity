@@ -17,7 +17,7 @@ class DeepseekMoEBlock(nn.Module):
         self.num_experts_per_tok = config.num_experts_per_tok
 
         if self.config.model_type == "deepseek_v2":
-            from .modeling_deepseek import DeepseekV2MLP, MoEGate
+            from .modeling_deepseek_v2 import DeepseekV2MLP, MoEGate
 
             self.mlp_cls = DeepseekV2MLP
             self.gate_cls = MoEGate

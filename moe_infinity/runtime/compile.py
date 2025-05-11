@@ -11,7 +11,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP
 
 # from moe_infinity.models.modeling_grok import MoeMLP as GrokMoeMLP
 from moe_infinity.models.modeling_arctic import ArcticMLP
-from moe_infinity.models.modeling_deepseek import DeepseekV2MLP
+from moe_infinity.models.modeling_deepseek_v2 import DeepseekV2MLP
 from moe_infinity.models.modeling_deepseek_v3 import DeepseekV3MLP
 
 EXPERT_CLS = {

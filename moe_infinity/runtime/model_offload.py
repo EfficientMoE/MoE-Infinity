@@ -314,13 +314,13 @@ class OffloadEngine(object):
             SyncArcticMoeBlock
         )
 
-        moe_infinity.models.modeling_deepseek._old_sparse_mlp = (
-            moe_infinity.models.modeling_deepseek.DeepseekV2MoE
+        moe_infinity.models.modeling_deepseek_v2._old_sparse_mlp = (
+            moe_infinity.models.modeling_deepseek_v2.DeepseekV2MoE
         )
         moe_infinity.models.modeling_deepseek_v3._old_sparse_mlp = (
             moe_infinity.models.modeling_deepseek_v3.DeepseekV3MoE
         )
-        moe_infinity.models.modeling_deepseek.modeling_deepseek.DeepseekV2MoE = DeepseekMoEBlock
+        moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.DeepseekV2MoE = DeepseekMoEBlock
         moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = DeepseekMoEBlock
 
         def from_pretrained_decorator(
@@ -1020,5 +1020,5 @@ class OffloadEngine(object):
             moe_infinity.models.modeling_arctic._old_sparse_mlp
         )
 
-        moe_infinity.models.modeling_deepseek.modeling_deepseek.DeepseekV2MoE = moe_infinity.models.modeling_deepseek._old_sparse_mlp
+        moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.DeepseekV2MoE = moe_infinity.models.modeling_deepseek_v2._old_sparse_mlp
         moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = moe_infinity.models.modeling_deepseek_v3._old_sparse_mlp
