@@ -18,7 +18,7 @@ import os
 from .builder import CUDAOpBuilder, OpBuilder
 
 
-class PrefetchBuilder(OpBuilder):
+class PrefetchBuilder(CUDAOpBuilder):
     BUILD_VAR = "MOE_BUILD_PREFETCH"
     NAME = "prefetch"
 
@@ -33,6 +33,7 @@ class PrefetchBuilder(OpBuilder):
             "core/utils/logger.cpp",
             "core/utils/cuda_utils.cpp",
             "core/model/model_topology.cpp",
+            "core/model/fused_mlp.cu",
             "core/prefetch/archer_prefetch_handle.cpp",
             "core/prefetch/task_scheduler.cpp",
             "core/prefetch/task_thread.cpp",

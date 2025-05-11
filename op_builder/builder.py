@@ -754,7 +754,7 @@ class CUDAOpBuilder(OpBuilder):
         if sys.platform == "win32":
             return ["-O2"]
         else:
-            return ["-O3", "-std=c++14", "-g", "-Wno-reorder"]
+            return ["-O3", "-std=c++17", "-g", "-Wno-reorder"]
 
     def nvcc_args(self):
         if self.build_for_cpu:
@@ -763,7 +763,7 @@ class CUDAOpBuilder(OpBuilder):
         if self.is_rocm_pytorch():
             ROCM_MAJOR, ROCM_MINOR = self.installed_rocm_version()
             args += [
-                "-std=c++14",
+                "-std=c++17",
                 "-U__HIP_NO_HALF_OPERATORS__",
                 "-U__HIP_NO_HALF_CONVERSIONS__",
                 "-U__HIP_NO_HALF2_OPERATORS__",
@@ -779,7 +779,7 @@ class CUDAOpBuilder(OpBuilder):
                 "--use_fast_math",
                 "-std=c++17"
                 if sys.platform == "win32" and cuda_major > 10
-                else "-std=c++14",
+                else "-std=c++17",
                 "-U__CUDA_NO_HALF_OPERATORS__",
                 "-U__CUDA_NO_HALF_CONVERSIONS__",
                 "-U__CUDA_NO_HALF2_OPERATORS__",

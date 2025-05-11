@@ -10,6 +10,7 @@
 #include "device_caching_allocator.h"
 #include <c10/util/Exception.h>
 #include <cuda_runtime_api.h>
+#include "utils/cuda_utils.h"
 #include "utils/logger.h"
 
 namespace c10 {
@@ -24,11 +25,7 @@ inline void* DeviceCachingAllocator::allocate_and_cache(const size_t bytes) {
   auto cuda_err = cudaMalloc(&ptr, bytes);
   if (cuda_err != cudaSuccess) {
     free_cached();
-    cuda_err = cudaMalloc(&ptr, bytes);
-    if (cuda_err != cudaSuccess) {
-      DLOG_ERROR("cudaMalloc failed", bytes, cuda_err);
-      throw std::runtime_error("cudaMalloc failed");
-    }
+    CUDA_CHECK(cudaMalloc(&ptr, bytes));
   }
 
   allocation_map_[ptr] = bytes;

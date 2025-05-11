@@ -136,24 +136,37 @@ tokenizer.pad_token = tokenizer.eos_token
 cnt = 0
 max_seq_length = 512
 for input_text in all_inputs:
-    # repeat the input text 100 times to test the performance
-    # input_text = input_text * 1000
-    inputs = tokenizer(
-        input_text,
-        truncation=True,
-        padding="do_not_pad",
-        max_length=max_seq_length,
-        return_tensors="pt",
+    prompt = tokenizer.apply_chat_template(
+        conversation=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {
+                "role": "user",
+                "content": input_text,
+            },
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
     )
-    print("inputs ...")
-    print(inputs.input_ids.shape)
+    print(f"prompt: {prompt}")
+
+    token_ids = tokenizer.encode(prompt, return_tensors="pt")
+    token_ids = token_ids.to("cuda:0")
+    # inputs = tokenizer(
+    #     token_ids,
+    #     truncation=True,
+    #     padding="do_not_pad",
+    #     max_length=max_seq_length,
+    #     return_tensors="pt",
+    # )
+    # print("inputs ...")
+    # print(inputs.input_ids.shape)
 
     streamer = StopWatch(model.engine, tokenizer)
     with torch.no_grad():
         print("outputs_text ...")
         outputs = model.generate(
-            inputs.input_ids.to("cuda:0"),
-            attention_mask=inputs.attention_mask.to("cuda:0"),
+            token_ids.to("cuda:0"),
+            # attention_mask=inputs.attention_mask.to("cuda:0"),
             streamer=streamer,
             max_new_tokens=args.out_len,
             min_new_tokens=args.out_len,
@@ -168,4 +181,4 @@ for input_text in all_inputs:
         print(
             f"Decoding time per iteration: {streamer.decoding_time / streamer.decoding_iterations} seconds"
         )
-        print(f"Input tokens: {len(inputs.input_ids[0])}")
+        # print(f"Input tokens: {len(inputs.input_ids[0])}")

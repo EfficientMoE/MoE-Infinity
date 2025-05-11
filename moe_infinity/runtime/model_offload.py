@@ -37,6 +37,7 @@ from moe_infinity.models import (
     SyncSwitchTransformersSparseMLP,
 )
 from moe_infinity.ops.op_builder.prefetch import PrefetchBuilder
+from moe_infinity.runtime.compile import script_expert
 from moe_infinity.runtime.hooks import *
 from moe_infinity.utils import (
     ArcherConfig,
@@ -417,6 +418,12 @@ class OffloadEngine(object):
                         if is_flash_attn_available
                         else "eager"
                     ),
+                )
+
+                script_expert(
+                    self.checkpoint,
+                    self.config.model_type,
+                    self.config,
                 )
 
                 if self.config.model_type == "deepseek_v3":
@@ -848,7 +855,10 @@ class OffloadEngine(object):
                     # )
 
                     self.expert_dispatcher.register_expert(
-                        expert_layer_id, expert_idx, expert_tensors
+                        expert_layer_id,
+                        expert_idx,
+                        expert_tensors,
+                        os.path.join(self.checkpoint, f"expert.pt"),
                     )
                 expert_layer_id += 1
             else:

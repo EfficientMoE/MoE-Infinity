@@ -29,7 +29,9 @@ class DistributedExpertExecutor:
     def set_device_map_manager(self, device_map_manager):
         self.device_map_manager = device_map_manager
 
-    def dispatch_local(self, hidden_states, router_mask, layer_id):
+    def dispatch_local(
+        self, layer_id, hidden_states, router_mask, router_weights
+    ):
         num_expert = router_mask.shape[-1]
         expert_count = (
             torch.sum(router_mask.view((-1, num_expert)), dim=0)
@@ -43,7 +45,9 @@ class DistributedExpertExecutor:
         )
         expected_wait_cnt = len(expert_list)
 
-        self.expert_dispatcher.set_inputs(hidden_states, router_mask)
+        self.expert_dispatcher.set_inputs(
+            hidden_states, router_mask, router_weights
+        )
         self.expert_dispatcher.set_expected_queue(expected_wait_cnt)
 
         total_gpus = torch.cuda.device_count()

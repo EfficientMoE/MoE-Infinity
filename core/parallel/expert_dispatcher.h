@@ -45,45 +45,42 @@ class ExpertDispatcher : public base::noncopyable {
 
  public:
   explicit ExpertDispatcher(int num_experts, int num_layers, int dtype,
-                            int expert_type, int num_threads = 8);
+                            int expert_type, int num_threads = 1);
   ~ExpertDispatcher() {
     main_thread_stop_flag_.store(true);
     for (auto& thread : threads_) {
       thread->join();
     }
 
-    for (auto& stream : fetch_streams_) {
-      cudaStreamDestroy(stream);
-    }
+    // for (auto& stream : fetch_streams_) {
+    //   cudaStreamDestroy(stream);
+    // }
     for (auto& stream : exec_streams_) {
       cudaStreamDestroy(stream);
     }
-    for (auto& stream : out_streams_) {
-      cudaStreamDestroy(stream);
-    }
+    // for (auto& stream : out_streams_) {
+    //   cudaStreamDestroy(stream);
+    // }
   }
 
   void SetInputs(const torch::Tensor& hidden_states,
-                 const torch::Tensor& router_mask) {
-    hidden_states_ = hidden_states.clone();
-    router_mask_ = router_mask.clone();
-  }
+                 const torch::Tensor& router_mask,
+                 const torch::Tensor& router_weight);
 
   void EnqueueExpert(int layer_idx, int expert_idx, int gpu_id = -1,
                      bool remote = false);
   void NofityFetchStart();
 
   void RegisterExpert(int layer_idx, int expert_idx,
-                      const std::vector<std::uint32_t>& tensor_ids);
+                      const std::vector<std::uint32_t>& tensor_ids,
+                      std::string jit_path);
   void ClearExpertCacheCounts();
   void SetExpectedQueue(int expected_pending = 0) {
     pending_.store(expected_pending);
   }
 
   std::vector<CallResult> WaitExpert() { return Wait(); }
-  void SetNode(int layer_idx, int expert_idx, const NodePtr& node) {
-    experts_[expert_idx][layer_idx]->node = node;
-  }
+  torch::Tensor WaitHiddenStates();
 
  private:
   void Enqueue(CallArgs& args);
@@ -123,16 +120,26 @@ class ExpertDispatcher : public base::noncopyable {
   // std::mutex exec_mutex_;
   std::mutex gpu_overload_mutex_;
 
-  std::vector<cudaStream_t> fetch_streams_;
   std::vector<cudaStream_t> exec_streams_;
-  std::vector<cudaStream_t> out_streams_;
 
   std::vector<bool> gpu_overload_;
 
   torch::Tensor hidden_states_;
+  torch::Tensor final_hidden_states_;
   torch::Tensor router_mask_;
+  torch::Tensor router_weight_;
 
   std::vector<int64_t> cache_sizes_;
 
   int cache_capacity_ = 0;
+
+  std::vector<MoEMLP*> modules_;
 };
+
+#define SET_TENSORS_AND_MODULE_FROM_BLOB(cls, module, node, device, \
+                                         jit_module)                \
+  do {                                                              \
+    reinterpret_cast<cls*>(module)->SetTensorsFromBlob(             \
+        node->device_memory_ptr, node->tensor_ids, device);         \
+    reinterpret_cast<cls*>(module)->SetModuleFromBlob(jit_module);  \
+  } while (0)

@@ -45,9 +45,61 @@ inline py::list vector_to_list(std::vector<uint32_t>& vec) {
   return list;
 }
 
+#define DTYPE_BFLOAT16 0
+#define DTYPE_FLOAT32 1
+#define DTYPE_FLOAT16 2
+#define DTYPE_FP8_E4M3FN 3
+
+inline torch::ScalarType dtype_to_torch(int dtype) {
+  auto tensor_dtype = torch::kFloat32;
+  switch (dtype) {
+    case DTYPE_BFLOAT16:
+      tensor_dtype = torch::kBFloat16;
+      break;
+    case DTYPE_FLOAT16:
+      tensor_dtype = torch::kHalf;
+      break;
+    case DTYPE_FLOAT32:
+      tensor_dtype = torch::kFloat32;
+      break;
+    case DTYPE_FP8_E4M3FN:
+      tensor_dtype = torch::kFloat8_e4m3fn;
+      break;
+    default:
+      assert(false);
+  }
+  return tensor_dtype;
+}
+
+inline int torch_dtype_to_int(torch::ScalarType dtype) {
+  auto tensor_dtype = DTYPE_FLOAT32;
+  switch (dtype) {
+    case torch::kBFloat16:
+      tensor_dtype = DTYPE_BFLOAT16;
+      break;
+    case torch::kHalf:
+      tensor_dtype = DTYPE_FLOAT16;
+      break;
+    case torch::kFloat32:
+      tensor_dtype = DTYPE_FLOAT32;
+      break;
+    case torch::kFloat8_e4m3fn:
+      tensor_dtype = DTYPE_FP8_E4M3FN;
+      break;
+    default:
+      assert(false);
+  }
+  return tensor_dtype;
+}
+
+inline size_t torch_dtype_size(int dtype) {
+  auto torch_type = torch::ScalarType(dtype_to_torch(dtype));
+  auto itemsize = torch::zeros({1}, torch_type).itemsize();
+  return itemsize;
+}
+
 inline size_t torch_shape_size(const std::vector<int64_t>& shape, int dtype) {
-  auto torch_type = torch::ScalarType(dtype);
-  auto itemsize = torch::empty({1}, torch_type).itemsize();
+  auto itemsize = torch_dtype_size(dtype);
   size_t size = 1;
   for (auto dim : shape) {
     size *= dim;
