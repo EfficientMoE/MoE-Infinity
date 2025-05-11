@@ -25,6 +25,8 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       num_enqueued_(0),
       start_(false),
       expert_type_(expert_type),
+      dtype_(dtype),
+      num_experts_(num_experts),
       input_mutex_(kNumDevices),
       input_cv_(kNumDevices),
       exec_mutex_(kNumDevices),
@@ -354,10 +356,15 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id) {
       continue;
     }
 
-    auto expert_idx = args.expert_node->expert_idx;
+    int64_t batch_size = hidden_states_.size(0);
     auto device = CUDA_DEVICE(gpu_id);
-    auto token_mask = router_mask_.index({"...", expert_idx}).to(torch::kBool);
-    auto input = hidden_states_.index({token_mask}).to(device);
+    auto expert_idx = args.expert_node->expert_idx;
+
+    auto token_mask = router_mask_.index({"...", expert_idx});
+    torch::Tensor input = (batch_size == 1)
+                              ? hidden_states_.to(device)
+                              : hidden_states_.index({token_mask}).to(device);
+
     // args.hidden_states = std::move(input);
     // assert(args.hidden_states.sum().to(torch::kCPU).item<float>() != 0);
     // at::InferenceMode infer_guard(true);
@@ -448,14 +455,14 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id) {
     //            "(", output.device().str(), ")");
     // output cannot be all zeros using torch.all
     // assert(torch::all(output == 0).item<bool>() == false);
-    OutputFunc(args, output, gpu_id);
+    OutputFunc(args, output, token_mask, gpu_id);
   }
 
   cudaStreamDestroy(stream);
 }
 
 void ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
-                                  int gpu_id) {
+                                  torch::Tensor token_mask, int gpu_id) {
   auto output_device =
       (args.out_gpu_id < 0) ? CPU_DEVICE : CUDA_DEVICE(args.out_gpu_id);
   torch::Tensor output_tensor = output.to(output_device).to(torch::kFloat32);
@@ -476,13 +483,18 @@ void ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
   args.expert_node->node->mutex.unlock();
   int64_t expert_idx = args.expert_node->expert_idx;
   int64_t layer_idx = args.expert_node->layer_idx;
+  int64_t batch_size = hidden_states_.size(0);
 
-  auto token_mask = router_mask_.index({"...", expert_idx}).to(torch::kBool);
-  auto token_indices = torch::nonzero(token_mask).squeeze(1);
-  auto weights = router_weight_.index({token_mask, expert_idx}).unsqueeze(1);
-  auto weighted_output = output_tensor * weights;
-  final_hidden_states_.index_add_(0, token_indices, weighted_output);
-
+  if (batch_size == 1) {
+    final_hidden_states_.add_(
+        output_tensor *
+        router_weight_.index({torch::indexing::Slice(), expert_idx}));
+  } else {
+    auto token_indices = torch::nonzero(token_mask).squeeze(1);
+    auto weights = router_weight_.index({token_mask, expert_idx}).unsqueeze(1);
+    auto weighted_output = output_tensor * weights;
+    final_hidden_states_.index_add_(0, token_indices, weighted_output);
+  }
   // {
   //   std::lock_guard<std::mutex> lock(output_mutex_);
   //   output_queue_.emplace_back(std::move(output_tensor),
@@ -531,8 +543,77 @@ void ExpertDispatcher::SetInputs(const torch::Tensor& hidden_states,
   int device = at::cuda::current_device();
   auto options =
       torch::TensorOptions().dtype(torch::kFloat32).device(CUDA_DEVICE(device));
-  hidden_states_ = hidden_states.clone();
-  router_mask_ = router_mask.clone();
-  final_hidden_states_ = torch::zeros_like(hidden_states_, options);
-  router_weight_ = router_weight.clone();
+  hidden_states_ = hidden_states;
+  router_mask_ = router_mask;
+  router_weight_ = router_weight;
+  final_hidden_states_ = torch::zeros_like(hidden_states, options);
+
+  // auto stream = exec_streams_[device];
+  // int64_t batch_size = hidden_states_.size(0);
+  // int64_t hidden_dim = hidden_states_.size(1);
+
+  // DLOG_FATAL_IF(num_experts_ != router_weight.size(1),
+  //               "ExpertDispatcher::SetInputs: num_experts ", num_experts_,
+  //               " router_weight.size(1) ", router_weight.size(1));
+
+  // if (!final_hidden_states_.defined()) {
+  //   // final_hidden_states is float type
+  //   auto options =
+  //     torch::TensorOptions().dtype(torch::kFloat32).device(CUDA_DEVICE(device));
+  //   auto allocator = c10::DeviceAllocator::get(device);
+  //   void* ptr = allocator->allocate(batch_size * hidden_dim * sizeof(float));
+  //   final_hidden_states_ = torch::from_blob(ptr, {batch_size, hidden_dim},
+  //                                           DoNothingDeleter<float>{},
+  //                                           options);
+  // }
+
+  // if (!router_mask_.defined()) {
+  //   // router mask is boolean type
+  //   auto options =
+  //     torch::TensorOptions().dtype(torch::kBool).device(CUDA_DEVICE(device));
+  //   auto allocator = c10::DeviceAllocator::get(device);
+  //   void* ptr = allocator->allocate(batch_size * num_experts_ *
+  //   sizeof(bool)); router_mask_ = torch::from_blob(ptr, {batch_size,
+  //   num_experts_},
+  //                                   DoNothingDeleter<bool>{}, options);
+  // }
+
+  // if (!router_weight_.defined()) {
+  //   // router weight is float type
+  //   auto options =
+  //     torch::TensorOptions().dtype(torch::kFloat32).device(CUDA_DEVICE(device));
+  //   auto allocator = c10::DeviceAllocator::get(device);
+  //   void* ptr = allocator->allocate(batch_size * num_experts_ *
+  //   sizeof(float)); router_weight_ = torch::from_blob(ptr, {batch_size,
+  //   num_experts_},
+  //                                     DoNothingDeleter<float>{}, options);
+  // }
+
+  // if (!hidden_states_.defined()) {
+  //   // hidden states is float type
+  //   auto options =
+  //     torch::TensorOptions().dtype(hidden_states.dtype()).device(CUDA_DEVICE(device));
+  //   auto allocator = c10::DeviceAllocator::get(device);
+  //   void* ptr = allocator->allocate(hidden_states.numel() * sizeof(float));
+  //   hidden_states_ = torch::from_blob(ptr, {batch_size, hidden_dim},
+  //                                     DoNothingDeleter<float>{}, options);
+  // }
+
+  // cudaMemsetAsync(final_hidden_states_.data_ptr(), 0,
+  //                 final_hidden_states_.numel() * sizeof(float), stream);
+  // cudaMemcpyAsync(
+  //     router_mask_.data_ptr(), router_mask.data_ptr(),
+  //     router_mask.numel() * sizeof(bool), cudaMemcpyDeviceToDevice, stream);
+  // cudaMemcpyAsync(
+  //     router_weight_.data_ptr(), router_weight.data_ptr(),
+  //     router_weight.numel() * sizeof(float), cudaMemcpyDeviceToDevice,
+  //     stream);
+  // cudaMemcpyAsync(
+  //     hidden_states_.data_ptr(), hidden_states.data_ptr(),
+  //     hidden_states.numel() * sizeof(float), cudaMemcpyDeviceToDevice,
+  //     stream);
+  // cudaMemcpyAsync(
+  //     router_mask_.data_ptr(), router_mask.data_ptr(),
+  //     router_mask.numel() * sizeof(bool), cudaMemcpyDeviceToDevice, stream);
+  // cudaStreamSynchronize(stream);
 }

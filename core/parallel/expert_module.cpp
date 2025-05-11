@@ -473,13 +473,14 @@ torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
   param_set_ = false;
   // slice until batch_size
   cudaStreamSynchronize(stream);
-  auto options = torch::TensorOptions()
-                     .dtype(dtype_to_torch(dtype_))
-                     .device(CUDA_DEVICE(at::cuda::current_device()));
-  auto output = torch::empty({batch_size, hdim}, options);
-  output.copy_(output_.index({torch::indexing::Slice(0, batch_size)}));
-  cudaStreamSynchronize(stream);
-  return std::move(output);
+  // auto options = torch::TensorOptions()
+  //                    .dtype(dtype_to_torch(dtype_))
+  //                    .device(CUDA_DEVICE(at::cuda::current_device()));
+  // auto output = torch::empty({batch_size, hdim}, options);
+  // output.copy_(output_.index({torch::indexing::Slice(0, batch_size)}));
+  // cudaStreamSynchronize(stream);
+  // return std::move(output);
+  return output_.index({torch::indexing::Slice(0, batch_size)});
 }
 
 void MoEMLP::ForwardHelper() {

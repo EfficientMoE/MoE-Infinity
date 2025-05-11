@@ -92,7 +92,8 @@ class ExpertDispatcher : public base::noncopyable {
 
   // void GPUThreadFunc(int gpu_id);
 
-  void OutputFunc(ExecArgs args, torch::Tensor output, int gpu_id);
+  void OutputFunc(ExecArgs args, torch::Tensor output, torch::Tensor token_mask,
+                  int gpu_id);
 
  private:
   std::vector<std::unique_ptr<base::Thread>> threads_;
@@ -104,6 +105,8 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<size_t> num_enqueued_;
   bool start_;
   int expert_type_;
+  int dtype_;
+  int num_experts_;
   std::atomic<bool> main_thread_stop_flag_;
 
   std::atomic<size_t> pending_;

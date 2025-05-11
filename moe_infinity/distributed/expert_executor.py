@@ -46,7 +46,7 @@ class DistributedExpertExecutor:
         expected_wait_cnt = len(expert_list)
 
         self.expert_dispatcher.set_inputs(
-            hidden_states, router_mask, router_weights
+            hidden_states, router_mask.bool(), router_weights
         )
         self.expert_dispatcher.set_expected_queue(expected_wait_cnt)
 
