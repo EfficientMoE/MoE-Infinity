@@ -15,6 +15,7 @@ class DeepseekMoEBlock(nn.Module):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
+        self.num_expert = config.n_routed_experts
 
         if self.config.model_type == "deepseek_v2":
             from .modeling_deepseek_v2 import DeepseekV2MLP, MoEGate
@@ -74,17 +75,32 @@ class DeepseekMoEBlock(nn.Module):
         # sorted_tokens = hidden_states[idxs // topk_idx.shape[1]]
 
         # tokens_per_expert = tokens_per_expert.cpu().numpy()
+        selected_experts = topk_idx
+        routing_weights = topk_weight
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        # Compute sparse mask via scatter
+        B, E = routing_weights.shape[0], self.num_expert
+        router_mask = torch.zeros(
+            B, E, dtype=torch.bool, device=selected_experts.device
+        )
+        router_mask.scatter_(1, selected_experts, True)
+
+        routing_weights_mask = torch.zeros(
+            B, E, dtype=routing_weights.dtype, device=routing_weights.device
+        )
+        routing_weights_mask.scatter_add_(1, selected_experts, routing_weights)
 
         batch_size, sequence_length, hidden_dim = orig_shape
-        router_mask = F.one_hot(
-            topk_idx, num_classes=self.config.n_routed_experts
-        )
-        routing_weights_mask = (topk_weight[:, :, None] * router_mask).permute(
-            0, 2, 1
-        )
-        routing_weights_mask = torch.sum(routing_weights_mask, dim=-1)
-        router_mask = router_mask.permute(0, 2, 1)
-        router_mask = torch.any(router_mask, dim=-1)
+        # router_mask = F.one_hot(
+        #     topk_idx, num_classes=self.config.n_routed_experts
+        # )
+        # routing_weights_mask = (topk_weight[:, :, None] * router_mask).permute(
+        #     0, 2, 1
+        # )
+        # routing_weights_mask = torch.sum(routing_weights_mask, dim=-1)
+        # router_mask = router_mask.permute(0, 2, 1)
+        # router_mask = torch.any(router_mask, dim=-1)
 
         # use logical or to merge last dimension
         # for i in range(self.config.num_experts_per_tok):

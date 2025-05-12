@@ -25,11 +25,8 @@ class Qwen3MoEBlock(nn.Module):
             ]
         )
 
-    @nvtx.annotate("Qwen3MoEBlock", color="blue")
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """ """
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
+    @nvtx.annotate("Qwen3Prepare", color="blue")
+    def __prepare_expert_route(self, hidden_states):
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
 
@@ -45,21 +42,46 @@ class Qwen3MoEBlock(nn.Module):
         # print(f"hidden_states shape: {hidden_states.shape}")
         # print(f"routing_weights shape: {routing_weights.shape}")
 
-        router_mask = F.one_hot(selected_experts, num_classes=self.num_experts)
-        routing_weights_mask = (
-            routing_weights[:, :, None] * router_mask
-        ).permute(0, 2, 1)
-        routing_weights_mask = torch.sum(routing_weights_mask, dim=-1)
-        router_mask = router_mask.permute(0, 2, 1)
+        # Compute sparse mask via scatter
+        B, E = routing_weights.shape[0], self.num_experts
+        router_mask = torch.zeros(
+            B, E, dtype=torch.bool, device=selected_experts.device
+        )
+        router_mask.scatter_(1, selected_experts, True)
+
+        routing_weights_mask = torch.zeros(
+            B, E, dtype=routing_weights.dtype, device=routing_weights.device
+        )
+        routing_weights_mask.scatter_add_(1, selected_experts, routing_weights)
+
+        return router_logits, router_mask, routing_weights_mask
+
+    @nvtx.annotate("Qwen3MoEBlock", color="blue")
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """ """
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        router_logits, router_mask, routing_weights_mask = (
+            self.__prepare_expert_route(hidden_states)
+        )
+        # router_mask = F.one_hot(selected_experts, num_classes=self.num_experts)
+        # routing_weights_mask = (
+        #     routing_weights[:, :, None] * router_mask
+        # ).permute(0, 2, 1)
+        # routing_weights_mask = torch.sum(routing_weights_mask, dim=-1)
+        # router_mask = router_mask.permute(0, 2, 1)
+        # router_mask = torch.any(router_mask, dim=-1)
+
         # print(f"router_mask shape: {router_mask.shape}")
         # print(f"routing_weights_mask shape: {routing_weights_mask.shape}")
 
-        # use logical or to merge last dimension
-        for i in range(self.top_k):
-            router_mask[:, :, 0] = torch.logical_or(
-                router_mask[:, :, 0], router_mask[:, :, i]
-            )
-        router_mask = router_mask[:, :, 0]
+        # # use logical or to merge last dimension
+        # for i in range(self.top_k):
+        #     router_mask[:, :, 0] = torch.logical_or(
+        #         router_mask[:, :, 0], router_mask[:, :, i]
+        #     )
+        # router_mask = router_mask[:, :, 0]
 
         self.expert_executor.dispatch_local(
             self.layer_id, hidden_states, router_mask, routing_weights_mask
@@ -83,8 +105,8 @@ class Qwen3MoEBlock(nn.Module):
             batch_size, sequence_length, hidden_dim
         ).to(hidden_states.dtype)
 
-        return final_hidden_states
-
+        return final_hidden_states, router_logits
+        """
         # One hot encode the selected experts to create an expert mask
         # this will be used to easily index which expert is going to be sollicitated
         expert_mask = torch.nn.functional.one_hot(
@@ -113,3 +135,4 @@ class Qwen3MoEBlock(nn.Module):
             batch_size, sequence_length, hidden_dim
         )
         return final_hidden_states, router_logits
+        """

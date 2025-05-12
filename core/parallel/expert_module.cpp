@@ -412,7 +412,7 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
       void* buffer_ptr = allocator->allocate(data_size);
       buffer_[i].set_data(torch::from_blob(buffer_ptr, data_shape,
                                            DoNothingDeleter<void>{}, options));
-      DLOG_DEBUG("MoEMLP::SetTensorsFromBlob: buffer_ tensor", i, "data_shape",
+      DLOG_TRACE("MoEMLP::SetTensorsFromBlob: buffer_ tensor", i, "data_shape",
                  data_shape, "data_size", data_size, "device",
                  buffer_[i].device().str());
     }
@@ -499,7 +499,7 @@ void MoEMLP::ForwardHelper() {
     auto& gate_act_out = buffer_[3];
     auto& up_out = buffer_[4];
 
-    DLOG_DEBUG("MoEMLP::forward: gate_proj", gate_proj.sizes().vec(), "up_proj",
+    DLOG_TRACE("MoEMLP::forward: gate_proj", gate_proj.sizes().vec(), "up_proj",
                up_proj.sizes().vec(), "down_proj", down_proj.sizes().vec(),
                "input", input.sizes().vec(), "gate_out", gate_out.sizes().vec(),
                "gate_act_out", gate_act_out.sizes().vec(), "up_out",

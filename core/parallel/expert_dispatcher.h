@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "common/sync.h"
 #include "base/noncopyable.h"
 #include "base/thread.h"
 #include "expert_module.h"
@@ -95,6 +96,8 @@ class ExpertDispatcher : public base::noncopyable {
   void OutputFunc(ExecArgs args, torch::Tensor output, torch::Tensor token_mask,
                   int gpu_id);
 
+  ExpertNodePtr FindExpertEvict(int gpu_id);
+
  private:
   std::vector<std::unique_ptr<base::Thread>> threads_;
   std::mutex mutex_;
@@ -119,9 +122,12 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<std::condition_variable> input_cv_;
   std::vector<std::condition_variable> exec_cv_;
 
+  std::vector<std::mutex> cache_mutex_;
+  std::vector<std::condition_variable> cache_cv_;
+
   std::mutex output_mutex_;
   // std::mutex exec_mutex_;
-  std::mutex gpu_overload_mutex_;
+  // std::mutex gpu_overload_mutex_;
 
   std::vector<cudaStream_t> exec_streams_;
 
@@ -133,6 +139,7 @@ class ExpertDispatcher : public base::noncopyable {
   torch::Tensor router_weight_;
 
   std::vector<int64_t> cache_sizes_;
+  std::vector<std::unordered_set<uint64_t>> cached_experts_;
 
   int cache_capacity_ = 0;
 

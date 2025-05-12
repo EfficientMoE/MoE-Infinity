@@ -31,13 +31,20 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       input_cv_(kNumDevices),
       exec_mutex_(kNumDevices),
       exec_cv_(kNumDevices),
+      cache_mutex_(kNumDevices),
+      cache_cv_(kNumDevices),
       input_queue_(kNumDevices),
-      exec_queue_(kNumDevices),
       gpu_overload_(kNumDevices, false),
+      exec_queue_(kNumDevices),
+      cached_experts_(kNumDevices),
       modules_(kNumDevices, nullptr) {
   main_thread_stop_flag_.store(false);
 
   // module_ = new MoEMLP(dtype, expert_type);
+
+  // Futex<bool> initial_value(false);
+  // gpu_overload_ = std::move(std::vector<Futex<bool>>(kNumDevices,
+  // initial_value));
 
   for (int i = 0; i < kNumDevices; ++i) {
     auto thread_func = std::bind(&ExpertDispatcher::GPUFetchFunc, this, i);
@@ -51,6 +58,7 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
     cache_sizes_.push_back(cache_limit);
 
     modules_[i] = new MoEMLP(dtype, expert_type);
+    // gpu_overload_.emplace_back(false);
   }
 
   for (int i = 0; i < kNumDevices * num_threads; ++i) {
@@ -212,6 +220,25 @@ void ExpertDispatcher::ClearExpertCacheCounts() {
 //   }
 // }
 
+ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id) {
+  uint64_t min_visit_count = INT_MAX;
+  ExpertNodePtr evict_expert_node = nullptr;
+
+  for (auto& key : cached_experts_[gpu_id]) {
+    auto layer_idx = key >> 32;
+    auto expert_idx = key & 0xFFFFFFFF;
+    auto node = experts_[expert_idx][layer_idx]->node;
+    if (node == nullptr) continue;
+    if (node->device.is_cuda() && node->incache_visit_count < min_visit_count &&
+        node->mutex.try_lock()) {
+      evict_expert_node = experts_[expert_idx][layer_idx];
+      min_visit_count = node->incache_visit_count;
+      node->mutex.unlock();
+    }
+  }
+  return evict_expert_node;
+}
+
 void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
   cudaSetDevice(gpu_id);
   cudaStream_t stream;
@@ -241,8 +268,9 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
 
     auto device = CUDA_DEVICE(gpu_id);
     auto original_device = (args.remote) ? CPU_DEVICE : hidden_states_.device();
-    int layer_idx = args.layer_idx;
-    int expert_idx = args.expert_idx;
+    int64_t layer_idx = args.layer_idx;
+    int64_t expert_idx = args.expert_idx;
+    int64_t batch_size = hidden_states_.size(0);
 
     auto expert_node = experts_[expert_idx][layer_idx];
     bool cache_hit = expert_node->node->device.is_cuda();
@@ -251,47 +279,107 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
     //           << " layer_idx " << layer_idx << " expert_idx " << expert_idx
     //           << " cache_hit " << cache_hit << " node "
     //           << expert_node->node->device.str() << std::endl;
+    DLOG_DEBUG("ExpertDispatcher::GPUFetchFunc: gpu_id ", gpu_id, " layer_idx ",
+               layer_idx, " expert_idx ", expert_idx, "cache_hit ", cache_hit,
+               "cache_size ", cache_sizes_[gpu_id], " incache count ",
+               cached_experts_[gpu_id].size());
 
-    if (!expert_node->node->device.is_cuda() &&
-        cache_sizes_[gpu_id] < expert_node->node->byte_size) {
-      // find the expert in gpu and min incache_visit_count
-      NodePtr evict_node = nullptr;
-      auto num_layers = experts_[0].size();
-      auto num_experts = experts_.size();
-      int min_visit_count = INT_MAX;
-      for (size_t i = 0; i < num_experts; ++i) {
-        for (size_t j = 0; j < num_layers; ++j) {
-          auto node = experts_[i][j]->node;
-          if (node == nullptr) {
-            // std::cerr << "ExpertDispatcher::GPUFetchFunc: node is nullptr"
-            //           << " layer_idx " << j << " expert_idx " << i <<
-            //           std::endl;
-            continue;
+    if (!cache_hit && cache_sizes_[gpu_id] < expert_node->node->byte_size) {
+      if (batch_size > 1) {
+        // force fetch to GPU regardless of cache size, only for prefill
+        // only one extra cache slot for prefill
+        DLOG_DEBUG("overloading expert cache: gpu_id ", gpu_id, " cache size ",
+                   cache_sizes_[gpu_id], " incache count ",
+                   cached_experts_[gpu_id].size(), " layer_idx ", layer_idx,
+                   " expert_idx ", expert_idx);
+        // gpu_overload_[gpu_id].wait_and_set(false, true);
+        // busy wait for cache to be available
+        while (gpu_overload_[gpu_id]) {
+          std::this_thread::sleep_for(std::chrono::microseconds(1));
+        }
+        gpu_overload_[gpu_id] = true;
+      } else {
+        // find the expert in gpu and min incache_visit_count
+        ExpertNodePtr evict_expert_node = FindExpertEvict(gpu_id);
+        if (evict_expert_node == nullptr) {
+          // wait for notification that cache is available
+          DLOG_WARN(
+              "All cached expert locked, waiting for cache to be available. "
+              "gpu_id ",
+              gpu_id, " cache size ", cache_sizes_[gpu_id], " incache count ",
+              cached_experts_[gpu_id].size(), " layer_idx ", layer_idx,
+              " expert_idx ", expert_idx);
+          {
+            std::unique_lock<std::mutex> lock(cache_mutex_[gpu_id]);
+            cache_cv_[gpu_id].wait(lock);
           }
-          if (node->device.is_cuda() &&
-              node->incache_visit_count < min_visit_count &&
-              node->mutex.try_lock()) {
-            evict_node = node;
-            min_visit_count = node->incache_visit_count;
-            node->mutex.unlock();
-            // std::cerr << "ExpertDispatcher::GPUFetchFunc: evict node "
-            //           << evict_node->device.str() << " incache_visit_count "
-            //           << min_visit_count << std::endl;
-          }
+          evict_expert_node = FindExpertEvict(gpu_id);
+        }
+        // auto num_layers = experts_[0].size();
+        // auto num_experts = experts_.size();
+
+        // for (size_t i = 0; i < num_experts; ++i) {
+        //   for (size_t j = 0; j < num_layers; ++j) {
+        // auto node = experts_[i][j]->node;
+        // if (node == nullptr) {
+        //   // std::cerr << "ExpertDispatcher::GPUFetchFunc: node is nullptr"
+        //   //           << " layer_idx " << j << " expert_idx " << i <<
+        //   //           std::endl;
+        //   continue;
+        // }
+        // if (node->device.is_cuda() &&
+        //     node->incache_visit_count < min_visit_count &&
+        //     node->mutex.try_lock()) {
+        //   evict_node = node;
+        //   min_visit_count = node->incache_visit_count;
+        //   node->mutex.unlock();
+        //   // std::cerr << "ExpertDispatcher::GPUFetchFunc: evict node "
+        //   //           << evict_node->device.str() << " incache_visit_count "
+        //   //           << min_visit_count << std::endl;
+        // }
+        //   }
+        // }
+        DLOG_FATAL_IF(
+            evict_expert_node == nullptr,
+            "ExpertDispatcher::GPUFetchFunc: evict_node is nullptr, gpu_id",
+            gpu_id, "cache size", cache_sizes_[gpu_id], "in cache count",
+            cached_experts_[gpu_id].size());
+
+        DLOG_DEBUG("evicting expert: gpu_id ", gpu_id, " cache size ",
+                   cache_sizes_[gpu_id], " incache count ",
+                   cached_experts_[gpu_id].size(), " layer_idx ", layer_idx,
+                   " expert_idx ", expert_idx);
+
+        auto evict_node = evict_expert_node->node;
+        evict_node->SetDevice(evict_node->default_host);
+        cache_sizes_[gpu_id] += evict_node->byte_size;
+        int64_t evict_layer_idx = evict_expert_node->layer_idx;
+        int64_t evict_expert_idx = evict_expert_node->expert_idx;
+
+        // std::lock_guard<std::mutex> lock(cache_mutex_[gpu_id]);
+        uint64_t evict_key = (evict_layer_idx << 32) + evict_expert_idx;
+        auto it = cached_experts_[gpu_id].find(evict_key);
+        if (it != cached_experts_[gpu_id].end()) {
+          cached_experts_[gpu_id].erase(it);
+        } else {
+          DLOG_FATAL(
+              "ExpertDispatcher::GPUFetchFunc: evict_key not found. layer_idx ",
+              evict_layer_idx, " expert_idx ", evict_expert_idx);
         }
       }
-      assert(evict_node != nullptr);
-      evict_node->SetDevice(evict_node->default_host);
-      cache_sizes_[gpu_id] += evict_node->byte_size;
     }
 
-    bool success = true;
+    if (!gpu_overload_[gpu_id]) {
+      cache_sizes_[gpu_id] -= expert_node->node->byte_size;
+      uint64_t key = (layer_idx << 32) + expert_idx;
+      cached_experts_[gpu_id].insert(key);
+    }
 
     expert_node->node->SetDevice(device, true, stream);
     expert_node->node->incache_visit_count += 1;
     expert_node->SetTensorsFromBlob(device);
     // module_->SetTensorsFromIds(expert_node->node->tensor_ids);
-    cache_sizes_[gpu_id] -= expert_node->node->byte_size;
+
     // std::cerr << "ExpertDispatcher::GPUFetchFunc: move to device gpu_id "
     //           << gpu_id << " layer_idx " << layer_idx << " expert_idx "
     //           << expert_idx << " node "
@@ -327,7 +415,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       exec_args.expert_node = expert_node;
       exec_args.out_gpu_id = original_device.index();
       exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
-      exec_args.evict = !success;
+      exec_args.evict = gpu_overload_[gpu_id];
       exec_args.hit = cache_hit;
       std::lock_guard<std::mutex> lock(exec_mutex_[gpu_id]);
       exec_queue_[gpu_id].emplace_back(std::move(exec_args));
@@ -467,23 +555,48 @@ void ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
       (args.out_gpu_id < 0) ? CPU_DEVICE : CUDA_DEVICE(args.out_gpu_id);
   torch::Tensor output_tensor = output.to(output_device).to(torch::kFloat32);
 
-  DLOG_DEBUG("ExpertDispatcher::OutputFunc: output_tensor ",
+  DLOG_TRACE("ExpertDispatcher::OutputFunc: output_tensor ",
              output_tensor.sizes().vec(), "(", output_tensor.device().str(),
              ")");
 
-  if (args.evict) {
-    args.expert_node->node->SetDevice(args.expert_node->node->default_host,
-                                      true, nullptr);
-    {
-      std::lock_guard<std::mutex> lock(gpu_overload_mutex_);
-      gpu_overload_[gpu_id] = false;
-    }
-  }
-
-  args.expert_node->node->mutex.unlock();
+  // args.expert_node->node->mutex.unlock();
   int64_t expert_idx = args.expert_node->expert_idx;
   int64_t layer_idx = args.expert_node->layer_idx;
   int64_t batch_size = hidden_states_.size(0);
+
+  args.expert_node->node->mutex.unlock();
+  if (args.evict) {
+    // pop out overloaded expert such that cache is not polluted
+    args.expert_node->node->SetDevice(args.expert_node->node->default_host,
+                                      true, nullptr);
+    // std::lock_guard<std::mutex> lock(cache_mutex_[gpu_id]);
+    // uint64_t key = (layer_idx << 32) + expert_idx;
+    // auto it = cached_experts_[gpu_id].find(key);
+    // if (it != cached_experts_[gpu_id].end()) {
+    //   cached_experts_[gpu_id].erase(it);
+    // } else {
+    //   DLOG_FATAL(
+    //       "ExpertDispatcher::OutputFunc: expert not found in cache. gpu_id",
+    //       gpu_id, "layer_idx ", layer_idx, "expert_idx ", expert_idx);
+    // }
+    // cache_sizes_[gpu_id] += args.expert_node->node->byte_size;
+    DLOG_DEBUG("pop out overloaded expert cache_sizes_[gpu_id] ",
+               cache_sizes_[gpu_id], "gpu_id ", gpu_id, "layer_idx ", layer_idx,
+               "expert_idx ", expert_idx);
+    // std::lock_guard<std::mutex> lock(cache_mutex_[gpu_id]);
+    // gpu_overload_[gpu_id].set_and_wake(true);
+    gpu_overload_[gpu_id] = false;
+  }
+  cache_cv_[gpu_id].notify_all();
+
+  // if (args.evict) {
+  //   args.expert_node->node->SetDevice(args.expert_node->node->default_host,
+  //                                     true, nullptr);
+  //   {
+  //     std::lock_guard<std::mutex> lock(gpu_overload_mutex_);
+  //     gpu_overload_[gpu_id] = false;
+  //   }
+  // }
 
   if (batch_size == 1) {
     final_hidden_states_.add_(

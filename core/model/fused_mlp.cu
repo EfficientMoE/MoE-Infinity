@@ -1,4 +1,4 @@
-#include "fused_mlp.cuh"
+#include "fused_mlp.h"
 #include "parallel/expert_module.h"
 
 torch::Tensor launch_fused_moe_ffn(torch::Tensor hidden,  // [M, K]
