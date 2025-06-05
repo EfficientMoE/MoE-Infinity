@@ -140,6 +140,12 @@ class OffloadEngine(object):
         # print("Distributed init done")
 
         self.prefetch_lib = PrefetchBuilder().load() if use_jit else prefetch_op
+        # new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
+        #     self.prefetch_lib.__file__, "TorchAllocateDevice", "TorchFreeDevice"
+        # )
+        # # Swap the current allocator
+        # torch.cuda.memory.change_current_allocator(new_alloc)
+
         self.archer_engine = self.prefetch_lib.prefetch_handle(
             self.checkpoint, _archer_config.device_memory_ratio
         )
@@ -420,11 +426,11 @@ class OffloadEngine(object):
                     ),
                 )
 
-                script_expert(
-                    self.checkpoint,
-                    self.config.model_type,
-                    self.config,
-                )
+                # script_expert(
+                #     self.checkpoint,
+                #     self.config.model_type,
+                #     self.config,
+                # )
 
                 if self.config.model_type == "deepseek_v3":
                     model = model.to(torch.float8_e4m3fn)

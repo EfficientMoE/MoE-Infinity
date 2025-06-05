@@ -37,6 +37,7 @@ class PrefetchBuilder(CUDAOpBuilder):
             "core/prefetch/archer_prefetch_handle.cpp",
             "core/prefetch/task_scheduler.cpp",
             "core/prefetch/task_thread.cpp",
+            "core/memory/caching_allocator.cpp",
             "core/memory/memory_pool.cpp",
             "core/memory/stream_pool.cpp",
             "core/memory/host_caching_allocator.cpp",
@@ -64,13 +65,30 @@ class PrefetchBuilder(CUDAOpBuilder):
             "core/python/py_archer_prefetch.cpp",
         ]
 
+    def cutlass_dir(self):
+        CUTLASS_DIR = os.path.expanduser("~") + "/cutlass"
+        if not os.path.exists(CUTLASS_DIR):
+            raise FileNotFoundError(
+                f"Cutlass directory not found: {CUTLASS_DIR}"
+            )
+        else:
+            print(f"Using Cutlass directory: {CUTLASS_DIR}")
+        return CUTLASS_DIR
+
     def include_paths(self):
-        return ["core"]
+        CUTLASS_DIR = self.cutlass_dir()
+
+        return [
+            "core",
+            f"{CUTLASS_DIR}/include",
+            f"{CUTLASS_DIR}/tools/util/include",
+        ]
 
     def cxx_args(self):
         # -O0 for improved debugging, since performance is bound by I/O
         CPU_ARCH = self.cpu_arch()
         SIMD_WIDTH = self.simd_width()
+        CUTLASS_DIR = self.cutlass_dir()
 
         return [
             "-g",
@@ -83,16 +101,19 @@ class PrefetchBuilder(CUDAOpBuilder):
             CPU_ARCH,
             "-fopenmp",
             SIMD_WIDTH,
-            "-I/usr/local/cuda/include",
-            "-L/usr/local/cuda/lib64",
-            "-lcuda",
-            "-lcudart",
-            "-lcublas",
             "-lpthread",
+            "-L/usr/local/cuda/lib64",
+            f"-L{CUTLASS_DIR}/build/tools/library",
+            "-lcutlass",
         ]
 
     def extra_ldflags(self):
-        return []
+        return [
+            "-luuid",
+            "-lcublas",
+            "-lcudart",
+            "-lcuda",
+        ]
 
     def is_compatible(self, verbose=True):
         return super().is_compatible(verbose)

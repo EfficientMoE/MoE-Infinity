@@ -189,8 +189,8 @@ void ExpertDispatcher::RegisterExpert(
     if (cached_node == nullptr) {
       cached_node = node;
       experts_[expert_idx][layer_idx]->node = node;
-      experts_[expert_idx][layer_idx]->jit_module =
-          new torch::jit::script::Module(torch::jit::load(jit_path));
+      // experts_[expert_idx][layer_idx]->jit_module =
+      //     new torch::jit::script::Module(torch::jit::load(jit_path));
     } else if (cached_node != node) {
       DLOG_FATAL("RegisterExpert: tensor_id has multiple nodes", tensor_id);
     }
