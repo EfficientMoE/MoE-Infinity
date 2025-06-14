@@ -151,15 +151,6 @@ for input_text in all_inputs:
 
     token_ids = tokenizer.encode(prompt, return_tensors="pt")
     token_ids = token_ids.to("cuda:0")
-    # inputs = tokenizer(
-    #     token_ids,
-    #     truncation=True,
-    #     padding="do_not_pad",
-    #     max_length=max_seq_length,
-    #     return_tensors="pt",
-    # )
-    # print("inputs ...")
-    # print(inputs.input_ids.shape)
 
     streamer = StopWatch(model.engine, tokenizer)
     with torch.no_grad():
