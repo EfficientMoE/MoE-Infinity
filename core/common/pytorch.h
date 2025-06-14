@@ -93,8 +93,23 @@ inline int torch_dtype_to_int(torch::ScalarType dtype) {
 }
 
 inline size_t torch_dtype_size(int dtype) {
-  auto torch_type = torch::ScalarType(dtype_to_torch(dtype));
-  auto itemsize = torch::zeros({1}, torch_type).itemsize();
+  size_t itemsize = 0;
+  switch (dtype) {
+    case DTYPE_BFLOAT16:
+      itemsize = 2;  // bfloat16 is 2 bytes
+      break;
+    case DTYPE_FLOAT16:
+      itemsize = 2;  // float16 is 2 bytes
+      break;
+    case DTYPE_FLOAT32:
+      itemsize = 4;  // float32 is 4 bytes
+      break;
+    case DTYPE_FP8_E4M3FN:
+      itemsize = 1;  // fp8_e4m3fn is 1 byte
+      break;
+    default:
+      assert(false);  // Invalid dtype
+  }
   return itemsize;
 }
 
