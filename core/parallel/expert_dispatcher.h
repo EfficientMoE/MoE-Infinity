@@ -70,7 +70,7 @@ class ExpertDispatcher : public base::noncopyable {
 
   void EnqueueExpert(int layer_idx, int expert_idx, int gpu_id = -1,
                      bool remote = false);
-  void NofityFetchStart();
+  void NotifyFetchStart();
 
   void RegisterExpert(int layer_idx, int expert_idx,
                       const std::vector<std::uint32_t>& tensor_ids,

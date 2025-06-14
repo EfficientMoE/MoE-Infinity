@@ -197,7 +197,7 @@ void ExpertDispatcher::RegisterExpert(
   }
 }
 
-void ExpertDispatcher::NofityFetchStart() {
+void ExpertDispatcher::NotifyFetchStart() {
   for (int i = 0; i < kNumDevices; ++i) {
     // std::unique_lock<std::mutex> lock(input_mutex_[i]);
     input_cv_[i].notify_all();
