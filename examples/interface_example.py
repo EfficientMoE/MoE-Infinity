@@ -82,11 +82,6 @@ else:
 dataset_name = "cais/mmlu"
 names = datasets.get_dataset_config_names(dataset_name)
 
-# # remove empty entry in BIGBench dataset
-# names.remove("simple_arithmetic_json_multiple_choice")
-# names.remove("simple_arithmetic_multiple_targets_json")
-# names.remove("cifar10_classification")
-
 pool = mp.Pool(mp.cpu_count())
 all_inputs = [None] * len(names)
 all_inputs = pool.map(partial(datasets.load_dataset, dataset_name), names)
