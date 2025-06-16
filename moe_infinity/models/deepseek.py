@@ -1,9 +1,37 @@
-from typing import Dict, Optional, Tuple
+from typing import Dict
 
 import nvtx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class DeepseekMoEGate(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.n_routed_experts = config.n_routed_experts
+        self.gating_dim = config.hidden_size
+        self.weight = nn.Parameter(
+            torch.empty((self.n_routed_experts, self.gating_dim))
+        )
+
+    def forward(self, hidden_states):
+        """
+        Forward pass for the MoE gate.
+        :param hidden_states: Input tensor of shape (batch_size, sequence_length, hidden_size).
+        :return: Gating logits of shape (batch_size, sequence_length, n_routed_experts).
+        """
+        # Compute the gating logits
+        bsz, seq_len, h = hidden_states.shape
+        ### compute gating score
+        hidden_states = hidden_states.view(-1, h)
+        logits = F.linear(
+            hidden_states.type(torch.float32),
+            self.weight.type(torch.float32),
+            None,
+        )
+        return logits
 
 
 class DeepseekMoEBlock(nn.Module):
@@ -37,7 +65,8 @@ class DeepseekMoEBlock(nn.Module):
             ]
         )
 
-        self.gate = self.gate_cls(config)
+        # self.gate = self.gate_cls(config)
+        self.gate = DeepseekMoEGate(config)
         if config.n_shared_experts is not None:
             intermediate_size = (
                 config.moe_intermediate_size * config.n_shared_experts
@@ -50,40 +79,33 @@ class DeepseekMoEBlock(nn.Module):
         self.archer_engine = None
         self.expert_tensor_ids: Dict[int, int] = None
 
-    @nvtx.annotate(message="DeepseekMoEBlock", color="blue")
-    def forward(self, hidden_states):
-        identity = hidden_states
-        orig_shape = hidden_states.shape
+    @nvtx.annotate("DeepSeekPrepare", color="blue")
+    def __prepare_expert_route(self, hidden_states):
+        # router_logits: (batch * sequence_length, n_experts)
+        router_logits = self.gate(hidden_states)  # dtype float32
 
-        gate_output = self.gate(hidden_states)
-        if len(gate_output) == 3:
-            topk_idx, topk_weight, aux_loss = gate_output
-        else:
-            topk_idx, topk_weight = gate_output
-            aux_loss = None
-        # topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(
+            routing_weights, self.num_experts_per_tok, dim=-1
+        )
+        # if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
+        #     routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        # we cast back to the input dtype
+        # routing_weights = routing_weights.to(hidden_states.dtype)
 
-        # print("topk_idx", topk_idx.shape)
-        # print("topk_weight", topk_weight.shape)
-        # print(self.config.n_routed_experts, self.config.num_experts_per_tok)
-
-        # cnts = topk_idx.new_zeros((topk_idx.shape[0], len(self.experts)))
-        # cnts.scatter_(1, topk_idx, 1)
-        # tokens_per_expert = cnts.sum(dim=0)
-        # idxs = topk_idx.view(-1).argsort()
-        # sorted_tokens = hidden_states[idxs // topk_idx.shape[1]]
-
-        # tokens_per_expert = tokens_per_expert.cpu().numpy()
-        selected_experts = topk_idx
-        routing_weights = topk_weight
-        routing_weights = routing_weights.to(hidden_states.dtype)
+        # print(f"hidden_states shape: {hidden_states.shape}")
+        # print(f"routing_weights shape: {routing_weights.shape}")
 
         # Compute sparse mask via scatter
         B, E = routing_weights.shape[0], self.num_expert
         router_mask = torch.zeros(
             B, E, dtype=torch.bool, device=selected_experts.device
         )
+
+        # print("selected_experts", selected_experts.shape)
+        # print("routing_weights", routing_weights.shape)
+        # print("router_mask", router_mask.shape)
+        # print("router_logits", router_logits.shape)
         router_mask.scatter_(1, selected_experts, True)
 
         routing_weights_mask = torch.zeros(
@@ -91,63 +113,21 @@ class DeepseekMoEBlock(nn.Module):
         )
         routing_weights_mask.scatter_add_(1, selected_experts, routing_weights)
 
-        batch_size, sequence_length, hidden_dim = orig_shape
-        # router_mask = F.one_hot(
-        #     topk_idx, num_classes=self.config.n_routed_experts
-        # )
-        # routing_weights_mask = (topk_weight[:, :, None] * router_mask).permute(
-        #     0, 2, 1
-        # )
-        # routing_weights_mask = torch.sum(routing_weights_mask, dim=-1)
-        # router_mask = router_mask.permute(0, 2, 1)
-        # router_mask = torch.any(router_mask, dim=-1)
+        return router_mask, routing_weights_mask
 
-        # use logical or to merge last dimension
-        # for i in range(self.config.num_experts_per_tok):
-        #     router_mask[:, :, 0] = torch.logical_or(
-        #         router_mask[:, :, 0], router_mask[:, :, i]
-        #     )
-        # router_mask = router_mask[:, :, 0]
-
-        # print("router_mask", router_mask.shape)
-        # print("routing_weights_mask", routing_weights_mask.shape)
-
-        # overlap current layer with unique expert list
-        # unique_expert_list = torch.unique(topk_idx).tolist()
-        # self.expert_prefetcher.fetch_experts_lock_cache(
-        #     self.layer_id, unique_expert_list
-        # )
-
-        # self.expert_prefetcher.prefetch_experts_list(self.layer_id, unique_expert_list)
-
-        # expert_index = topk_idx.reshape(
-        #     batch_size, sequence_length, self.config.num_experts_per_tok
-        # )
-        # for i in range(batch_size):
-        #     seq_id = self.seq_id_list[i]
-        #     expert_matrix = self.expert_predictor.predict(
-        #         seq_id, expert_index[i], self.layer_id
-        #     )
-        #     self.expert_prefetcher.prefetch_experts(
-        #         self.layer_id, expert_matrix
-        #     )
+    @nvtx.annotate(message="DeepseekMoEBlock", color="blue")
+    def forward(self, hidden_states):
+        identity = hidden_states
+        routing_mask, routing_weight = self.__prepare_expert_route(
+            hidden_states
+        )
+        batch_size, sequence_length, hidden_dim = identity.shape
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
         self.expert_executor.dispatch_local(
-            self.layer_id, hidden_states, router_mask, routing_weights_mask
+            self.layer_id, hidden_states, routing_mask, routing_weight
         )
         final_hidden_states = self.expert_executor.wait_dispatch_local()
-        # final_hidden_states = torch.zeros(
-        #     (batch_size * sequence_length, hidden_dim),
-        #     dtype=hidden_states.dtype,
-        #     device=hidden_states.device,
-        # )
-        # results = self.expert_executor.wait_dispatch_local()
-        # for output, _, idx, _ in results:
-        #     token_indices = router_mask[:, idx].bool()
-        #     final_hidden_states[token_indices, :] += (
-        #         output.to(routing_weights_mask.device)
-        #         * routing_weights_mask[token_indices, idx][:, None]
-        #     )
 
         final_hidden_states = final_hidden_states.view(
             batch_size, sequence_length, hidden_dim
@@ -157,28 +137,3 @@ class DeepseekMoEBlock(nn.Module):
                 identity
             )
         return final_hidden_states
-
-        # outputs = []
-        # start_idx = 0
-        # for i, num_tokens in enumerate(tokens_per_expert):
-        #     end_idx = start_idx + num_tokens
-        #     if num_tokens == 0:
-        #         continue
-        #     expert = self.experts[i]
-        #     tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
-        #     expert_out = expert(tokens_for_this_expert)
-        #     outputs.append(expert_out.to(hidden_states.device))
-        #     start_idx = end_idx
-
-        # outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
-
-        # new_x = torch.empty_like(outs)
-        # new_x[idxs] = outs
-        # y = (
-        #     new_x.view(*topk_idx.shape, -1)
-        #     .type(topk_weight.dtype)
-        #     .mul_(topk_weight.unsqueeze(dim=-1))
-        #     .sum(dim=1)
-        #     .type(new_x.dtype)
-        # )
-        # return y

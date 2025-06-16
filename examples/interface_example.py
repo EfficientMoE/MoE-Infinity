@@ -79,28 +79,28 @@ else:
         args.model_name_or_path, trust_remote_code=True, use_fast=False
     )
 
-dataset_name = "cais/mmlu"
-names = datasets.get_dataset_config_names(dataset_name)
 
-pool = mp.Pool(mp.cpu_count())
-all_inputs = [None] * len(names)
-all_inputs = pool.map(partial(datasets.load_dataset, dataset_name), names)
+dataset = datasets.load_dataset("openai/gsm8k", "main", split="test")
+all_inputs = dataset["question"]
+
+# dataset_name = "openai/gsm8k"
+# names = datasets.get_dataset_config_names(dataset_name)
+
+# pool = mp.Pool(mp.cpu_count())
+# all_inputs = [None] * len(names)
+# all_inputs = pool.map(partial(datasets.load_dataset, dataset_name), names)
 
 # print(all_inputs)
 
-text_list = []
-for dataset in all_inputs:
-    if "test" not in dataset:
-        continue
-    for i, text in enumerate(dataset["test"]["question"]):
-        text_list.append(text)
+# text_list = []
+# for dataset in all_inputs:
+#     if "test" not in dataset:
+#         continue
+#     for i, text in enumerate(dataset["test"]["question"]):
+#         text_list.append(text)
 
-print(len(text_list))
-all_inputs = text_list
-
-# all_inputs = [
-#     text for dataset in all_inputs for text in dataset["test"]["question"] if "test" in dataset
-# ]
+# print(len(text_list))
+# all_inputs = text_list
 
 config = {
     "offload_path": os.path.join(args.offload_dir, model_name),
