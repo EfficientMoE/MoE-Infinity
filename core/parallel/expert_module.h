@@ -246,15 +246,6 @@ struct MoEMLP : public torch::nn::Module {
  private:
   std::vector<torch::Tensor> buffer_;
   std::vector<torch::Tensor> param_;
-  // torch::Tensor input_;
-  // torch::Tensor output_;
-  // torch::Tensor gate_proj_;
-  // torch::Tensor up_proj_;
-  // torch::Tensor down_proj_;
-
-  // torch::Tensor fc1_bias_;
-  // torch::Tensor fc2_bias_;
-  // torch::Tensor fc3_bias_;
 
   at::cuda::CUDAGraph graph_;
   int warmup_count_ = 5;

@@ -12,6 +12,7 @@
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
 #include "model/model_topology.h"
+#include "model/moe.h"
 
 #include <c10/core/ScalarType.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -660,73 +661,4 @@ void ExpertDispatcher::SetInputs(const torch::Tensor& hidden_states,
   router_mask_ = router_mask;
   router_weight_ = router_weight;
   final_hidden_states_ = torch::zeros_like(hidden_states, options);
-
-  // auto stream = exec_streams_[device];
-  // int64_t batch_size = hidden_states_.size(0);
-  // int64_t hidden_dim = hidden_states_.size(1);
-
-  // DLOG_FATAL_IF(num_experts_ != router_weight.size(1),
-  //               "ExpertDispatcher::SetInputs: num_experts ", num_experts_,
-  //               " router_weight.size(1) ", router_weight.size(1));
-
-  // if (!final_hidden_states_.defined()) {
-  //   // final_hidden_states is float type
-  //   auto options =
-  //     torch::TensorOptions().dtype(torch::kFloat32).device(CUDA_DEVICE(device));
-  //   auto allocator = c10::DeviceAllocator::get(device);
-  //   void* ptr = allocator->allocate(batch_size * hidden_dim * sizeof(float));
-  //   final_hidden_states_ = torch::from_blob(ptr, {batch_size, hidden_dim},
-  //                                           DoNothingDeleter<float>{},
-  //                                           options);
-  // }
-
-  // if (!router_mask_.defined()) {
-  //   // router mask is boolean type
-  //   auto options =
-  //     torch::TensorOptions().dtype(torch::kBool).device(CUDA_DEVICE(device));
-  //   auto allocator = c10::DeviceAllocator::get(device);
-  //   void* ptr = allocator->allocate(batch_size * num_experts_ *
-  //   sizeof(bool)); router_mask_ = torch::from_blob(ptr, {batch_size,
-  //   num_experts_},
-  //                                   DoNothingDeleter<bool>{}, options);
-  // }
-
-  // if (!router_weight_.defined()) {
-  //   // router weight is float type
-  //   auto options =
-  //     torch::TensorOptions().dtype(torch::kFloat32).device(CUDA_DEVICE(device));
-  //   auto allocator = c10::DeviceAllocator::get(device);
-  //   void* ptr = allocator->allocate(batch_size * num_experts_ *
-  //   sizeof(float)); router_weight_ = torch::from_blob(ptr, {batch_size,
-  //   num_experts_},
-  //                                     DoNothingDeleter<float>{}, options);
-  // }
-
-  // if (!hidden_states_.defined()) {
-  //   // hidden states is float type
-  //   auto options =
-  //     torch::TensorOptions().dtype(hidden_states.dtype()).device(CUDA_DEVICE(device));
-  //   auto allocator = c10::DeviceAllocator::get(device);
-  //   void* ptr = allocator->allocate(hidden_states.numel() * sizeof(float));
-  //   hidden_states_ = torch::from_blob(ptr, {batch_size, hidden_dim},
-  //                                     DoNothingDeleter<float>{}, options);
-  // }
-
-  // cudaMemsetAsync(final_hidden_states_.data_ptr(), 0,
-  //                 final_hidden_states_.numel() * sizeof(float), stream);
-  // cudaMemcpyAsync(
-  //     router_mask_.data_ptr(), router_mask.data_ptr(),
-  //     router_mask.numel() * sizeof(bool), cudaMemcpyDeviceToDevice, stream);
-  // cudaMemcpyAsync(
-  //     router_weight_.data_ptr(), router_weight.data_ptr(),
-  //     router_weight.numel() * sizeof(float), cudaMemcpyDeviceToDevice,
-  //     stream);
-  // cudaMemcpyAsync(
-  //     hidden_states_.data_ptr(), hidden_states.data_ptr(),
-  //     hidden_states.numel() * sizeof(float), cudaMemcpyDeviceToDevice,
-  //     stream);
-  // cudaMemcpyAsync(
-  //     router_mask_.data_ptr(), router_mask.data_ptr(),
-  //     router_mask.numel() * sizeof(bool), cudaMemcpyDeviceToDevice, stream);
-  // cudaStreamSynchronize(stream);
 }

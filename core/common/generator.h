@@ -1,3 +1,8 @@
+// Copyright (c) EfficientMoE.
+// SPDX-License-Identifier: Apache-2.0
+
+// EfficientMoE Team
+
 #pragma once
 
 #include <uuid/uuid.h>

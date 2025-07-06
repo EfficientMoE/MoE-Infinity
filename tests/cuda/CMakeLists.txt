@@ -125,6 +125,7 @@ set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -g -G -lineinfo -rdynamic -O3 -gencode a
 set(SRC_LIST
     test_uvm_kernel.cu
     test_fused_mlp.cu
+    test_fused_mlp_wmma.cu
     test_expert_fusion.cu
     test_expert_fusion_v2.cu
     # test_single_gemm_tiled.cu
@@ -134,6 +135,7 @@ set(SRC_LIST
     test_autosize_tileload.cu
     test_autosize_tileload_stage.cu
     test_autotune_blocksize.cu
+    tests_masked_select.cu
 )
 
 FOREACH(SRC ${SRC_LIST})
@@ -142,7 +144,7 @@ FOREACH(SRC ${SRC_LIST})
   target_link_libraries(${SRC_NAME} cutlass ${CUDA_LIBRARIES})
 
   # if file is test_expert_fusion or test_expert_fusion_v2, link torch_python
-  IF(${SRC_NAME} STREQUAL "test_expert_fusion" OR ${SRC_NAME} STREQUAL "test_expert_fusion_v2")
+  IF(${SRC_NAME} STREQUAL "test_expert_fusion" OR ${SRC_NAME} STREQUAL "test_expert_fusion_v2" OR ${SRC_NAME} STREQUAL "tests_masked_select" OR ${SRC_NAME} STREQUAL "test_fused_mlp_wmma")
     target_link_libraries(${SRC_NAME} ${torch_python_LIBRARY} ${Python3_LIBRARIES} ${TORCH_LIBRARIES})
     target_include_directories(${SRC_NAME} PRIVATE  ${CONDA_INCLUDE_DIRS} ${TORCH_INCLUDE_DIRS} ${Python3_INCLUDE_DIRS})
   ENDIF()

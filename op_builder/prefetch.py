@@ -34,6 +34,8 @@ class PrefetchBuilder(CUDAOpBuilder):
             "core/utils/cuda_utils.cpp",
             "core/model/model_topology.cpp",
             "core/model/fused_mlp.cu",
+            "core/kernel/activation_kernels.cu",
+            "core/kernel/topk_softmax_kernels.cu",
             "core/prefetch/archer_prefetch_handle.cpp",
             "core/prefetch/task_scheduler.cpp",
             "core/prefetch/task_thread.cpp",

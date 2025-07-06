@@ -344,15 +344,6 @@ void ExpertNode::SetTensorsFromBlob(const torch::Device& device) {
 MoEMLP::MoEMLP(int dtype, int expert_type) {
   auto tensor_dtype = dtype_to_torch(dtype);
   auto options = torch::TensorOptions().dtype(tensor_dtype).device(torch::kCPU);
-  // input_ = register_parameter("input", torch::zeros({1}, options));
-  // output_ = register_parameter("output", torch::zeros({1}, options));
-  // gate_proj_ = register_parameter("gate_proj", torch::zeros({1}, options));
-  // up_proj_ = register_parameter("up_proj", torch::zeros({1}, options));
-  // down_proj_ = register_parameter("down_proj", torch::zeros({1}, options));
-
-  // fc1_bias_ = register_parameter("fc1_bias", torch::zeros({1}, options));
-  // fc2_bias_ = register_parameter("fc2_bias", torch::zeros({1}, options));
-  // fc3_bias_ = register_parameter("fc3_bias", torch::zeros({1}, options));
 
   expert_type_ = expert_type;
   dtype_ = dtype;
@@ -511,11 +502,11 @@ void MoEMLP::ForwardHelper() {
     // gate step
     torch::matmul_out(gate_out, input, gate_proj.transpose(0, 1));
 
-    // activation step
-    torch::silu_out(gate_act_out, gate_out);
-
     // up step
     torch::matmul_out(up_out, input, up_proj.transpose(0, 1));
+
+    // activation step
+    torch::silu_out(gate_act_out, gate_out);
 
     // multiplication step, reuse gate_out
     torch::mul_out(gate_out, gate_act_out, up_out);
