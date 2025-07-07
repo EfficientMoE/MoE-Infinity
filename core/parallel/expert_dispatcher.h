@@ -16,6 +16,7 @@
 #include "common/sync.h"
 #include "base/noncopyable.h"
 #include "base/thread.h"
+#include "utils/threadsafe_queue.h"
 #include "expert_module.h"
 
 enum MUTEX_TYPE {
@@ -70,7 +71,7 @@ class ExpertDispatcher : public base::noncopyable {
 
   void EnqueueExpert(int layer_idx, int expert_idx, int gpu_id = -1,
                      bool remote = false);
-  void NofityFetchStart();
+  void NotifyFetchStart();
 
   void RegisterExpert(int layer_idx, int expert_idx,
                       const std::vector<std::uint32_t>& tensor_ids,
@@ -101,8 +102,10 @@ class ExpertDispatcher : public base::noncopyable {
  private:
   std::vector<std::unique_ptr<base::Thread>> threads_;
   std::mutex mutex_;
-  std::vector<std::deque<CallArgs>> input_queue_;
-  std::vector<std::deque<ExecArgs>> exec_queue_;
+  // std::vector<std::deque<CallArgs>> input_queue_;
+  std::vector<ThreadSafeQueue<CallArgs>> input_queue_;
+  // std::vector<std::deque<ExecArgs>> exec_queue_;
+  std::vector<ThreadSafeQueue<ExecArgs>> exec_queue_;
   std::vector<CallResult> output_queue_;
   std::vector<std::vector<ExpertNodePtr>> experts_;
   std::atomic<size_t> num_enqueued_;
@@ -117,10 +120,10 @@ class ExpertDispatcher : public base::noncopyable {
   std::mutex pending_mutex_;
   std::condition_variable pending_cv_;
 
-  std::vector<std::mutex> input_mutex_;
-  std::vector<std::mutex> exec_mutex_;
-  std::vector<std::condition_variable> input_cv_;
-  std::vector<std::condition_variable> exec_cv_;
+  // std::vector<std::mutex> input_mutex_;
+  // std::vector<std::mutex> exec_mutex_;
+  // std::vector<std::condition_variable> input_cv_;
+  // std::vector<std::condition_variable> exec_cv_;
 
   std::vector<std::mutex> cache_mutex_;
   std::vector<std::condition_variable> cache_cv_;

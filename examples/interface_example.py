@@ -84,33 +84,28 @@ else:
         args.model_name_or_path, trust_remote_code=True, use_fast=False
     )
 
-dataset_name = "cais/mmlu"
-names = datasets.get_dataset_config_names(dataset_name)
 
-# # remove empty entry in BIGBench dataset
-# names.remove("simple_arithmetic_json_multiple_choice")
-# names.remove("simple_arithmetic_multiple_targets_json")
-# names.remove("cifar10_classification")
+dataset = datasets.load_dataset("openai/gsm8k", "main", split="test")
+all_inputs = dataset["question"]
 
-pool = mp.Pool(mp.cpu_count())
-all_inputs = [None] * len(names)
-all_inputs = pool.map(partial(datasets.load_dataset, dataset_name), names)
+# dataset_name = "openai/gsm8k"
+# names = datasets.get_dataset_config_names(dataset_name)
+
+# pool = mp.Pool(mp.cpu_count())
+# all_inputs = [None] * len(names)
+# all_inputs = pool.map(partial(datasets.load_dataset, dataset_name), names)
 
 # print(all_inputs)
 
-text_list = []
-for dataset in all_inputs:
-    if "test" not in dataset:
-        continue
-    for i, text in enumerate(dataset["test"]["question"]):
-        text_list.append(text)
+# text_list = []
+# for dataset in all_inputs:
+#     if "test" not in dataset:
+#         continue
+#     for i, text in enumerate(dataset["test"]["question"]):
+#         text_list.append(text)
 
-print(len(text_list))
-all_inputs = text_list
-
-# all_inputs = [
-#     text for dataset in all_inputs for text in dataset["test"]["question"] if "test" in dataset
-# ]
+# print(len(text_list))
+# all_inputs = text_list
 
 custom_kwargs = {}
 if "switch" in args.model_name_or_path.lower():
@@ -150,15 +145,6 @@ for input_text in all_inputs:
 
     token_ids = tokenizer.encode(prompt, return_tensors="pt")
     token_ids = token_ids.to("cuda:0")
-    # inputs = tokenizer(
-    #     token_ids,
-    #     truncation=True,
-    #     padding="do_not_pad",
-    #     max_length=max_seq_length,
-    #     return_tensors="pt",
-    # )
-    # print("inputs ...")
-    # print(inputs.input_ids.shape)
 
     streamer = StopWatch(model.engine, tokenizer)
     with torch.no_grad():

@@ -265,7 +265,7 @@ struct ExpertNode {
   int layer_idx;
   int expert_idx;
   int expert_type;
-  torch::jit::script::Module* jit_module;
+  torch::jit::script::Module* jit_module = nullptr;
 };
 
 typedef std::shared_ptr<ExpertNode> ExpertNodePtr;
