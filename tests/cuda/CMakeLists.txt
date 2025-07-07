@@ -125,9 +125,6 @@ set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -g -G -lineinfo -rdynamic -O3 -gencode a
 set(SRC_LIST
     test_uvm_kernel.cu
     test_fused_mlp.cu
-    test_fused_mlp_wmma.cu
-    test_expert_fusion.cu
-    test_expert_fusion_v2.cu
     # test_single_gemm_tiled.cu
     test_load_tile.cu
     test_load_tile_templated.cu
@@ -135,19 +132,38 @@ set(SRC_LIST
     test_autosize_tileload.cu
     test_autosize_tileload_stage.cu
     test_autotune_blocksize.cu
-    tests_masked_select.cu
+
 )
+
+set(TORCH_SRC_LIST
+  test_topk_softmax.cu
+  test_expert_fusion.cu
+  test_expert_fusion_v2.cu
+  # tests_masked_select.cu
+  test_fused_mlp_wmma.cu
+)
+
+file(GLOB KERNEL_SRC "${CMAKE_SOURCE_DIR}/../../core/kernel/*.cu")
+message(STATUS "Using kernel source files: ${KERNEL_SRC}, ${CMAKE_SOURCE_DIR}")
 
 FOREACH(SRC ${SRC_LIST})
   get_filename_component(SRC_NAME ${SRC} NAME_WE)
   add_executable(${SRC_NAME} ${SRC})
   target_link_libraries(${SRC_NAME} cutlass ${CUDA_LIBRARIES})
+ENDFOREACH()
 
-  # if file is test_expert_fusion or test_expert_fusion_v2, link torch_python
-  IF(${SRC_NAME} STREQUAL "test_expert_fusion" OR ${SRC_NAME} STREQUAL "test_expert_fusion_v2" OR ${SRC_NAME} STREQUAL "tests_masked_select" OR ${SRC_NAME} STREQUAL "test_fused_mlp_wmma")
-    target_link_libraries(${SRC_NAME} ${torch_python_LIBRARY} ${Python3_LIBRARIES} ${TORCH_LIBRARIES})
-    target_include_directories(${SRC_NAME} PRIVATE  ${CONDA_INCLUDE_DIRS} ${TORCH_INCLUDE_DIRS} ${Python3_INCLUDE_DIRS})
+
+FOREACH(SRC ${TORCH_SRC_LIST})
+  get_filename_component(SRC_NAME ${SRC} NAME_WE)
+  IF(${SRC_NAME} STREQUAL "test_topk_softmax")
+    add_executable(${SRC_NAME} ${SRC} ${KERNEL_SRC})
+  ELSE()
+    add_executable(${SRC_NAME} ${SRC})
   ENDIF()
+  target_link_libraries(${SRC_NAME} cutlass ${CUDA_LIBRARIES})
+
+  target_link_libraries(${SRC_NAME} ${torch_python_LIBRARY} ${Python3_LIBRARIES} ${TORCH_LIBRARIES})
+  target_include_directories(${SRC_NAME} PRIVATE ${CONDA_INCLUDE_DIRS} ${TORCH_INCLUDE_DIRS} ${Python3_INCLUDE_DIRS})
 
   # IF(${SRC_NAME} STREQUAL "test_autosize_tileload")
   #   target_link_libraries(${SRC_NAME} thrust)

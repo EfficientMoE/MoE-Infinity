@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP
 
+from moe_infinity.ops.op_builder.prefetch import PrefetchBuilder
+
 
 class Qwen3MoEBlock(nn.Module):
     def __init__(self, config):
@@ -30,30 +32,36 @@ class Qwen3MoEBlock(nn.Module):
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
 
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(
-            routing_weights, self.top_k, dim=-1
-        )
-        if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
-            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-        # we cast back to the input dtype
-        routing_weights = routing_weights.to(hidden_states.dtype)
+        router_mask, routing_weights_mask = self.lib.topk_softmax(router_logits)
+        # routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        # routing_weights, selected_experts = torch.topk(
+        #     routing_weights, self.top_k, dim=-1
+        # )
+        # if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
+        #     routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        # # we cast back to the input dtype
+        # routing_weights = routing_weights.to(hidden_states.dtype)
 
-        # print(f"hidden_states shape: {hidden_states.shape}")
-        # print(f"routing_weights shape: {routing_weights.shape}")
+        # # print(f"hidden_states shape: {hidden_states.shape}")
+        # # print(f"routing_weights shape: {routing_weights.shape}")
 
-        # Compute sparse mask via scatter
-        B, E = routing_weights.shape[0], self.num_experts
-        router_mask = torch.zeros(
-            B, E, dtype=torch.bool, device=selected_experts.device
-        )
-        router_mask.scatter_(1, selected_experts, True)
+        # # Compute sparse mask via scatter
+        # B, E = routing_weights.shape[0], self.num_experts
+        # router_mask = torch.zeros(
+        #     B, E, dtype=torch.bool, device=selected_experts.device
+        # )
+        # router_mask.scatter_(1, selected_experts, True)
 
-        routing_weights_mask = torch.zeros(
-            B, E, dtype=routing_weights.dtype, device=routing_weights.device
-        )
-        routing_weights_mask.scatter_add_(1, selected_experts, routing_weights)
-
+        # routing_weights_mask = torch.zeros(
+        #     B, E, dtype=routing_weights.dtype, device=routing_weights.device
+        # )
+        # routing_weights_mask.scatter_add_(1, selected_experts, routing_weights)
+        # assert (routing_weights_mask_t == routing_weights_mask).all(), "routing_weights_mask_t and routing_weights_mask should be equal, max diff: {}".format(
+        #     (routing_weights_mask_t - routing_weights_mask).abs().max()
+        # )
+        # assert (router_mask_t == router_mask).all(), "router_mask_t and router_mask should be equal, max diff: {}".format(
+        #     (router_mask_t - router_mask).abs().max()
+        # )
         return router_logits, router_mask, routing_weights_mask
 
     @nvtx.annotate("Qwen3MoEBlock", color="blue")

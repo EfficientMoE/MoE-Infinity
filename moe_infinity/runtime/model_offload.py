@@ -140,6 +140,7 @@ class OffloadEngine(object):
         # print("Distributed init done")
 
         self.prefetch_lib = PrefetchBuilder().load() if use_jit else prefetch_op
+
         # new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
         #     self.prefetch_lib.__file__, "TorchAllocateDevice", "TorchFreeDevice"
         # )
@@ -341,6 +342,7 @@ class OffloadEngine(object):
                 )
 
                 self.model_name = model_name = args[0]
+
                 # if "arctic" in model_name:
                 #     self.config = ArcticConfig.from_pretrained(*args, **kwargs)
                 # else:
@@ -348,6 +350,15 @@ class OffloadEngine(object):
                 self.num_layers, self.num_experts, self.num_encoder_layers = (
                     parse_moe_param(self.config)
                 )
+
+                if "qwen" in model_name.lower():
+                    self.prefetch_lib.init_moe_layer(
+                        self.num_experts,
+                        self.config.num_experts_per_tok,
+                        1024,
+                        self.config.hidden_size,
+                        self.config.moe_intermediate_size,
+                    )
 
                 self.dtype = parse_expert_dtype(self.config)
                 self.dtype_cls = self.config.torch_dtype
@@ -590,6 +601,8 @@ class OffloadEngine(object):
                         module.expert_tracer = self.expert_tracer
                         module.expert_predictor = self.expert_predictor
                         module.expert_tensor_map = self.expert_tensor_map
+
+                        module.lib = self.prefetch_lib
 
                         self.expert_layer_modules.append(module)
 

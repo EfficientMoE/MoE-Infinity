@@ -507,7 +507,7 @@ void topk_softmax(torch::Tensor& topk_weights,          // [num_tokens, topk]
 
   topkGatingSoftmaxKernelLauncher(
       gating_output.data_ptr<float>(), topk_weights.data_ptr<float>(),
-      topk_indices.data_ptr<uint32_t>(), token_expert_indices.data_ptr<int>(),
+      topk_indices.data_ptr<int64_t>(), token_expert_indices.data_ptr<int>(),
       softmax_workspace.data_ptr<float>(), num_tokens, num_experts, topk,
       stream);
 

@@ -30,10 +30,12 @@
  * Supports online training and simultaneous inference.
  */
 
-#include <stdexcept>
-#include <mma.h>
+#if 0
 
-#include "common_device.h"
+  #include <stdexcept>
+  #include <mma.h>
+
+  #include "common_device.h"
 
 void check_shmem_error(cudaError_t error) {
   if (error != cudaSuccess) {
@@ -90,18 +92,18 @@ __device__ void threadblock_layer(
   __syncthreads();
 
 // Load N_BLOCKS chunks of weights from global memory into registers.
-#pragma unroll
+  #pragma unroll
   for (uint32_t i = 0; i < N_BLOCKS; ++i) {
     wmma::load_matrix_sync(weights_frag[i],
                            weights_this_layer + 16 * i + weights_col * WIDTH,
                            WIDTH);
   }
 
-#pragma unroll
+  #pragma unroll
   for (int l = 0; l < N_ITERS; ++l) {
     wmma::fill_fragment(result_frag[l], 0.0f);
 
-#pragma unroll
+  #pragma unroll
     for (uint32_t i = 0; i < N_BLOCKS; ++i) {
       // Load a chunk of intermediate activations from shared memory and
       // multiply with chunk of weights
@@ -117,7 +119,7 @@ __device__ void threadblock_layer(
 
   __syncthreads();
 
-#pragma unroll
+  #pragma unroll
   for (int l = 0; l < N_ITERS; ++l) {
     wmma::store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW),
                             result_frag[l], WIDTH + SKEW, wmma::mem_row_major);
@@ -126,7 +128,7 @@ __device__ void threadblock_layer(
   if (out_intermediate_threadblock_this_layer != nullptr) {
     __syncthreads();
 
-#pragma unroll
+  #pragma unroll
     for (int l = 0; l < N_ITERS; ++l) {
       *(int4*)&out_intermediate_threadblock_this_layer[lane_offset +
                                                        (row + 16 * l) * WIDTH] =
@@ -150,7 +152,7 @@ __device__ void threadblock_load_input_static(
   const uint32_t lane_offset = (8 * li) % WIDTH;
   const uint32_t row = (8 * li + wi * 8 * 32) / WIDTH;
 
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < N_ITERS; ++i) {
     *(int4*)&act_shmem[lane_offset + (row + 16 * i) * (WIDTH + SKEW)] =
         *(int4*)&input_threadblock[lane_offset + (row + 16 * i) * WIDTH];
@@ -206,7 +208,7 @@ __device__ void threadblock_input_layer_forward_dynamic(
 
   const uint32_t n_elems_b = WIDTH * in_width;
 
-#pragma unroll
+  #pragma unroll
   for (uint32_t idx = thread_elem_idx; idx < n_elems_b;
        idx += n_elems_per_load) {
     const uint32_t idx_skewed = idx + idx / in_width * INPUT_SKEW;
@@ -219,7 +221,7 @@ __device__ void threadblock_input_layer_forward_dynamic(
     __syncthreads();
   }
 
-#pragma unroll
+  #pragma unroll
   for (int l = 0; l < N_ITERS; ++l) {
     if (std::is_same<INPUT_LAYOUT, wmma::row_major>::value) {
       // Load chunk of inputs into shmem.
@@ -227,7 +229,7 @@ __device__ void threadblock_input_layer_forward_dynamic(
       // only used once. (Possibly due to latency hiding through staging.)
       const uint32_t n_elems_a = 16 * in_width;
 
-#pragma unroll
+  #pragma unroll
       for (uint32_t idx = thread_elem_idx; idx < n_elems_a;
            idx += n_elems_per_load) {
         const uint32_t idx_skewed = idx + idx / in_width * INPUT_SKEW;
@@ -239,7 +241,7 @@ __device__ void threadblock_input_layer_forward_dynamic(
     }
 
     wmma::fill_fragment(result_frag[l], 0.0f);
-#pragma unroll
+  #pragma unroll
     for (uint32_t i = 0; i < n_tensor_ops; ++i) {
       // Load chunk of inputs and weights from shared memory and multiply them
       if (std::is_same<INPUT_LAYOUT, wmma::row_major>::value) {
@@ -268,7 +270,7 @@ __device__ void threadblock_input_layer_forward_dynamic(
     __syncthreads();
   }
 
-#pragma unroll
+  #pragma unroll
   for (int l = 0; l < N_ITERS; ++l) {
     wmma::store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW),
                             result_frag[l], WIDTH + SKEW, wmma::mem_row_major);
@@ -277,7 +279,7 @@ __device__ void threadblock_input_layer_forward_dynamic(
   if (out_intermediate_threadblock_this_layer != nullptr) {
     __syncthreads();
 
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < N_ITERS; ++i) {
       *(int4*)&out_intermediate_threadblock_this_layer[lane_offset +
                                                        (row + 16 * i) * WIDTH] =
@@ -329,7 +331,7 @@ __device__ void threadblock_last_layer_forward(
 
   __syncthreads();
 
-#pragma unroll
+  #pragma unroll
   for (uint32_t i = 0; i < N_BLOCKS; ++i)
     wmma::load_matrix_sync(weights_frag[i], weights_shmem + 16 * i,
                            WIDTH + SKEW);
@@ -337,7 +339,7 @@ __device__ void threadblock_last_layer_forward(
   // Perform last layer by parallelizing over iters
   for (uint32_t idx = wi; idx < N_ITERS; idx += N_BLOCKS) {
     wmma::fill_fragment(result_frag, 0.0f);
-#pragma unroll
+  #pragma unroll
     for (uint32_t i = 0; i < N_BLOCKS; ++i) {
       // Load a chunk of intermediate activations from shared memory and
       // multiply with chunk of the weight matrix
@@ -376,7 +378,7 @@ __device__ void threadblock_write_output_static(
 
   __syncthreads();
 
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < N_ITERS; ++i) {
     *(int4*)&output_threadblock[lane_offset + (row + 16 * i) * WIDTH] =
         *(int4*)&act_shmem[lane_offset + (row + 16 * i) * (WIDTH + SKEW)];
@@ -826,3 +828,4 @@ template class FullyFusedMLP<network_precision_t, 128>;
 template class FullyFusedMLP<network_precision_t, 64>;
 template class FullyFusedMLP<network_precision_t, 32>;
 template class FullyFusedMLP<network_precision_t, 16>;
+#endif
