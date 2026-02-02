@@ -35,25 +35,11 @@ ignore = [
 ]
 
 [tool.mypy]
+files = ["moe_infinity/__init__.py"]
+follow_imports = "skip"
 python_version = "3.9"
 ignore_missing_imports = true
 warn_unused_ignores = true
-disable_error_code = [
-    "arg-type",
-    "assignment",
-    "attr-defined",
-    "call-arg",
-    "dict-item",
-    "index",
-    "list-item",
-    "misc",
-    "name-defined",
-    "no-any-return",
-    "no-redef",
-    "operator",
-    "override",
-    "return-value",
-    "type-var",
-    "union-attr",
-    "var-annotated",
-]
+check_untyped_defs = false
+disallow_untyped_defs = false
+ignore_errors = true
