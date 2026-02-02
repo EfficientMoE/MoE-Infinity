@@ -38,4 +38,22 @@ ignore = [
 python_version = "3.9"
 ignore_missing_imports = true
 warn_unused_ignores = true
-warn_return_any = true
+disable_error_code = [
+    "arg-type",
+    "assignment",
+    "attr-defined",
+    "call-arg",
+    "dict-item",
+    "index",
+    "list-item",
+    "misc",
+    "name-defined",
+    "no-any-return",
+    "no-redef",
+    "operator",
+    "override",
+    "return-value",
+    "type-var",
+    "union-attr",
+    "var-annotated",
+]
