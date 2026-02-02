@@ -5,6 +5,7 @@
 
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 import torch
 from transformers import HfArgumentParser
@@ -18,7 +19,7 @@ class ArcherConfig:
     trace_capacity: int = field(
         default=1000, metadata={"help": "Capacity of trace"}
     )
-    trace_path: os.PathLike = field(
+    trace_path: Optional[os.PathLike] = field(
         default=None, metadata={"help": "Path to trace file"}
     )
     # master_addr: str = field(

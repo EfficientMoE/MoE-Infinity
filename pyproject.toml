@@ -35,11 +35,11 @@ ignore = [
 ]
 
 [tool.mypy]
-files = ["moe_infinity/__init__.py"]
+files = ["moe_infinity/utils/hf_config.py", "moe_infinity/utils/config.py"]
 follow_imports = "skip"
 python_version = "3.9"
 ignore_missing_imports = true
 warn_unused_ignores = true
 check_untyped_defs = false
 disallow_untyped_defs = false
-ignore_errors = true
+disable_error_code = ["assignment"]
