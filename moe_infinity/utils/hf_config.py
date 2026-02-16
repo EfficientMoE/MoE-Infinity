@@ -1,5 +1,5 @@
 import re
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 from transformers import PretrainedConfig
@@ -55,7 +55,7 @@ def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
 
 def parse_expert_id(
     param_name: str, config: PretrainedConfig
-) -> Tuple[int, int]:
+) -> Tuple[Optional[int], Optional[int]]:
     arch = config.architectures[0].lower()
     _, _, num_encoder_layers = parse_moe_param(config)
 
