@@ -1,7 +1,7 @@
-# Copyright (c) TorchMoE.
+# Copyright (c) EfficientMoE.
 # SPDX-License-Identifier: Apache-2.0
 
-# TorchMoE Team
+# EfficientMoE Team
 
 import os
 from dataclasses import dataclass, field
@@ -39,6 +39,9 @@ class ArcherConfig:
     device_memory_ratio: float = field(
         default=0.9,
         metadata={"help": "Ratio of device memory to use"},
+    )
+    num_threads: int = field(
+        default=8, metadata={"help": "Number of threads for each GPU exec"}
     )
     host_memory_ratio: float = field(
         default=0.9,

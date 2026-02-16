@@ -6,8 +6,8 @@ from moe_infinity import MoE
 
 user_home = os.path.expanduser("~")
 
-checkpoint = "TheBloke/Mixtral-8x7B-v0.1-GPTQ"
-tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+checkpoint = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote=True)
 
 config = {
     "offload_path": os.path.join(user_home, "moe-infinity"),

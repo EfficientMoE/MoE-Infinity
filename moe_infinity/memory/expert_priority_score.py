@@ -56,7 +56,6 @@ def lfu_score(expert_freq: dict):
 
     if sum == 0:
         sum = 1
-
     lfu_score = []
     for key, value in expert_freq.items():
         expert_idx, layer_idx = key
@@ -142,7 +141,6 @@ def priority_score(
     # zero_access = False
     for entry in trace_entries:
         freq_sum += entry.access
-
     if freq_sum == 0:
         # freq_sum = len(trace_entries)
         seq_expert_score = np.ones_like(seq_expert_score)

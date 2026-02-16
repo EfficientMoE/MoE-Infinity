@@ -1,6 +1,6 @@
 # MoE-Infinity
 
-MoE-Infinity is a cost-effective, fast, and easy-to-use library for Mixture-of-Experts (MoE) inference and serving.
+MoE-Infinity is a cost-effective, fast, and easy-to-use library for Mixture-of-Experts (MoE) inference.
 
 MoE-Infinity is cost-effective yet fast:
 
@@ -8,12 +8,12 @@ MoE-Infinity is cost-effective yet fast:
 - Minimizing the expert offloading overheads through several novel techniques: expert activation tracing, activation-aware expert prefetching, and activation-aware expert caching.
 - Supporting LLM acceleration techniques (such as [FlashAttention](https://github.com/Dao-AILab/flash-attention)).
 - Supporting multi-GPU environments with numeorous OS-level performance optimizations.
-- Achieving SOTA latency and throughput performance when serving MoEs in a resource-constrained GPU environment (in comparison with HuggingFace [Accelerate](https://github.com/huggingface/accelerate), [DeepSpeed](https://github.com/microsoft/DeepSpeed), [Mixtral-Offloading](https://github.com/dvmazur/mixtral-offloading), and [Ollama/LLama.cpp](https://github.com/ollama/ollama)).
+- Achieving SOTA latency performance when serving MoEs in a resource-constrained GPU environment (in comparison with [vLLM](https://github.com/vllm-project/vllm), HuggingFace [Accelerate](https://github.com/huggingface/accelerate), [DeepSpeed](https://github.com/microsoft/DeepSpeed), [Mixtral-Offloading](https://github.com/dvmazur/mixtral-offloading), and [Ollama/LLama.cpp](https://github.com/ollama/ollama)).
 
 MoE-Infinity is easy-to-use:
 
 - HuggingFace model compatible, and HuggingFace programmer friendly.
-- Supporting all available MoE checkpoints (including [Google Switch Transformers](https://huggingface.co/google/switch-large-128), [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b), and [Mixtral](mistralai/Mixtral-8x7B-Instruct-v0.1)).
+- Supporting all available MoE checkpoints (including [Deepseek-V2](https://huggingface.co/collections/deepseek-ai/deepseek-v2-669a1c8b8f2dbc203fbd7746), [Google Switch Transformers](https://huggingface.co/google/switch-large-128), [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b), and [Mixtral](mistralai/Mixtral-8x7B-Instruct-v0.1)).
 
 Note that: The open-sourced MoE-Infinity has been redesigned for making it HuggingFace-users friendly. This version is different from the version reported in the paper, which takes extreme performance as the top priority. As a result, distributed inference is currently not supported in this open-sourced version.
 
@@ -33,16 +33,17 @@ Note that: The open-sourced MoE-Infinity has been redesigned for making it Huggi
 
 ## Performance
 
-Single GPU A5000 (24GB Memory), per-token-latency (seconds) for generation with a mixed dataset that includes [FLAN](https://huggingface.co/datasets/Muennighoff/flan), [BIG-Bench](https://huggingface.co/datasets/bigbench) and [MMLU](https://huggingface.co/datasets/lukaemon/mmlu) datasets.
+Single GPU A5000 (24GB Memory), per-token-latency (seconds) for generation with a mixed dataset that includes [LongBench](https://huggingface.co/datasets/THUDM/LongBench), [GSM8K](https://huggingface.co/datasets/openai/gsm8k),  [FLAN](https://huggingface.co/datasets/Muennighoff/flan), [BIG-Bench](https://huggingface.co/datasets/bigbench) and [MMLU](https://huggingface.co/datasets/lukaemon/mmlu) datasets.
 Lower per-token-latency is preferable.
 
 |  | Switch-large-128 | NLLB-MoE-54B | Mixtral-8x7b | DeepSeek-V2-Lite
 | :---: | :---: | :---: | :---: | :---: |
-| <ins>MoE-Infinity</ins> | <ins>*0.230*</ins>	| <ins>*0.239*</ins> | <ins>*0.895*</ins> | <ins>*0.181*</ins> |
+| <ins>MoE-Infinity</ins> | <ins>*0.130*</ins>	| <ins>*0.119*</ins> | <ins>*0.735*</ins> | <ins>*0.155*</ins> |
 | Accelerate | 1.043 | 3.071 | 6.633 |  1.743  |
 |DeepSpeed | 4.578 | 8.381 | 2.486 | 0.737 |
 |Mixtral Offloading| X | X | 1.752 | X |
 |Ollama | X | X | 0.903 | 1.250 |
+|vLLM| X | X | 2.137 | 0.493 |
 
 
 <!-- Single GPU A5000, throughput (token/s) for generation with batch size 32.
@@ -64,11 +65,10 @@ Higher throughput is preferable.
 
 We recommend installing MoE-Infinity in a virtual environment. To install MoE-Infinity, you can either install it from PyPI or build it from source.
 
-### Install from conda environment
-
 ```bash
-conda env create --file environment.yml
+conda create -n moe-infinity python=3.9
 conda activate moe-infinity
+# install from either PyPI or Source will trigger requirements.txt automatically
 ```
 
 ### Install from PyPI
@@ -84,9 +84,10 @@ pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/
 ### Install from Source
 
 ```bash
-git clone https://github.com/TorchMoE/MoE-Infinity.git
+git clone https://github.com/EfficientMoE/MoE-Infinity.git
 cd MoE-Infinity
 pip install -e .
+conda install -c conda-forge libstdcxx-ng=12 # assume using conda, otherwise install libstdcxx-ng=12 using your package manager or gcc=12
 ```
 
 ### Enable FlashAttention (Optional)
@@ -111,13 +112,13 @@ We provide a simple API for diverse setups, including single GPU, multiple GPUs,
 ```python
 import torch
 import os
-from transformers import AutoTokenizer, SwitchTransformersForConditionalGeneration
+from transformers import AutoTokenizer
 from moe_infinity import MoE
 
 user_home = os.path.expanduser('~')
 
-checkpoint = 'TheBloke/Mixtral-8x7B-v0.1-GPTQ'
-tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+checkpoint = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote=True)
 
 config = {
     "offload_path": os.path.join(user_home, "moe-infinity"),
@@ -145,7 +146,47 @@ CUDA_VISIBLE_DEVICES=0,1 python script.py
 We provide a simple example to run inference on a Huggingface LLM model. The script will download the model checkpoint and run inference on the specified input text. The output will be printed to the console.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python examples/interface_example.py --model_name_or_path "mistralai/Mixtral-8x7B-Instruct-v0.1" --offload_dir <your local path on SSD>
+CUDA_VISIBLE_DEVICES=0 python examples/interface_example.py --model_name_or_path "deepseek-ai/DeepSeek-V2-Lite-Chat" --offload_dir <your local path on SSD>
+```
+
+### OpenAI-Compatible Server
+
+Start the OpenAI-compatible server locally
+```bash
+python -m moe_infinity.entrypoints.openai.api_server --model deepseek-ai/DeepSeek-V2-Lite-Chat --offload-dir ./offload_dir
+```
+
+Query the model via `/v1/components/`. (We currently only support the required fields, i.e., "model" and "prompt").
+```bash
+curl http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+        "prompt": "Hello, my name is"
+    }'
+```
+You can also use `openai` python package to query the model.
+```bash
+pip install openai
+python tests/test_oai_completions.py
+```
+
+Query the model via `/v1/chat/completions`. (We currently only support the required fields, i.e., "model" and "messages").
+```bash
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Tell me a joke"}
+        ]
+    }'
+```
+You can also use `openai` python package to query the model.
+```bash
+pip install openai
+python tests/test_oai_chat_completions.py
 ```
 
 ## Release Plan
@@ -160,10 +201,15 @@ We plan to release two functions in the following months:
 
 If you use MoE-Inifity for your research, please cite our [paper](https://arxiv.org/abs/2401.14361):
 ```bibtex
-@inproceedings{moe-infinity2024,
-  title={MoE-Infinity: Offloading-Efficient MoE Model Serving},
-  author={Leyang Xue, Yao Fu, Zhan Lu, Luo Mai, Mahesh Marina},
-  booktitle={https://arxiv.org/abs/2401.14361},
-  year={2024}
+@misc{moe-infinity,
+  author       = {Leyang Xue and
+                  Yao Fu and
+                  Zhan Lu and
+                  Luo Mai and
+                  Mahesh Marina},
+  title        = {MoE-Infinity: Efficient MoE Inference on Personal Machines with Sparsity-Aware Expert Cache},
+  archivePrefix= {arXiv},
+  eprint       = {2401.14361},
+  year         = {2024}
 }
 ```

@@ -1,4 +1,5 @@
 import os
+import warnings
 from typing import Any, Dict, Union
 
 import torch
@@ -9,10 +10,15 @@ from transformers import AutoConfig
 
 import moe_infinity
 from moe_infinity.common.constants import MODEL_MAPPING_NAMES
-from moe_infinity.models import apply_rotary_pos_emb, apply_rotary_pos_emb_deepseek
+from moe_infinity.models import (
+    apply_rotary_pos_emb,
+    apply_rotary_pos_emb_deepseek,
+)
 from moe_infinity.models.modeling_arctic import ArcticConfig
 from moe_infinity.runtime import OffloadEngine
 from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
+
+warnings.filterwarnings("ignore")
 
 
 class MoE:
@@ -122,15 +128,17 @@ class MoE:
 
             is_flash_attn_available = True
 
-            if arch == "switch":
-                is_flash_attn_available = False
-            if arch == "deepseek" or arch == "deepseek_v3":
+            if (
+                arch == "switch"
+                or arch == "deepseek"
+                or arch == "deepseek_v3"
+                or arch == "nllb"
+            ):
                 is_flash_attn_available = False
         except ImportError:
             print(
                 "[WARNING] FlashAttention is not available in the current environment. Using default attention."
             )
-
         with self.engine.init(cls=model_cls, ar_config=config):
             self.model = model_cls.from_pretrained(
                 model_name_or_path,

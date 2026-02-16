@@ -1,7 +1,7 @@
-// Copyright (c) TorchMoE.
+// Copyright (c) EfficientMoE.
 // SPDX-License-Identifier: Apache-2.0
 
-// TorchMoE Team
+// EfficientMoE Team
 
 #pragma once
 
@@ -24,8 +24,7 @@ typedef std::uint64_t RequestID;
   classname& operator=(classname&&) = delete;
 
 #define STATIC_GET_INSTANCE(classname)                          \
-  static classname* GetInstance()                               \
-  {                                                             \
+  static classname* GetInstance() {                             \
     static std::once_flag flag;                                 \
     static classname* instance = nullptr;                       \
     std::call_once(flag, []() { instance = new classname(); }); \

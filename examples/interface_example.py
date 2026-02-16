@@ -1,7 +1,7 @@
-# Copyright (c) TorchMoE.
+# Copyright (c) EfficientMoE.
 # SPDX-License-Identifier: Apache-2.0
 
-# TorchMoE Team
+# EfficientMoE Team
 
 import argparse
 import multiprocessing as mp
@@ -100,7 +100,6 @@ config = {
     "device_memory_ratio": args.device_memory_ratio,
 }
 model = MoE(args.model_name_or_path, config)
-
 
 custom_kwargs = {}
 if "switch" in args.model_name_or_path.lower():
