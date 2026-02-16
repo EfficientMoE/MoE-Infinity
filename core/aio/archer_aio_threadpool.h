@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include "archer_aio_thread.h"
@@ -23,4 +25,5 @@ class ArcherAioThreadPool {
  private:
   int num_threads_;
   std::vector<std::unique_ptr<ArcherAioThread>> threads_;
+  std::atomic<uint64_t> round_robin_counter_{0};
 };

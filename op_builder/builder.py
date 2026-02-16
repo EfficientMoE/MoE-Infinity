@@ -81,6 +81,21 @@ def get_default_compute_capabilities():
     return compute_caps
 
 
+def get_current_compute_capabilities():
+    compute_caps = []
+    if installed_cuda_version()[0] >= 11:
+        for i in range(torch.cuda.device_count()):
+            CC_MAJOR, CC_MINOR = torch.cuda.get_device_capability(i)
+            cc = f"{CC_MAJOR}.{CC_MINOR}"
+            if cc not in compute_caps:
+                compute_caps.append(cc)
+        compute_caps = sorted(compute_caps)
+        compute_caps[-1] += "+PTX"
+    else:
+        compute_caps = get_default_compute_capabilities().split(";")
+    return compute_caps
+
+
 # list compatible minor CUDA versions - so that for example pytorch built with cuda-11.0 can be used
 # to build deepspeed and system-wide installed cuda 11.2
 cuda_minor_mismatch_ok = {
@@ -754,7 +769,7 @@ class CUDAOpBuilder(OpBuilder):
         if sys.platform == "win32":
             return ["-O2"]
         else:
-            return ["-O3", "-std=c++14", "-g", "-Wno-reorder"]
+            return ["-O3", "-std=c++17", "-g", "-Wno-reorder"]
 
     def nvcc_args(self):
         if self.build_for_cpu:
@@ -787,6 +802,7 @@ class CUDAOpBuilder(OpBuilder):
             if os.environ.get("DS_DEBUG_CUDA_BUILD", "0") == "1":
                 args.append("--ptxas-options=-v")
             args += self.compute_capability_args()
+        print(f"nvcc args: {args}")
         return args
 
     def libraries_args(self):

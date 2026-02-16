@@ -58,7 +58,30 @@ def read_readme() -> str:
 
 install_requires = fetch_requirements("requirements.txt")
 
-ext_modules = []
+ext_modules = [
+    cpp_extension.CUDAExtension(
+        name="fused_glu_cuda",
+        sources=["core/python/fused_glu_cuda.cu"],
+        extra_compile_args={
+            "nvcc": ["-gencode=arch=compute_80,code=sm_80", "-O3"]
+        },
+    ),
+    # Expert GEMM with CUTLASS 3.x
+    cpp_extension.CUDAExtension(
+        name="expert_gemm",
+        sources=["core/python/expert_gemm.cu"],
+        extra_compile_args={
+            "nvcc": [
+                "-gencode=arch=compute_80,code=sm_80",
+                "-gencode=arch=compute_90,code=sm_90",
+                "-O3",
+                "-use_fast_math",
+                "-std=c++17",
+                "-DBF16_AVAILABLE",
+            ]
+        },
+    ),
+]
 
 BUILD_OP_DEFAULT = int(os.environ.get("BUILD_OPS", 0))
 
