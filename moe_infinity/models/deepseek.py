@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from moe_infinity.kernel.router import launch_fused_softmax_topk_nobias
+
 
 class DeepseekMoEGate(nn.Module):
     def __init__(self, config):

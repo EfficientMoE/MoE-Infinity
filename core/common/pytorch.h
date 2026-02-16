@@ -7,6 +7,7 @@
 
 #include <torch/extension.h>
 #include "aio/archer_prio_aio_handle.h"
+#include "types.h"
 #include "base/noncopyable.h"
 
 #define CPU_DEVICE torch::Device(torch::kCPU)
@@ -26,6 +27,15 @@
 #define INT32_TENSOR_OPTIONS(target) TENSOR_OPTIONS(torch::kInt32, target)
 #define INT64_TENSOR_OPTIONS(target) TENSOR_OPTIONS(torch::kInt64, target)
 #define BFLOAT16_TENSOR_OPTIONS(target) TENSOR_OPTIONS(torch::kBFloat16, target)
+
+#define TENSOR_FROM_BLOB(blob, shape, dtype, target)      \
+  torch::from_blob(blob, shape, DoNothingDeleter<void>{}, \
+                   TENSOR_OPTIONS(dtype, target))
+
+// when dtype is a cpp type use type trait to get the torch dtype
+#define TENSOR_FROM_BLOB_CPP(blob, shape, dtype, target)  \
+  torch::from_blob(blob, shape, DoNothingDeleter<void>{}, \
+                   TENSOR_OPTIONS(torch::ScalarType(dtype), target))
 
 #define FAKE_TENSOR_SIZES torch::IntArrayRef({1})
 

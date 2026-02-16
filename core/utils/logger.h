@@ -6,6 +6,7 @@
 #pragma once
 
 #include <vector>
+#include "common/types.h"
 #include "base/logging.h"
 
 inline void print(base::LogStream& stream) {}
@@ -32,6 +33,14 @@ LogStream& operator<<(LogStream& stream, const std::vector<T>& vec) {
   }
   stream << "]";
   return stream;
+}
+
+// define a custom operator<< for enum classes
+template <typename T>
+typename std::enable_if<std::is_enum<T>::value, LogStream&>::type operator<<(
+    LogStream& stream, const T& value) {
+  // This will call the EnumTypeToString function defined in the macro
+  return stream << enum_to_string<T>(value);
 }
 
 }  // namespace base
@@ -70,6 +79,13 @@ LogStream& operator<<(LogStream& stream, const std::vector<T>& vec) {
     if (base::Logger::logLevel() <= base::Logger::WARN)                    \
       print(base::Logger(__FILE__, __LINE__, base::Logger::WARN).stream(), \
             __VA_ARGS__);                                                  \
+  } while (0)
+
+#define DLOG_WARN_IF(condition, ...) \
+  do {                               \
+    if (condition) {                 \
+      DLOG_WARN(__VA_ARGS__);        \
+    }                                \
   } while (0)
 
 #define DLOG_FATAL(...)                                                     \

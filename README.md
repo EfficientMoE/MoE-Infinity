@@ -204,6 +204,7 @@ If you use MoE-Inifity for your research, please cite our [paper](https://arxiv.
   author       = {Leyang Xue and
                   Yao Fu and
                   Zhan Lu and
+                  Chuanhao Sun and
                   Luo Mai and
                   Mahesh Marina},
   title        = {MoE{-}Infinity: Efficient MoE Inference on Personal Machines with Sparsity-Aware Expert Cache},

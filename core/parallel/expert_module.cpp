@@ -4,12 +4,13 @@
 // EfficientMoE Team
 
 #include "expert_module.h"
-#include "aio/archer_tensor_handle.h"
-#include "memory/caching_allocator.h"
+// #include "memory/caching_allocator.h"
+#include "utils/cuda_utils.h"
 #include "utils/logger.h"
 
 static const int64_t kMaxTokens = 128;
 
+/*
 SwitchTransformersDenseActDense::SwitchTransformersDenseActDense(int dtype) {
   // auto tensor_dtype = dtype_to_torch(dtype);
   auto options = torch::TensorOptions().device(torch::kCPU);
@@ -226,11 +227,12 @@ void MixtralMoEDenseActDense::SetModuleFromBlob(
 
 torch::Tensor MixtralMoEDenseActDense::forward(torch::Tensor hidden_states,
                                                cudaStream_t stream) {
-  /*
-  current_hidden_states = self.silu(self.w1(hidden_states)) *
-  self.w3(hidden_states) current_hidden_states = self.w2(current_hidden_states)
-  return current_hidden_states
-  */
+
+  // current_hidden_states = self.silu(self.w1(hidden_states)) *
+  // self.w3(hidden_states) current_hidden_states =
+self.w2(current_hidden_states)
+  // return current_hidden_states
+
   // int w1_nan = torch::sum(torch::isnan(w1)).item<int>();
   // int w2_nan = torch::sum(torch::isnan(w2)).item<int>();
   // int w3_nan = torch::sum(torch::isnan(w3)).item<int>();
@@ -303,33 +305,34 @@ torch::Tensor DeepSeekMoEDenseActDense::forward(torch::Tensor hidden_states,
           torch::matmul(hidden_states, up_proj.transpose(0, 1)),
       down_proj.transpose(0, 1));
 }
+*/
 
 void ExpertNode::SetTensorsFromBlob(const torch::Device& device) {
-  int expert_type = this->expert_type;
+  auto expert_type = static_cast<ExpertType>(this->expert_type);
   switch (expert_type) {
-    case SWITCH_TRANSFORMERS_DENSE_ACT_DENSE:
+    case ExpertType::SwitchTransformersDenseActDense:
       reinterpret_cast<SwitchTransformersDenseActDense*>(module)
           ->SetTensorsFromBlob(node->device_memory_ptr, node->tensor_ids,
                                device);
       break;
-    case SWITCH_TRANSFORMERS_DENSE_GATED_ACT_DENSE:
+    case ExpertType::SwitchTransformersDenseGatedActDense:
       reinterpret_cast<SwitchTransformersDenseGatedActDense*>(module)
           ->SetTensorsFromBlob(node->device_memory_ptr, node->tensor_ids,
                                device);
       break;
-    case NLLB_MOE_DENSE_ACT_DENSE:
+    case ExpertType::NllbMoeDenseActDense:
       reinterpret_cast<NllbMoeDenseActDense*>(module)->SetTensorsFromBlob(
           node->device_memory_ptr, node->tensor_ids, device);
       break;
-    case FSGPT_MOE_DENSE_ACT_DENSE:
+    case ExpertType::FSGPTMoeDenseActDense:
       reinterpret_cast<FSGPTMoEDenseActDense*>(module)->SetTensorsFromBlob(
           node->device_memory_ptr, node->tensor_ids, device);
       break;
-    case MIXTRAL_MOE_DENSE_ACT_DENSE:
+    case ExpertType::MixtralMoeDenseActDense:
       reinterpret_cast<MixtralMoEDenseActDense*>(module)->SetTensorsFromBlob(
           node->device_memory_ptr, node->tensor_ids, device);
       break;
-    case DEEPSEEK_MOE_DENSE_ACT_DENSE:
+    case ExpertType::DeepSeekMoeDenseActDense:
       reinterpret_cast<DeepSeekMoEDenseActDense*>(module)->SetTensorsFromBlob(
           node->device_memory_ptr, node->tensor_ids, device);
       break;
@@ -341,15 +344,6 @@ void ExpertNode::SetTensorsFromBlob(const torch::Device& device) {
 MoEMLP::MoEMLP(int dtype, int expert_type) {
   auto tensor_dtype = dtype_to_torch(dtype);
   auto options = torch::TensorOptions().dtype(tensor_dtype).device(torch::kCPU);
-  // input_ = register_parameter("input", torch::zeros({1}, options));
-  // output_ = register_parameter("output", torch::zeros({1}, options));
-  // gate_proj_ = register_parameter("gate_proj", torch::zeros({1}, options));
-  // up_proj_ = register_parameter("up_proj", torch::zeros({1}, options));
-  // down_proj_ = register_parameter("down_proj", torch::zeros({1}, options));
-
-  // fc1_bias_ = register_parameter("fc1_bias", torch::zeros({1}, options));
-  // fc2_bias_ = register_parameter("fc2_bias", torch::zeros({1}, options));
-  // fc3_bias_ = register_parameter("fc3_bias", torch::zeros({1}, options));
 
   expert_type_ = expert_type;
   dtype_ = dtype;
@@ -508,11 +502,11 @@ void MoEMLP::ForwardHelper() {
     // gate step
     torch::matmul_out(gate_out, input, gate_proj.transpose(0, 1));
 
-    // activation step
-    torch::silu_out(gate_act_out, gate_out);
-
     // up step
     torch::matmul_out(up_out, input, up_proj.transpose(0, 1));
+
+    // activation step
+    torch::silu_out(gate_act_out, gate_out);
 
     // multiplication step, reuse gate_out
     torch::mul_out(gate_out, gate_act_out, up_out);

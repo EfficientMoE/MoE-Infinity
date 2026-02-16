@@ -12,6 +12,7 @@
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
 #include "model/model_topology.h"
+#include "model/moe.h"
 
 #include <c10/core/ScalarType.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -191,8 +192,8 @@ void ExpertDispatcher::RegisterExpert(
     if (cached_node == nullptr) {
       cached_node = node;
       experts_[expert_idx][layer_idx]->node = node;
-      experts_[expert_idx][layer_idx]->jit_module =
-          new torch::jit::script::Module(torch::jit::load(jit_path));
+      // experts_[expert_idx][layer_idx]->jit_module =
+      //     new torch::jit::script::Module(torch::jit::load(jit_path));
     } else if (cached_node != node) {
       DLOG_FATAL("RegisterExpert: tensor_id has multiple nodes", tensor_id);
     }

@@ -66,6 +66,11 @@ parser.add_argument("--out_len", type=int, default=32)
 args = parser.parse_args()
 
 model_name = args.model_name_or_path.split("/")[-1]
+config = {
+    "offload_path": os.path.join(args.offload_dir, model_name),
+    "device_memory_ratio": args.device_memory_ratio,
+}
+model = MoE(args.model_name_or_path, config)
 
 tokenizer = None
 if "grok" in model_name:
@@ -101,12 +106,6 @@ all_inputs = dataset["question"]
 
 # print(len(text_list))
 # all_inputs = text_list
-
-config = {
-    "offload_path": os.path.join(args.offload_dir, model_name),
-    "device_memory_ratio": args.device_memory_ratio,
-}
-model = MoE(args.model_name_or_path, config)
 
 custom_kwargs = {}
 if "switch" in args.model_name_or_path.lower():
