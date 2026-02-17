@@ -6,8 +6,14 @@
 #include <torch/extension.h>
 #include "parallel/expert_dispatcher.h"
 #include "prefetch/archer_prefetch_handle.h"
+#include "model/moe.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("init_moe_layer", InitMoELayer,
+        "Initialize the MoE layer with the specified parameters.");
+  m.def("topk_softmax", TopKSoftmax,
+        "Perform top-k softmax operation on the MoE layer.");
+
   py::class_<ArcherPrefetchHandle>(m, "prefetch_handle")
       .def(py::init<const std::string&, const double>())
 
@@ -87,7 +93,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("enqueue_expert", &ExpertDispatcher::EnqueueExpert)
       .def("set_inputs", &ExpertDispatcher::SetInputs)
       .def("set_expected_queue", &ExpertDispatcher::SetExpectedQueue)
-      .def("wait_expert", &ExpertDispatcher::WaitExpert)
+      //  .def("wait_expert", &ExpertDispatcher::WaitExpert)
+      .def("wait_expert", &ExpertDispatcher::WaitHiddenStates)
+      .def("notify_fetch_start", &ExpertDispatcher::NotifyFetchStart)
       .def("clear_expert_cache_counts",
            &ExpertDispatcher::ClearExpertCacheCounts);
 }

@@ -9,6 +9,10 @@
 int kNumDevices = GetDeviceCount();
 
 bool IsDevicePointer(const void* ptr) {
+  if (ptr == nullptr) {
+    DLOG_ERROR("ptr is null");
+    return false;
+  }
   cudaPointerAttributes attr;
   cudaError_t err = cudaPointerGetAttributes(&attr, ptr);
   if (err != cudaSuccess) {

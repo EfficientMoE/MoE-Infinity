@@ -56,7 +56,6 @@ class SyncNllbMoeSparseMLP(nn.Module):
         )
         router_mask = combining_weights.bool()
 
-        next_states = torch.zeros_like(hidden_states)
         top_1_expert_index = torch.argmax(top_1_mask, dim=-1)
 
         # logits_except_top_1 = router_probs.masked_fill(
@@ -78,18 +77,25 @@ class SyncNllbMoeSparseMLP(nn.Module):
         #         self.layer_id, expert_matrix
         #     )
 
-        results = self.expert_executor.dispatch_local(
-            hidden_states, router_mask, self.layer_id
+        self.expert_executor.dispatch_local(
+            self.layer_id, hidden_states, router_mask, combining_weights
         )
-        for output, _, idx, _ in results:
-            token_indices = router_mask[..., idx].bool()
-            weights = combining_weights[..., idx]
-            # print(router_mask.shape, combining_weights.shape, hidden_states.shape, flush=True)
-            # print(output.shape, weights.shape, token_indices.shape, next_states.shape, flush=True)
-            # print(output.shape, weights[token_indices].shape, next_states[token_indices].shape, flush=True)
-            next_states[token_indices] += torch.einsum(
-                "b,be->be", weights[token_indices], output.to(weights.device)
-            )
+        next_states = self.expert_executor.wait_dispatch_local()
+
+        # self.expert_executor.dispatch_local(
+        #     self.layer_id, hidden_states, router_mask, combining_weights
+        # )
+        # next_states = torch.zeros_like(hidden_states)
+        # results = self.expert_executor.wait_dispatch_local()
+        # for output, _, idx, _ in results:
+        #     token_indices = router_mask[..., idx].bool()
+        #     weights = combining_weights[..., idx]
+        #     # print(router_mask.shape, combining_weights.shape, hidden_states.shape, flush=True)
+        #     # print(output.shape, weights.shape, token_indices.shape, next_states.shape, flush=True)
+        #     # print(output.shape, weights[token_indices].shape, next_states[token_indices].shape, flush=True)
+        #     next_states[token_indices] += torch.einsum(
+        #         "b,be->be", weights[token_indices], output.to(weights.device)
+        #     )
 
         # for expert_id, expert in self.experts.items():
         #     idx = int(expert_id.split("_")[-1])
@@ -101,7 +107,7 @@ class SyncNllbMoeSparseMLP(nn.Module):
         #         next_states[token_indices] += torch.einsum("b,be->be", weights[token_indices], expert_output)
 
         next_states[next_states == 0] = hidden_states[next_states == 0]
-        hidden_states = next_states
+        hidden_states = next_states.to(hidden_states.dtype)
 
         return hidden_states, (
             router_probs.to("cuda:0", non_blocking=True),

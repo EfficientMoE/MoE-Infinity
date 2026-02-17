@@ -84,21 +84,24 @@ class SyncMixtralSparseMoeBlock(nn.Module):
         #     )
         #     # print("prefetch", time.time() - start_time)
 
-        final_hidden_states = torch.zeros(
-            (batch_size * sequence_length, hidden_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
+        self.expert_executor.dispatch_local(
+            self.layer_id, hidden_states, router_mask, routing_weights_mask
         )
+        final_hidden_states = self.expert_executor.wait_dispatch_local()
 
-        results = self.expert_executor.dispatch_local(
-            hidden_states, router_mask, self.layer_id
-        )
-        for output, _, idx, _ in results:
-            token_indices = router_mask[:, idx].bool()
-            final_hidden_states[token_indices, :] += (
-                output.to(routing_weights_mask.device)
-                * routing_weights_mask[token_indices, idx][:, None]
-            )
+        # final_hidden_states = torch.zeros(
+        #     (batch_size * sequence_length, hidden_dim),
+        #     dtype=hidden_states.dtype,
+        #     device=hidden_states.device,
+        # )
+
+        # results = self.expert_executor.wait_dispatch_local()
+        # for output, _, idx, _ in results:
+        #     token_indices = router_mask[:, idx].bool()
+        #     final_hidden_states[token_indices, :] += (
+        #         output.to(routing_weights_mask.device)
+        #         * routing_weights_mask[token_indices, idx][:, None]
+        #     )
 
         # for expert_idx in range(self.num_experts):
         #     # expert_layer = self.experts[expert_idx]
@@ -112,7 +115,7 @@ class SyncMixtralSparseMoeBlock(nn.Module):
         #         )
         #         final_hidden_states[token_indices, :] += current_hidden_states
 
-        final_hidden_states = final_hidden_states.reshape(
+        final_hidden_states = final_hidden_states.view(
             batch_size, sequence_length, hidden_dim
-        )
+        ).to(hidden_states.dtype)
         return final_hidden_states, router_logits
