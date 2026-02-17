@@ -3,6 +3,7 @@
   author       = {Leyang Xue and
                   Yao Fu and
                   Zhan Lu and
+                  Chuanhao Sun and
                   Luo Mai and
                   Mahesh Marina},
   title        = {MoE-Infinity: Efficient MoE Inference on Personal Machines with Sparsity-Aware Expert Cache},

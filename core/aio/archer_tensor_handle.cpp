@@ -20,12 +20,8 @@ const char* ARCHER_IHDEX_NAME = "archer_index";
 
 std::unique_ptr<ArcherTensorHandle> kArcherTensorHandle(nullptr);
 
-ArcherTensorHandle::ArcherTensorHandle(const std::string& prefix,
-                                       int num_io_threads)
-    : prefix_(prefix),
-      prio_aio_handle_(prefix, num_io_threads),
-      file_id_(0),
-      file_offset_(0) {
+ArcherTensorHandle::ArcherTensorHandle(const std::string& prefix)
+    : prefix_(prefix), prio_aio_handle_(prefix), file_id_(0), file_offset_(0) {
   // InitLogger();
 
   if (prefix_.back() != '/') {

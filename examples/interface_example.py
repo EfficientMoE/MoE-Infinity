@@ -66,6 +66,11 @@ parser.add_argument("--out_len", type=int, default=32)
 args = parser.parse_args()
 
 model_name = args.model_name_or_path.split("/")[-1]
+config = {
+    "offload_path": os.path.join(args.offload_dir, model_name),
+    "device_memory_ratio": args.device_memory_ratio,
+}
+model = MoE(args.model_name_or_path, config)
 
 tokenizer = None
 if "grok" in model_name:
@@ -79,39 +84,28 @@ else:
         args.model_name_or_path, trust_remote_code=True, use_fast=False
     )
 
-dataset_name = "cais/mmlu"
-names = datasets.get_dataset_config_names(dataset_name)
 
-# # remove empty entry in BIGBench dataset
-# names.remove("simple_arithmetic_json_multiple_choice")
-# names.remove("simple_arithmetic_multiple_targets_json")
-# names.remove("cifar10_classification")
+dataset = datasets.load_dataset("openai/gsm8k", "main", split="test")
+all_inputs = dataset["question"]
 
-pool = mp.Pool(mp.cpu_count())
-all_inputs = [None] * len(names)
-all_inputs = pool.map(partial(datasets.load_dataset, dataset_name), names)
+# dataset_name = "openai/gsm8k"
+# names = datasets.get_dataset_config_names(dataset_name)
+
+# pool = mp.Pool(mp.cpu_count())
+# all_inputs = [None] * len(names)
+# all_inputs = pool.map(partial(datasets.load_dataset, dataset_name), names)
 
 # print(all_inputs)
 
-text_list = []
-for dataset in all_inputs:
-    if "test" not in dataset:
-        continue
-    for i, text in enumerate(dataset["test"]["question"]):
-        text_list.append(text)
+# text_list = []
+# for dataset in all_inputs:
+#     if "test" not in dataset:
+#         continue
+#     for i, text in enumerate(dataset["test"]["question"]):
+#         text_list.append(text)
 
-print(len(text_list))
-all_inputs = text_list
-
-# all_inputs = [
-#     text for dataset in all_inputs for text in dataset["test"]["question"] if "test" in dataset
-# ]
-
-config = {
-    "offload_path": os.path.join(args.offload_dir, model_name),
-    "device_memory_ratio": args.device_memory_ratio,
-}
-model = MoE(args.model_name_or_path, config)
+# print(len(text_list))
+# all_inputs = text_list
 
 custom_kwargs = {}
 if "switch" in args.model_name_or_path.lower():
@@ -124,7 +118,10 @@ elif "grok" in args.model_name_or_path.lower():
     custom_kwargs = {}
 elif "arctic" in args.model_name_or_path.lower():
     custom_kwargs = {"pad_token_id": tokenizer.eos_token_id}
-elif "deepseek" in args.model_name_or_path.lower():
+elif (
+    "deepseek" in args.model_name_or_path.lower()
+    or "qwen3" in args.model_name_or_path.lower()
+):
     custom_kwargs = {"pad_token_id": tokenizer.eos_token_id}
 else:
     raise ValueError(f"Model {args.model_name_or_path} not supported")
@@ -133,24 +130,28 @@ tokenizer.pad_token = tokenizer.eos_token
 cnt = 0
 max_seq_length = 512
 for input_text in all_inputs:
-    # repeat the input text 100 times to test the performance
-    # input_text = input_text * 1000
-    inputs = tokenizer(
-        input_text,
-        truncation=True,
-        padding="do_not_pad",
-        max_length=max_seq_length,
-        return_tensors="pt",
+    prompt = tokenizer.apply_chat_template(
+        conversation=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {
+                "role": "user",
+                "content": input_text,
+            },
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
     )
-    print("inputs ...")
-    print(inputs.input_ids.shape)
+    print(f"prompt: {prompt}")
+
+    token_ids = tokenizer.encode(prompt, return_tensors="pt")
+    token_ids = token_ids.to("cuda:0")
 
     streamer = StopWatch(model.engine, tokenizer)
     with torch.no_grad():
         print("outputs_text ...")
         outputs = model.generate(
-            inputs.input_ids.to("cuda:0"),
-            attention_mask=inputs.attention_mask.to("cuda:0"),
+            token_ids.to("cuda:0"),
+            # attention_mask=inputs.attention_mask.to("cuda:0"),
             streamer=streamer,
             max_new_tokens=args.out_len,
             min_new_tokens=args.out_len,
@@ -165,4 +166,4 @@ for input_text in all_inputs:
         print(
             f"Decoding time per iteration: {streamer.decoding_time / streamer.decoding_iterations} seconds"
         )
-        print(f"Input tokens: {len(inputs.input_ids[0])}")
+        # print(f"Input tokens: {len(inputs.input_ids[0])}")

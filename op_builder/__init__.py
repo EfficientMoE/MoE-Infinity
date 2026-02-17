@@ -18,7 +18,6 @@ import pkgutil
 import sys
 
 from .builder import OpBuilder, get_default_compute_capabilities
-from .compute import ComputeBuilder
 from .prefetch import PrefetchBuilder
 
 # Do not remove, required for abstract accelerator to detect if we have a deepspeed or 3p op_builder

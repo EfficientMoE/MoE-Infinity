@@ -99,11 +99,6 @@ def get_current_compute_capabilities():
 # list compatible minor CUDA versions - so that for example pytorch built with cuda-11.0 can be used
 # to build deepspeed and system-wide installed cuda 11.2
 cuda_minor_mismatch_ok = {
-    10: [
-        "10.0",
-        "10.1",
-        "10.2",
-    ],
     11: [
         "11.0",
         "11.1",
@@ -115,7 +110,17 @@ cuda_minor_mismatch_ok = {
         "11.7",
         "11.8",
     ],
-    12: ["12.0", "12.1"],
+    12: [
+        "12.0",
+        "12.1",
+        "12.2",
+        "12.3",
+        "12.4",
+        "12.5",
+        "12.6",
+        "12.7",
+        "12.8",
+    ],
 }
 
 
@@ -778,7 +783,7 @@ class CUDAOpBuilder(OpBuilder):
         if self.is_rocm_pytorch():
             ROCM_MAJOR, ROCM_MINOR = self.installed_rocm_version()
             args += [
-                "-std=c++14",
+                "-std=c++17",
                 "-U__HIP_NO_HALF_OPERATORS__",
                 "-U__HIP_NO_HALF_CONVERSIONS__",
                 "-U__HIP_NO_HALF2_OPERATORS__",
@@ -794,7 +799,7 @@ class CUDAOpBuilder(OpBuilder):
                 "--use_fast_math",
                 "-std=c++17"
                 if sys.platform == "win32" and cuda_major > 10
-                else "-std=c++14",
+                else "-std=c++17",
                 "-U__CUDA_NO_HALF_OPERATORS__",
                 "-U__CUDA_NO_HALF_CONVERSIONS__",
                 "-U__CUDA_NO_HALF2_OPERATORS__",

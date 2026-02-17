@@ -6,7 +6,7 @@ from moe_infinity import MoE
 
 user_home = os.path.expanduser("~")
 
-checkpoint = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+checkpoint = "Qwen/Qwen3-30B-A3B"
 tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote=True)
 
 config = {

@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <vector>
+#include "common/types.h"
 #include "base/logging.h"
 
 inline void print(base::LogStream& stream) {}
@@ -17,6 +19,31 @@ inline void print(base::LogStream& stream, T first, Args... args) {
     print(stream, args...);  // Recursive call
   }
 }
+
+namespace base {
+
+template <typename T>
+LogStream& operator<<(LogStream& stream, const std::vector<T>& vec) {
+  stream << "[";
+  for (size_t i = 0; i < vec.size(); ++i) {
+    if (i > 0) {
+      stream << ", ";
+    }
+    stream << vec[i];
+  }
+  stream << "]";
+  return stream;
+}
+
+// define a custom operator<< for enum classes
+template <typename T>
+typename std::enable_if<std::is_enum<T>::value, LogStream&>::type operator<<(
+    LogStream& stream, const T& value) {
+  // This will call the EnumTypeToString function defined in the macro
+  return stream << enum_to_string<T>(value);
+}
+
+}  // namespace base
 
 #define DLOG_TRACE(...)                                                     \
   do {                                                                      \
@@ -54,9 +81,23 @@ inline void print(base::LogStream& stream, T first, Args... args) {
             __VA_ARGS__);                                                  \
   } while (0)
 
+#define DLOG_WARN_IF(condition, ...) \
+  do {                               \
+    if (condition) {                 \
+      DLOG_WARN(__VA_ARGS__);        \
+    }                                \
+  } while (0)
+
 #define DLOG_FATAL(...)                                                     \
   do {                                                                      \
     if (base::Logger::logLevel() <= base::Logger::FATAL)                    \
       print(base::Logger(__FILE__, __LINE__, base::Logger::FATAL).stream(), \
             __VA_ARGS__);                                                   \
+  } while (0)
+
+#define DLOG_FATAL_IF(condition, ...) \
+  do {                                \
+    if (condition) {                  \
+      DLOG_FATAL(__VA_ARGS__);        \
+    }                                 \
   } while (0)

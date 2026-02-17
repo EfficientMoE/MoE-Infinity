@@ -25,5 +25,4 @@ class ArcherAioThreadPool {
  private:
   int num_threads_;
   std::vector<std::unique_ptr<ArcherAioThread>> threads_;
-  std::atomic<uint64_t> round_robin_counter_{0};
 };

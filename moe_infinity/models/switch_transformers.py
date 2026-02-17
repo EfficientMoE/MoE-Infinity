@@ -92,15 +92,16 @@ class SyncSwitchTransformersSparseMLP(nn.Module):
         #     )
 
         self.expert_executor.dispatch_local(
-            hidden_states, router_mask, self.layer_id
+            self.layer_id, hidden_states, router_mask, router_probs
         )
+        next_states = self.expert_executor.wait_dispatch_local()
 
-        next_states = hidden_states.clone()
-        results = self.expert_executor.wait_dispatch_local()
+        # next_states = hidden_states.clone()
+        # results = self.expert_executor.wait_dispatch_local()
 
-        for output, _, idx, _ in results:
-            token_indices = router_mask[:, :, idx].bool()
-            next_states[token_indices] = output.to(next_states.device)
+        # for output, _, idx, _ in results:
+        #     token_indices = router_mask[:, :, idx].bool()
+        #     next_states[token_indices] = output.to(next_states.device)
 
         # for expert_id, expert in self.experts.items():
         #     idx = int(expert_id.split("_")[-1])
