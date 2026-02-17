@@ -54,9 +54,8 @@ void ArcherAioThread::Run() {
     std::function<void()> callback;
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      cv_.wait(lock, [this] {
-        return !callbacks_.empty() || !is_running_.load();
-      });
+      cv_.wait(lock,
+               [this] { return !callbacks_.empty() || !is_running_.load(); });
       if (!is_running_.load() && callbacks_.empty()) {
         break;
       }

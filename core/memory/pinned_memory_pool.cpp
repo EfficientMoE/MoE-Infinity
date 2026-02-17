@@ -21,7 +21,8 @@ PinnedMemoryPool::PinnedMemoryPool(std::size_t chunk_size, int num_chunks)
     if (posix_memalign(&ptr, 4096, chunk_size) != 0) {
       DLOG_FATAL("Failed to allocate aligned memory for pinned pool chunk ", i);
     }
-    cudaError_t err = cudaHostRegister(ptr, chunk_size, cudaHostRegisterDefault);
+    cudaError_t err =
+        cudaHostRegister(ptr, chunk_size, cudaHostRegisterDefault);
     if (err != cudaSuccess) {
       DLOG_WARN("cudaHostRegister failed for chunk ", i, ": ",
                 cudaGetErrorString(err), "; falling back to unpinned");

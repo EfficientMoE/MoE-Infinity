@@ -22,12 +22,11 @@ ArcherPrioAioHandle::ArcherPrioAioHandle(const std::string& prefix,
     : time_to_exit_{false},
       aio_context_(kBlockSize, time_to_exit_, num_io_threads) {
   // InitLogger();
-  int effective_threads =
-      (num_io_threads > 0)
-          ? num_io_threads
-          : ArcherPrioAioContext::GetDefaultNumIoThreads();
-  pinned_pool_ = std::make_shared<PinnedMemoryPool>(kBlockSize,
-                                                    effective_threads * 4);
+  int effective_threads = (num_io_threads > 0)
+                              ? num_io_threads
+                              : ArcherPrioAioContext::GetDefaultNumIoThreads();
+  pinned_pool_ =
+      std::make_shared<PinnedMemoryPool>(kBlockSize, effective_threads * 4);
   thread_ = std::thread(&ArcherPrioAioHandle::Run, this);
 }
 
@@ -123,7 +122,9 @@ std::int64_t ArcherPrioAioHandle::Write(const std::string& filename,
     }
     // How many bytes of real data (not padding) to copy for this chunk
     std::int64_t copy_count =
-        (shift + byte_count <= num_bytes) ? byte_count : std::max(num_bytes - shift, (std::int64_t)0);
+        (shift + byte_count <= num_bytes)
+            ? byte_count
+            : std::max(num_bytes - shift, (std::int64_t)0);
     const void* src_ptr = static_cast<const char*>(buffer) + shift;
 
     callbacks.push_back([pool, fd, src_ptr, copy_count, byte_count, xfer_offset,
@@ -189,8 +190,7 @@ void ArcherPrioAioContext::Schedule() {
     schedule_cv_.wait(lock, [this] {
       std::lock_guard<std::mutex> lh(io_queue_high_mutex_);
       std::lock_guard<std::mutex> ll(io_queue_low_mutex_);
-      return !io_queue_high_.empty() || !io_queue_low_.empty() ||
-             time_to_exit_;
+      return !io_queue_high_.empty() || !io_queue_low_.empty() || time_to_exit_;
     });
     if (time_to_exit_) {
       return;

@@ -15,7 +15,7 @@
 import glob
 import os
 
-from .builder import OpBuilder, CUDAOpBuilder
+from .builder import CUDAOpBuilder, OpBuilder
 
 
 class ComputeBuilder(CUDAOpBuilder):

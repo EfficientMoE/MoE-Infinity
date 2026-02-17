@@ -137,7 +137,71 @@ Required before committing:
 
 ## Testing
 
-Tests are located in `tests/` directory. Run individual test scripts as needed.
+### Test Structure
+
+```
+tests/
+├── cpp/
+│   └── unittest/
+│       ├── queues/
+│       │   ├── CMakeLists.txt
+│       │   ├── test_lockfree_queue.cpp   # LockFreeQueue correctness & stress
+│       │   └── test_threadsafe_queue.cpp # ThreadSafeQueue correctness & stress
+│       └── utils/
+│           ├── CMakeLists.txt
+│           ├── test_lfu_cache.cpp         # LFUCache eviction & frequency logic
+│           └── test_simple_object_pool.cpp # SimpleObjectPool reuse & concurrency
+└── python/
+    ├── benchmark/
+    │   └── test_fused_glu_cutlass.py
+    └── integration/
+        ├── test_oai_chat_completions.py
+        └── test_oai_completions.py
+
+docker/tests/                              # I/O integration tests (pybind11 + pytest)
+├── build_test_module.py                   # Builds test_io_module.so
+├── conftest.py                            # pytest fixtures (workspace_tmpdir)
+├── run_tests.py                           # Orchestrates Tier 1 / Tier 2 runs
+├── test_io_integration.py                 # pytest test classes
+└── test_io_module.cpp                     # C++ pybind11 test harness
+```
+
+### Building & Running C++ Unit Tests
+
+```bash
+# Build and run queue tests
+cd tests/cpp/unittest/queues
+cmake -B build && cmake --build build
+ctest --test-dir build -V
+
+# Build and run utils tests (LFUCache, SimpleObjectPool)
+cd tests/cpp/unittest/utils
+cmake -B build && cmake --build build
+ctest --test-dir build -V
+```
+
+### Docker Build & Integration Tests
+
+```bash
+# Build the Docker image (runs Tier 1 I/O tests at build time)
+docker build -t moe-infinity-test -f docker/Dockerfile .
+
+# Run full test suite (Tier 2 requires a GPU)
+docker run --gpus all moe-infinity-test
+
+# Interactive shell inside the container
+docker run --gpus all -it moe-infinity-test bash
+
+# Run only Tier 1 tests (no GPU needed)
+docker run moe-infinity-test python docker/tests/run_tests.py
+```
+
+The Docker image is based on `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel`.
+Build steps inside the image:
+1. Build `prefetch_op.so` via `docker/build_prefetch.py` (avoids the pre-existing `fused_glu_cuda.cu` build error)
+2. Run `docker/verify_build.py` — smoke test the shared library
+3. Build `test_io_module.so` via `docker/tests/build_test_module.py`
+4. Run `docker/tests/run_tests.py` — Tier 1 tests (threading, file I/O, no CUDA) at image build time; Tier 2 (pinned memory, tensor roundtrip) at `docker run` time with `--gpus all`
 
 ## Task Management (Task Master MCP)
 

@@ -15,9 +15,10 @@ import sys
 
 sys.path.insert(0, ".")
 
-from op_builder.prefetch import PrefetchBuilder
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension
+
+from op_builder.prefetch import PrefetchBuilder
 
 builder = PrefetchBuilder()
 ext = builder.builder()

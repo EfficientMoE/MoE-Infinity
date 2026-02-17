@@ -29,7 +29,11 @@ print("=" * 60)
 # 1. Check that the .so file exists
 print("\n1. Shared library exists:")
 so_dir = "moe_infinity/ops/prefetch"
-so_files = [f for f in os.listdir(so_dir) if f.endswith(".so")] if os.path.isdir(so_dir) else []
+so_files = (
+    [f for f in os.listdir(so_dir) if f.endswith(".so")]
+    if os.path.isdir(so_dir)
+    else []
+)
 check("prefetch_op .so exists", len(so_files) > 0, f"(found: {so_files})")
 
 # 2. Check that the .so can be loaded via Python import
@@ -38,6 +42,7 @@ if so_files:
     try:
         # The .so links against libtorch, so we must import torch first
         import torch  # noqa: F401
+
         spec = importlib.util.spec_from_file_location(
             "prefetch_op", os.path.join(so_dir, so_files[0])
         )
@@ -93,15 +98,21 @@ def file_contains(path, pattern):
 
 check(
     "atomic<bool> is_running_ in aio_thread.h",
-    file_contains("core/aio/archer_aio_thread.h", "std::atomic<bool> is_running_"),
+    file_contains(
+        "core/aio/archer_aio_thread.h", "std::atomic<bool> is_running_"
+    ),
 )
 check(
     "atomic<bool> time_to_exit_ in prio_aio_handle.h",
-    file_contains("core/aio/archer_prio_aio_handle.h", "std::atomic<bool> time_to_exit_"),
+    file_contains(
+        "core/aio/archer_prio_aio_handle.h", "std::atomic<bool> time_to_exit_"
+    ),
 )
 check(
     "condition_variable cv_ in aio_thread.h",
-    file_contains("core/aio/archer_aio_thread.h", "std::condition_variable cv_"),
+    file_contains(
+        "core/aio/archer_aio_thread.h", "std::condition_variable cv_"
+    ),
 )
 check(
     "round_robin_counter_ in threadpool.h",
@@ -109,7 +120,9 @@ check(
 )
 check(
     "GetDefaultNumIoThreads in prio_aio_handle.h",
-    file_contains("core/aio/archer_prio_aio_handle.h", "GetDefaultNumIoThreads"),
+    file_contains(
+        "core/aio/archer_prio_aio_handle.h", "GetDefaultNumIoThreads"
+    ),
 )
 check(
     "PinnedMemoryPool in prio_aio_handle.h",
@@ -129,7 +142,9 @@ check(
 )
 check(
     "SetModuleMemoryFromDisk_Views in model_topology.cpp",
-    file_contains("core/model/model_topology.cpp", "SetModuleMemoryFromDisk_Views"),
+    file_contains(
+        "core/model/model_topology.cpp", "SetModuleMemoryFromDisk_Views"
+    ),
 )
 
 # Summary
