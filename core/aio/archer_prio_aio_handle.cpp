@@ -17,8 +17,9 @@
 const int kBlockSize = 1024 * 1024;
 const int kQueueDepth = 32;
 
-ArcherPrioAioHandle::ArcherPrioAioHandle(const std::string& prefix)
-    : aio_context_(kBlockSize), time_to_exit_(false) {
+ArcherPrioAioHandle::ArcherPrioAioHandle(const std::string& prefix,
+                                         int num_io_threads)
+    : time_to_exit_(false), aio_context_(kBlockSize, time_to_exit_, num_io_threads) {
   // InitLogger();
   int effective_threads = (num_io_threads > 0)
                               ? num_io_threads
@@ -176,6 +177,10 @@ ArcherPrioAioContext::ArcherPrioAioContext(const int block_size,
 }
 
 ArcherPrioAioContext::~ArcherPrioAioContext() {}
+
+void ArcherPrioAioContext::NotifyExit() {
+  schedule_cv_.notify_all();
+}
 
 void ArcherPrioAioContext::Schedule() {
   std::shared_ptr<AioRequest> io_request = nullptr;

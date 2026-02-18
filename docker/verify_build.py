@@ -28,29 +28,32 @@ print("=" * 60)
 
 # 1. Check that the .so file exists
 print("\n1. Shared library exists:")
-so_dir = "moe_infinity/ops/prefetch"
-so_files = (
-    [f for f in os.listdir(so_dir) if f.endswith(".so")]
-    if os.path.isdir(so_dir)
-    else []
-)
-check("prefetch_op .so exists", len(so_files) > 0, f"(found: {so_files})")
+so_files = []
+for root, _, files in os.walk("moe_infinity"):
+    so_files.extend(
+        os.path.join(root, f) for f in files if f.endswith(".so")
+    )
+check("_store .so exists", len(so_files) > 0, f"(found: {so_files})")
 
 # 2. Check that the .so can be loaded via Python import
 print("\n2. Shared library loads:")
-if so_files:
-    try:
-        # The .so links against libtorch, so we must import torch first
-        import torch  # noqa: F401
+try:
+    import torch  # noqa: F401
+    import importlib.util
+    import sys
 
-        spec = importlib.util.spec_from_file_location(
-            "prefetch_op", os.path.join(so_dir, so_files[0])
-        )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        check("importlib loads prefetch_op .so", True)
-    except Exception as e:
-        check("importlib loads prefetch_op .so", False, str(e))
+    # Load the _store module directly from the .so file
+    so_path = "moe_infinity/_store.cpython-311-x86_64-linux-gnu.so"
+    if os.path.exists(so_path):
+        spec = importlib.util.spec_from_file_location("_store", so_path)
+        _store = importlib.util.module_from_spec(spec)
+        sys.modules["moe_infinity._store"] = _store
+        spec.loader.exec_module(_store)
+        check("import moe_infinity._store", True)
+    else:
+        check("import moe_infinity._store", False, f"File not found: {so_path}")
+except Exception as e:
+    check("import moe_infinity._store", False, str(e))
 
 # 3. Check that all expected source files were compiled (by checking .o files)
 print("\n3. Object files for refactored sources:")

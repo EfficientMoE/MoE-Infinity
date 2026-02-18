@@ -26,8 +26,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ccache \
+    cmake \
     ninja-build \
     git \
+    uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Enable ccache for C++/CUDA builds
@@ -35,10 +37,28 @@ ENV CCACHE_DIR=/ccache
 ENV CCACHE_MAXSIZE=10G
 ENV PATH=/usr/lib/ccache:${PATH}
 
-WORKDIR /workspace/MoE-Infinity
-
-# Create ccache directory for compiler caching
+# Create ccache directory for compiler caching (early for better layer reuse)
 RUN mkdir -p ${CCACHE_DIR}
+
+# ---------------------------------------------------------------
+# Install CUTLASS (default to a 3.x release; override with build args)
+# ---------------------------------------------------------------
+ARG CUTLASS_REPO=https://github.com/NVIDIA/cutlass.git
+ARG CUTLASS_VERSION=v3.5.1
+ARG CUTLASS_NVCC_ARCHS=80
+ENV CUTLASS_DIR=/root/cutlass
+
+RUN git clone --branch ${CUTLASS_VERSION} --depth 1 ${CUTLASS_REPO} ${CUTLASS_DIR}
+RUN --mount=type=cache,target=/ccache \
+    cmake -B ${CUTLASS_DIR}/build -S ${CUTLASS_DIR} \
+    -DCUTLASS_ENABLE_LIBRARY=ON \
+    -DCUTLASS_NVCC_ARCHS=${CUTLASS_NVCC_ARCHS} \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    && cmake --build ${CUTLASS_DIR}/build --target cutlass_library -j$(nproc)
+
+WORKDIR /workspace/MoE-Infinity
 
 # Copy source code
 COPY . .
@@ -51,18 +71,15 @@ RUN pip install --no-cache-dir \
     py-cpuinfo
 
 # ---------------------------------------------------------------
-# Build the prefetch extension (core AIO + memory + model + prefetch)
-#
-# This is a targeted build of the prefetch_op shared library which
-# contains all our refactored code. We use a helper script instead
-# of the full `BUILD_OPS=1 pip install -e .` because setup.py
-# unconditionally compiles fused_glu_cuda.cu and expert_gemm.cu
-# which have pre-existing issues on the xly/code-clean branch.
-# ---------------------------------------------------------------
-RUN python docker/build_prefetch.py
+# Build the torch extensions (inplace, no package install)
+RUN --mount=type=cache,target=/ccache \
+    CUTLASS_DIR=${CUTLASS_DIR} python setup.py build_ext --inplace
 
-# Verify the shared library was produced
-RUN ls -lh moe_infinity/ops/prefetch/prefetch_op*.so
+# Copy .so files to the expected location
+RUN cp build/lib.linux-x86_64-cpython-311/moe_infinity/_*.so moe_infinity/ 2>/dev/null || true
+
+# Verify the shared libraries were produced
+RUN ls -lh moe_infinity/*.so
 
 # ---------------------------------------------------------------
 # Run build verification tests
@@ -72,10 +89,18 @@ RUN python docker/verify_build.py
 # ---------------------------------------------------------------
 # Build C++ test extension (test_io_module)
 # ---------------------------------------------------------------
-RUN python docker/tests/build_test_module.py
+RUN cmake -B build/cmake_main -S . \
+    -DCUTLASS_DIR=${CUTLASS_DIR} \
+    -DCMAKE_CUDA_ARCHITECTURES=${CUTLASS_NVCC_ARCHS} \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/workspace/MoE-Infinity \
+    -GNinja
+RUN --mount=type=cache,target=/ccache \
+    cmake --build build/cmake_main --target test_io_module -j$(nproc)
+RUN cmake --install build/cmake_main --component TestRuntime
 
 # Verify the test module was produced
-RUN ls -lh docker/tests/test_io_module*.so
+RUN ls -lh tests/docker/test_io_module*.so
 
 # Install test dependencies
 RUN pip install --no-cache-dir pytest
@@ -84,9 +109,9 @@ RUN pip install --no-cache-dir pytest
 # Run Tier 1 tests (build-time, no CUDA)
 # Threading, file I/O, and configuration tests that don't need a GPU.
 # ---------------------------------------------------------------
-RUN python docker/tests/run_tests.py
+RUN python tests/docker/run_tests.py
 
 # ---------------------------------------------------------------
 # Default: run full test suite (Tier 2 needs --gpus all)
 # ---------------------------------------------------------------
-CMD ["python", "docker/tests/run_tests.py"]
+CMD ["python", "tests/docker/run_tests.py"]

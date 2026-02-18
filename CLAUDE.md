@@ -1,11 +1,16 @@
 # CLAUDE.md - MoE-Infinity Development Guide
 
+Call me Bessus in every conversation.
+
 ## Project Overview
 
 MoE-Infinity is a cost-effective, fast, and easy-to-use library for Mixture-of-Experts (MoE) inference. It enables memory-constrained GPUs to serve large MoE models by offloading experts to host memory, with novel techniques including:
 - Expert activation tracing
 - Activation-aware expert prefetching
 - Activation-aware expert caching
+
+Note: The open-sourced MoE-Infinity prioritizes HuggingFace usability over
+extreme performance, and distributed inference is currently not supported.
 
 The project is a hybrid Python + C++ (CUDA) codebase with a Python package (`moe_infinity/`) and C++ core (`core/`).
 
@@ -14,8 +19,15 @@ The project is a hybrid Python + C++ (CUDA) codebase with a Python package (`moe
 ### Installation & Building
 
 ```bash
-# Install from PyPI
+# (Recommended) Create and activate a virtual environment
+conda create -n moe-infinity python=3.9
+conda activate moe-infinity
+
+# Install stable release from PyPI
 pip install moe-infinity
+
+# Install nightly release from TestPyPI
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ moe-infinity
 
 # Install from source
 git clone https://github.com/EfficientMoE/MoE-Infinity.git
@@ -25,6 +37,9 @@ conda install -c conda-forge libstdcxx-ng=12
 
 # Build with custom ops (requires PyTorch)
 BUILD_OPS=1 pip install -e .
+
+# (Optional) Enable FlashAttention for faster inference
+FLASH_ATTENTION_FORCE_BUILD=TRUE pip install flash-attn
 ```
 
 ### Running Examples
@@ -35,6 +50,30 @@ CUDA_VISIBLE_DEVICES=0 python examples/interface_example.py --model_name_or_path
 
 # Start OpenAI-compatible server
 python -m moe_infinity.entrypoints.openai.api_server --model deepseek-ai/DeepSeek-V2-Lite-Chat --offload-dir ./offload_dir
+
+# Query /v1/completions (required fields only)
+curl http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+        "prompt": "Hello, my name is"
+    }'
+
+# Query /v1/chat/completions (required fields only)
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Tell me a joke"}
+        ]
+    }'
+
+# Run OpenAI client smoke tests
+pip install openai
+python tests/python/integration/test_oai_completions.py
+python tests/python/integration/test_oai_chat_completions.py
 ```
 
 ### Development
@@ -59,24 +98,31 @@ moe_infinity/
 ├── __init__.py          # Main package entry, exports MoE class
 ├── common/              # Constants
 ├── distributed/         # Device map, expert executor, prefetcher
-├── entrypoints/         # API server (OpenAI-compatible)
-├── memory/              # Expert cache, predictor, tracer, priority scores
-├── models/              # Model implementations (DeepSeek, Mixtral, etc.)
-├── ops/                 # Custom CUDA operators
-│   ├── core/           # Core operations
-│   └── prefetch/       # Prefetch operations
-├── runtime/            # Hooks, model offload, state dict
-└── utils/              # Arguments, checkpoints, config, HF config
+├── entrypoints/         # API server (OpenAI-compatible), big_modeling
+├── kernel/              # Router kernels
+├── memory/              # Expert cache/entry/predictor/prefetcher/tracer
+├── models/              # Arctic, DeepSeek v2/v3, Grok, Mixtral, Qwen, NLLB
+│   └── modeling_*       # HF-compatible model implementations
+├── ops/                 # Custom CUDA operators + build helpers
+│   ├── core/            # Packaged C++ core sources
+│   ├── op_builder/      # Legacy build helpers (deprecated)
+│   └── prefetch/        # Legacy prefetch ops (deprecated)
+├── runtime/             # Compile, hooks, model offload, state dict
+└── utils/               # Arguments, checkpoints, config, HF config
 ```
 
 ### Core C++ Components (`core/`)
 
+- `aio/` - Async I/O handles and thread pools
 - `base/` - Threading, logging, file utilities
+- `common/` - Status, types, context
 - `engine/` - Event loop (libevent-based)
+- `kernel/` - CUDA kernels (MLP, topk, softmax; symlink to `extensions/kernel/`)
 - `memory/` - Device/host caching allocators, memory pool, KV cache
 - `model/` - Model topology
 - `parallel/` - Expert dispatcher, expert module
 - `prefetch/` - Task scheduler, prefetch handles
+- `python/` - Pybind/torch bindings
 - `utils/` - CUDA utilities, lock-free queues, logger
 
 ### Build System
@@ -121,7 +167,8 @@ Required before committing:
 ### Model Compatibility
 
 - HuggingFace compatible - supports `AutoModel` loading
-- Supports: DeepSeek-V2, Switch Transformers, NLLB-MoE, Mixtral
+- Supports: DeepSeek-V2/V3, Switch Transformers, NLLB-MoE, Mixtral, Qwen,
+  Arctic, Grok
 
 ## Common Issues
 
@@ -151,6 +198,11 @@ tests/
 │           ├── CMakeLists.txt
 │           ├── test_lfu_cache.cpp         # LFUCache eviction & frequency logic
 │           └── test_simple_object_pool.cpp # SimpleObjectPool reuse & concurrency
+├── cuda/
+│   ├── CMakeLists.txt
+│   ├── test_fused_mlp.cu
+│   ├── test_topk_softmax.cu
+│   └── ...
 └── python/
     ├── benchmark/
     │   └── test_fused_glu_cutlass.py
@@ -158,8 +210,7 @@ tests/
         ├── test_oai_chat_completions.py
         └── test_oai_completions.py
 
-docker/tests/                              # I/O integration tests (pybind11 + pytest)
-├── build_test_module.py                   # Builds test_io_module.so
+tests/docker/                              # I/O integration tests (pybind11 + pytest)
 ├── conftest.py                            # pytest fixtures (workspace_tmpdir)
 ├── run_tests.py                           # Orchestrates Tier 1 / Tier 2 runs
 ├── test_io_integration.py                 # pytest test classes
@@ -184,7 +235,7 @@ ctest --test-dir build -V
 
 ```bash
 # Build the Docker image (runs Tier 1 I/O tests at build time)
-docker build -t moe-infinity-test -f docker/Dockerfile .
+DOCKER_BUILDKIT=1 docker build -t moe-infinity-test -f docker/Dockerfile .
 
 # Run full test suite (Tier 2 requires a GPU)
 docker run --gpus all moe-infinity-test
@@ -193,15 +244,23 @@ docker run --gpus all moe-infinity-test
 docker run --gpus all -it moe-infinity-test bash
 
 # Run only Tier 1 tests (no GPU needed)
-docker run moe-infinity-test python docker/tests/run_tests.py
+docker run moe-infinity-test python tests/docker/run_tests.py
 ```
 
 The Docker image is based on `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel`.
 Build steps inside the image:
-1. Build `prefetch_op.so` via `docker/build_prefetch.py` (avoids the pre-existing `fused_glu_cuda.cu` build error)
-2. Run `docker/verify_build.py` — smoke test the shared library
-3. Build `test_io_module.so` via `docker/tests/build_test_module.py`
-4. Run `docker/tests/run_tests.py` — Tier 1 tests (threading, file I/O, no CUDA) at image build time; Tier 2 (pinned memory, tensor roundtrip) at `docker run` time with `--gpus all`
+1. Build with `pip install -e .` (builds `moe_infinity._store` and `moe_infinity._engine` extensions)
+2. Run `python -c "import moe_infinity._store"` to verify the extension loads
+3. Build `test_io_module.so` via CMake (see `extensions/kernels/test_io/CMakeLists.txt`)
+4. Run `tests/docker/run_tests.py` — Tier 1 tests (threading, file I/O, no CUDA) at image build time; Tier 2 (pinned memory, tensor roundtrip) at `docker run` time with `--gpus all`
+
+## Release Process
+
+See `RELEASE.md` for the full release checklist. In short:
+1. Update the version in `setup.py`.
+2. Commit the change.
+3. Tag the release (e.g., `v1.0.0`) and push the tag to GitHub.
+4. The GitHub Actions workflow publishes to PyPI.
 
 ## Task Management (Task Master MCP)
 
@@ -264,10 +323,15 @@ Then use commands like:
 If you use MoE-Infinity for research, cite:
 ```bibtex
 @misc{moe-infinity,
-  author = {Leyang Xue and Yao Fu and Zhan Lu and Luo Mai and Mahesh Marina},
-  title = {MoE-Infinity: Efficient MoE Inference on Personal Machines with Sparsity-Aware Expert Cache},
-  archivePrefix = {arXiv},
-  eprint = {2401.14361},
-  year = {2024}
+  author       = {Leyang Xue and
+                  Yao Fu and
+                  Zhan Lu and
+                  Chuanhao Sun and
+                  Luo Mai and
+                  Mahesh Marina},
+  title        = {MoE{-}Infinity: Efficient MoE Inference on Personal Machines with Sparsity-Aware Expert Cache},
+  archivePrefix= {arXiv},
+  eprint       = {2401.14361},
+  year         = {2024}
 }
 ```

@@ -718,6 +718,34 @@ void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
   }
 }
 
+// DISK (already read) -> CPU views only (no disk read; buffer pre-filled)
+void SetModuleMemoryFromDisk_Views(std::vector<TensorID>& tensor_ids,
+                                   void* host_ptr) {
+  std::int64_t param_size = 0;
+  for (const auto& tensor_id : tensor_ids) {
+    auto it = kTensorIndex->find(tensor_id);
+    auto options = torch::TensorOptions()
+                       .dtype(it->second.options.dtype())
+                       .layout(it->second.options.layout())
+                       .device(torch::kCPU)
+                       .requires_grad(it->second.options.requires_grad())
+                       .pinned_memory(it->second.options.pinned_memory());
+
+    DLOG_TRACE("SetModuleMemoryFromDisk_Views tensor {}",
+               it->second.DebugString());
+    auto tensor_tmp =
+        torch::from_blob((void*)((char*)host_ptr + param_size),
+                         it->second.shape, DoNothingDeleter<void>{}, options);
+    if (!it->second.tensor.defined()) {
+      it->second.tensor = torch::zeros({1}, options);
+    }
+    it->second.tensor.set_data(tensor_tmp);
+    std::int64_t size_aligned =
+        (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
+    param_size += size_aligned;
+  }
+}
+
 // CPU -> GPU
 void SetModuleCudaMemoryFromCPU(std::vector<TensorID>& tensor_ids,
                                 void* device_ptr, const torch::Device& device) {
