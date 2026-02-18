@@ -1,0 +1,16 @@
+.git
+build/
+dist/
+*.egg-info
+__pycache__
+*.pyc
+*.so
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+.vscode
+.idea
+.taskmaster
+.claude

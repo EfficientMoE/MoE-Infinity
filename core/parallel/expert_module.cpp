@@ -7,6 +7,7 @@
 // #include "memory/caching_allocator.h"
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
+#include "kernel/fused_moe_mlp.h"
 
 static const int64_t kMaxTokens = 128;
 
@@ -490,29 +491,18 @@ void MoEMLP::ForwardHelper() {
     auto& input = buffer_[0];
     auto& output = buffer_[1];
     auto& gate_out = buffer_[2];
-    auto& gate_act_out = buffer_[3];
-    auto& up_out = buffer_[4];
+    auto& fused_out = buffer_[3];  // silu(gate) * up result
 
     DLOG_TRACE("MoEMLP::forward: gate_proj", gate_proj.sizes().vec(), "up_proj",
                up_proj.sizes().vec(), "down_proj", down_proj.sizes().vec(),
                "input", input.sizes().vec(), "gate_out", gate_out.sizes().vec(),
-               "gate_act_out", gate_act_out.sizes().vec(), "up_out",
-               up_out.sizes().vec(), "output", output.sizes().vec());
+               "fused_out", fused_out.sizes().vec(), "output",
+               output.sizes().vec());
 
-    // gate step
-    torch::matmul_out(gate_out, input, gate_proj.transpose(0, 1));
-
-    // up step
-    torch::matmul_out(up_out, input, up_proj.transpose(0, 1));
-
-    // activation step
-    torch::silu_out(gate_act_out, gate_out);
-
-    // multiplication step, reuse gate_out
-    torch::mul_out(gate_out, gate_act_out, up_out);
-
-    // down step
-    torch::matmul_out(output, gate_out, down_proj.transpose(0, 1));
+    // Single fused CUTLASS call: 3 GEMMs, silu*up fused into GEMM1 epilogue.
+    // Replaces: matmul(gate), matmul(up), silu, mul, matmul(down).
+    fused_moe_ffn_into(input, gate_proj, up_proj, down_proj,
+                       gate_out, fused_out, output, /*stream=*/nullptr);
     return;
   }
   DLOG_FATAL("MoEMLP::forward: expert_type not supported", expert_type_);

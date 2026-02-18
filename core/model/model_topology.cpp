@@ -85,10 +85,56 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
     }
   } else {
     // both are null, which means the node is not initialized
-    if (host_memory_ptr == nullptr && device_memory_ptr == nullptr) {
-      // int numa_id =
-      //     default_device.index() / 4;  // TODO: 8 gpus, 2 numa nodes, so 4
-      //     gpus per numa
+    bool from_disk =
+        (host_memory_ptr == nullptr && device_memory_ptr == nullptr);
+
+    if (from_disk && target_device.is_cuda()) {
+      // Pipelined path: disk -> host -> GPU with per-tensor overlap
+      host_memory_ptr =
+          kHostMemoryPool->AllocateMemory(id, byte_size, CPU_DEVICE);
+      assert(host_memory_ptr != nullptr);
+      device_memory_ptr =
+          kDeviceMemoryPool->AllocateMemory(id, byte_size, target_device);
+      assert(device_memory_ptr != nullptr);
+
+      cudaStream_t h2d_stream = stream;
+      bool own_stream = false;
+      if (h2d_stream == nullptr) {
+        cudaStreamCreateWithFlags(&h2d_stream, cudaStreamNonBlocking);
+        own_stream = true;
+      }
+
+      auto start_time = MCIROSECONDS_SINCE_EPOCH;
+      std::int64_t param_offset = 0;
+      for (const auto& tensor_id : tensor_ids) {
+        // Read tensor from disk into host buffer
+        kArcherTensorHandle->ReadTensor(
+            tensor_id, static_cast<char*>(host_memory_ptr) + param_offset,
+            on_demand);
+
+        auto it = kTensorIndex->find(tensor_id);
+        std::int64_t size_aligned =
+            (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
+
+        // Async copy this tensor's data to GPU (overlaps with next disk read)
+        CudaMemcpyAsync(static_cast<char*>(device_memory_ptr) + param_offset,
+                        static_cast<char*>(host_memory_ptr) + param_offset,
+                        size_aligned, cudaMemcpyHostToDevice, h2d_stream);
+
+        param_offset += size_aligned;
+      }
+      cudaStreamSynchronize(h2d_stream);
+      if (own_stream) {
+        cudaStreamDestroy(h2d_stream);
+      }
+
+      // Create torch tensor views on both host and device buffers
+      SetModuleMemoryFromDisk_Views(tensor_ids, host_memory_ptr);
+      SetModuleCudaMemoryFromCPU(tensor_ids, device_memory_ptr, target_device);
+      auto end_time = MCIROSECONDS_SINCE_EPOCH;
+      DLOG_TRACE("PipelinedDiskToGpu time: {} us", end_time - start_time);
+    } else if (from_disk) {
+      // CPU-only target: use original sequential path
       host_memory_ptr =
           kHostMemoryPool->AllocateMemory(id, byte_size, CPU_DEVICE);
       assert(host_memory_ptr != nullptr);
@@ -99,11 +145,10 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
       DLOG_TRACE("SetModuleMemoryFromDisk time: {} us", end_time - start_time);
     }
 
-    if (target_device.is_cuda()) {
-      // DLOG_TRACE("Allocate GPU Memory for node {}", this->id);
+    if (!from_disk && target_device.is_cuda()) {
+      // Already in host memory, just copy to GPU
       device_memory_ptr =
           kDeviceMemoryPool->AllocateMemory(id, byte_size, target_device);
-      // DLOG_TRACE("Allocate GPU Memory for node {} done", this->id);
       assert(device_memory_ptr != nullptr);
       assert(host_memory_ptr != nullptr);
 
@@ -660,6 +705,34 @@ void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
                        .pinned_memory(it->second.options.pinned_memory());
 
     DLOG_TRACE("SetModuleMemoryFromDisk tensor {}", it->second.DebugString());
+    auto tensor_tmp =
+        torch::from_blob((void*)((char*)host_ptr + param_size),
+                         it->second.shape, DoNothingDeleter<void>{}, options);
+    if (!it->second.tensor.defined()) {
+      it->second.tensor = torch::zeros({1}, options);
+    }
+    it->second.tensor.set_data(tensor_tmp);
+    std::int64_t size_aligned =
+        (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
+    param_size += size_aligned;
+  }
+}
+
+// DISK (already read) -> CPU views only (no disk read; buffer pre-filled)
+void SetModuleMemoryFromDisk_Views(std::vector<TensorID>& tensor_ids,
+                                   void* host_ptr) {
+  std::int64_t param_size = 0;
+  for (const auto& tensor_id : tensor_ids) {
+    auto it = kTensorIndex->find(tensor_id);
+    auto options = torch::TensorOptions()
+                       .dtype(it->second.options.dtype())
+                       .layout(it->second.options.layout())
+                       .device(torch::kCPU)
+                       .requires_grad(it->second.options.requires_grad())
+                       .pinned_memory(it->second.options.pinned_memory());
+
+    DLOG_TRACE("SetModuleMemoryFromDisk_Views tensor {}",
+               it->second.DebugString());
     auto tensor_tmp =
         torch::from_blob((void*)((char*)host_ptr + param_size),
                          it->second.shape, DoNothingDeleter<void>{}, options);

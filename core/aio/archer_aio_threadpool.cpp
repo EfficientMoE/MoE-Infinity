@@ -30,8 +30,8 @@ void ArcherAioThreadPool::Stop() {
 
 void ArcherAioThreadPool::Enqueue(AioCallback& callback, int thread_id) {
   if (thread_id < 0) {
-    const auto thread_id = rand() % num_threads_;
-    threads_[thread_id]->Enqueue(callback);
+    const auto idx = round_robin_counter_.fetch_add(1) % num_threads_;
+    threads_[idx]->Enqueue(callback);
   } else {
     threads_[thread_id]->Enqueue(callback);
   }

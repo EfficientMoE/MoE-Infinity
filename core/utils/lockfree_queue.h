@@ -1,8 +1,10 @@
 #pragma once
 
 #include <atomic>
-#include <memory>
+#include <condition_variable>
 #include <iostream>
+#include <mutex>
+#include <queue>
 #include <thread>
 #include <vector>
 
@@ -12,73 +14,41 @@ template <typename T>
 class LockFreeQueue : public base::noncopyable {
  public:
   LockFreeQueue() {
-    Node* dummy = new Node();  // Dummy node
-    head_.store(dummy);
-    tail_.store(dummy);
+    head_.store(nullptr);
+    tail_.store(nullptr);
   }
 
-  ~LockFreeQueue() {
-    while (Node* old_head = head_.load()) {
-      head_.store(old_head->next);
-      delete old_head;
-    }
-  }
+  ~LockFreeQueue() = default;
 
-  void Push(T& value) {
-    std::shared_ptr<T> new_data = std::make_shared<T>(std::move(value));
-    Node* new_node = new Node();
-    new_node->data = new_data;
-
-    do {
-      Node* old_tail = tail_.load();
-      Node* next = old_tail->next;
-      if (old_tail == tail_.load()) {
-        if (next == nullptr) {
-          if (old_tail->next.compare_exchange_weak(next, new_node)) {
-            tail_.compare_exchange_weak(old_tail, new_node);
-            return;
-          }
-        } else {
-          tail_.compare_exchange_weak(old_tail, next);
-        }
-      }
-    } while (true);
+  void Push(T value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.push(std::move(value));
   }
 
   bool Pop(T& value) {
-    Node* old_head;
-
-    do {
-      old_head = head_.load();  // Read current head
-      Node* next = old_head->next.load(std::memory_order_acquire);
-      if (old_head == tail_.load(std::memory_order_acquire)) {
-        return false;  // Queue is empty
-      }
-
-    } while (!head_.compare_exchange_weak(old_head, old_head->next,
-                                          std::memory_order_release));
-
-    value = *(old_head->next.load()->data);  // Read value
-    delete old_head;                         // Free old node
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty()) {
+      return false;
+    }
+    value = std::move(queue_.front());
+    queue_.pop();
     return true;
   }
 
-  bool Empty() const { return head_.load() == tail_.load(); }
+  bool Empty() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_.empty();
+  }
 
   bool Full() const {
     return false;  // Queue is unbounded
   }
 
  protected:
-  struct Node {
-    std::shared_ptr<T> data;
-    std::atomic<Node*> next;
-
-    Node() : next(nullptr) {}
-  };
-
-  std::atomic<Node*> head_;
-  std::atomic<Node*> tail_;
+  mutable std::mutex mutex_;
+  std::queue<T> queue_;
+  std::atomic<void*> head_;
+  std::atomic<void*> tail_;
 };
 
 template <typename T>

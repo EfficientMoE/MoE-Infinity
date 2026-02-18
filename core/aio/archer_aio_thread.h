@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <list>
 #include <mutex>
@@ -30,10 +31,12 @@ class ArcherAioThread {
  private:
   int thread_id_;
   std::thread thread_;
-  bool is_running_;
+  std::atomic<bool> is_running_;
 
   std::list<AioCallback> callbacks_;
 
   std::mutex mutex_;
+  std::condition_variable cv_;
+  std::condition_variable done_cv_;
   std::atomic<int> pending_callbacks_;
 };

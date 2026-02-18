@@ -12,6 +12,7 @@
 #include <unordered_map>
 
 #include "archer_aio_threadpool.h"
+#include "memory/pinned_memory_pool.h"
 #include "utils/simple_object_pool.h"
 
 static const std::size_t kAioAlignment = 4096;
@@ -27,10 +28,15 @@ struct AioRequest {
 
 class ArcherPrioAioContext {
  public:
-  explicit ArcherPrioAioContext(const int block_size);
+  explicit ArcherPrioAioContext(const int block_size,
+                                std::atomic<bool>& time_to_exit,
+                                int num_io_threads = 0);
   ~ArcherPrioAioContext();
 
+  static int GetDefaultNumIoThreads();
+
   void AcceptRequest(std::shared_ptr<AioRequest>& io_request, bool high_prio);
+  void NotifyExit();
 
   void Schedule();
   std::vector<AioCallback> PrepIocbs(const bool read_op, void* buffer,
@@ -47,12 +53,17 @@ class ArcherPrioAioContext {
   std::deque<std::shared_ptr<struct AioRequest>> io_queue_high_;
   std::deque<std::shared_ptr<struct AioRequest>> io_queue_low_;
 
+  std::condition_variable schedule_cv_;
+  std::mutex schedule_mutex_;
+  std::atomic<bool>& time_to_exit_;
+
   std::unique_ptr<ArcherAioThreadPool> thread_pool_;
 };
 
 class ArcherPrioAioHandle {
  public:
-  explicit ArcherPrioAioHandle(const std::string& prefix);
+  explicit ArcherPrioAioHandle(const std::string& prefix,
+                               int num_io_threads = 0);
   ~ArcherPrioAioHandle();
 
   std::int64_t Read(const std::string& filename, void* buffer,
@@ -66,9 +77,10 @@ class ArcherPrioAioHandle {
   void Run();  // io submit thread function
 
  private:
-  bool time_to_exit_;
+  std::atomic<bool> time_to_exit_;
   std::thread thread_;
   std::mutex file_set_mutex_;
   std::unordered_map<std::string, int> file_set_;
+  std::shared_ptr<PinnedMemoryPool> pinned_pool_;
   ArcherPrioAioContext aio_context_;
 };

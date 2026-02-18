@@ -16,7 +16,10 @@ extern const char* ARCHER_IHDEX_NAME;
 
 class ArcherTensorHandle : public base::noncopyable {
  public:
-  explicit ArcherTensorHandle(const std::string& prefix);
+  static constexpr int64_t kPartitionSize = 10LL * 1024 * 1024 * 1024;
+
+  explicit ArcherTensorHandle(const std::string& prefix,
+                              int num_io_threads = 0);
   ~ArcherTensorHandle() = default;
 
   void StoreTensor(const std::uint32_t tensor_id, torch::Tensor& buffer);
