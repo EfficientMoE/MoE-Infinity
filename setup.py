@@ -195,12 +195,7 @@ print(f"find_packages: {find_packages()}")
 setup(
     name="moe_infinity",
     version=os.getenv("MOEINF_VERSION", "0.0.1"),
-    packages=find_packages(
-        exclude=["moe_infinity.ops.core.*", "extensions", "extensions.*"]
-    ),
-    package_data={
-        "moe_infinity": ["ops/core/**"],
-    },
+    packages=find_packages(exclude=["extensions", "extensions.*"]),
     include_package_data=True,
     install_requires=install_requires,
     author="EfficientMoE Team",
