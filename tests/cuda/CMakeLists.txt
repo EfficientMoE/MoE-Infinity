@@ -104,6 +104,7 @@ include_directories(
     ${CUTLASS_DIR}/examples/13_two_tensor_op_fusion
     ${CUTLASS_DIR}/examples/common
     ${CONDA_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../extensions
     ${CMAKE_SOURCE_DIR}/../../core
 )
 
@@ -143,7 +144,7 @@ set(TORCH_SRC_LIST
   test_fused_mlp_wmma.cu
 )
 
-file(GLOB KERNEL_SRC "${CMAKE_SOURCE_DIR}/../../core/kernel/*.cu")
+file(GLOB KERNEL_SRC "${CMAKE_SOURCE_DIR}/../../extensions/kernel/*.cu")
 message(STATUS "Using kernel source files: ${KERNEL_SRC}, ${CMAKE_SOURCE_DIR}")
 
 FOREACH(SRC ${SRC_LIST})

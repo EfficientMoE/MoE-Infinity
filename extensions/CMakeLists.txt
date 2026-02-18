@@ -26,6 +26,10 @@ target_compile_options(prefetch_op PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-O3 -Wall -Wno-reorder -fPIC -fopenmp -march=native>
 )
 
+target_include_directories(prefetch_op PRIVATE
+  ${CMAKE_SOURCE_DIR}/extensions
+)
+
 install(TARGETS prefetch_op
   LIBRARY DESTINATION "${CMAKE_SOURCE_DIR}/moe_infinity/ops/prefetch"
   COMPONENT Runtime

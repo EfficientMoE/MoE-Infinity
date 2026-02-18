@@ -2,12 +2,12 @@ import time
 
 import torch
 
-from moe_infinity.ops.op_builder.compute import ComputeBuilder
+import moe_infinity._engine as engine
 
 torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 torch.backends.cudnn.deterministic = True
 
-lib = ComputeBuilder().load()
+lib = engine
 
 # B, D, H = 128, 1024, 4096
 B, D, H = 128, 128, 1024

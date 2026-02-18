@@ -6,10 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# _GLIBCXX_USE_CXX11_ABI=0 required for libtorch compatibility
-# (confirmed by tests/cuda/CMakeLists.txt line 4)
-add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
-
 # Find Python
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 

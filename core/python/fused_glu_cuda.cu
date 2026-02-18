@@ -240,7 +240,7 @@ at::Tensor fused_silu_gemm(torch::Tensor hidden, torch::Tensor gate_proj) {
     if (launch_err != cudaSuccess) {
       std::cerr << "Kernel launch failed: " << cudaGetErrorString(launch_err)
                 << std::endl;
-      return;
+      return output;
     }
   }
 
@@ -394,10 +394,131 @@ at::Tensor fused_silu_gemm_cublas(torch::Tensor hidden,
   return output;
 }
 
+at::Tensor expert_fused_mlp(torch::Tensor input, torch::Tensor w1,
+                            torch::Tensor w3, torch::Tensor w2);
+at::Tensor expert_fused_mlp_batched(torch::Tensor input, torch::Tensor w1_list,
+                                    torch::Tensor w3_list,
+                                    torch::Tensor w2_list,
+                                    torch::Tensor expert_ids);
+
+// ============================================================================
+// Expert GEMM implementations from expert_gemm.cu
+// ============================================================================
+
+__device__ __forceinline__ float expert_silu(float x) {
+  return x / (1.0f + expf(-x));
+}
+
+__global__ void expert_silu_multiply_kernel(
+    const __nv_bfloat16* __restrict__ gate_output,
+    const __nv_bfloat16* __restrict__ up_output,
+    __nv_bfloat16* __restrict__ output, int num_tokens, int inter_dim) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < num_tokens * inter_dim) {
+    float gate = __bfloat162float(gate_output[idx]);
+    float up = __bfloat162float(up_output[idx]);
+    float result = expert_silu(gate) * up;
+    output[idx] = __float2bfloat16(result);
+  }
+}
+
+at::Tensor expert_fused_mlp(torch::Tensor input, torch::Tensor w1,
+                            torch::Tensor w3, torch::Tensor w2) {
+  TORCH_CHECK(input.is_cuda(), "Input must be CUDA");
+  TORCH_CHECK(input.scalar_type() == at::kBFloat16, "Expected BF16 input");
+  TORCH_CHECK(w1.scalar_type() == at::kBFloat16, "Expected BF16 w1");
+  TORCH_CHECK(w3.scalar_type() == at::kBFloat16, "Expected BF16 w3");
+  TORCH_CHECK(w2.scalar_type() == at::kBFloat16, "Expected BF16 w2");
+
+  const int num_tokens = input.size(0);
+  const int D = input.size(1);
+  const int inter_dim = w1.size(0);
+
+  auto gate_output = torch::empty({num_tokens, inter_dim}, input.options());
+  auto up_output = torch::empty({num_tokens, inter_dim}, input.options());
+  auto gate_up_fused = torch::empty({num_tokens, inter_dim}, input.options());
+  auto output = torch::empty({num_tokens, D}, input.options());
+
+  cublasHandle_t handle;
+  cublasCreate(&handle);
+  float alpha = 1.0f, beta = 0.0f;
+
+  // gate_output = input @ w1.T
+  cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, inter_dim, num_tokens, D,
+               &alpha, w1.data_ptr<at::BFloat16>(), CUDA_R_16BF, D,
+               input.data_ptr<at::BFloat16>(), CUDA_R_16BF, D, &beta,
+               gate_output.data_ptr<at::BFloat16>(), CUDA_R_16BF, inter_dim,
+               CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+
+  // up_output = input @ w3.T
+  cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, inter_dim, num_tokens, D,
+               &alpha, w3.data_ptr<at::BFloat16>(), CUDA_R_16BF, D,
+               input.data_ptr<at::BFloat16>(), CUDA_R_16BF, D, &beta,
+               up_output.data_ptr<at::BFloat16>(), CUDA_R_16BF, inter_dim,
+               CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+
+  cublasDestroy(handle);
+
+  // SiLU(gate_output) * up_output
+  const int threads = 256;
+  const int blocks = (num_tokens * inter_dim + threads - 1) / threads;
+  expert_silu_multiply_kernel<<<blocks, threads>>>(
+      reinterpret_cast<__nv_bfloat16*>(gate_output.data_ptr<at::BFloat16>()),
+      reinterpret_cast<__nv_bfloat16*>(up_output.data_ptr<at::BFloat16>()),
+      reinterpret_cast<__nv_bfloat16*>(gate_up_fused.data_ptr<at::BFloat16>()),
+      num_tokens, inter_dim);
+
+  // output = gate_up_fused @ w2.T
+  cublasCreate(&handle);
+  cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, D, num_tokens, inter_dim,
+               &alpha, w2.data_ptr<at::BFloat16>(), CUDA_R_16BF, inter_dim,
+               gate_up_fused.data_ptr<at::BFloat16>(), CUDA_R_16BF, inter_dim,
+               &beta, output.data_ptr<at::BFloat16>(), CUDA_R_16BF, D,
+               CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+  cublasDestroy(handle);
+  cudaDeviceSynchronize();
+
+  return output;
+}
+
+at::Tensor expert_fused_mlp_batched(torch::Tensor input, torch::Tensor w1_list,
+                                    torch::Tensor w3_list,
+                                    torch::Tensor w2_list,
+                                    torch::Tensor expert_ids) {
+  TORCH_CHECK(input.is_cuda(), "Input must be CUDA");
+  TORCH_CHECK(input.scalar_type() == at::kBFloat16, "Expected BF16");
+
+  const int num_tokens = input.size(0);
+  const int D = input.size(1);
+  const int inter_dim = w1_list.size(1);
+  const int num_experts = w1_list.size(0);
+
+  auto output = torch::empty({num_tokens, D}, input.options());
+
+  for (int expert_id = 0; expert_id < num_experts; expert_id++) {
+    auto mask = (expert_ids == expert_id);
+    auto token_indices = mask.nonzero().squeeze();
+    if (token_indices.numel() == 0) continue;
+
+    auto expert_input = input.index_select(0, token_indices);
+    auto w1 = w1_list[expert_id];
+    auto w3 = w3_list[expert_id];
+    auto w2 = w2_list[expert_id];
+    auto expert_output = expert_fused_mlp(expert_input, w1, w3, w2);
+    output.index_copy_(0, token_indices, expert_output);
+  }
+
+  return output;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("linear_cublaslt_bf16", &linear_cublaslt_bf16,
         "Linear layer with cuBLAS LT (BF16)");
   m.def("fused_silu_gemm", &fused_silu_gemm, "Fused GEMM + SiLU (CUDA, BF16)");
   m.def("fused_silu_gemm_cublas", &fused_silu_gemm_cublas,
         "Fused GEMM + SiLU (CUDA, BF16, CUBLAS)");
+  m.def("expert_fused_mlp", &expert_fused_mlp,
+        "Fused Expert MLP (gate+up fused, then down) - cuBLAS version");
+  m.def("expert_fused_mlp_batched", &expert_fused_mlp_batched,
+        "Fused Expert MLP for batched experts");
 }

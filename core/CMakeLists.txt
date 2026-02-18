@@ -43,8 +43,8 @@ set(ARCHER_CORE_CXX_SOURCES
 
 set(ARCHER_CORE_CUDA_SOURCES
   ${CMAKE_SOURCE_DIR}/core/model/fused_mlp.cu
-  ${CMAKE_SOURCE_DIR}/core/kernel/activation_kernels.cu
-  ${CMAKE_SOURCE_DIR}/core/kernel/topk_softmax_kernels.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/activation_kernels.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/topk_softmax_kernels.cu
 )
 
 add_library(archer_core STATIC
@@ -54,6 +54,7 @@ add_library(archer_core STATIC
 
 target_include_directories(archer_core PUBLIC
   ${CMAKE_SOURCE_DIR}/core
+  ${CMAKE_SOURCE_DIR}/extensions
   ${CUTLASS_DIR}/include
   ${CUTLASS_DIR}/tools/util/include
   ${TORCH_INCLUDE_DIRS}
