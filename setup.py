@@ -129,6 +129,7 @@ _STORE_SOURCES = [
     "core/base/thread_pool.cc",
     # CUDA kernels for store
     "core/model/fused_mlp.cu",
+    "extensions/kernel/fused_moe_mlp.cu",
     "extensions/kernel/activation_kernels.cu",
     "extensions/kernel/topk_softmax_kernels.cu",
     # Python binding

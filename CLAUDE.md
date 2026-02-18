@@ -36,7 +36,7 @@ pip install -e .
 conda install -c conda-forge libstdcxx-ng=12
 
 # Build with custom ops (requires PyTorch)
-BUILD_OPS=1 pip install -e .
+BUILD_OPS=1 MAX_JOBS=$(nproc) pip install -e .
 
 # (Optional) Enable FlashAttention for faster inference
 FLASH_ATTENTION_FORCE_BUILD=TRUE pip install flash-attn
@@ -201,6 +201,7 @@ tests/
 ├── cuda/
 │   ├── CMakeLists.txt
 │   ├── test_fused_mlp.cu
+│   ├── test_fused_mlp_cutlass.cu  # BF16 CUTLASS vs Torch-native MLP benchmark
 │   ├── test_topk_softmax.cu
 │   └── ...
 └── python/
@@ -222,14 +223,31 @@ tests/docker/                              # I/O integration tests (pybind11 + p
 ```bash
 # Build and run queue tests
 cd tests/cpp/unittest/queues
-cmake -B build && cmake --build build
+cmake -B build && cmake --build build -j$(nproc)
 ctest --test-dir build -V
 
 # Build and run utils tests (LFUCache, SimpleObjectPool)
 cd tests/cpp/unittest/utils
-cmake -B build && cmake --build build
+cmake -B build && cmake --build build -j$(nproc)
 ctest --test-dir build -V
 ```
+
+### Building & Running CUDA Benchmark Tests
+
+```bash
+# Build a specific CUDA benchmark (requires CUTLASS at ~/cutlass and a GPU)
+cd tests/cuda
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target test_fused_mlp_cutlass -j$(nproc)
+./build/test_fused_mlp_cutlass
+
+# Build all CUDA tests
+cmake --build build -j$(nproc)
+```
+
+> **CMakeLists.txt pattern:** tests that need `${KERNEL_SRC}` (i.e. link
+> `extensions/kernel/*.cu`) must be added to `TORCH_SRC_LIST` **and** listed
+> in the `IF(SRC_NAME STREQUAL "..." OR ...)` guard in the `FOREACH` loop.
 
 ### Docker Build & Integration Tests
 

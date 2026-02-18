@@ -1,10 +1,14 @@
 #pragma once
 
+#include <cmath>
+#include <cutlass/array.h>
 #include <cutlass/cutlass.h>
-#include <cutlass/gemm/device/gemm.h>
+#include <cutlass/epilogue/thread/linear_combination.h>
 #include <cutlass/epilogue/thread/linear_combination_silu.h>
-#include <cutlass/layout/row_major.h>
-#include <cutlass/layout/column_major.h>
+#include <cutlass/gemm/device/gemm.h>
+#include <cutlass/layout/matrix.h>
+#include <cutlass/numeric_conversion.h>
+#include <cutlass/numeric_types.h>
 
 // Data type
 using ElementInput = cutlass::bfloat16_t;
@@ -22,7 +26,7 @@ using LayoutA = cutlass::layout::RowMajor;
 using LayoutB = cutlass::layout::ColumnMajor;
 using LayoutC = cutlass::layout::RowMajor;
 
-using EpilogueOutputOp = cutlass::epilogue::thread::LinearCombinationSiLU<
+using EpilogueOutputOp = cutlass::epilogue::thread::LinearCombinationSilu<
     ElementOutput,  // Element type for output
     128 / cutlass::sizeof_bits<ElementOutput>::value,  // Elements per
                                                        // vectorized access
@@ -38,96 +42,85 @@ using FusedGemmSiLU = cutlass::gemm::device::Gemm<
     EpilogueOutputOp  // Fused epilogue with SiLU
     >;
 
-#include <cutlass/cutlass.h>
-#include <cutlass/gemm/device/gemm.h>
-#include <cutlass/epilogue/thread/linear_combination.h>
-#include <cutlass/epilogue/thread/linear_combination_silu.h>
-#include <cutlass/layout/row_major.h>
-#include <cutlass/layout/column_major.h>
-#include <cutlass/numeric_types.h>
-#include <cutlass/arch/arch.h>
-#include <cuda_runtime.h>
-#include <iostream>
+// Custom SiLU-Mul epilogue: D[i] = silu(source[i]) * accum[i]
+//
+// Used as the epilogue for the up-projection GEMM in fused MoE MLP:
+//   accum  = input @ up_proj^T     (result of this GEMM)
+//   source = gate_out              (result of prior gate GEMM, passed as C)
+//   D      = silu(gate_out) * up_accum   -> written to fused_buf
+template <typename ElementOutput_, int Count,
+          typename ElementAccumulator_ = float,
+          typename ElementCompute_ = float>
+struct SiLUAndMulEpilogue {
+  using ElementOutput = ElementOutput_;
+  using ElementAccumulator = ElementAccumulator_;
+  using ElementCompute = ElementCompute_;
 
-// Define data types
-using ElementInput = cutlass::half_t;
-using ElementOutput = cutlass::half_t;
-using ElementAccumulator = float;
-using ElementCompute = float;
+  static int const kCount = Count;
 
-// Layouts
-using LayoutA = cutlass::layout::RowMajor;     // X
-using LayoutB = cutlass::layout::ColumnMajor;  // Weights
-using LayoutC = cutlass::layout::RowMajor;     // Output
+  using FragmentOutput = cutlass::Array<ElementOutput, kCount>;
+  using FragmentAccumulator = cutlass::Array<ElementAccumulator, kCount>;
+  using FragmentCompute = cutlass::Array<ElementCompute, kCount>;
 
-// Tile sizes (adjust for your GPU architecture)
-using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;
-using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;
-using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
+  struct Params {
+    ElementCompute alpha;
+    ElementCompute beta;
+    CUTLASS_HOST_DEVICE Params()
+        : alpha(ElementCompute(1)), beta(ElementCompute(1)) {}
+    CUTLASS_HOST_DEVICE Params(ElementCompute a, ElementCompute b)
+        : alpha(a), beta(b) {}
+  };
 
-// Epilogue for GEMM3 (down projection)
-using EpilogueOutputOp = cutlass::epilogue::thread::LinearCombination<
-    ElementOutput, 128 / cutlass::sizeof_bits<ElementOutput>::value,
-    ElementAccumulator, ElementCompute>;
+ private:
+  Params params_;
 
-// GEMM3 definition (fused output * Wd^T)
-using Gemm3 = cutlass::gemm::device::Gemm<
-    ElementOutput, LayoutA, ElementInput, LayoutB, ElementOutput, LayoutC,
-    ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
-    ThreadblockShape, WarpShape, InstructionShape, EpilogueOutputOp>;
+ public:
+  CUTLASS_HOST_DEVICE SiLUAndMulEpilogue(Params const& params)
+      : params_(params) {}
 
-// Fully fused kernel for GEMM1+SiLU+GEMM2+Mul
-__global__ void FusedMoEMLPKernel(
-    ElementInput const* X,   // [B, InputSize]
-    ElementInput const* Wg,  // [HiddenSize, InputSize]
-    ElementInput const* Wu,  // [UpSize, InputSize]
-    ElementInput const* Wd,  // [OutSize, UpSize], optional
-    ElementOutput* Output,   // [B, OutSize] if Wd != nullptr else [B, UpSize]
-    int B, int InputSize, int HiddenSize, int UpSize, int OutSize,
-    bool has_Wd) {
-  int row = blockIdx.x * blockDim.x + threadIdx.x;  // Batch
-  if (row >= B) return;
+  // Source (C matrix = gate_out) is always needed
+  CUTLASS_HOST_DEVICE bool is_source_needed() const { return true; }
 
-  // Pointers
-  const ElementInput* X_row = X + row * InputSize;
-  const ElementInput* Wg_col = Wg;
-  const ElementInput* Wu_col = Wu;
+  // No-op for split-K (not used)
+  CUTLASS_HOST_DEVICE void set_k_partition(int, int) {}
 
-  // Accumulators for GEMM1 and GEMM2
-  ElementAccumulator acc_g[HiddenSize] = {0};
-  ElementAccumulator acc_u[UpSize] = {0};
+  // D[i] = silu(source[i]) * accum[i]
+  // source = gate_out, accum = up-projection result
+  CUTLASS_HOST_DEVICE FragmentOutput operator()(
+      FragmentAccumulator const& accum, FragmentOutput const& source) const {
+    cutlass::NumericConverter<ElementCompute, ElementAccumulator> to_compute_a;
+    cutlass::NumericConverter<ElementCompute, ElementOutput> to_compute_s;
+    cutlass::NumericConverter<ElementOutput, ElementCompute> to_output;
 
-  // Compute GEMM1 and GEMM2 in registers
-  for (int k = 0; k < InputSize; ++k) {
-    ElementInput x = X_row[k];
-    for (int n = 0; n < HiddenSize; ++n)
-      acc_g[n] += static_cast<ElementAccumulator>(x) *
-                  static_cast<ElementAccumulator>(Wg_col[n * InputSize + k]);
-    for (int n = 0; n < UpSize; ++n)
-      acc_u[n] += static_cast<ElementAccumulator>(x) *
-                  static_cast<ElementAccumulator>(Wu_col[n * InputSize + k]);
+    FragmentOutput result;
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < kCount; ++i) {
+      ElementCompute x = to_compute_s(source[i]);
+      ElementCompute u = to_compute_a(accum[i]);
+      // SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
+      ElementCompute silu_x =
+          x * (ElementCompute(1) /
+               (ElementCompute(1) + expf(-static_cast<float>(x))));
+      result[i] = to_output(silu_x * u);
+    }
+
+    return result;
   }
 
-  // Apply SiLU to GEMM1 result
-  for (int n = 0; n < HiddenSize; ++n) {
-    float x = static_cast<float>(acc_g[n]);
-    acc_g[n] = x * (1.0f / (1.0f + expf(-x)));  // SiLU
-  }
+  // Fallback when source is not needed (required by interface, not called here)
+  CUTLASS_HOST_DEVICE FragmentOutput
+  operator()(FragmentAccumulator const& accum) const {
+    cutlass::NumericConverter<ElementCompute, ElementAccumulator> to_compute_a;
+    cutlass::NumericConverter<ElementOutput, ElementCompute> to_output;
 
-  // Fused output = SiLU(GEMM1) * GEMM2
-  ElementAccumulator fused[UpSize];
-  for (int n = 0; n < UpSize; ++n) {
-    fused[n] = acc_u[n];
-  }
+    FragmentOutput result;
 
-  for (int n = 0; n < min(HiddenSize, UpSize); ++n) {
-    fused[n] *= acc_g[n];  // Elementwise multiply
-  }
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < kCount; ++i) {
+      result[i] = to_output(to_compute_a(accum[i]));
+    }
 
-  for (int n = 0; n < OutSize; ++n) {
-    ElementAccumulator acc_out = 0;
-    for (int k = 0; k < UpSize; ++k)
-      acc_out += fused[k] * static_cast<ElementAccumulator>(Wd[n * UpSize + k]);
-    Output[row * OutSize + n] = static_cast<ElementOutput>(acc_out);
+    return result;
   }
-}
+};

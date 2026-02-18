@@ -142,6 +142,7 @@ set(TORCH_SRC_LIST
   test_expert_fusion_v2.cu
   # tests_masked_select.cu
   test_fused_mlp_wmma.cu
+  test_fused_mlp_cutlass.cu
 )
 
 file(GLOB KERNEL_SRC "${CMAKE_SOURCE_DIR}/../../extensions/kernel/*.cu")
@@ -156,7 +157,8 @@ ENDFOREACH()
 
 FOREACH(SRC ${TORCH_SRC_LIST})
   get_filename_component(SRC_NAME ${SRC} NAME_WE)
-  IF(${SRC_NAME} STREQUAL "test_topk_softmax")
+  IF(${SRC_NAME} STREQUAL "test_topk_softmax" OR
+     ${SRC_NAME} STREQUAL "test_fused_mlp_cutlass")
     add_executable(${SRC_NAME} ${SRC} ${KERNEL_SRC})
   ELSE()
     add_executable(${SRC_NAME} ${SRC})

@@ -44,7 +44,7 @@ RUN mkdir -p ${CCACHE_DIR}
 # Install CUTLASS (default to a 3.x release; override with build args)
 # ---------------------------------------------------------------
 ARG CUTLASS_REPO=https://github.com/NVIDIA/cutlass.git
-ARG CUTLASS_VERSION=v3.5.1
+ARG CUTLASS_VERSION=v3.9.2
 ARG CUTLASS_NVCC_ARCHS=80
 ENV CUTLASS_DIR=/root/cutlass
 

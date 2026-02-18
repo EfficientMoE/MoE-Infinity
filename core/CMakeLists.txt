@@ -43,6 +43,7 @@ set(ARCHER_CORE_CXX_SOURCES
 
 set(ARCHER_CORE_CUDA_SOURCES
   ${CMAKE_SOURCE_DIR}/core/model/fused_mlp.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/fused_moe_mlp.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/activation_kernels.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/topk_softmax_kernels.cu
 )

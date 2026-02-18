@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <stack>
+#include <vector>
 
 /** Pool for objects that cannot be used from different threads simultaneously.
  * Allows to create an object for each thread.

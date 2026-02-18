@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <unordered_set>
 #include <vector>
