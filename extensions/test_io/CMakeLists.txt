@@ -2,7 +2,7 @@ find_library(torch_python_LIBRARY torch_python
   PATHS "${TORCH_INSTALL_PREFIX}/lib")
 
 Python3_add_library(test_io_module MODULE WITH_SOABI
-  ${CMAKE_SOURCE_DIR}/docker/tests/test_io_module.cpp
+  ${CMAKE_SOURCE_DIR}/tests/docker/test_io_module.cpp
 )
 
 # --whole-archive forces all object files from the static lib into the shared
@@ -20,6 +20,6 @@ target_compile_options(test_io_module PRIVATE
 )
 
 install(TARGETS test_io_module
-  LIBRARY DESTINATION "${CMAKE_SOURCE_DIR}/docker/tests"
+  LIBRARY DESTINATION "${CMAKE_SOURCE_DIR}/tests/docker"
   COMPONENT TestRuntime
 )
