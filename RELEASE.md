@@ -36,7 +36,7 @@ For developers who prefer to manually build and publish their package to PyPI, t
     ```
 3. Build the source distribution and wheel for the package using:
     ```bash
-    BUILD_OPS=1 python -m build
+    python -m build
     ```
     This command generates the package files in the `dist/` directory.
 4. Upload the built package to the PyPI repository using `twine`:

@@ -35,8 +35,8 @@ cd MoE-Infinity
 pip install -e .
 conda install -c conda-forge libstdcxx-ng=12
 
-# Build with custom ops (requires PyTorch)
-BUILD_OPS=1 MAX_JOBS=$(nproc) pip install -e .
+# Build with custom ops (requires PyTorch + CUDA toolkit)
+MAX_JOBS=$(nproc) pip install -e .
 
 # (Optional) Enable FlashAttention for faster inference
 FLASH_ATTENTION_FORCE_BUILD=TRUE pip install flash-attn
