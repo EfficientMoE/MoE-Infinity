@@ -1,4 +1,3 @@
-import ast
 import os
 import subprocess
 import sys
@@ -23,15 +22,20 @@ def test_interface_example_help():
     )
 
 
-def test_readme_example_syntax():
-    """Verify readme_example.py has no syntax errors."""
-    source = (EXAMPLES_DIR / "readme_example.py").read_text()
-    try:
-        compile(ast.parse(source), "readme_example.py", "exec")
-    except SyntaxError as e:
-        raise AssertionError(
-            f"Syntax error in readme_example.py: {e}"
-        ) from e
+def test_readme_example_help():
+    """Verify readme_example.py --help exits 0 (all imports OK, argparse OK)."""
+    repo_root = str(EXAMPLES_DIR.parent)
+    env = {**os.environ, "PYTHONPATH": repo_root}
+    result = subprocess.run(
+        [sys.executable, str(EXAMPLES_DIR / "readme_example.py"), "--help"],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        env=env,
+    )
+    assert result.returncode == 0, (
+        f"--help exited {result.returncode}\n{result.stderr}"
+    )
 
 
 def test_example_imports_available():
