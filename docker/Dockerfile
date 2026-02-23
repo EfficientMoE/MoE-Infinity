@@ -70,6 +70,8 @@ RUN pip install --no-cache-dir \
     ninja \
     py-cpuinfo
 
+RUN pip install --no-cache-dir -r requirements.txt
+
 # ---------------------------------------------------------------
 # Build the torch extensions (inplace, no package install)
 RUN --mount=type=cache,target=/ccache \

@@ -12,10 +12,10 @@ packaging>=20.0
 protobuf
 py-cpuinfo
 pyarrow==14.0.1
-pydantic==1.10.12
+pydantic==1.10.13
 scipy
 sentencepiece
 sphinx
-torch==2.3.1
-transformers==4.51.3
+transformers==4.53.0
 uvicorn
+flash-attn
