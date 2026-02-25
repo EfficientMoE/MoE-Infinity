@@ -17,7 +17,9 @@ Modes
 
 import argparse
 import ctypes
+import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -189,278 +191,62 @@ def run_dual_stream(stream1, stream2):
 
 
 # ---------------------------------------------------------------------------
-# Green context setup (modes 3 & 4)
+# Green context setup (modes 3 & 4) — backed by green_ctx.so (C++)
+#
+# All CUDA driver API calls are made inside green_ctx.cpp, compiled against
+# the real <cuda.h> headers.  Python only passes primitive integers across
+# the boundary, so struct-layout changes between CUDA versions have no effect
+# here.
 # ---------------------------------------------------------------------------
 
-# ctypes struct definitions matching cuda.h (CUDA 13.1 / driver 590.x)
-#
-# CUdevResource layout (CUDA 13.1):
-#   offset  0: type (int, 4 bytes)
-#   offset  4: _padding[92] (92 bytes)
-#   offset 96: anonymous union (RESOURCE_ABI_BYTES = 40 bytes)
-#                sm:      CUdevSmResource      (4 uints = 16 bytes)
-#                wqConfig: CUdevWorkqueueConfigResource (3 fields = 12 bytes)
-#                _oversize: unsigned char[40]
-#   offset 136: nextResource (pointer, 8 bytes)
-#   total: 144 bytes
+_HERE = Path(__file__).parent
+_SO   = _HERE / "green_ctx.so"
 
 
-class CUdevResourceSM(ctypes.Structure):
-    """CUdevSmResource from CUDA 13.1 cuda.h — 4 unsigned int fields."""
-    _fields_ = [
-        ("smCount", ctypes.c_uint),
-        ("minSmPartitionSize", ctypes.c_uint),
-        ("smCoscheduledAlignment", ctypes.c_uint),
-        ("flags", ctypes.c_uint),
-    ]
+def _build_and_load_green_ctx():
+    """Compile green_ctx.so if not present, then return ctypes.CDLL handle."""
+    if not _SO.exists():
+        subprocess.check_call(["make", "-C", str(_HERE), "green_ctx.so"])
+    return ctypes.CDLL(str(_SO))
 
 
-class CUdevWorkqueueConfigResource(ctypes.Structure):
-    """CUdevWorkqueueConfigResource from CUDA 13.1 cuda.h."""
-    _fields_ = [
-        ("device", ctypes.c_int),
-        ("wqConcurrencyLimit", ctypes.c_uint),
-        ("sharingScope", ctypes.c_int),  # CUdevWorkqueueConfigScope enum
-    ]
-
-
-class CUdevResourceUnion(ctypes.Union):
-    """Anonymous union inside CUdevResource; RESOURCE_ABI_BYTES = 40."""
-    _fields_ = [
-        ("sm", CUdevResourceSM),
-        ("wqConfig", CUdevWorkqueueConfigResource),
-        ("_data", ctypes.c_uint8 * 40),
-    ]
-
-
-class CUdevResource(ctypes.Structure):
+def setup_green_ctx_sm(device_id: int = 0):
     """
-    CUdevResource from CUDA 13.1 cuda.h.
-    type(4) + _pad(92) + union(40) + nextResource(8) = 144 bytes.
-    The union (containing sm / wqConfig) starts at offset 96.
+    Create two SM-partitioned green contexts via green_ctx.so.
+    Returns (stream1, stream2, (sm0, sm1, total)) or raises RuntimeError.
     """
-    _fields_ = [
-        ("type", ctypes.c_int),              # offset 0
-        ("_pad", ctypes.c_uint8 * 92),       # offset 4
-        ("res", CUdevResourceUnion),         # offset 96, size 40
-        ("nextResource", ctypes.c_void_p),   # offset 136, size 8
-    ]
+    lib = _build_and_load_green_ctx()
+    s0, s1 = ctypes.c_uint64(), ctypes.c_uint64()
+    sm0, sm1, total = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+    ret = lib.gc_setup_sm(device_id,
+                          ctypes.byref(s0), ctypes.byref(s1),
+                          ctypes.byref(sm0), ctypes.byref(sm1),
+                          ctypes.byref(total))
+    if ret != 0:
+        raise RuntimeError(f"gc_setup_sm failed (CUDA error {ret})")
+    return (torch.cuda.ExternalStream(s0.value),
+            torch.cuda.ExternalStream(s1.value),
+            (sm0.value, sm1.value, total.value))
 
 
-# CUdevResourceDesc is an opaque POINTER (typedef struct CUdevResourceDesc_st *)
-# NOT a struct — treat as c_void_p.
-CUdevResourceDesc = ctypes.c_void_p
-
-CUgreenCtx = ctypes.c_void_p
-CUstream = ctypes.c_void_p
-
-CU_DEV_RESOURCE_TYPE_SM = 1
-CU_DEV_RESOURCE_TYPE_WORKQUEUE_CONFIG = 1000   # WQ scope configuration
-CU_GREEN_CTX_DEFAULT_STREAM = 1
-CU_STREAM_NON_BLOCKING = 1                     # required by cuGreenCtxStreamCreate
-CU_WORKQUEUE_SCOPE_GREEN_CTX_BALANCED = 1      # avoid scheduling interference
-
-
-def _load_libcuda():
-    for name in ("libcuda.so.1", "libcuda.so"):
-        try:
-            return ctypes.CDLL(name)
-        except OSError:
-            continue
-    return None
-
-
-def setup_green_ctx_sm(libcuda):
+def setup_green_ctx_sm_wq(device_id: int = 0):
     """
-    Create two SM-partitioned green contexts.
-    Returns (stream1, stream2, sm_counts) or raises RuntimeError.
+    Create two SM+WQ-balanced green contexts via green_ctx.so.
+    Requires CUDA 13.1 / driver >= 575.
+    Returns (stream1, stream2, (sm0, sm1, total)) or raises RuntimeError.
     """
-    device = ctypes.c_int()
-    ret = libcuda.cuInit(0)
+    lib = _build_and_load_green_ctx()
+    s0, s1 = ctypes.c_uint64(), ctypes.c_uint64()
+    sm0, sm1, total = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+    ret = lib.gc_setup_sm_wq(device_id,
+                              ctypes.byref(s0), ctypes.byref(s1),
+                              ctypes.byref(sm0), ctypes.byref(sm1),
+                              ctypes.byref(total))
     if ret != 0:
-        raise RuntimeError(f"cuInit failed: {ret}")
-    ret = libcuda.cuDeviceGet(ctypes.byref(device), 0)
-    if ret != 0:
-        raise RuntimeError(f"cuDeviceGet failed: {ret}")
-
-    # Get total SM resource
-    sm_res = CUdevResource()
-    ret = libcuda.cuDeviceGetDevResource(
-        device, ctypes.byref(sm_res), CU_DEV_RESOURCE_TYPE_SM
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuDeviceGetDevResource(SM) failed: {ret}")
-
-    total_sms = sm_res.res.sm.smCount
-
-    # Split into 2 equal partitions.
-    # minCount = total//2 gives each group half the SMs; minCount=1 would give
-    # only smCoscheduledAlignment SMs per group (2 on Ampere), wasting the rest.
-    result_arr = (CUdevResource * 2)()
-    nb = ctypes.c_uint(2)
-    min_count = total_sms // 2
-    ret = libcuda.cuDevSmResourceSplitByCount(
-        result_arr, ctypes.byref(nb), ctypes.byref(sm_res), None, 0, min_count
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuDevSmResourceSplitByCount failed: {ret}")
-
-    sm0 = result_arr[0].res.sm.smCount
-    sm1 = result_arr[1].res.sm.smCount
-
-    # Generate descriptors.
-    # CUdevResourceDesc is a POINTER (c_void_p), not a struct.
-    # cuDevResourceGenerateDesc writes the allocated pointer into *phDesc.
-    desc1 = ctypes.c_void_p()
-    desc2 = ctypes.c_void_p()
-    ret = libcuda.cuDevResourceGenerateDesc(
-        ctypes.byref(desc1), result_arr, 1  # result_arr → pointer to elem[0]
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuDevResourceGenerateDesc[0] failed: {ret}")
-    _ptr1 = ctypes.cast(
-        ctypes.addressof(result_arr) + ctypes.sizeof(CUdevResource),
-        ctypes.POINTER(CUdevResource),
-    )
-    ret = libcuda.cuDevResourceGenerateDesc(
-        ctypes.byref(desc2), _ptr1, 1  # offset pointer to elem[1]
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuDevResourceGenerateDesc[1] failed: {ret}")
-
-    # Create green contexts — pass desc by value (it's a pointer)
-    gctx1 = CUgreenCtx()
-    gctx2 = CUgreenCtx()
-    ret = libcuda.cuGreenCtxCreate(
-        ctypes.byref(gctx1), desc1, device, CU_GREEN_CTX_DEFAULT_STREAM
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuGreenCtxCreate[0] failed: {ret}")
-    ret = libcuda.cuGreenCtxCreate(
-        ctypes.byref(gctx2), desc2, device, CU_GREEN_CTX_DEFAULT_STREAM
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuGreenCtxCreate[1] failed: {ret}")
-
-    # Create streams bound to green contexts.
-    # CU_STREAM_NON_BLOCKING (0x1) is REQUIRED by cuGreenCtxStreamCreate;
-    # passing flags=0 causes CUDA_ERROR_INVALID_VALUE.
-    raw_s1 = CUstream()
-    raw_s2 = CUstream()
-    ret = libcuda.cuGreenCtxStreamCreate(
-        ctypes.byref(raw_s1), gctx1, CU_STREAM_NON_BLOCKING, 0
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuGreenCtxStreamCreate[0] failed: {ret}")
-    ret = libcuda.cuGreenCtxStreamCreate(
-        ctypes.byref(raw_s2), gctx2, CU_STREAM_NON_BLOCKING, 0
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuGreenCtxStreamCreate[1] failed: {ret}")
-
-    stream1 = torch.cuda.ExternalStream(raw_s1.value)
-    stream2 = torch.cuda.ExternalStream(raw_s2.value)
-
-    return stream1, stream2, (sm0, sm1, total_sms)
-
-
-def setup_green_ctx_sm_wq(libcuda):
-    """
-    Create two SM+WQ-balanced green contexts (CUDA 13.1 / driver ≥ 590.x).
-
-    Uses CU_DEV_RESOURCE_TYPE_WORKQUEUE_CONFIG (1000) to set
-    CU_WORKQUEUE_SCOPE_GREEN_CTX_BALANCED, which prevents scheduling
-    interference between the two green contexts' work queues.
-
-    Returns (stream1, stream2, sm_counts) or raises RuntimeError.
-    """
-    device = ctypes.c_int()
-    libcuda.cuInit(0)
-    libcuda.cuDeviceGet(ctypes.byref(device), 0)
-
-    # SM resource — split into 2 equal halves
-    sm_res = CUdevResource()
-    ret = libcuda.cuDeviceGetDevResource(
-        device, ctypes.byref(sm_res), CU_DEV_RESOURCE_TYPE_SM
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuDeviceGetDevResource(SM) failed: {ret}")
-
-    total_sms = sm_res.res.sm.smCount
-    result_arr = (CUdevResource * 2)()
-    nb = ctypes.c_uint(2)
-    min_count = total_sms // 2
-    ret = libcuda.cuDevSmResourceSplitByCount(
-        result_arr, ctypes.byref(nb), ctypes.byref(sm_res), None, 0, min_count
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuDevSmResourceSplitByCount(SM) failed: {ret}")
-
-    # Work-queue configuration resource (CU_DEV_RESOURCE_TYPE_WORKQUEUE_CONFIG=1000).
-    # This is a CONFIGURATION (scope hint), not a splittable resource.
-    # Setting sharingScope=BALANCED requests non-overlapping WQ scheduling.
-    wq_res = CUdevResource()
-    ret = libcuda.cuDeviceGetDevResource(
-        device, ctypes.byref(wq_res), CU_DEV_RESOURCE_TYPE_WORKQUEUE_CONFIG
-    )
-    if ret != 0:
-        raise RuntimeError(
-            f"cuDeviceGetDevResource(WORKQUEUE_CONFIG) failed: {ret} "
-            "(driver < 590.x / CUDA < 13.1)"
-        )
-    wq_res.res.wqConfig.sharingScope = CU_WORKQUEUE_SCOPE_GREEN_CTX_BALANCED
-
-    # Build resource pairs [SM_partition, WQ_config] for each green context.
-    # Use memmove to copy CUdevResource structs (ctypes assignment is shallow).
-    res_pair0 = (CUdevResource * 2)()
-    res_pair1 = (CUdevResource * 2)()
-    _sz = ctypes.sizeof(CUdevResource)
-    ctypes.memmove(ctypes.addressof(res_pair0[0]), ctypes.addressof(result_arr[0]), _sz)
-    ctypes.memmove(ctypes.addressof(res_pair0[1]), ctypes.addressof(wq_res), _sz)
-    ctypes.memmove(ctypes.addressof(res_pair1[0]), ctypes.addressof(result_arr[1]), _sz)
-    ctypes.memmove(ctypes.addressof(res_pair1[1]), ctypes.addressof(wq_res), _sz)
-
-    desc1 = ctypes.c_void_p()
-    desc2 = ctypes.c_void_p()
-    ret = libcuda.cuDevResourceGenerateDesc(ctypes.byref(desc1), res_pair0, 2)
-    if ret != 0:
-        raise RuntimeError(f"cuDevResourceGenerateDesc[0] (SM+WQ) failed: {ret}")
-    ret = libcuda.cuDevResourceGenerateDesc(ctypes.byref(desc2), res_pair1, 2)
-    if ret != 0:
-        raise RuntimeError(f"cuDevResourceGenerateDesc[1] (SM+WQ) failed: {ret}")
-
-    gctx1 = CUgreenCtx()
-    gctx2 = CUgreenCtx()
-    ret = libcuda.cuGreenCtxCreate(
-        ctypes.byref(gctx1), desc1, device, CU_GREEN_CTX_DEFAULT_STREAM
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuGreenCtxCreate[0] (SM+WQ) failed: {ret}")
-    ret = libcuda.cuGreenCtxCreate(
-        ctypes.byref(gctx2), desc2, device, CU_GREEN_CTX_DEFAULT_STREAM
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuGreenCtxCreate[1] (SM+WQ) failed: {ret}")
-
-    raw_s1 = CUstream()
-    raw_s2 = CUstream()
-    ret = libcuda.cuGreenCtxStreamCreate(
-        ctypes.byref(raw_s1), gctx1, CU_STREAM_NON_BLOCKING, 0
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuGreenCtxStreamCreate[0] (SM+WQ) failed: {ret}")
-    ret = libcuda.cuGreenCtxStreamCreate(
-        ctypes.byref(raw_s2), gctx2, CU_STREAM_NON_BLOCKING, 0
-    )
-    if ret != 0:
-        raise RuntimeError(f"cuGreenCtxStreamCreate[1] (SM+WQ) failed: {ret}")
-
-    stream1 = torch.cuda.ExternalStream(raw_s1.value)
-    stream2 = torch.cuda.ExternalStream(raw_s2.value)
-
-    sm0 = result_arr[0].res.sm.smCount
-    sm1 = result_arr[1].res.sm.smCount
-    return stream1, stream2, (sm0, sm1, total_sms)
+        raise RuntimeError(f"gc_setup_sm_wq failed (CUDA error {ret})")
+    return (torch.cuda.ExternalStream(s0.value),
+            torch.cuda.ExternalStream(s1.value),
+            (sm0.value, sm1.value, total.value))
 
 
 def make_green_stream_fn(stream1, stream2):
@@ -624,51 +410,44 @@ def main():
     # ------------------------------------------------------------------
     # Mode 3: green-ctx-sm  (CUDA ≥ 12.4)
     # ------------------------------------------------------------------
-    libcuda = _load_libcuda()
-    if libcuda is None:
-        print("Mode 3  green-ctx-sm     [SKIPPED: libcuda.so not found]")
-    else:
-        print("Mode 3  green-ctx-sm     SM-partitioned green contexts, CUDA 12.4+")
-        try:
-            gs1, gs2, sm_info = setup_green_ctx_sm(libcuda)
-            fn_gcsm = make_green_stream_fn(gs1, gs2)
-            med, p5, p95 = bench(fn_gcsm)
-            results["green-ctx-sm"] = (med, p5, p95, sm_info)
-            print(
-                f"  green-ctx-sm            median={med:8.1f}µs  "
-                f"p5={p5:.0f}  p95={p95:.0f}  "
-                f"{tflops(med):.2f} TFLOPS  "
-                f"(SM split: {sm_info[0]} + {sm_info[1]})"
-            )
-        except (RuntimeError, AttributeError) as e:
-            print(f"  [SKIPPED: {e}]")
+    print("Mode 3  green-ctx-sm     SM-partitioned green contexts, CUDA 12.4+")
+    try:
+        gs1, gs2, sm_info = setup_green_ctx_sm(0)
+        fn_gcsm = make_green_stream_fn(gs1, gs2)
+        med, p5, p95 = bench(fn_gcsm)
+        results["green-ctx-sm"] = (med, p5, p95, sm_info)
+        print(
+            f"  green-ctx-sm            median={med:8.1f}µs  "
+            f"p5={p5:.0f}  p95={p95:.0f}  "
+            f"{tflops(med):.2f} TFLOPS  "
+            f"(SM split: {sm_info[0]} + {sm_info[1]})"
+        )
+    except Exception as e:
+        print(f"  [SKIPPED: {e}]")
     print()
 
     # ------------------------------------------------------------------
     # Mode 4: green-ctx-sm-wq  (CUDA ≥ 13.1 / driver ≥ 575.x)
     # ------------------------------------------------------------------
-    if libcuda is None:
-        print("Mode 4  green-ctx-sm-wq  [SKIPPED: libcuda.so not found]")
-    else:
+    print(
+        "Mode 4  green-ctx-sm-wq  SM + work-queue partition, CUDA 13.1+  "
+        "(driver ≥ 575.x)"
+    )
+    try:
+        gs1_wq, gs2_wq, sm_info_wq = setup_green_ctx_sm_wq(0)
+        fn_gcsmwq = make_green_stream_fn(gs1_wq, gs2_wq)
+        med, p5, p95 = bench(fn_gcsmwq)
+        results["green-ctx-sm-wq"] = (med, p5, p95, sm_info_wq)
         print(
-            "Mode 4  green-ctx-sm-wq  SM + work-queue partition, CUDA 13.1+  "
-            "(driver ≥ 575.x)"
+            f"  green-ctx-sm-wq         median={med:8.1f}µs  "
+            f"p5={p5:.0f}  p95={p95:.0f}  "
+            f"{tflops(med):.2f} TFLOPS  "
+            f"(SM split: {sm_info_wq[0]} + {sm_info_wq[1]})"
         )
-        try:
-            gs1_wq, gs2_wq, sm_info_wq = setup_green_ctx_sm_wq(libcuda)
-            fn_gcsmwq = make_green_stream_fn(gs1_wq, gs2_wq)
-            med, p5, p95 = bench(fn_gcsmwq)
-            results["green-ctx-sm-wq"] = (med, p5, p95, sm_info_wq)
-            print(
-                f"  green-ctx-sm-wq         median={med:8.1f}µs  "
-                f"p5={p5:.0f}  p95={p95:.0f}  "
-                f"{tflops(med):.2f} TFLOPS  "
-                f"(SM split: {sm_info_wq[0]} + {sm_info_wq[1]})"
-            )
-        except (RuntimeError, AttributeError) as e:
-            drv_msg = "driver 550.x < 575.x required for CUDA 13.1 WQ partition"
-            print(f"  [SKIPPED: {drv_msg}]")
-            print(f"    (detail: {e})")
+    except Exception as e:
+        drv_msg = "driver 550.x < 575.x required for CUDA 13.1 WQ partition"
+        print(f"  [SKIPPED: {drv_msg}]")
+        print(f"    (detail: {e})")
     print()
 
     # ------------------------------------------------------------------
