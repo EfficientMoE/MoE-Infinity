@@ -3,6 +3,7 @@ auto_gptq
 chardet
 datasets>=2.12.0
 fastapi
+flash-attn
 hjson
 ninja
 numpy
@@ -19,4 +20,3 @@ sentencepiece
 sphinx
 transformers==4.53.0
 uvicorn
-flash-attn
