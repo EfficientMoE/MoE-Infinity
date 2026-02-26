@@ -17,20 +17,23 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
-    container:
-      image: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu20.04
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v3
 
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
       - name: Install Dependencies
         run: |
-          apt update && apt install --no-install-recommends -y python3-pip python3-dev
-          python3 -m pip install --upgrade pip
-          python3 -m pip install build
+          python -m pip install --upgrade pip
+          pip install setuptools==75.3.2 wheel build
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Build Wheel
+      - name: Build sdist
         run: |
-          BUILD_OPS=1 python3 -m build
+          python -m build --sdist --no-isolation

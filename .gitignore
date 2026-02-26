@@ -1,7 +1,7 @@
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode
 
-test_*.py
+*.nsys-rep
 
 # Prerequisites
 *.d

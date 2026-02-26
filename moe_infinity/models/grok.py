@@ -67,21 +67,27 @@ class SyncGrokMoeBlock(nn.Module):
                 self.layer_id, expert_matrix
             )
 
-        final_hidden_states = torch.zeros(
-            (batch_size * sequence_length, hidden_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
+        self.expert_executor.dispatch_local(
+            self.layer_id, hidden_states, router_mask, routing_weights_mask
         )
+        final_hidden_states = self.expert_executor.wait_dispatch_local()
 
-        results = self.expert_executor.dispatch_local(
-            hidden_states, router_mask, self.layer_id
-        )
-        for output, _, idx, _ in results:
-            token_indices = router_mask[:, idx].bool()
-            final_hidden_states[token_indices, :] += (
-                output.to(routing_weights_mask.device)
-                * routing_weights_mask[token_indices, idx][:, None]
-            )
+        # final_hidden_states = torch.zeros(
+        #     (batch_size * sequence_length, hidden_dim),
+        #     dtype=hidden_states.dtype,
+        #     device=hidden_states.device,
+        # )
+
+        # self.expert_executor.dispatch_local(
+        #     self.layer_id, hidden_states, router_mask, routing_weights_mask
+        # )
+        # results = self.expert_executor.wait_dispatch_local()
+        # for output, _, idx, _ in results:
+        #     token_indices = router_mask[:, idx].bool()
+        #     final_hidden_states[token_indices, :] += (
+        #         output.to(routing_weights_mask.device)
+        #         * routing_weights_mask[token_indices, idx][:, None]
+        #     )
 
         # # One hot encode the selected experts to create an expert mask
         # # this will be used to easily index which expert is going to be sollicitated
@@ -119,5 +125,5 @@ class SyncGrokMoeBlock(nn.Module):
 
         final_hidden_states = final_hidden_states.reshape(
             batch_size, sequence_length, hidden_dim
-        )
+        ).to(hidden_states.dtype)
         return final_hidden_states, router_logits

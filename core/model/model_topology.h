@@ -203,6 +203,8 @@ extern std::mutex kReadMutex;
 void SetModuleDisk(std::vector<TensorID>& tensor_ids);
 void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
                              bool on_demand = false);
+void SetModuleMemoryFromDisk_Views(std::vector<TensorID>& tensor_ids,
+                                   void* host_ptr);
 void SetModuleCudaMemoryFromCPU(std::vector<TensorID>& tensor_ids,
                                 void* device_ptr, const torch::Device& device);
 void SetModuleMemoryFromCuda(std::vector<TensorID>& tensor_ids, void* host_ptr);

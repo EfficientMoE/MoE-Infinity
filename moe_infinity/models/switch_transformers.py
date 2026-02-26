@@ -78,7 +78,6 @@ class SyncSwitchTransformersSparseMLP(nn.Module):
 
         # The routers introduced might not always map all the tokens, to a router, which means that some hidden states
         # can be unchanged from one layer to another. That is why the hidden states are cloned before updating only the selected ones.
-        next_states = hidden_states.clone()
 
         # n_tokens = hidden_states.shape[1] * hidden_states.shape[0]
         batch_size = hidden_states.shape[0]
@@ -92,13 +91,17 @@ class SyncSwitchTransformersSparseMLP(nn.Module):
         #         self.layer_id, expert_matrix
         #     )
 
-        results = self.expert_executor.dispatch_local(
-            hidden_states, router_mask, self.layer_id
+        self.expert_executor.dispatch_local(
+            self.layer_id, hidden_states, router_mask, router_probs
         )
+        next_states = self.expert_executor.wait_dispatch_local()
 
-        for output, _, idx, _ in results:
-            token_indices = router_mask[:, :, idx].bool()
-            next_states[token_indices] = output.to(next_states.device)
+        # next_states = hidden_states.clone()
+        # results = self.expert_executor.wait_dispatch_local()
+
+        # for output, _, idx, _ in results:
+        #     token_indices = router_mask[:, :, idx].bool()
+        #     next_states[token_indices] = output.to(next_states.device)
 
         # for expert_id, expert in self.experts.items():
         #     idx = int(expert_id.split("_")[-1])

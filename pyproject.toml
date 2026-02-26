@@ -7,6 +7,9 @@ build-backend = "setuptools.build_meta"
 line-length = 80
 exclude = []
 
+[tool.ruff.format]
+quote-style = "double"
+
 [tool.ruff.lint]
 fixable = ["ALL"]
 unfixable = [
@@ -30,3 +33,13 @@ ignore = [
     # Loop control variable not used within loop body
     "B007"
 ]
+
+[tool.mypy]
+files = ["moe_infinity/utils/hf_config.py", "moe_infinity/utils/config.py"]
+follow_imports = "skip"
+python_version = "3.9"
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+disable_error_code = ["assignment"]

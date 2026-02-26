@@ -20,8 +20,12 @@ const char* ARCHER_IHDEX_NAME = "archer_index";
 
 std::unique_ptr<ArcherTensorHandle> kArcherTensorHandle(nullptr);
 
-ArcherTensorHandle::ArcherTensorHandle(const std::string& prefix)
-    : prefix_(prefix), prio_aio_handle_(prefix), file_id_(0), file_offset_(0) {
+ArcherTensorHandle::ArcherTensorHandle(const std::string& prefix,
+                                       int num_io_threads)
+    : prefix_(prefix),
+      prio_aio_handle_(prefix, num_io_threads),
+      file_id_(0),
+      file_offset_(0) {
   // InitLogger();
 
   if (prefix_.back() != '/') {
@@ -74,7 +78,17 @@ void ArcherTensorHandle::StoreTensor(const std::uint32_t tensor_id,
     tensor_meta = it->second;
   }
 
-  file_offset_ += tensor_exists ? 0 : num_bytes_aligned;
+  if (!tensor_exists) {
+    // Check if this tensor would exceed the current partition
+    if (file_offset_ + num_bytes_aligned > kPartitionSize) {
+      file_id_++;
+      file_offset_ = 0;
+      DLOG_INFO("Storage partition full, switching to file_id=", file_id_);
+    }
+    tensor_meta.file_id = file_id_;
+    tensor_meta.offset = file_offset_;
+    file_offset_ += num_bytes_aligned;
+  }
 
   kTensorIndex->insert(std::make_pair(tensor_id, tensor_meta));
 

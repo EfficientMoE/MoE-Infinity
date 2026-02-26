@@ -13,4 +13,5 @@ from .model_utils import (
     rotate_half,
 )
 from .nllb_moe import SyncNllbMoeSparseMLP
+from .qwen import Qwen3MoEBlock
 from .switch_transformers import SyncSwitchTransformersSparseMLP

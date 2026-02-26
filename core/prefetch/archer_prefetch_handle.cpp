@@ -4,6 +4,8 @@
 // EfficientMoE Team
 
 #include "archer_prefetch_handle.h"
+
+#include <cstdlib>
 #include <cuda_runtime_api.h>
 #include <torch/extension.h>
 #include "aio/archer_tensor_handle.h"
@@ -19,8 +21,14 @@ ArcherPrefetchHandle::ArcherPrefetchHandle(const std::string& prefix,
                                            const double device_memory_ratio)
     : prefix_(prefix), last_layer_id_(0), has_cleaned_up_resources_(false) {
   // InitLogger();
+  int num_io_threads = 0;
+  const char* io_threads_env = std::getenv("MOE_IO_THREADS");
+  if (io_threads_env != nullptr) {
+    num_io_threads = std::atoi(io_threads_env);
+  }
   kTensorIndex = std::make_unique<ArcherTensorIndex>();
-  kArcherTensorHandle = std::make_unique<ArcherTensorHandle>(prefix);
+  kArcherTensorHandle =
+      std::make_unique<ArcherTensorHandle>(prefix, num_io_threads);
   kTopologyHandle = std::make_unique<ArcherTopologyHandle>();
   kTaskPool = std::make_unique<ArcherTaskPool>();
   kDeviceMemoryPool = std::make_unique<DeviceMemoryPool>();
