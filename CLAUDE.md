@@ -89,6 +89,40 @@ ruff format .
 clang-format --style=file --i core/**/*.cpp core/**/*.h
 ```
 
+### AST-Based Code Search (Tree-sitter)
+
+A persistent function-definition and call-graph index is stored in
+`.ast_index.json` (gitignored, generated). Rebuild it after any code edit:
+
+```bash
+# (Re)build the index — run from repo root, uses moe-infinity conda env
+conda run -n moe-infinity python scripts/build_ast_index.py
+
+# Optional: auto-rebuild on every commit (add to .git/hooks/post-commit)
+# echo 'conda run -n moe-infinity python scripts/build_ast_index.py' >> .git/hooks/post-commit
+# chmod +x .git/hooks/post-commit
+```
+
+For interactive queries, ask Claude Code using `/function-dep-search`.
+The skill supports callers, callees, transitive deps, unused functions, and
+circular dependency detection across Python and C++. Claude Code invokes
+`build_ast_index.py` + Tree-sitter internally to answer these queries.
+
+**Reading `.ast_index.json` directly (Python):**
+
+```python
+import json
+idx = json.load(open(".ast_index.json"))
+# Find all definitions of a function
+hits = [d for d in idx["definitions"] if d["name"] == "schedule"]
+# Find what a caller calls
+callees = idx["call_graph"].get("ForwardHelper", [])
+```
+
+**Keeping the index fresh:** the index is rebuilt automatically if you add
+the post-commit hook above.  Otherwise, re-run `build_ast_index.py` whenever
+you add or rename functions so the index reflects current code.
+
 ## Architecture
 
 ### Package Structure
