@@ -26,6 +26,10 @@ def test_parse_expert_dtype_supported():
     cfg = _cfg(torch_dtype=torch.float16)
     assert parse_expert_dtype(cfg) == 2
 
+    if hasattr(torch, "float8_e4m3fn"):
+        cfg = _cfg(torch_dtype=torch.float8_e4m3fn)
+        assert parse_expert_dtype(cfg) == 3
+
 
 def test_parse_expert_dtype_unsupported():
     cfg = _cfg(torch_dtype=torch.int32)
@@ -33,15 +37,7 @@ def test_parse_expert_dtype_unsupported():
         parse_expert_dtype(cfg)
 
 
-def test_parse_moe_param_switch_and_nllb():
-    switch = _cfg(
-        architectures=["SwitchTransformers"],
-        num_sparse_encoder_layers=2,
-        num_sparse_decoder_layers=3,
-        num_experts=8,
-    )
-    assert parse_moe_param(switch) == (5, 8, 2)
-
+def test_parse_moe_param_nllb():
     nllb = _cfg(
         architectures=["NllbMoe"],
         encoder_layers=12,
@@ -51,6 +47,26 @@ def test_parse_moe_param_switch_and_nllb():
         num_experts=4,
     )
     assert parse_moe_param(nllb) == (8, 4, 6)
+
+
+def test_parse_moe_param_minimax_m2():
+    minimax = _cfg(
+        architectures=["MiniMaxM2ForCausalLM"],
+        model_type="minimax_m2",
+        num_hidden_layers=62,
+        num_local_experts=256,
+    )
+    assert parse_moe_param(minimax) == (62, 256, 0)
+
+
+def test_parse_moe_param_kimi_vl():
+    text_cfg = _cfg(num_hidden_layers=27, n_routed_experts=64)
+    kimi = _cfg(
+        architectures=["KimiVLForConditionalGeneration"],
+        model_type="kimi_vl",
+        text_config=text_cfg,
+    )
+    assert parse_moe_param(kimi) == (27, 64, 0)
 
 
 def test_parse_moe_param_mixtral_and_deepseek():
@@ -69,22 +85,7 @@ def test_parse_moe_param_mixtral_and_deepseek():
     assert parse_moe_param(deepseek) == (9, 12, 0)
 
 
-def test_parse_expert_id_switch_and_mixtral():
-    switch = _cfg(
-        architectures=["Switch"],
-        num_sparse_encoder_layers=2,
-        num_sparse_decoder_layers=2,
-        num_experts=4,
-        encoder_sparse_step=2,
-        decoder_sparse_step=2,
-    )
-
-    layer_id, expert_id = parse_expert_id(
-        "decoder.block.1.layer.2.mlp.experts.expert_3.wi.weight",
-        switch,
-    )
-    assert (layer_id, expert_id) == (2, 3)
-
+def test_parse_expert_id_mixtral():
     mixtral = _cfg(
         architectures=["Mixtral"],
         num_hidden_layers=4,
@@ -95,6 +96,34 @@ def test_parse_expert_id_switch_and_mixtral():
         mixtral,
     )
     assert (layer_id, expert_id) == (2, 5)
+
+
+def test_parse_expert_id_minimax_m2():
+    minimax = _cfg(
+        architectures=["MiniMaxM2ForCausalLM"],
+        model_type="minimax_m2",
+        num_hidden_layers=62,
+        num_local_experts=256,
+    )
+    layer_id, expert_id = parse_expert_id(
+        "model.layers.5.feed_forward.experts.7.w1.weight",
+        minimax,
+    )
+    assert (layer_id, expert_id) == (5, 7)
+
+
+def test_parse_expert_id_kimi_vl():
+    text_cfg = _cfg(num_hidden_layers=27, n_routed_experts=64)
+    kimi = _cfg(
+        architectures=["KimiVLForConditionalGeneration"],
+        model_type="kimi_vl",
+        text_config=text_cfg,
+    )
+    layer_id, expert_id = parse_expert_id(
+        "language_model.model.layers.3.mlp.experts.10.gate_proj.weight",
+        kimi,
+    )
+    assert (layer_id, expert_id) == (3, 10)
 
 
 def test_parse_expert_id_grok_and_deepseek():

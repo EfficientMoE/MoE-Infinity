@@ -29,12 +29,13 @@ from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
 from moe_infinity.models import (
     DeepseekMoEBlock,
+    KimiMoEBlock,
+    MiniMaxMoEBlock,
     Qwen3MoEBlock,
     SyncArcticMoeBlock,
     SyncGrokMoeBlock,
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
-    SyncSwitchTransformersSparseMLP,
 )
 from moe_infinity.runtime.compile import script_expert
 from moe_infinity.runtime.hooks import *
@@ -58,6 +59,48 @@ except ImportError as exc:
 
 # Alias for compatibility
 prefetch_op = prefetch_lib
+
+
+def _patch_trust_remote_code_moe(config, moe_class_name, replacement_cls):
+    """Replace a trust_remote_code MoE block class with our custom implementation.
+
+    The model module must already be in sys.modules (imported via importlib in
+    big_modeling.py during dynamic class resolution before __enter__ is called).
+    """
+    import importlib
+    import sys
+
+    auto_map = getattr(config, "auto_map", {})
+    rel_path = auto_map.get("AutoModelForCausalLM") or auto_map.get(
+        "AutoModel"
+    )
+    if not rel_path:
+        return
+    mod_name = rel_path.rsplit(".", 1)[0]
+    cfg_mod = type(config).__module__
+    # cfg_mod is e.g. "transformers_modules.MiniMaxAI.MiniMax-M2-5.abc.configuration_minimax_m2"
+    # We want "transformers_modules.MiniMaxAI.MiniMax-M2-5.abc"
+    prefix = ".".join(cfg_mod.split(".")[:4])
+    full_mod = prefix + "." + mod_name
+    mod = sys.modules.get(full_mod)
+    if mod is None:
+        try:
+            mod = importlib.import_module(full_mod)
+        except ImportError:
+            print(
+                f"[MoE-Infinity] Warning: could not import {full_mod} for patching.",
+                flush=True,
+            )
+            return
+    if hasattr(mod, moe_class_name):
+        mod._old_sparse_mlp = getattr(mod, moe_class_name)
+        setattr(mod, moe_class_name, replacement_cls)
+    else:
+        print(
+            f"[MoE-Infinity] Warning: {moe_class_name} not found in {full_mod}. "
+            "Verify the MoE class name against the downloaded model code.",
+            flush=True,
+        )
 
 
 # class ArcherException(Exception):
@@ -286,13 +329,6 @@ class OffloadEngine(object):
 
         activate_empty_init()
 
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._old_cast_classifier = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier = cast_classifier_decorator(
-            transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier
-        )
-
-        transformers.models.switch_transformers.modeling_switch_transformers._old_sparse_mlp = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP = SyncSwitchTransformersSparseMLP
         transformers.models.nllb_moe.modeling_nllb_moe._old_sparse_mlp = (
             transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP
         )
@@ -332,6 +368,23 @@ class OffloadEngine(object):
         moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.DeepseekV2MoE = DeepseekMoEBlock
         moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = DeepseekMoEBlock
 
+        # Trust-remote-code model patches. The model module must have been
+        # imported by big_modeling.py (via importlib during dynamic class
+        # resolution) before __enter__ is called.
+        _model_type = getattr(self.config, "model_type", "").lower()
+        if _model_type == "minimax_m2":
+            # TODO: Replace "MiniMaxM2MoE" with the actual MoE block class name
+            # found in the downloaded modeling_minimax_m2.py source.
+            _patch_trust_remote_code_moe(
+                self.config, "MiniMaxM2MoE", MiniMaxMoEBlock
+            )
+        elif _model_type == "kimi_vl":
+            # TODO: Replace "KimiDecoderMoE" with the actual MoE block class
+            # name found in the downloaded Kimi-VL modeling file.
+            _patch_trust_remote_code_moe(
+                self.config, "KimiDecoderMoE", KimiMoEBlock
+            )
+
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
         ) -> Callable:
@@ -362,12 +415,27 @@ class OffloadEngine(object):
                         self.config.moe_intermediate_size,
                     )
 
-                self.dtype = parse_expert_dtype(self.config)
-                self.dtype_cls = self.config.torch_dtype
+                # For Kimi-VL the top-level config may lack torch_dtype;
+                # fall back to text_config.
+                _eff_config = self.config
+                if self.config.model_type == "kimi_vl":
+                    _eff_config = getattr(
+                        self.config, "text_config", self.config
+                    )
+                self.dtype = parse_expert_dtype(_eff_config)
+                self.dtype_cls = _eff_config.torch_dtype
 
                 if self.config.model_type == "deepseek_v3":
                     self.dtype_cls = torch.float8_e4m3fn
                     self.dtype = 3
+                elif self.config.model_type == "minimax_m2":
+                    # MiniMax-M2.5 may store weights in float8_e4m3fn.
+                    # Override dtype handling if FP8 is detected.
+                    if (
+                        hasattr(torch, "float8_e4m3fn")
+                        and self.dtype_cls == torch.float8_e4m3fn
+                    ):
+                        self.dtype = 3
 
                 if (
                     not self.archer_engine.is_tensor_index_initialized()
@@ -427,11 +495,22 @@ class OffloadEngine(object):
                     "is_flash_attn_available", False
                 )
                 # self.archer_prefetch.n_layer, self.archer_prefetch.n_expert, n_encoder_layers = parse_moe_param(self.config)
+                # FP8 models (deepseek_v3, minimax_m2 if FP8) must be created
+                # in bfloat16 and then cast to FP8 after instantiation.
+                _fp8_models = {"deepseek_v3"}
+                if (
+                    self.config.model_type == "minimax_m2"
+                    and self.dtype == 3
+                ):
+                    _fp8_models.add("minimax_m2")
+                _create_dtype = (
+                    torch.bfloat16
+                    if self.config.model_type in _fp8_models
+                    else self.dtype_cls
+                )
                 model = cls._from_config(
                     self.config,
-                    torch_dtype=self.dtype_cls
-                    if self.config.model_type != "deepseek_v3"
-                    else torch.bfloat16,
+                    torch_dtype=_create_dtype,
                     attn_implementation=(
                         "flash_attention_2"
                         if is_flash_attn_available
@@ -445,7 +524,7 @@ class OffloadEngine(object):
                 #     self.config,
                 # )
 
-                if self.config.model_type == "deepseek_v3":
+                if self.config.model_type in _fp8_models:
                     model = model.to(torch.float8_e4m3fn)
 
                 # if (
@@ -584,13 +663,13 @@ class OffloadEngine(object):
                 for module in model.modules():
                     if (
                         isinstance(module, SyncNllbMoeSparseMLP)
-                        or isinstance(module, SyncSwitchTransformersSparseMLP)
-                        or isinstance(module, SyncNllbMoeSparseMLP)
                         or isinstance(module, SyncMixtralSparseMoeBlock)
                         or isinstance(module, SyncGrokMoeBlock)
                         or isinstance(module, SyncArcticMoeBlock)
                         or isinstance(module, DeepseekMoEBlock)
                         or isinstance(module, Qwen3MoEBlock)
+                        or isinstance(module, MiniMaxMoEBlock)
+                        or isinstance(module, KimiMoEBlock)
                     ):
                         # module.archer_prefetch = self.archer_prefetch
                         # module.archer_tracer = self.archer_tracer
@@ -1022,9 +1101,6 @@ class OffloadEngine(object):
 
     # clean runtime hooks
     def clean_up(self):
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._old_cast_classifier
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP = transformers.models.switch_transformers.modeling_switch_transformers._old_sparse_mlp
-
         transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP = (
             transformers.models.nllb_moe.modeling_nllb_moe._old_sparse_mlp
         )

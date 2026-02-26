@@ -9,7 +9,10 @@ from huggingface_hub import snapshot_download
 from transformers import AutoConfig
 
 import moe_infinity
-from moe_infinity.common.constants import MODEL_MAPPING_NAMES
+from moe_infinity.common.constants import (
+    MODEL_MAPPING_NAMES,
+    MODEL_TRUST_REMOTE_CODE,
+)
 from moe_infinity.models import (
     apply_rotary_pos_emb,
     apply_rotary_pos_emb_deepseek,
@@ -40,8 +43,8 @@ class MoE:
     ```python
     >>> from moe_infinity import MoE
 
-    >>> checkpoint = "google/switch-base-128"
-    >>> config = "config.json"
+    >>> checkpoint = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    >>> config = {"offload_path": "/tmp/moe-infinity", "device_memory_ratio": 0.75}
     >>> model = MoE(checkpoint, config)
 
     >>> # You can now use the model as usual
@@ -81,10 +84,11 @@ class MoE:
                 model_name_or_path, trust_remote_code=True
             )
         architecture = model_config.architectures[0].lower()
+        model_type = getattr(model_config, "model_type", "").lower()
 
         arch = None
         for supp_arch in MODEL_MAPPING_NAMES:
-            if supp_arch in architecture:
+            if supp_arch in architecture or supp_arch == model_type:
                 arch = supp_arch
                 break
         if arch is None:
@@ -95,6 +99,32 @@ class MoE:
             )
         self.arch = arch
         model_cls = MODEL_MAPPING_NAMES[arch]
+
+        # For trust_remote_code models, resolve the actual class from auto_map.
+        # AutoConfig.from_pretrained already imported the config module, so
+        # we can derive the model module path and import it here.
+        if arch in MODEL_TRUST_REMOTE_CODE:
+            import importlib
+            import sys
+
+            auto_map = getattr(model_config, "auto_map", {})
+            rel_path = auto_map.get("AutoModelForCausalLM") or auto_map.get(
+                "AutoModel"
+            )
+            if rel_path:
+                mod_name, cls_name = rel_path.rsplit(".", 1)
+                cfg_mod = type(model_config).__module__
+                # cfg_mod: "transformers_modules.{org}.{repo}.{hash}.configuration_*"
+                prefix = ".".join(cfg_mod.split(".")[:4])
+                full_mod = prefix + "." + mod_name
+                mod = sys.modules.get(full_mod)
+                if mod is None:
+                    mod = importlib.import_module(full_mod)
+                model_cls = getattr(mod, cls_name)
+            else:
+                from transformers import AutoModelForCausalLM
+
+                model_cls = AutoModelForCausalLM
         # with init_empty_weights():
         #     self.model = model_cls(model_config)
         if os.path.exists(model_name_or_path):
@@ -128,12 +158,7 @@ class MoE:
 
             is_flash_attn_available = True
 
-            if (
-                arch == "switch"
-                or arch == "deepseek"
-                or arch == "deepseek_v3"
-                or arch == "nllb"
-            ):
+            if arch == "deepseek" or arch == "deepseek_v3" or arch == "nllb":
                 is_flash_attn_available = False
         except ImportError:
             print(

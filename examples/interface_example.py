@@ -108,9 +108,7 @@ all_inputs = dataset["question"]
 # all_inputs = text_list
 
 custom_kwargs = {}
-if "switch" in args.model_name_or_path.lower():
-    custom_kwargs = {"decoder_start_token_id": 0}
-elif "nllb" in args.model_name_or_path.lower():
+if "nllb" in args.model_name_or_path.lower():
     custom_kwargs = {"forced_bos_token_id": 256057}  # translate to French
 elif "mixtral" in args.model_name_or_path.lower():
     custom_kwargs = {"pad_token_id": tokenizer.eos_token_id}

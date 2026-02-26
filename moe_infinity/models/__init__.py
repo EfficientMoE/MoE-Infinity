@@ -6,6 +6,8 @@
 from .arctic import ArcticConfig, SyncArcticMoeBlock
 from .deepseek import DeepseekMoEBlock
 from .grok import SyncGrokMoeBlock
+from .kimi import KimiMoEBlock
+from .minimax import MiniMaxMoEBlock
 from .mixtral import SyncMixtralSparseMoeBlock
 from .model_utils import (
     apply_rotary_pos_emb,
@@ -14,4 +16,3 @@ from .model_utils import (
 )
 from .nllb_moe import SyncNllbMoeSparseMLP
 from .qwen import Qwen3MoEBlock
-from .switch_transformers import SyncSwitchTransformersSparseMLP
