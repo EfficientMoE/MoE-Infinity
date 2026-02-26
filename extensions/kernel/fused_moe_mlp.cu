@@ -28,10 +28,10 @@ using LargeKWarpShape = cutlass::gemm::GemmShape<32, 32, 64>;
 // Standard linear-combination epilogue (D = alpha*accum + beta*C).
 // Used for gate GEMM (beta=0) and down GEMM (beta=0).
 using StdEpilogue = cutlass::epilogue::thread::LinearCombination<
-    ElementInput,                                      // D element type
+    ElementInput,                                     // D element type
     128 / cutlass::sizeof_bits<ElementInput>::value,  // elements per vector
-    ElementAccumulator,                                // accumulator type
-    float                                              // compute type
+    ElementAccumulator,                               // accumulator type
+    float                                             // compute type
     >;
 
 // SiLU-Mul epilogue: D[i] = silu(C[i]) * accum[i]
@@ -51,9 +51,9 @@ using SiLUMulEpilogue =
 // GEMM0: gate_buf = input @ gate_proj^T
 //   A: [M, H] RowMajor   B: gate_proj [I,H]→ColMajor [H,I]   D: [M,I]
 using GemmGate = cutlass::gemm::device::Gemm<
-    ElementInput, LayoutA,   // A
-    ElementInput, LayoutB,   // B (ColMajor: gate_proj [I,H] stored as [H,I])
-    ElementInput, LayoutC,   // C/D
+    ElementInput, LayoutA,  // A
+    ElementInput, LayoutB,  // B (ColMajor: gate_proj [I,H] stored as [H,I])
+    ElementInput, LayoutC,  // C/D
     ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
     MoEThreadblockShape, MoEWarpShape, MoEInstructionShape, StdEpilogue>;
 
@@ -61,9 +61,9 @@ using GemmGate = cutlass::gemm::device::Gemm<
 //   A: [M, H] RowMajor   B: up_proj [I,H]→ColMajor [H,I]
 //   C: gate_buf [M,I]  (SiLU source in epilogue)    D: fused_buf [M,I]
 using GemmUpFused = cutlass::gemm::device::Gemm<
-    ElementInput, LayoutA,   // A
-    ElementInput, LayoutB,   // B
-    ElementInput, LayoutC,   // C (gate_out, read by SiLU epilogue)
+    ElementInput, LayoutA,  // A
+    ElementInput, LayoutB,  // B
+    ElementInput, LayoutC,  // C (gate_out, read by SiLU epilogue)
     ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
     MoEThreadblockShape, MoEWarpShape, MoEInstructionShape,
     SiLUMulEpilogue  // D = silu(C) * accum
@@ -72,9 +72,9 @@ using GemmUpFused = cutlass::gemm::device::Gemm<
 // GEMM2: output = fused_buf @ down_proj^T
 //   A: [M, I] RowMajor   B: down_proj [H,I]→ColMajor [I,H]   D: [M,H]
 using GemmDown = cutlass::gemm::device::Gemm<
-    ElementInput, LayoutA,   // A
-    ElementInput, LayoutB,   // B (ColMajor: down_proj [H,I] stored as [I,H])
-    ElementInput, LayoutC,   // C/D
+    ElementInput, LayoutA,  // A
+    ElementInput, LayoutB,  // B (ColMajor: down_proj [H,I] stored as [I,H])
+    ElementInput, LayoutC,  // C/D
     ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
     MoEThreadblockShape, MoEWarpShape, MoEInstructionShape, StdEpilogue>;
 
@@ -83,19 +83,14 @@ using GemmDown = cutlass::gemm::device::Gemm<
 // ---------------------------------------------------------------------------
 
 using GemmGateLK = cutlass::gemm::device::Gemm<
-    ElementInput, LayoutA,
-    ElementInput, LayoutB,
-    ElementInput, LayoutC,
+    ElementInput, LayoutA, ElementInput, LayoutB, ElementInput, LayoutC,
     ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
-    LargeKThreadblockShape, LargeKWarpShape, MoEInstructionShape,
-    StdEpilogue,
+    LargeKThreadblockShape, LargeKWarpShape, MoEInstructionShape, StdEpilogue,
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
     /*Stages=*/3>;
 
 using GemmUpFusedLK = cutlass::gemm::device::Gemm<
-    ElementInput, LayoutA,
-    ElementInput, LayoutB,
-    ElementInput, LayoutC,
+    ElementInput, LayoutA, ElementInput, LayoutB, ElementInput, LayoutC,
     ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
     LargeKThreadblockShape, LargeKWarpShape, MoEInstructionShape,
     SiLUMulEpilogue,
@@ -103,12 +98,9 @@ using GemmUpFusedLK = cutlass::gemm::device::Gemm<
     /*Stages=*/3>;
 
 using GemmDownLK = cutlass::gemm::device::Gemm<
-    ElementInput, LayoutA,
-    ElementInput, LayoutB,
-    ElementInput, LayoutC,
+    ElementInput, LayoutA, ElementInput, LayoutB, ElementInput, LayoutC,
     ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
-    LargeKThreadblockShape, LargeKWarpShape, MoEInstructionShape,
-    StdEpilogue,
+    LargeKThreadblockShape, LargeKWarpShape, MoEInstructionShape, StdEpilogue,
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
     /*Stages=*/3>;
 
@@ -212,9 +204,8 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
     // CUTLASS GEMM: D [M, N] = A [M, K] × B [K, N]
     //   M=batch, N=I (intermediate), K=H (hidden)
     //   A: [M, H] RowMajor,        lda = H
-    //   B: [H, I] ColMajor         ldb = H   (gate_proj [I,H] RowMajor ≡ [H,I] ColMajor)
-    //   D: [M, I] RowMajor,        ldd = I
-    //   beta=0 → C not read
+    //   B: [H, I] ColMajor         ldb = H   (gate_proj [I,H] RowMajor ≡ [H,I]
+    //   ColMajor) D: [M, I] RowMajor,        ldd = I beta=0 → C not read
     // ------------------------------------------------------------------
     {
       GemmGate gemm;
@@ -261,9 +252,8 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
     //
     //   M=batch, N=H (hidden), K=I (intermediate)
     //   A: [M, I] RowMajor,        lda = I
-    //   B: [I, H] ColMajor,        ldb = I   (down_proj [H,I] RowMajor ≡ [I,H] ColMajor)
-    //   D: [M, H] RowMajor,        ldd = H
-    //   beta=0 → C not read
+    //   B: [I, H] ColMajor,        ldb = I   (down_proj [H,I] RowMajor ≡ [I,H]
+    //   ColMajor) D: [M, H] RowMajor,        ldd = H beta=0 → C not read
     // ------------------------------------------------------------------
     {
       GemmDown gemm;

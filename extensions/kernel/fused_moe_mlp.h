@@ -5,7 +5,8 @@
 
 // Fused MoE MLP forward pass using CUTLASS.
 //
-// Computes: output = (silu(input @ gate_proj^T) * (input @ up_proj^T)) @ down_proj^T
+// Computes: output = (silu(input @ gate_proj^T) * (input @ up_proj^T)) @
+// down_proj^T
 //
 // The intermediate gate_out and silu*up fusion are computed with custom CUTLASS
 // epilogues to eliminate 2 kernel launches and avoid writing gate_act_out to

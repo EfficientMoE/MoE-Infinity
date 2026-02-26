@@ -30,17 +30,16 @@ print("=" * 60)
 print("\n1. Shared library exists:")
 so_files = []
 for root, _, files in os.walk("moe_infinity"):
-    so_files.extend(
-        os.path.join(root, f) for f in files if f.endswith(".so")
-    )
+    so_files.extend(os.path.join(root, f) for f in files if f.endswith(".so"))
 check("_store .so exists", len(so_files) > 0, f"(found: {so_files})")
 
 # 2. Check that the .so can be loaded via Python import
 print("\n2. Shared library loads:")
 try:
-    import torch  # noqa: F401
     import importlib.util
     import sys
+
+    import torch  # noqa: F401
 
     # Load the _store module directly from the .so file
     so_path = "moe_infinity/_store.cpython-311-x86_64-linux-gnu.so"

@@ -58,9 +58,7 @@ def test_oracle_score_handles_zero_frequency():
 
 def test_priority_score_outputs_entries_for_matrix():
     decoder_entry = _trace_entry(np.ones((2, 2)))
-    cache_entries = {
-        ExpertCacheEntry(expert_idx=0, layer_idx=0, timestamp=1)
-    }
+    cache_entries = {ExpertCacheEntry(expert_idx=0, layer_idx=0, timestamp=1)}
     trace_entries = {decoder_entry}
     expert_freq = {(0, 0): 1, (1, 1): 2}
 

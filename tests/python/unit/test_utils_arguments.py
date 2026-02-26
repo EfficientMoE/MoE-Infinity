@@ -1,6 +1,9 @@
 import torch
 
-from moe_infinity.utils.arguments import copy_args_to_device, copy_kwargs_to_device
+from moe_infinity.utils.arguments import (
+    copy_args_to_device,
+    copy_kwargs_to_device,
+)
 
 
 def test_copy_args_to_device_with_nested_structures():

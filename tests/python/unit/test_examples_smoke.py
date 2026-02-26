@@ -17,9 +17,9 @@ def test_interface_example_help():
         cwd=repo_root,
         env=env,
     )
-    assert result.returncode == 0, (
-        f"--help exited {result.returncode}\n{result.stderr}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"--help exited {result.returncode}\n{result.stderr}"
 
 
 def test_readme_example_help():
@@ -33,9 +33,9 @@ def test_readme_example_help():
         cwd=repo_root,
         env=env,
     )
-    assert result.returncode == 0, (
-        f"--help exited {result.returncode}\n{result.stderr}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"--help exited {result.returncode}\n{result.stderr}"
 
 
 def test_example_imports_available():
@@ -47,6 +47,6 @@ def test_example_imports_available():
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 0, (
-            f"Cannot import '{pkg}': {result.stderr.strip()}"
-        )
+        assert (
+            result.returncode == 0
+        ), f"Cannot import '{pkg}': {result.stderr.strip()}"

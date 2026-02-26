@@ -125,8 +125,8 @@ constexpr auto string_to_enum(const std::string& s) noexcept
                                                                              \
   /* Specialize generic template functions for this enum type */             \
   template <>                                                                \
-  constexpr auto enum_to_string<EnumType>(EnumType e) noexcept               \
-      -> const char* {                                                       \
+  constexpr auto enum_to_string<EnumType>(                                   \
+      EnumType e) noexcept -> const char* {                                  \
     return EnumType##ToString(e);                                            \
   }                                                                          \
                                                                              \

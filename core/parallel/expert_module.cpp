@@ -501,8 +501,8 @@ void MoEMLP::ForwardHelper() {
 
     // Single fused CUTLASS call: 3 GEMMs, silu*up fused into GEMM1 epilogue.
     // Replaces: matmul(gate), matmul(up), silu, mul, matmul(down).
-    fused_moe_ffn_into(input, gate_proj, up_proj, down_proj,
-                       gate_out, fused_out, output, /*stream=*/nullptr);
+    fused_moe_ffn_into(input, gate_proj, up_proj, down_proj, gate_out,
+                       fused_out, output, /*stream=*/nullptr);
     return;
   }
   DLOG_FATAL("MoEMLP::forward: expert_type not supported", expert_type_);

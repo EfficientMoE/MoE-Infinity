@@ -41,15 +41,15 @@ class Timer {
 //   gate_act  [M, I]   fused_tmp[M, I]   output    [M, H]
 // ---------------------------------------------------------------------------
 static void torch_fused_mlp(torch::Tensor& hidden, torch::Tensor& gate_proj,
-                             torch::Tensor& up_proj, torch::Tensor& down_proj,
-                             torch::Tensor& gate_out, torch::Tensor& up_out,
-                             torch::Tensor& gate_act, torch::Tensor& fused_tmp,
-                             torch::Tensor& output) {
+                            torch::Tensor& up_proj, torch::Tensor& down_proj,
+                            torch::Tensor& gate_out, torch::Tensor& up_out,
+                            torch::Tensor& gate_act, torch::Tensor& fused_tmp,
+                            torch::Tensor& output) {
   at::mm_out(gate_out, hidden, gate_proj.t());   // gate_out = hidden @ W_g^T
-  at::mm_out(up_out, hidden, up_proj.t());        // up_out   = hidden @ W_u^T
-  at::silu_out(gate_act, gate_out);               // gate_act = silu(gate_out)
-  at::mul_out(fused_tmp, gate_act, up_out);       // fused    = gate_act * up_out
-  at::mm_out(output, fused_tmp, down_proj.t());   // output   = fused @ W_d^T
+  at::mm_out(up_out, hidden, up_proj.t());       // up_out   = hidden @ W_u^T
+  at::silu_out(gate_act, gate_out);              // gate_act = silu(gate_out)
+  at::mul_out(fused_tmp, gate_act, up_out);      // fused    = gate_act * up_out
+  at::mm_out(output, fused_tmp, down_proj.t());  // output   = fused @ W_d^T
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +83,7 @@ static void benchmark(int M, int H, int I, const std::string& name,
   const at::cuda::OptionalCUDAGuard device_guard(device);
 
   auto opts = torch::TensorOptions().dtype(torch::kBFloat16).device(device);
-  auto f32  = torch::TensorOptions().dtype(torch::kFloat32).device(device);
+  auto f32 = torch::TensorOptions().dtype(torch::kFloat32).device(device);
 
   // Scale weights by 1/sqrt(dim) so activations stay O(1) and don't overflow
   // BF16 max (~65504).  Without scaling, gate_out std≈sqrt(H)≈45, fused
@@ -93,9 +93,9 @@ static void benchmark(int M, int H, int I, const std::string& name,
   const float scaleI = 1.0f / std::sqrt(static_cast<float>(I));
 
   // Shared inputs
-  torch::Tensor hidden    = mk_bf16(torch::randn({M, H}, f32));
+  torch::Tensor hidden = mk_bf16(torch::randn({M, H}, f32));
   torch::Tensor gate_proj = mk_bf16(torch::randn({I, H}, f32) * scaleH);
-  torch::Tensor up_proj   = mk_bf16(torch::randn({I, H}, f32) * scaleH);
+  torch::Tensor up_proj = mk_bf16(torch::randn({I, H}, f32) * scaleH);
   torch::Tensor down_proj = mk_bf16(torch::randn({H, I}, f32) * scaleI);
 
   // CUTLASS buffers
@@ -113,8 +113,8 @@ static void benchmark(int M, int H, int I, const std::string& name,
   // --- Correctness ---
   torch_fused_mlp(hidden, gate_proj, up_proj, down_proj, gate_out, up_out,
                   gate_act, fused_tmp, torch_out);
-  fused_moe_ffn_into(hidden, gate_proj, up_proj, down_proj, gate_buf,
-                     fused_buf, cutlass_out, nullptr);
+  fused_moe_ffn_into(hidden, gate_proj, up_proj, down_proj, gate_buf, fused_buf,
+                     cutlass_out, nullptr);
   cudaDeviceSynchronize();
   report_error(torch_out, cutlass_out);
 

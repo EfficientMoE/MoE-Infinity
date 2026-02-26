@@ -43,15 +43,25 @@ parser = argparse.ArgumentParser(
     description="Prefill–decode attention collocation benchmark"
 )
 parser.add_argument("--n-decode", type=int, default=8, help="decode batch size")
-parser.add_argument("--n-prefill", type=int, default=1, help="prefill batch size")
 parser.add_argument(
-    "--decode-ctx", type=int, default=512, help="KV-cache length per decode request"
+    "--n-prefill", type=int, default=1, help="prefill batch size"
 )
 parser.add_argument(
-    "--prefill-len", type=int, default=512, help="sequence length per prefill request"
+    "--decode-ctx",
+    type=int,
+    default=512,
+    help="KV-cache length per decode request",
+)
+parser.add_argument(
+    "--prefill-len",
+    type=int,
+    default=512,
+    help="sequence length per prefill request",
 )
 parser.add_argument("--num-heads", type=int, default=32, help="attention heads")
-parser.add_argument("--head-dim", type=int, default=128, help="per-head dimension")
+parser.add_argument(
+    "--head-dim", type=int, default=128, help="per-head dimension"
+)
 parser.add_argument("--warmup", type=int, default=20, help="warmup iterations")
 parser.add_argument("--iters", type=int, default=100, help="timed iterations")
 args = parser.parse_args()
@@ -103,7 +113,9 @@ for _ in range(N_DEC):
     cu_q_list.append(cu_q_list[-1] + 1)
 for _ in range(N_PRE):
     cu_q_list.append(cu_q_list[-1] + L_PRE)
-cu_seqlens_q_combined = torch.tensor(cu_q_list, dtype=torch.int32, device=DEVICE)
+cu_seqlens_q_combined = torch.tensor(
+    cu_q_list, dtype=torch.int32, device=DEVICE
+)
 
 # cu_seqlens_k: L_DEC per decode request, L_PRE per prefill request
 cu_k_list = [0]
@@ -111,7 +123,9 @@ for _ in range(N_DEC):
     cu_k_list.append(cu_k_list[-1] + L_DEC)
 for _ in range(N_PRE):
     cu_k_list.append(cu_k_list[-1] + L_PRE)
-cu_seqlens_k_combined = torch.tensor(cu_k_list, dtype=torch.int32, device=DEVICE)
+cu_seqlens_k_combined = torch.tensor(
+    cu_k_list, dtype=torch.int32, device=DEVICE
+)
 
 max_seqlen_q_combined = L_PRE  # max(1, L_PRE)
 max_seqlen_k_combined = max(L_DEC, L_PRE)
@@ -200,7 +214,7 @@ def run_dual_stream(stream1, stream2):
 # ---------------------------------------------------------------------------
 
 _HERE = Path(__file__).parent
-_SO   = _HERE / "green_ctx.so"
+_SO = _HERE / "green_ctx.so"
 
 
 def _build_and_load_green_ctx():
@@ -218,15 +232,21 @@ def setup_green_ctx_sm(device_id: int = 0):
     lib = _build_and_load_green_ctx()
     s0, s1 = ctypes.c_uint64(), ctypes.c_uint64()
     sm0, sm1, total = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
-    ret = lib.gc_setup_sm(device_id,
-                          ctypes.byref(s0), ctypes.byref(s1),
-                          ctypes.byref(sm0), ctypes.byref(sm1),
-                          ctypes.byref(total))
+    ret = lib.gc_setup_sm(
+        device_id,
+        ctypes.byref(s0),
+        ctypes.byref(s1),
+        ctypes.byref(sm0),
+        ctypes.byref(sm1),
+        ctypes.byref(total),
+    )
     if ret != 0:
         raise RuntimeError(f"gc_setup_sm failed (CUDA error {ret})")
-    return (torch.cuda.ExternalStream(s0.value),
-            torch.cuda.ExternalStream(s1.value),
-            (sm0.value, sm1.value, total.value))
+    return (
+        torch.cuda.ExternalStream(s0.value),
+        torch.cuda.ExternalStream(s1.value),
+        (sm0.value, sm1.value, total.value),
+    )
 
 
 def setup_green_ctx_sm_wq(device_id: int = 0):
@@ -238,15 +258,21 @@ def setup_green_ctx_sm_wq(device_id: int = 0):
     lib = _build_and_load_green_ctx()
     s0, s1 = ctypes.c_uint64(), ctypes.c_uint64()
     sm0, sm1, total = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
-    ret = lib.gc_setup_sm_wq(device_id,
-                              ctypes.byref(s0), ctypes.byref(s1),
-                              ctypes.byref(sm0), ctypes.byref(sm1),
-                              ctypes.byref(total))
+    ret = lib.gc_setup_sm_wq(
+        device_id,
+        ctypes.byref(s0),
+        ctypes.byref(s1),
+        ctypes.byref(sm0),
+        ctypes.byref(sm1),
+        ctypes.byref(total),
+    )
     if ret != 0:
         raise RuntimeError(f"gc_setup_sm_wq failed (CUDA error {ret})")
-    return (torch.cuda.ExternalStream(s0.value),
-            torch.cuda.ExternalStream(s1.value),
-            (sm0.value, sm1.value, total.value))
+    return (
+        torch.cuda.ExternalStream(s0.value),
+        torch.cuda.ExternalStream(s1.value),
+        (sm0.value, sm1.value, total.value),
+    )
 
 
 def make_green_stream_fn(stream1, stream2):
@@ -296,7 +322,9 @@ def main():
         f"        heads={H}  head_dim={D}  dtype=BF16  "
         f"warmup={WARMUP}  iters={ITERS}"
     )
-    print(f"GPU: {gpu_name}  CUDA runtime {cuda_rt_ver}  SM count: {sm_count_total}")
+    print(
+        f"GPU: {gpu_name}  CUDA runtime {cuda_rt_ver}  SM count: {sm_count_total}"
+    )
     print(sep)
     print()
 
@@ -312,8 +340,8 @@ def main():
     #   Decode: S_q=1, full KV-cache, N_DEC requests
     #     FLOPs = 2 × (2 × N_DEC × H × 1 × L_DEC × D)
     #           = 4 × N_DEC × H × L_DEC × D
-    FLOPS_PRE  = 2 * N_PRE * H * L_PRE**2 * D
-    FLOPS_DEC  = 4 * N_DEC * H * L_DEC  * D
+    FLOPS_PRE = 2 * N_PRE * H * L_PRE**2 * D
+    FLOPS_DEC = 4 * N_DEC * H * L_DEC * D
     FLOPS_STEP = FLOPS_PRE + FLOPS_DEC
 
     def tflops(us):
@@ -322,7 +350,9 @@ def main():
     def dec_tps(us):  # new tokens generated per second (N_DEC per step)
         return N_DEC / (us * 1e-6)
 
-    def pre_tps(us):  # prefill tokens processed per second (N_PRE × L_PRE per step)
+    def pre_tps(
+        us,
+    ):  # prefill tokens processed per second (N_PRE × L_PRE per step)
         return N_PRE * L_PRE / (us * 1e-6)
 
     # ------------------------------------------------------------------
@@ -345,7 +375,7 @@ def main():
         )
     )
     ideal_parallel = max(med_dec_only, med_pre_only)
-    serial_sum     = med_dec_only + med_pre_only
+    serial_sum = med_dec_only + med_pre_only
 
     print(
         f"  decode-only  ({N_DEC}×q=1,kv={L_DEC}):  "
@@ -359,9 +389,7 @@ def main():
         f"{FLOPS_PRE/(med_pre_only*1e-6)/1e12:.2f} TFLOPS  "
         f"{pre_tps(med_pre_only):,.0f} pre-tok/s"
     )
-    print(
-        f"  serial-sum (no overlap):      {serial_sum:7.1f}µs"
-    )
+    print(f"  serial-sum (no overlap):      {serial_sum:7.1f}µs")
     print(
         f"  ideal-overlap (perfect):      {ideal_parallel:7.1f}µs  "
         f"= max(decode, prefill)"
@@ -383,7 +411,9 @@ def main():
     # ------------------------------------------------------------------
     # Mode 1: varlen-fused
     # ------------------------------------------------------------------
-    print("Mode 1  varlen-fused     single flash_attn_varlen_func (continuous batching)")
+    print(
+        "Mode 1  varlen-fused     single flash_attn_varlen_func (continuous batching)"
+    )
     med, p5, p95 = bench(run_varlen_fused)
     results["varlen-fused"] = (med, p5, p95, None)
     print(
@@ -475,10 +505,10 @@ def main():
         if key not in results:
             continue
         med, p5, p95, sm_info = results[key]
-        speedup   = serial_med / med
-        tf        = tflops(med)
-        dtps      = dec_tps(med)
-        ptps      = pre_tps(med)
+        speedup = serial_med / med
+        tf = tflops(med)
+        dtps = dec_tps(med)
+        ptps = pre_tps(med)
         # Overlap efficiency: how close the parallel modes come to ideal concurrency.
         # ideal = max(decode_only, prefill_only); efficiency = ideal / actual.
         # Serial and varlen-fused don't use explicit parallelism → show "—".
@@ -507,7 +537,9 @@ def main():
     #   (mode_latency - decode_only) / decode_only × 100 %
     # Effective decode generation rate = N_DEC / mode_latency
     print(sep)
-    print("Generation-throughput projection  (attention bottleneck, 1 prefill/step)")
+    print(
+        "Generation-throughput projection  (attention bottleneck, 1 prefill/step)"
+    )
     print(sep)
     # Dec overhead: extra latency added to decode by collocating prefill,
     #   relative to decode-only baseline.  Higher = worse for decode latency.
@@ -525,7 +557,7 @@ def main():
         dtps_val = dec_tps(med)
         ptps_val = pre_tps(med)
         dec_overhead = (med - med_dec_only) / med_dec_only * 100
-        delta_vs_serial = med - serial_med   # positive = slower than serial
+        delta_vs_serial = med - serial_med  # positive = slower than serial
         print(
             f"  {key:<20} {med:7.1f}µs  {dtps_val:>10,.0f}  "
             f"{ptps_val:>10,.0f}  {dec_overhead:>+12.1f}%  {delta_vs_serial:>+10.1f}µs"

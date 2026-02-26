@@ -18,7 +18,7 @@ torch::Tensor launch_fused_moe_ffn(torch::Tensor hidden,  // [M, K]
 
   const int M = static_cast<int>(hidden.size(0));
   const int K = static_cast<int>(hidden.size(1));  // hidden dim
-  const int N = static_cast<int>(w1.size(0));       // intermediate dim
+  const int N = static_cast<int>(w1.size(0));      // intermediate dim
 
   auto opts = hidden.options();
   auto gate_buf = torch::empty({M, N}, opts);
