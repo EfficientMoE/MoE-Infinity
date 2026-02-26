@@ -8,51 +8,57 @@
 #include "utils/logger.h"
 
 ArcherAioThread::ArcherAioThread(int thread_id)
-    : thread_id_(thread_id), is_running_(false) {
+    : thread_id_(thread_id), is_running_{false} {
   DLOG_INFO("Create ArcherAioThread for thread: ", thread_id_);
 }
 
 ArcherAioThread::~ArcherAioThread() { Stop(); }
 
 void ArcherAioThread::Start() {
-  if (is_running_) {
+  if (is_running_.load()) {
     return;
   }
 
-  is_running_ = true;
+  is_running_.store(true);
   pending_callbacks_ = 0;
   thread_ = std::thread(&ArcherAioThread::Run, this);
 }
 
 void ArcherAioThread::Stop() {
-  if (!is_running_) {
+  if (!is_running_.load()) {
     return;
   }
 
-  is_running_ = false;
+  is_running_.store(false);
+  cv_.notify_one();
   thread_.join();
 }
 
 void ArcherAioThread::Enqueue(AioCallback& callback) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  callbacks_.push_back(std::move(callback));
-  pending_callbacks_.fetch_add(1);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    callbacks_.push_back(std::move(callback));
+    pending_callbacks_.fetch_add(1);
+  }
+  cv_.notify_one();
 }
 
 void ArcherAioThread::Wait() {
-  // while (!callbacks_.empty()) { usleep(1000); }
-  while (pending_callbacks_.load() != 0) {
-    usleep(1000);
-  }
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
+  done_cv_.wait(lock, [this] { return pending_callbacks_.load() == 0; });
   callbacks_.clear();
 }
 
 void ArcherAioThread::Run() {
-  while (is_running_) {
+  while (is_running_.load()) {
     std::function<void()> callback;
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::unique_lock<std::mutex> lock(mutex_);
+      cv_.wait(lock,
+               [this] { return !callbacks_.empty() || !is_running_.load(); });
+      if (!is_running_.load() && callbacks_.empty()) {
+        break;
+      }
       if (callbacks_.empty()) {
         continue;
       }
@@ -60,6 +66,8 @@ void ArcherAioThread::Run() {
       callbacks_.pop_front();
     }
     callback();
-    pending_callbacks_.fetch_sub(1);
+    if (pending_callbacks_.fetch_sub(1) == 1) {
+      done_cv_.notify_all();
+    }
   }
 }

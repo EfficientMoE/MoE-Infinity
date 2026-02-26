@@ -36,7 +36,6 @@ from moe_infinity.models import (
     SyncNllbMoeSparseMLP,
     SyncSwitchTransformersSparseMLP,
 )
-from moe_infinity.ops.op_builder.prefetch import PrefetchBuilder
 from moe_infinity.runtime.compile import script_expert
 from moe_infinity.runtime.hooks import *
 from moe_infinity.utils import (
@@ -50,12 +49,15 @@ from moe_infinity.utils.arguments import (
     copy_kwargs_to_device,
 )
 
-use_jit = False
 try:
-    import moe_infinity.ops.prefetch.prefetch_op as prefetch_op
-except ImportError:
-    print("Do not detect pre-installed ops, use JIT mode")
-    use_jit = True
+    import moe_infinity._store as prefetch_lib
+except ImportError as exc:
+    raise ImportError(
+        "moe_infinity._store extension is required. Install with CUDA enabled."
+    ) from exc
+
+# Alias for compatibility
+prefetch_op = prefetch_lib
 
 
 # class ArcherException(Exception):
@@ -139,7 +141,7 @@ class OffloadEngine(object):
         #              world_size=world_size)
         # print("Distributed init done")
 
-        self.prefetch_lib = PrefetchBuilder().load() if use_jit else prefetch_op
+        self.prefetch_lib = prefetch_lib
 
         # new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
         #     self.prefetch_lib.__file__, "TorchAllocateDevice", "TorchFreeDevice"

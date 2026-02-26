@@ -10,8 +10,11 @@ import sys
 from setuptools import find_packages, setup
 
 torch_available = True
+cuda_available = False
 try:
     import torch  # noqa: F401
+
+    cuda_available = torch.version.cuda is not None
 except ImportError:
     torch_available = False
     print(
@@ -22,11 +25,8 @@ except ImportError:
 ROOT_DIR = os.path.dirname(__file__)
 
 sys.path.insert(0, ROOT_DIR)
-# sys.path.insert(0, os.path.join(ROOT_DIR, 'src'))
 
 from torch.utils import cpp_extension
-
-from op_builder.all_ops import ALL_OPS
 
 RED_START = "\033[31m"
 RED_END = "\033[0m"
@@ -58,21 +58,136 @@ def read_readme() -> str:
 
 install_requires = fetch_requirements("requirements.txt")
 
+# Get CUTLASS_DIR from environment or default to ~/cutlass
+CUTLASS_DIR = os.path.expanduser(os.environ.get("CUTLASS_DIR", "~/cutlass"))
+
+# Common include paths
+COMMON_INCLUDE_PATHS = [
+    get_path("core"),
+    get_path("extensions"),
+    os.path.join(CUTLASS_DIR, "include"),
+    os.path.join(CUTLASS_DIR, "tools/util/include"),
+]
+
+# Common compile args
+COMMON_NVCC_ARGS = [
+    "-O3",
+    "--use_fast_math",
+    "-std=c++17",
+    "-U__CUDA_NO_HALF_OPERATORS__",
+    "-U__CUDA_NO_HALF_CONVERSIONS__",
+    "-U__CUDA_NO_HALF2_OPERATORS__",
+]
+
+COMMON_CXX_ARGS = [
+    "-O3",
+    "-Wall",
+    "-Wno-reorder",
+    "-fPIC",
+    "-fopenmp",
+]
+
+# _store extension: IO/checkpoint and prefetch functionality
+# Includes AIO, prefetch handle, tensor index, memory pools, model topology
+_STORE_SOURCES = [
+    # utils
+    "core/utils/logger.cpp",
+    "core/utils/cuda_utils.cpp",
+    # model
+    "core/model/model_topology.cpp",
+    "core/model/moe.cpp",
+    # prefetch
+    "core/prefetch/archer_prefetch_handle.cpp",
+    "core/prefetch/task_scheduler.cpp",
+    "core/prefetch/task_thread.cpp",
+    # memory
+    "core/memory/caching_allocator.cpp",
+    "core/memory/memory_pool.cpp",
+    "core/memory/pinned_memory_pool.cpp",
+    "core/memory/stream_pool.cpp",
+    "core/memory/host_caching_allocator.cpp",
+    "core/memory/device_caching_allocator.cpp",
+    # parallel
+    "core/parallel/expert_dispatcher.cpp",
+    "core/parallel/expert_module.cpp",
+    # aio
+    "core/aio/archer_aio_thread.cpp",
+    "core/aio/archer_prio_aio_handle.cpp",
+    "core/aio/archer_aio_utils.cpp",
+    "core/aio/archer_aio_threadpool.cpp",
+    "core/aio/archer_tensor_handle.cpp",
+    "core/aio/archer_tensor_index.cpp",
+    # base
+    "core/base/thread.cc",
+    "core/base/exception.cc",
+    "core/base/date.cc",
+    "core/base/process_info.cc",
+    "core/base/logging.cc",
+    "core/base/log_file.cc",
+    "core/base/timestamp.cc",
+    "core/base/file_util.cc",
+    "core/base/countdown_latch.cc",
+    "core/base/timezone.cc",
+    "core/base/log_stream.cc",
+    "core/base/thread_pool.cc",
+    # CUDA kernels for store
+    "core/model/fused_mlp.cu",
+    "extensions/kernel/fused_moe_mlp.cu",
+    "extensions/kernel/activation_kernels.cu",
+    "extensions/kernel/topk_softmax_kernels.cu",
+    # Python binding
+    "core/python/py_archer_prefetch.cpp",
+]
+
+_STORE_EXTRA_LINK_ARGS = [
+    "-luuid",
+    "-lcublas",
+    "-lcudart",
+    "-lcuda",
+    "-lpthread",
+]
+
+# _engine extension: compute kernels (fused_glu + expert_gemm)
+_ENGINE_SOURCES = [
+    "core/python/fused_glu_cuda.cu",
+]
+
+# Note: _engine needs CUTLASS for fused_glu_cuda.cu
+
 ext_modules = []
 
-BUILD_OP_DEFAULT = int(os.environ.get("BUILD_OPS", 0))
+if cuda_available:
+    _cuda_arch_flags = ["-gencode=arch=compute_80,code=sm_80"]
+    if os.environ.get("MOE_ENABLE_SM90", "1") == "1":
+        _cuda_arch_flags.append("-gencode=arch=compute_90,code=sm_90")
 
-if BUILD_OP_DEFAULT:
-    assert torch_available, "Unable to pre-compile ops without torch installed. Please install torch before attempting to pre-compile ops."
-    compatible_ops = dict.fromkeys(ALL_OPS.keys(), False)
-    install_ops = dict.fromkeys(ALL_OPS.keys(), False)
-    for op_name, builder in ALL_OPS.items():
-        if builder is not None:
-            op_compatible = builder.is_compatible()
-            compatible_ops[op_name] = op_compatible
-            if not op_compatible:
-                abort(f"Unable to pre-compile {op_name}")
-            ext_modules.append(builder.builder())
+    # _store extension: IO and prefetch
+    ext_modules.append(
+        cpp_extension.CUDAExtension(
+            name="moe_infinity._store",
+            sources=_STORE_SOURCES,
+            include_dirs=COMMON_INCLUDE_PATHS,
+            extra_compile_args={
+                "cxx": COMMON_CXX_ARGS,
+                "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,
+            },
+            extra_link_args=_STORE_EXTRA_LINK_ARGS,
+        )
+    )
+
+    # _engine extension: compute kernels (needs CUTLASS)
+    ext_modules.append(
+        cpp_extension.CUDAExtension(
+            name="moe_infinity._engine",
+            sources=_ENGINE_SOURCES,
+            include_dirs=COMMON_INCLUDE_PATHS,
+            extra_compile_args={
+                "nvcc": COMMON_NVCC_ARGS
+                + _cuda_arch_flags
+                + ["-DBF16_AVAILABLE"],
+            },
+        )
+    )
 
 cmdclass = {
     "build_ext": cpp_extension.BuildExtension.with_options(use_ninja=True)
@@ -84,13 +199,7 @@ print(f"find_packages: {find_packages()}")
 setup(
     name="moe_infinity",
     version=os.getenv("MOEINF_VERSION", "0.0.1"),
-    packages=find_packages(
-        exclude=["op_builder", "op_builder.*", "moe_infinity.ops.core.*"]
-    ),
-    package_data={
-        "moe_infinity.ops.prefetch": ["**/*.so"],
-        "moe_infinity": ["ops/core/**"],
-    },
+    packages=find_packages(exclude=["extensions", "extensions.*"]),
     include_package_data=True,
     install_requires=install_requires,
     author="EfficientMoE Team",
