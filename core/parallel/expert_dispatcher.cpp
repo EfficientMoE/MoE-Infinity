@@ -25,16 +25,16 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       num_enqueued_(0),
       start_(false),
       expert_type_(expert_type),
-      input_mutex_(kNumDevices),
-      input_cv_(kNumDevices),
-      exec_mutex_(kNumDevices),
-      exec_cv_(kNumDevices),
-      input_queue_(kNumDevices),
-      exec_queue_(kNumDevices),
-      gpu_overload_(kNumDevices, false) {
+      input_mutex_(kNumDevices()),
+      input_cv_(kNumDevices()),
+      exec_mutex_(kNumDevices()),
+      exec_cv_(kNumDevices()),
+      input_queue_(kNumDevices()),
+      exec_queue_(kNumDevices()),
+      gpu_overload_(kNumDevices(), false) {
   main_thread_stop_flag_.store(false);
 
-  for (int i = 0; i < kNumDevices; ++i) {
+  for (int i = 0; i < kNumDevices(); ++i) {
     cudaSetDevice(i);
     cudaStream_t fetch_stream;
     cudaStreamCreateWithFlags(&fetch_stream, cudaStreamNonBlocking);
@@ -54,15 +54,15 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
     cache_sizes_.push_back(cache_limit);
   }
 
-  for (int i = 0; i < kNumDevices * num_threads; ++i) {
-    cudaSetDevice(i % kNumDevices);
+  for (int i = 0; i < kNumDevices() * num_threads; ++i) {
+    cudaSetDevice(i % kNumDevices());
     cudaStream_t exec_stream;
     cudaStreamCreateWithFlags(&exec_stream, cudaStreamNonBlocking);
     exec_streams_.emplace_back(exec_stream);
     // cudaDeviceSynchronize();
 
     auto thread_func =
-        std::bind(&ExpertDispatcher::GPUExecFunc, this, i % kNumDevices);
+        std::bind(&ExpertDispatcher::GPUExecFunc, this, i % kNumDevices());
     threads_.emplace_back(new base::Thread(thread_func));
     threads_.back()->start();
     // SetThreadAffinity(threads_.back()->tid());

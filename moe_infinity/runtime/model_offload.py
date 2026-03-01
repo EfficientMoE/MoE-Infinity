@@ -15,10 +15,12 @@ import transformers
 
 # import torch.distributed as dist
 # from torch.distributed import rpc
-from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear
-from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import (
-    QuantLinear as QuantLinearOld,
-)
+try:
+    from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear
+    from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as QuantLinearOld
+except ImportError:
+    class QuantLinear: pass
+    class QuantLinearOld: pass
 from safetensors import safe_open
 from tqdm import tqdm
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
@@ -370,9 +372,13 @@ class OffloadEngine(object):
                         else:
                             state_dict = torch.load(ckpt)
 
-                        # convert all tensors in state_dict to self.dtype
+                        # convert all tensors in state_dict to self.dtype_cls
                         for k, v in state_dict.items():
-                            state_dict[k] = v.to(self.dtype).to("cpu")
+                            try:
+                                state_dict[k] = v.to(self.dtype_cls).to("cpu")
+                            except Exception as e:
+                                print(f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}", flush=True)
+                                raise
 
                         self._offload_state_dict(state_dict, empty_state_dict)
 
