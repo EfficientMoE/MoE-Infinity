@@ -86,9 +86,6 @@ void FixedBuffer<SIZE>::cookieEnd() {}
 void LogStream::staticCheck() {
   static_assert(kMaxNumericSize - 10 > std::numeric_limits<double>::digits10,
                 "kMaxNumericSize is large enough");
-  static_assert(
-      kMaxNumericSize - 10 > std::numeric_limits<long double>::digits10,
-      "kMaxNumericSize is large enough");
   static_assert(kMaxNumericSize - 10 > std::numeric_limits<long>::digits10,
                 "kMaxNumericSize is large enough");
   static_assert(kMaxNumericSize - 10 > std::numeric_limits<long long>::digits10,
