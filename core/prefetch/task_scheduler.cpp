@@ -534,7 +534,11 @@ void ArcherTaskPool::SetNodeDevice(const TaskPtr& task) {
   auto start_time = MCIROSECONDS_SINCE_EPOCH;
 
   // node->SetDevice(task->dst_device);
-  task->stream = TORCH_STREAM_H2D_VIEW(task->dst_device.index()).stream();
+  if (task->dst_device.is_cuda()) {
+    task->stream = TORCH_STREAM_H2D_VIEW(task->dst_device.index()).stream();
+  } else {
+    task->stream = nullptr;
+  }
   node->SetDevice(task->dst_device, task->on_demand, task->stream);
   auto end_time = MCIROSECONDS_SINCE_EPOCH;
   DLOG_TRACE("SetNodeDevice: task: {}, emplace time {} us", task->DebugString(),

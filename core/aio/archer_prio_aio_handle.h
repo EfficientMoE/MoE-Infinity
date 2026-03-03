@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 #include "archer_aio_threadpool.h"
