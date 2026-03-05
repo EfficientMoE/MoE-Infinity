@@ -8,9 +8,10 @@ from typing import Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.models.mixtral.modeling_mixtral import (
-    MixtralBlockSparseTop2MLP,
-)
+try:
+    from transformers.models.mixtral.modeling_mixtral import MixtralBlockSparseTop2MLP
+except ImportError:
+    from transformers.models.mistral.modeling_mistral import MistralMLP as MixtralBlockSparseTop2MLP
 
 from moe_infinity.utils import ArcherConfig
 
