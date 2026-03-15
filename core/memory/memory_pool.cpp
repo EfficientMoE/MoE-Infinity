@@ -126,7 +126,7 @@ DeviceMemoryPool::DeviceMemoryPool() {
   int device_count = 0;
   cudaGetDeviceCount(&device_count);
 
-  c10::cuda::CUDACachingAllocator::init(device_count);
+  // c10::cuda::CUDACachingAllocator::init(device_count);
 
   for (int i = 0; i < device_count; ++i) {
     std::unordered_map<std::uint64_t, void*> allocated_id;

@@ -62,8 +62,8 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
     // gpu_overload_.emplace_back(false);
   }
 
-  for (int i = 0; i < kNumDevices * num_threads; ++i) {
-    cudaSetDevice(i % kNumDevices);
+  for (int i = 0; i < kNumDevices() * num_threads; ++i) {
+    cudaSetDevice(i % kNumDevices());
     cudaStream_t exec_stream;
     cudaStreamCreateWithFlags(&exec_stream, cudaStreamNonBlocking);
     exec_streams_.emplace_back(exec_stream);

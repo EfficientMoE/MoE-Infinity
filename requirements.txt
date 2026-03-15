@@ -1,5 +1,4 @@
 accelerate
-auto_gptq
 chardet
 datasets>=2.12.0
 fastapi
