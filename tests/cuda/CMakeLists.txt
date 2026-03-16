@@ -63,8 +63,16 @@ macro(append_cmake_prefix_path PKG EXPR)
 endmacro()
 
 # Add include directories and link for CUTLASS
-set(CUTLASS_DIR $ENV{HOME}/cutlass)
-message(STATUS "Using CUTLASS from: ${CUTLASS_DIR}")
+if(DEFINED CUTLASS_DIR AND NOT CUTLASS_DIR STREQUAL "")
+  message(STATUS "CUTLASS_DIR provided by CMake: ${CUTLASS_DIR}")
+elseif(DEFINED ENV{CUTLASS_DIR})
+  set(CUTLASS_DIR $ENV{CUTLASS_DIR})
+  message(STATUS "CUTLASS_DIR from environment: ${CUTLASS_DIR}")
+else()
+  set(CUTLASS_DIR $ENV{HOME}/cutlass)
+  message(STATUS "CUTLASS_DIR fallback to default: ${CUTLASS_DIR}")
+endif()
+set(CUTLASS_DIR "${CUTLASS_DIR}" CACHE PATH "Path to CUTLASS root directory")
 
 if(DEFINED ENV{CONDA_PREFIX})
   set(CONDA_PREFIX_PATH $ENV{CONDA_PREFIX})
@@ -118,10 +126,24 @@ link_directories(
 find_package(CUDA REQUIRED)
 
 # set cuda architecture
-set(CUDA_ARCHITECTURES 86)
+if(DEFINED CUDA_ARCHITECTURES AND NOT CUDA_ARCHITECTURES STREQUAL "")
+  message(STATUS "CUDA_ARCHITECTURES provided by CMake: ${CUDA_ARCHITECTURES}")
+elseif(DEFINED ENV{CUDA_ARCHITECTURES})
+  set(CUDA_ARCHITECTURES $ENV{CUDA_ARCHITECTURES})
+  message(STATUS "CUDA_ARCHITECTURES from environment: ${CUDA_ARCHITECTURES}")
+else()
+  set(CUDA_ARCHITECTURES 86)
+  message(STATUS "CUDA_ARCHITECTURES fallback to default: ${CUDA_ARCHITECTURES}")
+endif()
 
 # set nvcc flags
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -g -G -lineinfo -rdynamic -O3 -gencode arch=compute_86,code=sm_86 -Xcompiler -fopenmp")
+set(CUDA_NVCC_ARCH_FLAG "")
+if(CUDA_ARCHITECTURES MATCHES "^[0-9]+$")
+  set(CUDA_NVCC_ARCH_FLAG "-gencode arch=compute_${CUDA_ARCHITECTURES},code=sm_${CUDA_ARCHITECTURES}")
+else()
+  message(STATUS "Skipping explicit -gencode flag for non-numeric CUDA_ARCHITECTURES: ${CUDA_ARCHITECTURES}")
+endif()
+set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -g -G -lineinfo -rdynamic -O3 ${CUDA_NVCC_ARCH_FLAG} -Xcompiler -fopenmp")
 
 set(SRC_LIST
     test_uvm_kernel.cu

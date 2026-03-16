@@ -13,7 +13,7 @@ class Futex {
  public:
   Futex() { value_.store(0); }
   explicit Futex(T initial_value) : value_(initial_value) {}
-  explicit Futex(const Futex<T>& other) : value_(other.value_.get()) {}
+  explicit Futex(const Futex<T>& other) : value_(other.value_.load()) {}
 
   void wait(T expected) {
     while (value_.load() != expected) {

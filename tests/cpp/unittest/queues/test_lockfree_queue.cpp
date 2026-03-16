@@ -2,15 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Tests for utils/lockfree_queue.h
-//
-// Known issues found during review:
-//  - LockFreeRecyclingQueue::Pop returns void but base Pop returns bool, and
-//    it uses `override` on a non-virtual base method -> compile error.
-//  - LockFreeRecyclingQueue::TryPop similarly broken.
-//  - LockFreeQueue::Pop: after a successful CAS that advances `head_`, the
-//    read of `old_head->next.load()->data` can race with another thread that
-//    already popped (and freed) the node that old_head->next points to.
-//    This is a latent ABA / use-after-free hazard in high concurrency.
 
 #include "utils/lockfree_queue.h"
 
@@ -26,8 +17,8 @@
 // Existing tests (kept intact)
 // ---------------------------------------------------------------------------
 
-TEST(LockFreeQueueTest, SingleThreadedPushPop) {
-  LockFreeQueue<int> queue;
+TEST(MutexQueueTest, SingleThreadedPushPop) {
+  MutexQueue<int> queue;
   int value;
 
   int a = 1;
@@ -36,8 +27,8 @@ TEST(LockFreeQueueTest, SingleThreadedPushPop) {
   ASSERT_EQ(value, 1);
 }
 
-TEST(LockFreeQueueTest, SequentialPushParallelPop) {
-  LockFreeQueue<int> queue;
+TEST(MutexQueueTest, SequentialPushParallelPop) {
+  MutexQueue<int> queue;
 
   for (int i = 0; i < 10; i++) {
     queue.Push(i);
@@ -60,8 +51,8 @@ TEST(LockFreeQueueTest, SequentialPushParallelPop) {
   for (int i = 0; i < 10; i++) ASSERT_EQ(results[i], i);
 }
 
-TEST(LockFreeQueueTest, ParallelPushSequentialPop) {
-  LockFreeQueue<int> queue;
+TEST(MutexQueueTest, ParallelPushSequentialPop) {
+  MutexQueue<int> queue;
 
   std::vector<std::thread> threads;
   for (int i = 0; i < 10; i++) {
@@ -85,8 +76,8 @@ TEST(LockFreeQueueTest, ParallelPushSequentialPop) {
   for (int i = 0; i < 10; i++) ASSERT_EQ(results[i], i);
 }
 
-TEST(LockFreeQueueTest, ParallelPushParallelPop) {
-  LockFreeQueue<int> queue;
+TEST(MutexQueueTest, ParallelPushParallelPop) {
+  MutexQueue<int> queue;
 
   std::vector<std::thread> push_threads;
   for (int i = 0; i < 10; i++) {
@@ -120,8 +111,8 @@ TEST(LockFreeQueueTest, ParallelPushParallelPop) {
 // ---------------------------------------------------------------------------
 
 // Pop on freshly-constructed (empty) queue must return false immediately.
-TEST(LockFreeQueueTest, PopOnEmptyReturnsFalse) {
-  LockFreeQueue<int> queue;
+TEST(MutexQueueTest, PopOnEmptyReturnsFalse) {
+  MutexQueue<int> queue;
   int value = -1;
   EXPECT_FALSE(queue.Pop(value));
   // value must not have been modified
@@ -129,8 +120,8 @@ TEST(LockFreeQueueTest, PopOnEmptyReturnsFalse) {
 }
 
 // Empty() is true before any push and false afterwards.
-TEST(LockFreeQueueTest, EmptyMethod) {
-  LockFreeQueue<int> queue;
+TEST(MutexQueueTest, EmptyMethod) {
+  MutexQueue<int> queue;
   EXPECT_TRUE(queue.Empty());
 
   int v = 42;
@@ -142,8 +133,8 @@ TEST(LockFreeQueueTest, EmptyMethod) {
 }
 
 // Full() must always return false (unbounded queue).
-TEST(LockFreeQueueTest, FullAlwaysFalse) {
-  LockFreeQueue<int> queue;
+TEST(MutexQueueTest, FullAlwaysFalse) {
+  MutexQueue<int> queue;
   EXPECT_FALSE(queue.Full());
   for (int i = 0; i < 1000; i++) {
     queue.Push(i);
@@ -152,8 +143,8 @@ TEST(LockFreeQueueTest, FullAlwaysFalse) {
 }
 
 // Push then pop a single item and verify the returned value is correct.
-TEST(LockFreeQueueTest, SingleItemRoundTrip) {
-  LockFreeQueue<int> queue;
+TEST(MutexQueueTest, SingleItemRoundTrip) {
+  MutexQueue<int> queue;
   int in = 123, out = 0;
   queue.Push(in);
   ASSERT_TRUE(queue.Pop(out));
@@ -162,8 +153,8 @@ TEST(LockFreeQueueTest, SingleItemRoundTrip) {
 }
 
 // Verify FIFO ordering in single-threaded use.
-TEST(LockFreeQueueTest, FifoOrderSingleThread) {
-  LockFreeQueue<int> queue;
+TEST(MutexQueueTest, FifoOrderSingleThread) {
+  MutexQueue<int> queue;
   for (int i = 0; i < 10; i++) queue.Push(i);
 
   for (int i = 0; i < 10; i++) {
@@ -174,8 +165,8 @@ TEST(LockFreeQueueTest, FifoOrderSingleThread) {
 }
 
 // Works correctly with large objects (heap-allocated string).
-TEST(LockFreeQueueTest, LargeObjectRoundTrip) {
-  LockFreeQueue<std::string> queue;
+TEST(MutexQueueTest, LargeObjectRoundTrip) {
+  MutexQueue<std::string> queue;
   std::string in(10000, 'x');
   queue.Push(in);
 
@@ -185,14 +176,13 @@ TEST(LockFreeQueueTest, LargeObjectRoundTrip) {
 }
 
 // Stress test: many producers and consumers, all items accounted for.
-// This also stresses the ABA / memory-reclamation path in Pop().
-TEST(LockFreeQueueTest, HighConcurrencyStress) {
+TEST(MutexQueueTest, HighConcurrencyStress) {
   constexpr int kProducers = 8;
   constexpr int kConsumers = 8;
   constexpr int kItemsPerProducer = 1000;
   constexpr int kTotal = kProducers * kItemsPerProducer;
 
-  LockFreeQueue<int> queue;
+  MutexQueue<int> queue;
   std::atomic<int> produced{0};
   std::atomic<int> consumed{0};
 

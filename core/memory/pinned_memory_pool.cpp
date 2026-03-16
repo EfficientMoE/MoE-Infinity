@@ -16,6 +16,7 @@ PinnedMemoryPool::PinnedMemoryPool(std::size_t chunk_size, int num_chunks)
   DLOG_INFO("Creating pinned memory pool: ", num_chunks, " chunks of ",
             chunk_size / 1024, " KB");
   all_chunks_.reserve(num_chunks);
+  pinned_registered_.reserve(num_chunks);
   for (int i = 0; i < num_chunks; ++i) {
     void* ptr = nullptr;
     if (posix_memalign(&ptr, 4096, chunk_size) != 0) {
@@ -23,18 +24,23 @@ PinnedMemoryPool::PinnedMemoryPool(std::size_t chunk_size, int num_chunks)
     }
     cudaError_t err =
         cudaHostRegister(ptr, chunk_size, cudaHostRegisterDefault);
-    if (err != cudaSuccess) {
+    bool register_success = (err == cudaSuccess);
+    if (!register_success) {
       DLOG_WARN("cudaHostRegister failed for chunk ", i, ": ",
                 cudaGetErrorString(err), "; falling back to unpinned");
     }
     all_chunks_.push_back(ptr);
+    pinned_registered_.push_back(register_success);
     free_list_.push(ptr);
   }
 }
 
 PinnedMemoryPool::~PinnedMemoryPool() {
-  for (auto* ptr : all_chunks_) {
-    cudaHostUnregister(ptr);
+  for (std::size_t i = 0; i < all_chunks_.size(); ++i) {
+    void* ptr = all_chunks_[i];
+    if (i < pinned_registered_.size() && pinned_registered_[i]) {
+      cudaHostUnregister(ptr);
+    }
     free(ptr);
   }
 }

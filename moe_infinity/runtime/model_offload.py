@@ -5,6 +5,7 @@
 
 import functools
 import gc
+import importlib
 import json
 import os
 import re
@@ -59,15 +60,25 @@ from moe_infinity.utils.arguments import (
     copy_kwargs_to_device,
 )
 
-try:
-    import moe_infinity._store as prefetch_lib
-except ImportError as exc:
-    raise ImportError(
-        "moe_infinity._store extension is required. Install with CUDA enabled."
-    ) from exc
-
+_prefetch_lib = None
 # Alias for compatibility
-prefetch_op = prefetch_lib
+prefetch_op = None
+
+
+def _load_prefetch_lib():
+    global _prefetch_lib, prefetch_op
+    if _prefetch_lib is None:
+        try:
+            prefetch_lib = importlib.import_module("moe_infinity._store")
+        except ImportError as exc:
+            raise ImportError(
+                "moe_infinity._store extension is required. Install with CUDA enabled."
+            ) from exc
+
+        _prefetch_lib = prefetch_lib
+        prefetch_op = prefetch_lib
+
+    return _prefetch_lib
 
 
 # class ArcherException(Exception):
@@ -151,7 +162,7 @@ class OffloadEngine(object):
         #              world_size=world_size)
         # print("Distributed init done")
 
-        self.prefetch_lib = prefetch_lib
+        self.prefetch_lib = _load_prefetch_lib()
 
         # new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
         #     self.prefetch_lib.__file__, "TorchAllocateDevice", "TorchFreeDevice"

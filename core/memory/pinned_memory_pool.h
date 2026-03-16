@@ -25,6 +25,7 @@ class PinnedMemoryPool {
  private:
   std::size_t chunk_size_;
   std::vector<void*> all_chunks_;
+  std::vector<bool> pinned_registered_;
   std::queue<void*> free_list_;
   std::mutex mutex_;
   std::condition_variable cv_;

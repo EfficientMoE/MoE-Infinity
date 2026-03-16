@@ -2,6 +2,7 @@
 
 #include <cutlass/arch/arch.h>
 #include <cassert>
+#include <type_traits>
 
 #define KERNEL_LOG_DEBUG(msg, ...)                                \
   do {                                                            \
@@ -12,9 +13,9 @@
   } while (0)
 
 template <int ArchCode>
-using DetectedArchT = ArchTagT(ArchCode >= 900) ? cutlass::arch::Sm90
-                      : (ArchCode >= 800)       ? cutlass::arch::Sm80
-                                                : void > ;
+using DetectedArchT = std::conditional_t<
+    (ArchCode >= 900), cutlass::arch::Sm90,
+    std::conditional_t<(ArchCode >= 800), cutlass::arch::Sm80, void>>;
 
 template <typename T, typename = void>
 struct DetectedArch {

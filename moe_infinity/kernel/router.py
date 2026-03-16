@@ -43,6 +43,7 @@ def softmax_kernel(
 def fused_softmax_topk_kernel(
     hidden_ptr,  # [B, H]
     weight_ptr,  # [H, E]
+    bias_ptr,
     routing_mask_ptr,  # [B, E] (bool)
     routing_weight_ptr,  # [B, E] (float16)
     B: tl.constexpr,
@@ -50,7 +51,7 @@ def fused_softmax_topk_kernel(
     E: tl.constexpr,
     TOPK: tl.constexpr,
     BLOCK_E: tl.constexpr,
-    normalize_topk: tl.constexpr,  # New!
+    normalize_topk: tl.constexpr,
 ):
     batch_id = tl.program_id(0)
     off_e = tl.arange(0, BLOCK_E)
@@ -132,6 +133,7 @@ def launch_fused_softmax_topk(hidden_states, weight, bias, top_k):
         E=E,
         TOPK=top_k,
         BLOCK_E=BLOCK_E,
+        normalize_topk=True,
     )
 
     return routing_mask, routing_weight
@@ -153,7 +155,7 @@ def fused_softmax_topk_kernel_nobias(
     batch_id = tl.program_id(0)
     off_e = tl.arange(0, BLOCK_E)
 
-    logits = tl.full([BLOCK_E], -float("inf"), dtype=tl.float32)
+    logits = tl.zeros([BLOCK_E], dtype=tl.float32)
 
     for h in range(H):
         h_val = tl.load(hidden_ptr + batch_id * H + h)
@@ -161,6 +163,8 @@ def fused_softmax_topk_kernel_nobias(
         valid = off_e < E
         w_val = tl.load(w_ptr, mask=valid, other=0.0)
         logits = tl.where(valid, logits + h_val * w_val, logits)
+
+    logits = tl.where(off_e < E, logits, -float("inf"))
 
     # Softmax
     max_logit = tl.max(logits, axis=0)
@@ -175,7 +179,7 @@ def fused_softmax_topk_kernel_nobias(
 
     for i in range(BLOCK_E):
         if i < E:
-            p = tl.load(probs + batch_id * E + i)
+            p = probs[i]
             idx = i
 
             for j in range(TOPK):

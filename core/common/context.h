@@ -63,7 +63,7 @@ struct Context {
   }
 };
 
-Context& getContext() {
+inline Context& getContext() {
   static Context instance;
   return instance;
 }

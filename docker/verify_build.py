@@ -4,6 +4,7 @@ Verify that the MoE-Infinity prefetch extension was built correctly
 and that key refactored components are present.
 """
 
+import fnmatch
 import importlib
 import importlib.util
 import os
@@ -41,16 +42,32 @@ try:
 
     import torch  # noqa: F401
 
-    # Load the _store module directly from the .so file
-    so_path = "moe_infinity/_store.cpython-311-x86_64-linux-gnu.so"
-    if os.path.exists(so_path):
+    store_glob = "_store*.so"
+    store_candidates = [
+        path
+        for path in so_files
+        if fnmatch.fnmatch(os.path.basename(path), store_glob)
+    ]
+    so_path = store_candidates[0] if store_candidates else None
+    if so_path:
         spec = importlib.util.spec_from_file_location("_store", so_path)
-        _store = importlib.util.module_from_spec(spec)
-        sys.modules["moe_infinity._store"] = _store
-        spec.loader.exec_module(_store)
-        check("import moe_infinity._store", True)
+        if spec and spec.loader:
+            _store = importlib.util.module_from_spec(spec)
+            sys.modules["moe_infinity._store"] = _store
+            spec.loader.exec_module(_store)
+            check("import moe_infinity._store", True)
+        else:
+            check(
+                "import moe_infinity._store",
+                False,
+                f"Unable to create import spec from: {so_path}",
+            )
     else:
-        check("import moe_infinity._store", False, f"File not found: {so_path}")
+        check(
+            "import moe_infinity._store",
+            False,
+            f"_store .so not found in discovered files: {so_files}",
+        )
 except Exception as e:
     check("import moe_infinity._store", False, str(e))
 

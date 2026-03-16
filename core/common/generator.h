@@ -36,8 +36,8 @@ class NumGenerator {
 };
 
 // Static member definitions
-std::mutex NumGenerator::mutex_;
-uint32_t NumGenerator::ctx_id_ = 1;
+inline std::mutex NumGenerator::mutex_;
+inline uint32_t NumGenerator::ctx_id_ = 1;
 
 inline std::string GenUUID() {
   uuid_t uuid;

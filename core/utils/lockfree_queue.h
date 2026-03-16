@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
@@ -11,14 +10,11 @@
 #include "base/noncopyable.h"
 
 template <typename T>
-class LockFreeQueue : public base::noncopyable {
+class MutexQueue : public base::noncopyable {
  public:
-  LockFreeQueue() {
-    head_.store(nullptr);
-    tail_.store(nullptr);
-  }
+  MutexQueue() = default;
 
-  ~LockFreeQueue() = default;
+  ~MutexQueue() = default;
 
   void Push(T value) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -47,23 +43,20 @@ class LockFreeQueue : public base::noncopyable {
  protected:
   mutable std::mutex mutex_;
   std::queue<T> queue_;
-  std::atomic<void*> head_;
-  std::atomic<void*> tail_;
 };
 
 template <typename T>
-class LockFreeRecyclingQueue : public LockFreeQueue<T> {
+class LockFreeRecyclingQueue : public MutexQueue<T> {
  public:
   LockFreeRecyclingQueue() = default;
 
-  void Pop(T& item) override {
-    LockFreeQueue<T>::Pop(item);
-    Push(item);
-  }
-
-  bool TryPop(T& item) override {
-    bool success = LockFreeQueue<T>::TryPop(item);
-    Push(item);
+  bool Pop(T& item) {
+    bool success = MutexQueue<T>::Pop(item);
+    if (success) {
+      this->Push(item);
+    }
     return success;
   }
+
+  bool TryPop(T& item) { return Pop(item); }
 };

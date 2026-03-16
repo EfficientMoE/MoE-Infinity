@@ -22,5 +22,5 @@ target_link_libraries(test_lockfree_queue ${GTEST_LIBRARIES} pthread)
 target_link_libraries(test_threadsafe_queue ${GTEST_LIBRARIES} pthread)
 
 enable_testing()
-add_test(NAME LockFreeQueueTests COMMAND test_lockfree_queue)
+add_test(NAME MutexQueueTests COMMAND test_lockfree_queue)
 add_test(NAME ThreadSafeQueueTests COMMAND test_threadsafe_queue)

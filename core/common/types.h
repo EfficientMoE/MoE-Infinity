@@ -105,32 +105,33 @@ constexpr auto string_to_enum(const std::string& s) noexcept
 }
 
 // Macro to define enum class, enum to string, and string to enum functions
-#define DEFINE_ENUM_CLASS(EnumType, ENUM_VALUES)                             \
-  enum class EnumType { ENUM_VALUES(ENUM_ENTRY_COMMA, EnumType) Unknown };   \
-                                                                             \
-  /* Enum to string function */                                              \
-  constexpr const char* EnumType##ToString(EnumType v) {                     \
-    switch (v) {                                                             \
-      ENUM_VALUES(ENUM_CASE, EnumType)                                       \
-      default:                                                               \
-        return "Unknown";                                                    \
-    }                                                                        \
-  }                                                                          \
-                                                                             \
-  /* String to enum function */                                              \
-  EnumType StringTo##EnumType(const std::string& s) {                        \
-    ENUM_VALUES(STRING_CASE, EnumType)                                       \
-    return EnumType::Unknown;                                                \
-  }                                                                          \
-                                                                             \
-  /* Specialize generic template functions for this enum type */             \
-  template <>                                                                \
-  constexpr auto enum_to_string<EnumType>(                                   \
-      EnumType e) noexcept -> const char* {                                  \
-    return EnumType##ToString(e);                                            \
-  }                                                                          \
-                                                                             \
-  template <>                                                                \
-  auto string_to_enum<EnumType>(const std::string& s) noexcept -> EnumType { \
-    return StringTo##EnumType(s);                                            \
+#define DEFINE_ENUM_CLASS(EnumType, ENUM_VALUES)                           \
+  enum class EnumType { ENUM_VALUES(ENUM_ENTRY_COMMA, EnumType) Unknown }; \
+                                                                           \
+  /* Enum to string function */                                            \
+  constexpr const char* EnumType##ToString(EnumType v) {                   \
+    switch (v) {                                                           \
+      ENUM_VALUES(ENUM_CASE, EnumType)                                     \
+      default:                                                             \
+        return "Unknown";                                                  \
+    }                                                                      \
+  }                                                                        \
+                                                                           \
+  /* String to enum function */                                            \
+  inline EnumType StringTo##EnumType(const std::string& s) {               \
+    ENUM_VALUES(STRING_CASE, EnumType)                                     \
+    return EnumType::Unknown;                                              \
+  }                                                                        \
+                                                                           \
+  /* Specialize generic template functions for this enum type */           \
+  template <>                                                              \
+  constexpr auto enum_to_string<EnumType>(                                 \
+      EnumType e) noexcept -> const char* {                                \
+    return EnumType##ToString(e);                                          \
+  }                                                                        \
+                                                                           \
+  template <>                                                              \
+  inline auto string_to_enum<EnumType>(                                    \
+      const std::string& s) noexcept -> EnumType {                         \
+    return StringTo##EnumType(s);                                          \
   }
