@@ -190,9 +190,10 @@ void ArcherPrioAioContext::Schedule() {
     schedule_cv_.wait(lock, [this] {
       std::lock_guard<std::mutex> lh(io_queue_high_mutex_);
       std::lock_guard<std::mutex> ll(io_queue_low_mutex_);
-      return !io_queue_high_.empty() || !io_queue_low_.empty() || time_to_exit_;
+      return !io_queue_high_.empty() || !io_queue_low_.empty() ||
+             time_to_exit_.load();
     });
-    if (time_to_exit_) {
+    if (time_to_exit_.load()) {
       return;
     }
   }

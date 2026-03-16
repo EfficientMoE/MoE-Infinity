@@ -66,6 +66,7 @@ def fused_softmax_topk_kernel(
         logits += hidden_val * w
 
     logits += tl.load(bias_ptr + off_e, mask=off_e < E, other=0.0)
+    logits = tl.where(off_e < E, logits, -float("inf"))
 
     # Compute softmax
     max_logit = tl.max(logits, axis=0)
@@ -120,7 +121,7 @@ def launch_fused_softmax_topk(hidden_states, weight, bias, top_k):
         (B, E), dtype=dtype, device=hidden_states.device
     )
 
-    BLOCK_E = 32  # Must divide E
+    BLOCK_E = triton.next_power_of_2(E)
 
     fused_softmax_topk_kernel[(B,)](
         hidden_states,
@@ -219,8 +220,7 @@ def launch_fused_softmax_topk_nobias(
         (B, E), dtype=dtype, device=hidden_states.device
     )
 
-    BLOCK_E = 128
-    assert BLOCK_E >= E, "BLOCK_E must be greater than or equal to E"
+    BLOCK_E = triton.next_power_of_2(E)
 
     fused_softmax_topk_kernel_nobias[(B,)](
         hidden_states,

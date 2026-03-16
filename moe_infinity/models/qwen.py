@@ -27,6 +27,11 @@ class Qwen3MoEBlock(nn.Module):
             ]
         )
 
+        # runtime-injected handles (set by model_offload patching)
+        self.lib = None
+        self.expert_executor = None
+        self.layer_id = None
+
     @nvtx.annotate("Qwen3Prepare", color="blue")
     def __prepare_expert_route(self, hidden_states):
         # router_logits: (batch * sequence_length, n_experts)

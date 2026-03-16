@@ -1,22 +1,11 @@
 // Copyright (c) EfficientMoE.
 // SPDX-License-Identifier: Apache-2.0
 
-// Tests for utils/cache.h (LFUCache<KeyType, ValueType>)
+// Tests for utils/cache.h (LFUCache<KeyType, ValueType>).
 //
-// Known bugs found during review:
-//
-//  BUG-1 (use-after-erase in get()):
-//    `get()` stores an iterator `node = keyNodeMap[key]`, calls
-//    `freqListMap[freq].erase(node)` which invalidates `node`, then reads
-//    `node->freq`, `node->value` and pushes `*node` into another list.
-//    Dereferencing an erased list iterator is undefined behaviour.
-//    The tests below document the *intended* correct behaviour; they may
-//    crash or produce wrong results with AddressSanitizer enabled.
-//
-//  BUG-2 (concurrent modification in reset()):
-//    `reset()` iterates over `freqListMap` while simultaneously calling
-//    `freqListMap[1].push_back(node)` which can insert a new key=1 entry and
-//    invalidate the range-for iterator.
+// These tests provide regression coverage for previously reported LFUCache
+// correctness/stability issues in `get()` and `reset()`. They verify expected
+// behavior now that those issues are fixed.
 
 #include "utils/cache.h"
 
@@ -71,7 +60,7 @@ TEST(LFUCacheTest, EvictLFUOnOverflow) {
   LFUCache<int, int> cache(2);
   cache.put(1, 10);  // freq[1]=1
   cache.put(2, 20);  // freq[2]=1
-  cache.get(2);      // freq[2]=2 (BUG-1 affects this call)
+  cache.get(2);      // freq[2]=2
   cache.put(3, 30);  // capacity full → evict key=1 (lowest freq=1)
 
   EXPECT_EQ(cache.get(2), 20);
@@ -175,8 +164,7 @@ TEST(LFUCacheTest, MinFreqResetAfterEviction) {
 // ---------------------------------------------------------------------------
 
 // After reset(), all frequencies drop to 1 so all entries are equally
-// likely to be evicted.  We verify that existing keys are still readable.
-// NOTE: BUG-2 may cause a crash here; this test documents intended behaviour.
+// likely to be evicted. We verify that existing keys are still readable.
 TEST(LFUCacheTest, ResetPreservesKeys) {
   LFUCache<int, int> cache(3);
   cache.put(1, 10);

@@ -22,10 +22,12 @@ struct DetectedArch {
   using SM = void;
 };
 
+#ifdef __CUDA_ARCH__
 template <typename T>
 struct DetectedArch<T, std::enable_if_t<(__CUDA_ARCH__ > 0)>> {
   using SM = DetectedArchT<__CUDA_ARCH__>;
 };
+#endif
 
 template <int BusWidthBits>
 struct OptimalTileCalculator {

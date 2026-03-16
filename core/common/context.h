@@ -7,6 +7,8 @@
 
 #include <cstdint>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 enum class DataType { BFLOAT16 = 0, FLOAT32 = 1, FLOAT16 = 2, FP8_E4M3FN = 3 };

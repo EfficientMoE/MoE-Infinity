@@ -9,6 +9,7 @@
 #include <cstring>  // for memset
 #include <memory>
 #include <string>
+#include <tuple>
 
 #include "common/types.h"
 #include "utils/logger.h"

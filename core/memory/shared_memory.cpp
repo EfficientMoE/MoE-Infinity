@@ -1,5 +1,9 @@
 #include "shared_memory.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+
 void* OpenSharedMemory(const char* name, size_t size) {
   int shm_fd = shm_open(name, O_RDWR, 0666);
   LOG_FATAL_IF(shm_fd == -1,

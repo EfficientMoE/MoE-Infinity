@@ -1,8 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 project(LockFreeQueueTests)
 
-add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0) # needed for torch backward compatibility
-
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
@@ -101,6 +99,7 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
 # add torch
 find_package(Torch REQUIRED)
+add_compile_options(${TORCH_CXX_FLAGS})
 
 find_library(torch_python_LIBRARY torch_python PATHS
   "${TORCH_INSTALL_PREFIX}/lib")

@@ -6,19 +6,28 @@
 #include <atomic>
 #include <cerrno>
 #include <stdexcept>
+#include <type_traits>
 
 // Templated Futex class for atomic variable
 template <typename T>
 class Futex {
  public:
+  static_assert(std::is_integral_v<T>,
+                "Futex<T> requires an integral futex-compatible type");
+  static_assert(sizeof(T) == sizeof(int),
+                "Futex<T> requires a 32-bit futex-compatible storage type");
+  static_assert(
+      sizeof(std::atomic<T>) == sizeof(int),
+      "Futex<T> requires atomic storage compatible with futex 32-bit word");
+
   Futex() { value_.store(0); }
   explicit Futex(T initial_value) : value_(initial_value) {}
   explicit Futex(const Futex<T>& other) : value_(other.value_.load()) {}
 
   void wait(T expected) {
     while (value_.load() != expected) {
-      int ret = syscall(SYS_futex, &value_, FUTEX_WAIT, expected, nullptr,
-                        nullptr, 0);
+      int ret = syscall(SYS_futex, reinterpret_cast<int*>(&value_), FUTEX_WAIT,
+                        static_cast<int>(expected), nullptr, nullptr, 0);
       if (ret == -1 && errno != EAGAIN) {
         throw std::runtime_error("Futex wait failed");
       }
@@ -26,8 +35,8 @@ class Futex {
   }
 
   void wake(int count = 1) {
-    int ret =
-        syscall(SYS_futex, &value_, FUTEX_WAKE, count, nullptr, nullptr, 0);
+    int ret = syscall(SYS_futex, reinterpret_cast<int*>(&value_), FUTEX_WAKE,
+                      count, nullptr, nullptr, 0);
     if (ret == -1) {
       throw std::runtime_error("Futex wake failed");
     }
@@ -46,8 +55,9 @@ class Futex {
     while (true) {
       T current = value_.load();
       if (current != expected) {
-        int ret = syscall(SYS_futex, &value_, FUTEX_WAIT, current, nullptr,
-                          nullptr, 0);
+        int ret =
+            syscall(SYS_futex, reinterpret_cast<int*>(&value_), FUTEX_WAIT,
+                    static_cast<int>(current), nullptr, nullptr, 0);
         if (ret == -1 && errno != EAGAIN) {
           throw std::runtime_error("Futex wait failed");
         }
