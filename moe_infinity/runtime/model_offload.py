@@ -109,19 +109,31 @@ class OffloadEngine(object):
 
         # AttentionBackend scaffolding (no-op by default)
         # Set enable_attention_offload=True to activate (future work)
-        self._attention_backend = attention_backend
+        self._attention_backend = None
         self._enable_attention_offload: bool = enable_attention_offload
+        if attention_backend is not None:
+            self.set_attention_backend(attention_backend)
 
         # KVCacheManager scaffolding (no-op by default)
         self._kv_cache_manager = kv_cache_manager
         self._enable_kv_cache_offload: bool = enable_kv_cache_offload
 
     def get_attention_backend(self):
-        """Return registered attention backend, or None if unset."""
+        """Return the registered attention backend, or None if not configured.
+
+        Future: when enable_attention_offload=True, this backend will be used
+        to intercept attention computation for CPU offloading.
+        See moe_infinity/runtime/attention_backend.py for the interface.
+        """
         return self._attention_backend
 
     def set_attention_backend(self, backend):
-        """Register an AttentionBackend implementation."""
+        """Register an AttentionBackend implementation.
+
+        Args:
+            backend: An object implementing the AttentionBackend Protocol.
+                     Use PlaceholderAttentionBackend for testing.
+        """
         from moe_infinity.runtime.attention_backend import AttentionBackend
 
         if not isinstance(backend, AttentionBackend):
