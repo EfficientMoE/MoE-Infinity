@@ -64,56 +64,14 @@ class SyncMixtralSparseMoeBlock(nn.Module):
         )
         routing_weights_mask = torch.sum(routing_weights_mask, dim=-1)
 
-        # print("selected_experts", selected_experts)
         expert_index = selected_experts.reshape(
             batch_size, sequence_length, self.top_k
         )
-        # self.expert_prefetcher.fetch_experts_lock_cache(
-        #     self.layer_id, expert_index
-        # )
-        # for i in range(batch_size):
-        #     seq_id = self.seq_id_list[i]
-        #     # start_time = time.time()
-        #     expert_matrix = self.expert_predictor.predict(
-        #         seq_id, expert_index[i], self.layer_id
-        #     )
-        #     # print("predict", time.time() - start_time)
-        #     # start_time = time.time()
-        #     self.expert_prefetcher.prefetch_experts(
-        #         self.layer_id, expert_matrix
-        #     )
-        #     # print("prefetch", time.time() - start_time)
 
         self.expert_executor.dispatch_local(
             self.layer_id, hidden_states, router_mask, routing_weights_mask
         )
         final_hidden_states = self.expert_executor.wait_dispatch_local()
-
-        # final_hidden_states = torch.zeros(
-        #     (batch_size * sequence_length, hidden_dim),
-        #     dtype=hidden_states.dtype,
-        #     device=hidden_states.device,
-        # )
-
-        # results = self.expert_executor.wait_dispatch_local()
-        # for output, _, idx, _ in results:
-        #     token_indices = router_mask[:, idx].bool()
-        #     final_hidden_states[token_indices, :] += (
-        #         output.to(routing_weights_mask.device)
-        #         * routing_weights_mask[token_indices, idx][:, None]
-        #     )
-
-        # for expert_idx in range(self.num_experts):
-        #     # expert_layer = self.experts[expert_idx]
-        #     token_indices = router_mask[:, expert_idx]
-        #     current_state = hidden_states[token_indices, :]
-
-        #     if token_indices.any():
-        #         current_hidden_states = (
-        #             self.experts[expert_idx](current_state).to(routing_weights_mask.device)
-        #             * routing_weights_mask[token_indices, expert_idx][:, None]
-        #         )
-        #         final_hidden_states[token_indices, :] += current_hidden_states
 
         final_hidden_states = final_hidden_states.view(
             batch_size, sequence_length, hidden_dim

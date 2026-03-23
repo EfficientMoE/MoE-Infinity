@@ -63,9 +63,7 @@ class SyncSwitchTransformersSparseMLP(nn.Module):
         for idx in range(config.num_experts):
             self.experts[f"expert_{idx}"] = expert_class(config)
 
-        # self.archer_engine = None
         self.expert_tensor_ids: Dict[int, int] = None
-        # self.expert_dispatcher = None
 
         self.expert_executor = None
         self.expert_prefetcher = None
@@ -79,35 +77,13 @@ class SyncSwitchTransformersSparseMLP(nn.Module):
         # The routers introduced might not always map all the tokens, to a router, which means that some hidden states
         # can be unchanged from one layer to another. That is why the hidden states are cloned before updating only the selected ones.
 
-        # n_tokens = hidden_states.shape[1] * hidden_states.shape[0]
         batch_size = hidden_states.shape[0]
         expert_index = expert_index.reshape(batch_size, -1)
-        # for i in range(batch_size):
-        #     seq_id = self.seq_id_list[i]
-        #     expert_matrix = self.expert_predictor.predict(
-        #         seq_id, expert_index[i], self.layer_id
-        #     )
-        #     self.expert_prefetcher.prefetch_experts(
-        #         self.layer_id, expert_matrix
-        #     )
 
         self.expert_executor.dispatch_local(
             self.layer_id, hidden_states, router_mask, router_probs
         )
         next_states = self.expert_executor.wait_dispatch_local()
-
-        # next_states = hidden_states.clone()
-        # results = self.expert_executor.wait_dispatch_local()
-
-        # for output, _, idx, _ in results:
-        #     token_indices = router_mask[:, :, idx].bool()
-        #     next_states[token_indices] = output.to(next_states.device)
-
-        # for expert_id, expert in self.experts.items():
-        #     idx = int(expert_id.split("_")[-1])
-        #     token_indices = router_mask[:, :, idx].bool()
-        #     if token_indices.any():
-        #         next_states[token_indices] = expert(hidden_states[token_indices]).to(next_states.device)
 
         hidden_states = router_probs * next_states
         return hidden_states, (
