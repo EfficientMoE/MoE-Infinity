@@ -101,6 +101,14 @@ class ArcherConfig:
                     "The trace path should be a file, not a directory."
                 )
 
+        if not 0.0 <= self.device_memory_ratio <= 1.0:
+            raise ValueError(
+                f"device_memory_ratio must be in [0, 1], got {self.device_memory_ratio}"
+            )
+        if not 0.0 <= self.kv_cache_memory_ratio <= 1.0:
+            raise ValueError(
+                f"kv_cache_memory_ratio must be in [0, 1], got {self.kv_cache_memory_ratio}"
+            )
         if self.device_memory_ratio + self.kv_cache_memory_ratio > 1.0:
             raise ValueError(
                 f"device_memory_ratio ({self.device_memory_ratio}) + "
