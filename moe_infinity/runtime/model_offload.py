@@ -57,6 +57,7 @@ from moe_infinity.utils.arguments import (
     copy_args_to_device,
     copy_kwargs_to_device,
 )
+from moe_infinity.utils.device import get_default_device, get_device
 
 _prefetch_lib = None
 # Alias for compatibility
@@ -84,7 +85,15 @@ class OffloadEngine(object):
     request_id = 0
     config = {}
 
-    def __init__(self, capacity, config: PretrainedConfig):
+    def __init__(
+        self,
+        capacity,
+        config: PretrainedConfig,
+        attention_backend=None,
+        enable_attention_offload: bool = False,
+        kv_cache_manager=None,
+        enable_kv_cache_offload: bool = False,
+    ):
         self.offload_exemption = set()
         self.expert_modules = []
 
@@ -97,6 +106,42 @@ class OffloadEngine(object):
         self.config = config
 
         self.quant_method = None
+
+        # AttentionBackend scaffolding (no-op by default)
+        # Set enable_attention_offload=True to activate (future work)
+        self._attention_backend = attention_backend
+        self._enable_attention_offload: bool = enable_attention_offload
+
+        # KVCacheManager scaffolding (no-op by default)
+        self._kv_cache_manager = kv_cache_manager
+        self._enable_kv_cache_offload: bool = enable_kv_cache_offload
+
+    def get_attention_backend(self):
+        """Return registered attention backend, or None if unset."""
+        return self._attention_backend
+
+    def set_attention_backend(self, backend):
+        """Register an AttentionBackend implementation."""
+        from moe_infinity.runtime.attention_backend import AttentionBackend
+
+        if not isinstance(backend, AttentionBackend):
+            raise TypeError(
+                f"backend must implement AttentionBackend Protocol, got {type(backend)}"
+            )
+        self._attention_backend = backend
+
+    def get_kv_cache_manager(self):
+        """Return the registered KVCacheManager, or None if not configured.
+
+        Future: when enable_kv_cache_offload=True, this manager handles
+        swapping KV cache blocks between GPU and CPU pinned memory.
+        See moe_infinity/memory/kv_cache_manager.py for the interface.
+        """
+        return self._kv_cache_manager
+
+    def set_kv_cache_manager(self, manager):
+        """Register a KVCacheManager for KV cache offloading."""
+        self._kv_cache_manager = manager
 
     def init(
         self,
@@ -151,7 +196,7 @@ class OffloadEngine(object):
             def archer_torch_index_select(input, dim, index):
                 return orig_torch_index_select(
                     input, dim, index.to(input.device)
-                ).to("cuda:0")
+                ).to(get_default_device())
 
             return archer_torch_index_select
 
@@ -467,6 +512,15 @@ class OffloadEngine(object):
 
                 module_idx = 0
                 self.expert_layer_modules = []
+                # ATTENTION BACKEND INJECTION POINT (T15)
+                # When self._enable_attention_offload is True, replace attention modules here.
+                # Pattern: same as how SyncMixtralSparseMoeBlock replaces MixtralSparseMoeBlock.
+                # Future: self._attention_backend.forward() called in place of module.forward()
+                if (
+                    self._enable_attention_offload
+                    and self._attention_backend is not None
+                ):
+                    pass  # No-op: attention replacement not yet implemented
                 for module in model.modules():
                     if (
                         isinstance(module, SyncNllbMoeSparseMLP)
@@ -788,7 +842,7 @@ class OffloadEngine(object):
             for name, param in module.named_parameters(recurse=False):
                 if param.data.data_ptr() not in self.offload_set:
                     num_devices = torch.cuda.device_count()
-                    param.data = param.data.to(f"cuda:{num_devices-1}")
+                    param.data = param.data.to(get_device(num_devices - 1))
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
@@ -799,7 +853,7 @@ class OffloadEngine(object):
 
             for name, buf in module.named_buffers(recurse=False):
                 if buf.data.data_ptr() not in self.offload_set:
-                    buf.data = buf.data.to("cuda:0")
+                    buf.data = buf.data.to(get_default_device())
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
@@ -807,6 +861,16 @@ class OffloadEngine(object):
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.data.device)
+
+            # KV CACHE RELOAD POINT (T16)
+            # When enable_kv_cache_offload=True, reload swapped-out KV cache here.
+            # Future: self._kv_cache_manager.swap_in(block_ids_for_this_layer)
+            # This fires BEFORE each module's forward(), giving time to H2D transfer KV blocks.
+            if (
+                self._enable_kv_cache_offload
+                and self._kv_cache_manager is not None
+            ):
+                pass  # No-op: KV cache reload not yet implemented
 
         @torch.no_grad()
         def _post_forward_module_hook(module, input, output):
@@ -833,11 +897,24 @@ class OffloadEngine(object):
 
                 device_list.append(buf.device)
 
+            # KV CACHE CAPTURE POINT (T16)
+            # When enable_kv_cache_offload=True, capture past_key_values here.
+            # Future: extract output[1] (present_key_value) and call
+            #         self._kv_cache_manager.allocate_blocks(seq_id, num_blocks)
+            # This fires AFTER each module's forward(), when KV output is available.
+            if (
+                self._enable_kv_cache_offload
+                and self._kv_cache_manager is not None
+            ):
+                pass  # No-op: KV cache capture not yet implemented
+
             if param_not_offload:
                 if isinstance(output, torch.Tensor):
-                    return output.to(torch.device("cuda:0"))
+                    return output.to(torch.device(get_default_device()))
 
-                return copy_args_to_device(torch.device("cuda:0"), *output)
+                return copy_args_to_device(
+                    torch.device(get_default_device()), *output
+                )
 
         # Pre forward hook
         self.forward_hooks.append(
