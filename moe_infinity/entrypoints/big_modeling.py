@@ -6,7 +6,8 @@ import torch
 import transformers
 from accelerate.utils.versions import is_torch_version
 from huggingface_hub import snapshot_download
-from transformers import AutoConfig
+from transformers import AutoConfig, GenerationConfig
+from transformers.generation import GenerationMixin
 
 import moe_infinity
 from moe_infinity.common.constants import MODEL_MAPPING_NAMES
@@ -147,6 +148,21 @@ class MoE:
                 ),
                 is_flash_attn_available=is_flash_attn_available,
                 trust_remote_code=True,
+            )
+
+        self._ensure_generation_mixin()
+
+    def _ensure_generation_mixin(self):
+        if not hasattr(self.model, "generate"):
+            cls = self.model.__class__
+            self.model.__class__ = type(
+                cls.__name__,
+                (GenerationMixin, cls),
+                {},
+            )
+        if getattr(self.model, "generation_config", None) is None:
+            self.model.generation_config = GenerationConfig.from_model_config(
+                self.model.config
             )
 
     def _configure_hook(self, input_ids: torch.LongTensor):

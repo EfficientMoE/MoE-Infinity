@@ -32,13 +32,13 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       // input_cv_(kNumDevices),
       // exec_mutex_(kNumDevices),
       // exec_cv_(kNumDevices),
-      cache_mutex_(kNumDevices),
-      cache_cv_(kNumDevices),
-      input_queue_(kNumDevices),
-      gpu_overload_(kNumDevices, false),
-      exec_queue_(kNumDevices),
-      cached_experts_(kNumDevices),
-      modules_(kNumDevices, nullptr) {
+      cache_mutex_(kNumDevices()),
+      cache_cv_(kNumDevices()),
+      input_queue_(kNumDevices()),
+      gpu_overload_(kNumDevices(), false),
+      exec_queue_(kNumDevices()),
+      cached_experts_(kNumDevices()),
+      modules_(kNumDevices(), nullptr) {
   main_thread_stop_flag_.store(false);
 
   // module_ = new MoEMLP(dtype, expert_type);
@@ -47,7 +47,7 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
   // gpu_overload_ = std::move(std::vector<Futex<bool>>(kNumDevices,
   // initial_value));
 
-  for (int i = 0; i < kNumDevices; ++i) {
+  for (int i = 0; i < kNumDevices(); ++i) {
     auto thread_func = std::bind(&ExpertDispatcher::GPUFetchFunc, this, i);
     std::string thread_name = "GPUFetchFunc" + std::to_string(i);
     threads_.emplace_back(new base::Thread(thread_func, thread_name));
@@ -70,8 +70,8 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
     // cudaDeviceSynchronize();
 
     auto thread_func =
-        std::bind(&ExpertDispatcher::GPUExecFunc, this, i % kNumDevices);
-    std::string thread_name = "GPUExecFunc" + std::to_string(i % kNumDevices);
+        std::bind(&ExpertDispatcher::GPUExecFunc, this, i % kNumDevices());
+    std::string thread_name = "GPUExecFunc" + std::to_string(i % kNumDevices());
     threads_.emplace_back(new base::Thread(thread_func, thread_name));
     threads_.back()->start();
     // SetThreadAffinity(threads_.back()->tid());
@@ -201,7 +201,7 @@ void ExpertDispatcher::RegisterExpert(
 }
 
 void ExpertDispatcher::NotifyFetchStart() {
-  for (int i = 0; i < kNumDevices; ++i) {
+  for (int i = 0; i < kNumDevices(); ++i) {
     // std::unique_lock<std::mutex> lock(input_mutex_[i]);
     input_queue_[i].NotifyAll();
   }
