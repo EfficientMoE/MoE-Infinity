@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 find_package(GTest REQUIRED)
 include_directories(${GTEST_INCLUDE_DIRS})
 
-# core/ headers are 4 levels up from tests/cpp/unittest/utils/
+# core/ headers are 4 levels up from tests/cpp/unit/utils/
 include_directories(${CMAKE_SOURCE_DIR}/../../../../core)
 
 add_executable(test_lfu_cache test_lfu_cache.cpp)

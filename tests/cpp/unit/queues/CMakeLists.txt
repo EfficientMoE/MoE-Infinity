@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 find_package(GTest REQUIRED)
 include_directories(${GTEST_INCLUDE_DIRS})
 
-# Include core headers (project root is 4 levels up from tests/cpp/unittest/queues/)
+# Include core headers (project root is 4 levels up from tests/cpp/unit/queues/)
 message("CMAKE_SOURCE_DIR: ${CMAKE_SOURCE_DIR}")
 include_directories(${CMAKE_SOURCE_DIR}/../../../../core)
 
