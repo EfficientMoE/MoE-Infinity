@@ -48,6 +48,30 @@ class ArcherConfig:
         default=0.9,
         metadata={"help": "Ratio of host memory to use"},
     )
+    kv_cache_memory_ratio: float = field(
+        default=0.0,
+        metadata={
+            "help": "Fraction of GPU memory reserved for KV cache blocks. Default 0.0 (disabled). Set > 0 alongside enable_kv_cache_offload=True. Must satisfy: device_memory_ratio + kv_cache_memory_ratio <= 1.0"
+        },
+    )
+    enable_attention_offload: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable attention backend offloading. Default False (uses HuggingFace attention)."
+        },
+    )
+    enable_kv_cache_offload: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable KV cache CPU offloading. Default False. Requires C++ extension support."
+        },
+    )
+    attention_backend: str = field(
+        default="default",
+        metadata={
+            "help": "Attention backend name. 'default' = no-op PlaceholderAttentionBackend."
+        },
+    )
 
     @classmethod
     def load_from_file(self, config_path):
@@ -76,3 +100,9 @@ class ArcherConfig:
                 raise ValueError(
                     "The trace path should be a file, not a directory."
                 )
+
+        if self.device_memory_ratio + self.kv_cache_memory_ratio > 1.0:
+            raise ValueError(
+                f"device_memory_ratio ({self.device_memory_ratio}) + "
+                f"kv_cache_memory_ratio ({self.kv_cache_memory_ratio}) > 1.0"
+            )
