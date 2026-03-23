@@ -13,7 +13,6 @@
 # limitations under the License.
 """Arctic model configuration"""
 
-from dataclasses import asdict, dataclass
 from typing import Any, Dict
 
 from transformers.configuration_utils import PretrainedConfig
@@ -24,21 +23,6 @@ logger = logging.get_logger(__name__)
 ARCTIC_PRETRAINED_CONFIG_ARCHIVE_MAP = {
     "arctic": "https://huggingface.co/Snowflake/snowflake-arctic-instruct/tree/main/config.json",
 }
-
-
-@dataclass
-class ArcticLoraConfig:
-    lora_r: int = 64
-    lora_alpha: float = 16
-    shard_base_weights: bool = False
-
-
-@dataclass
-class ArcticQuantizationConfig:
-    q_bits: int = 8
-    rounding: str = "nearest"
-    mantissa_bits: int = 3
-    group_size: int = 512
 
 
 class ArcticConfig(PretrainedConfig):
@@ -176,10 +160,7 @@ class ArcticConfig(PretrainedConfig):
         self.moe_min_capacity = moe_min_capacity
         self.moe_token_dropping = moe_token_dropping
         self.parallel_attn_mlp_res = parallel_attn_mlp_res
-        if isinstance(quantization, dict):
-            self.quantization = ArcticQuantizationConfig(**quantization)
-        else:
-            self.quantization = quantization
+        self.quantization = quantization
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -192,18 +173,8 @@ class ArcticConfig(PretrainedConfig):
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any], **kwargs) -> "ArcticConfig":
         result = super().from_dict(config_dict, **kwargs)
-        if isinstance(result, tuple):
-            config = result[0]
-        else:
-            config = result
-        if isinstance(config.quantization, dict):
-            config.quantization = ArcticQuantizationConfig(
-                **config.quantization
-            )
         return result
 
     def to_dict(self) -> Dict[str, Any]:
         ret = super().to_dict()
-        if isinstance(ret["quantization"], ArcticQuantizationConfig):
-            ret["quantization"] = asdict(ret["quantization"])
         return ret
