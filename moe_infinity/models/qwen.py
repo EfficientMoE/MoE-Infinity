@@ -4,8 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP
 
-import moe_infinity._store as prefetch_lib
-
 
 class Qwen3MoEBlock(nn.Module):
     def __init__(self, config):
