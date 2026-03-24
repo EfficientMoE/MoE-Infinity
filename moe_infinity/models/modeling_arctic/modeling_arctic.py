@@ -30,6 +30,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from transformers import GenerationMixin
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.integrations.deepspeed import is_deepspeed_available
@@ -1738,7 +1739,7 @@ class ArcticModel(ArcticPreTrainedModel):
         )
 
 
-class ArcticForCausalLM(ArcticPreTrainedModel):
+class ArcticForCausalLM(ArcticPreTrainedModel, GenerationMixin):
     # TODO(jeffra): update _keys_to_ignore_on_load_unexpected with expert keys not relevant for this rank
     _keys_to_ignore_on_load_unexpected = [
         r"model\.layers\.\d+\.block_sparse_moe\.experts\.\d+\.w\d+\.weight"

@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
@@ -826,7 +827,7 @@ class Grok1Model(Grok1PretrainedModel):
         )
 
 
-class Grok1ModelForCausalLM(Grok1PretrainedModel):
+class Grok1ModelForCausalLM(Grok1PretrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config: Grok1Config, **kwargs):
