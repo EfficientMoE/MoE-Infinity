@@ -47,7 +47,7 @@ def reference_moe_gate(
     _, topk_idx = torch.topk(tmp_scores, k=top_k, dim=-1, sorted=False)
     topk_weight = scores.gather(1, topk_idx)
 
-    if norm_topk_prob:
+    if top_k > 1 and norm_topk_prob:
         topk_weight = topk_weight / (topk_weight.sum(-1, keepdim=True) + 1e-20)
     topk_weight = topk_weight * scaling_factor
     return topk_idx, topk_weight

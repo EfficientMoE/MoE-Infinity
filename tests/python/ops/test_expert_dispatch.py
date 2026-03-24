@@ -190,6 +190,7 @@ def test_cpp_expert_dispatcher_full_async_flow_documented_skip():
         pytest.skip("moe_infinity._store has no `expert_dispatcher` binding")
 
     dispatcher = store.expert_dispatcher(2, 1, 0, 4, 1)
+    torch.manual_seed(42)
     hidden_states = torch.randn(4, 8, dtype=torch.float32, device="cuda")
     router_mask = torch.zeros(4, 2, dtype=torch.bool, device="cuda")
     router_weights = torch.zeros(4, 2, dtype=torch.float32, device="cuda")

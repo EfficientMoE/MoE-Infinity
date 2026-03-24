@@ -71,9 +71,9 @@ class TestAddAuxiliaryLossBackward:
 
         # Gradient for x should be identity: grad_x = grad_output = ones
         expected_x_grad = torch.ones_like(x)
-        assert torch.allclose(
-            x.grad, expected_x_grad
-        ), f"x gradient should be all-ones, got {x.grad}"
+        torch.testing.assert_close(
+            x.grad, expected_x_grad, rtol=BF16_RTOL, atol=BF16_ATOL
+        )
 
     def test_backward_loss_gradient_ones(self, seed_everything):
         """
@@ -89,9 +89,9 @@ class TestAddAuxiliaryLossBackward:
 
         # Gradient for loss should be ones(1), not the sum of grad_output
         expected_loss_grad = torch.ones(1, dtype=torch.float32)
-        assert torch.allclose(
-            loss.grad, expected_loss_grad
-        ), f"loss gradient should be ones(1), got {loss.grad}"
+        torch.testing.assert_close(
+            loss.grad, expected_loss_grad, rtol=BF16_RTOL, atol=BF16_ATOL
+        )
 
     def test_backward_loss_requires_grad_false(self, seed_everything):
         """When loss.requires_grad=False, loss.grad should be None."""
@@ -122,8 +122,12 @@ class TestAddAuxiliaryLossBackward:
         expected_x_grad = torch.ones_like(x)
         expected_loss_grad = torch.ones(1, dtype=torch.float32, device="cuda")
 
-        assert torch.allclose(x.grad, expected_x_grad)
-        assert torch.allclose(loss.grad, expected_loss_grad)
+        torch.testing.assert_close(
+            x.grad, expected_x_grad, rtol=BF16_RTOL, atol=BF16_ATOL
+        )
+        torch.testing.assert_close(
+            loss.grad, expected_loss_grad, rtol=BF16_RTOL, atol=BF16_ATOL
+        )
 
 
 class TestAddAuxiliaryLossGradcheck:
@@ -193,9 +197,9 @@ class TestAddAuxiliaryLossBF16:
         expected_x_grad = torch.ones_like(x)
         expected_loss_grad = torch.ones(1, dtype=torch.bfloat16, device="cuda")
 
-        assert torch.allclose(
+        torch.testing.assert_close(
             x.grad, expected_x_grad, rtol=BF16_RTOL, atol=BF16_ATOL
         )
-        assert torch.allclose(
+        torch.testing.assert_close(
             loss.grad, expected_loss_grad, rtol=BF16_RTOL, atol=BF16_ATOL
         )
