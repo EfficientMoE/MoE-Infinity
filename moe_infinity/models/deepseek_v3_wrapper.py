@@ -51,24 +51,11 @@ class SyncDeepseekV3MoEBlock(nn.Module):
         routing_weights, selected_experts = torch.topk(
             routing_weights, self.num_experts_per_tok, dim=-1
         )
-        # if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
-        #     routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-        # we cast back to the input dtype
-        # routing_weights = routing_weights.to(hidden_states.dtype)
-
-        # print(f"hidden_states shape: {hidden_states.shape}")
-        # print(f"routing_weights shape: {routing_weights.shape}")
-
         # Compute sparse mask via scatter
         B, E = routing_weights.shape[0], self.num_expert
         router_mask = torch.zeros(
             B, E, dtype=torch.bool, device=selected_experts.device
         )
-
-        # print("selected_experts", selected_experts.shape)
-        # print("routing_weights", routing_weights.shape)
-        # print("router_mask", router_mask.shape)
-        # print("router_logits", router_logits.shape)
         router_mask.scatter_(1, selected_experts, True)
 
         routing_weights_mask = torch.zeros(
