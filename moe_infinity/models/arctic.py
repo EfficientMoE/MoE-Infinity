@@ -1,3 +1,4 @@
+import warnings
 from typing import Dict, Tuple
 
 import torch
@@ -7,6 +8,13 @@ import torch.nn.functional as F
 from moe_infinity.utils import ArcherConfig
 
 from .modeling_arctic import ArcticConfig, ArcticMLP
+
+warnings.warn(
+    "Arctic (Snowflake) support in MoE-Infinity is deprecated and will be removed in a future version. "
+    "The model is not available in HuggingFace transformers.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 class SyncArcticMoeBlock(nn.Module):

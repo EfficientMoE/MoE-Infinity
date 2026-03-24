@@ -54,4 +54,14 @@ def parse_expert_type(config: PretrainedConfig) -> int:
             f"Supported architectures are {list(MODEL_MAPPING_NAMES.keys())}."
         )
 
+    if arch in ("grok", "arctic"):
+        import warnings
+
+        warnings.warn(
+            f"'{arch}' model support is deprecated and will be removed in a future version. "
+            "This model architecture is not available in HuggingFace transformers.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     return MODEL_MAPPING_TYPES[arch]
