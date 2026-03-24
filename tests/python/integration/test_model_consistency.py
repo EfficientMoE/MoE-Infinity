@@ -1,14 +1,14 @@
-import gc
 import importlib.util
 import os
-from pathlib import Path
+import pickle
+import subprocess
+import sys
+import tempfile
 from typing import Any, Dict
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-from moe_infinity import MoE
+from transformers import AutoTokenizer
 
 
 def _get_attn_impl(model_name: str) -> str:
@@ -17,6 +17,108 @@ def _get_attn_impl(model_name: str) -> str:
     if importlib.util.find_spec("flash_attn") is not None:
         return "flash_attention_2"
     return "eager"
+
+
+_HF_WORKER = r"""
+import pickle, sys, torch
+from transformers import AutoModelForCausalLM
+
+model_name, attn_impl, input_ids_path, out_path = sys.argv[1:]
+input_ids = torch.load(input_ids_path, weights_only=True)
+
+if "deepseek" in model_name.lower():
+    from moe_infinity.models.modeling_deepseek_v2.modeling_deepseek import (
+        DeepseekV2ForCausalLM,
+    )
+    model = DeepseekV2ForCausalLM.from_pretrained(
+        model_name, device_map="auto", torch_dtype=torch.bfloat16,
+        attn_implementation=attn_impl,
+    )
+else:
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, device_map="auto", torch_dtype=torch.bfloat16,
+        attn_implementation=attn_impl, trust_remote_code=True,
+    )
+
+pad_token_id = int(open(out_path + ".pad").read())
+model.eval()
+with torch.no_grad():
+    logits = model(input_ids).logits.detach().cpu()
+    gen_ids = model.generate(
+        input_ids, max_new_tokens=32, do_sample=False,
+        pad_token_id=pad_token_id,
+    ).detach().cpu()
+
+with open(out_path, "wb") as f:
+    pickle.dump({"logits": logits, "gen_ids": gen_ids}, f)
+"""
+
+_MOE_WORKER = r"""
+import pickle, sys, torch
+from moe_infinity import MoE
+
+model_name, input_ids_path, offload_path, out_path = sys.argv[1:]
+input_ids = torch.load(input_ids_path, weights_only=True)
+pad_token_id = int(open(out_path + ".pad").read())
+
+config = {"offload_path": offload_path, "device_memory_ratio": 0.75}
+default_dtype = torch.get_default_dtype()
+torch.set_default_dtype(torch.bfloat16)
+try:
+    model = MoE(model_name, config)
+finally:
+    torch.set_default_dtype(default_dtype)
+
+with torch.no_grad():
+    _ = model(input_ids)
+
+with torch.no_grad():
+    logits = model(input_ids).logits.detach().cpu()
+    gen_ids = model.generate(
+        input_ids, max_new_tokens=32, do_sample=False,
+        pad_token_id=pad_token_id,
+    ).detach().cpu()
+
+with open(out_path, "wb") as f:
+    pickle.dump({"logits": logits, "gen_ids": gen_ids}, f)
+"""
+
+
+def _run_worker(script: str, args: list, label: str) -> Dict[str, torch.Tensor]:
+    import time
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write(script)
+        script_path = f.name
+    out_path = args[-1]
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, script_path] + args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        deadline = time.monotonic() + 1800
+        while time.monotonic() < deadline:
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                time.sleep(2)
+                break
+            ret = proc.poll()
+            if ret is not None and ret != 0:
+                _, stderr = proc.communicate(timeout=10)
+                pytest.fail(
+                    f"[{label}] Worker crashed (exit {ret}):\n"
+                    f"STDERR:\n{stderr.decode(errors='replace')[-2000:]}"
+                )
+            time.sleep(3)
+        else:
+            proc.kill()
+            pytest.fail(f"[{label}] Worker timed out after 1800s")
+        proc.kill()
+        with open(out_path, "rb") as f:
+            return pickle.load(f)
+    finally:
+        if os.path.exists(script_path):
+            os.unlink(script_path)
 
 
 @pytest.fixture(
@@ -44,72 +146,40 @@ def consistency_outputs(
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda:0")
     pad_token_id = tokenizer.eos_token_id
     if pad_token_id is None:
-        raise ValueError(
-            f"[{model_name}] tokenizer.eos_token_id is required for deterministic generation"
-        )
+        raise ValueError(f"[{model_name}] tokenizer.eos_token_id is required")
 
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-        attn_implementation=attn_impl,
-        trust_remote_code=True,
+    work_dir = tmp_path_factory.mktemp("consistency")
+    input_ids_path = str(work_dir / "input_ids.pt")
+    torch.save(input_ids, input_ids_path)
+
+    hf_out_path = str(work_dir / "hf_out.pkl")
+    moe_out_path = str(work_dir / "moe_out.pkl")
+    offload_path = str(work_dir / model_name.replace("/", "_"))
+
+    with open(hf_out_path + ".pad", "w") as f:
+        f.write(str(pad_token_id))
+    with open(moe_out_path + ".pad", "w") as f:
+        f.write(str(pad_token_id))
+
+    hf_data = _run_worker(
+        _HF_WORKER,
+        [model_name, attn_impl, input_ids_path, hf_out_path],
+        f"HF:{model_name}",
     )
-    hf_model.eval()
-    with torch.no_grad():
-        hf_output = hf_model(input_ids)
-        hf_logits = hf_output.logits.detach().cpu()
-        hf_gen = hf_model.generate(
-            input_ids,
-            max_new_tokens=32,
-            do_sample=False,
-            pad_token_id=pad_token_id,
-        )
-        hf_gen_ids = hf_gen.detach().cpu()
 
-    del hf_model
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    offload_base = tmp_path_factory.mktemp("offload")
-    offload_dir = Path(offload_base) / model_name.replace("/", "_")
-    config = {
-        "offload_path": str(offload_dir),
-        "device_memory_ratio": 0.75,
-    }
-
-    default_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(torch.bfloat16)
-    try:
-        moe_model = MoE(model_name, config)
-    finally:
-        torch.set_default_dtype(default_dtype)
-
-    with torch.no_grad():
-        _ = moe_model(input_ids)
-
-    with torch.no_grad():
-        moe_output = moe_model(input_ids)
-        moe_logits = moe_output.logits.detach().cpu()
-        moe_gen = moe_model.generate(
-            input_ids,
-            max_new_tokens=32,
-            do_sample=False,
-            pad_token_id=pad_token_id,
-        )
-        moe_gen_ids = moe_gen.detach().cpu()
-
-    del moe_model
-    gc.collect()
-    torch.cuda.empty_cache()
+    moe_data = _run_worker(
+        _MOE_WORKER,
+        [model_name, input_ids_path, offload_path, moe_out_path],
+        f"MoE:{model_name}",
+    )
 
     return {
         "model_name": model_name,
         "tokenizer": tokenizer,
-        "hf_logits": hf_logits,
-        "hf_gen_ids": hf_gen_ids,
-        "moe_logits": moe_logits,
-        "moe_gen_ids": moe_gen_ids,
+        "hf_logits": hf_data["logits"],
+        "hf_gen_ids": hf_data["gen_ids"],
+        "moe_logits": moe_data["logits"],
+        "moe_gen_ids": moe_data["gen_ids"],
     }
 
 
@@ -144,7 +214,9 @@ def test_forward_consistency(consistency_outputs: Dict[str, Any]) -> None:
         hf_logits,
         rtol=1e-3,
         atol=1e-3,
-        msg=lambda msg: f"[{model_name}] Logits not close. Max diff: {max_diff:.6f}\n{msg}",
+        msg=lambda msg: (
+            f"[{model_name}] Logits not close. Max diff: {max_diff:.6f}\n{msg}"
+        ),
     )
 
 
