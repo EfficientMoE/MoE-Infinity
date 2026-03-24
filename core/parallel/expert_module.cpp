@@ -480,6 +480,37 @@ torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
 
 void MoEMLP::ForwardHelper() {
   torch::NoGradGuard no_grad;
+  auto& input = buffer_[0];
+  auto& output = buffer_[1];
+
+  if (expert_type_ == SWITCH_TRANSFORMERS_DENSE_ACT_DENSE) {
+    auto& wi = param_[0];
+    auto& wo = param_[1];
+    output.copy_(torch::matmul(
+        torch::relu(torch::matmul(input, wi.transpose(0, 1).to(input.dtype()))),
+        wo.transpose(0, 1).to(input.dtype())));
+    return;
+  }
+
+  if (expert_type_ == SWITCH_TRANSFORMERS_DENSE_GATED_ACT_DENSE) {
+    auto& wi_0 = param_[0];
+    auto& wi_1 = param_[1];
+    auto& wo = param_[2];
+    auto gate = torch::gelu(torch::matmul(input, wi_0.transpose(0, 1)));
+    auto linear = torch::matmul(input, wi_1.transpose(0, 1));
+    output.copy_(torch::matmul(torch::mul(gate, linear), wo.transpose(0, 1)));
+    return;
+  }
+
+  if (expert_type_ == NLLB_MOE_DENSE_ACT_DENSE) {
+    auto& fc1 = param_[0];
+    auto& fc2 = param_[1];
+    output.copy_(
+        torch::matmul(torch::relu(torch::matmul(input, fc1.transpose(0, 1))),
+                      fc2.transpose(0, 1)));
+    return;
+  }
+
   if (expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ||
       expert_type_ == MIXTRAL_MOE_DENSE_ACT_DENSE) {
     auto& gate_proj = param_[0];
@@ -488,19 +519,9 @@ void MoEMLP::ForwardHelper() {
     auto& down_proj =
         (expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE) ? param_[2] : param_[1];
 
-    auto& input = buffer_[0];
-    auto& output = buffer_[1];
     auto& gate_out = buffer_[2];
-    auto& fused_out = buffer_[3];  // silu(gate) * up result
+    auto& fused_out = buffer_[3];
 
-    DLOG_TRACE("MoEMLP::forward: gate_proj", gate_proj.sizes().vec(), "up_proj",
-               up_proj.sizes().vec(), "down_proj", down_proj.sizes().vec(),
-               "input", input.sizes().vec(), "gate_out", gate_out.sizes().vec(),
-               "fused_out", fused_out.sizes().vec(), "output",
-               output.sizes().vec());
-
-    // Single fused CUTLASS call: 3 GEMMs, silu*up fused into GEMM1 epilogue.
-    // Replaces: matmul(gate), matmul(up), silu, mul, matmul(down).
     fused_moe_ffn_into(input, gate_proj, up_proj, down_proj, gate_out,
                        fused_out, output, /*stream=*/nullptr);
     return;

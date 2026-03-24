@@ -14,8 +14,6 @@ from typing import Callable, Dict, Type, Union
 import torch
 import transformers
 
-# import torch.distributed as dist
-# from torch.distributed import rpc
 try:
     from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear
     from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import (
@@ -59,6 +57,7 @@ from moe_infinity.utils.arguments import (
     copy_args_to_device,
     copy_kwargs_to_device,
 )
+from moe_infinity.utils.device import get_default_device, get_device
 
 _prefetch_lib = None
 # Alias for compatibility
@@ -81,21 +80,22 @@ def _load_prefetch_lib():
     return _prefetch_lib
 
 
-# class ArcherException(Exception):
-#     pass
-
-
 class OffloadEngine(object):
     param_id = 0
     request_id = 0
-    # request_id_flag = False
     config = {}
 
-    def __init__(self, capacity, config: PretrainedConfig):
+    def __init__(
+        self,
+        capacity,
+        config: PretrainedConfig,
+        attention_backend=None,
+        enable_attention_offload: bool = False,
+        kv_cache_manager=None,
+        enable_kv_cache_offload: bool = False,
+    ):
         self.offload_exemption = set()
         self.expert_modules = []
-
-        # self.model_create_counter = None
 
         self.ckpt_files = []
 
@@ -103,12 +103,57 @@ class OffloadEngine(object):
         self.expert_predictor = ExpertPredictor(config)
         self.expert_predictor.add_tracer(self.expert_tracer)
 
-        # self.expert_cache = ExpertCache(config)
         self.config = config
 
         self.quant_method = None
 
-    # def init_trace(self, trace_path: str):
+        # AttentionBackend scaffolding (no-op by default)
+        # Set enable_attention_offload=True to activate (future work)
+        self._attention_backend = None
+        self._enable_attention_offload: bool = enable_attention_offload
+        if attention_backend is not None:
+            self.set_attention_backend(attention_backend)
+
+        # KVCacheManager scaffolding (no-op by default)
+        self._kv_cache_manager = kv_cache_manager
+        self._enable_kv_cache_offload: bool = enable_kv_cache_offload
+
+    def get_attention_backend(self):
+        """Return the registered attention backend, or None if not configured.
+
+        Future: when enable_attention_offload=True, this backend will be used
+        to intercept attention computation for CPU offloading.
+        See moe_infinity/runtime/attention_backend.py for the interface.
+        """
+        return self._attention_backend
+
+    def set_attention_backend(self, backend):
+        """Register an AttentionBackend implementation.
+
+        Args:
+            backend: An object implementing the AttentionBackend Protocol.
+                     Use PlaceholderAttentionBackend for testing.
+        """
+        from moe_infinity.runtime.attention_backend import AttentionBackend
+
+        if not isinstance(backend, AttentionBackend):
+            raise TypeError(
+                f"backend must implement AttentionBackend Protocol, got {type(backend)}"
+            )
+        self._attention_backend = backend
+
+    def get_kv_cache_manager(self):
+        """Return the registered KVCacheManager, or None if not configured.
+
+        Future: when enable_kv_cache_offload=True, this manager handles
+        swapping KV cache blocks between GPU and CPU pinned memory.
+        See moe_infinity/memory/kv_cache_manager.py for the interface.
+        """
+        return self._kv_cache_manager
+
+    def set_kv_cache_manager(self, manager):
+        """Register a KVCacheManager for KV cache offloading."""
+        self._kv_cache_manager = manager
 
     def init(
         self,
@@ -141,34 +186,7 @@ class OffloadEngine(object):
 
         os.makedirs(self.checkpoint, exist_ok=True)
 
-        # print("Waiting for distributed init ...")
-
-        # local_rank = int(os.getenv('RANK', '0'))
-        # world_size = int(os.getenv("WORLD_SIZE", '1'))
-
-        # master_addr = os.getenv('MASTER_ADDR', 'localhost')
-        # master_port = os.getenv('MASTER_PORT', '6000')
-
-        # dist.init_process_group(
-        #     backend="nccl",
-        #     # _transports=["uv"], # https://discuss.pytorch.org/t/rpc-behavior-difference-between-pytorch-1-7-0-vs-1-9-0/124772/5
-        #     rank=local_rank,
-        #     world_size=world_size,
-        #     group_name="moe-infinity",
-        #     init_method= f"tcp://{master_addr}:{master_port}",
-        # )
-        # rpc.init_rpc(name=f"worker_{local_rank}",
-        #              rank=local_rank,
-        #              world_size=world_size)
-        # print("Distributed init done")
-
         self.prefetch_lib = _load_prefetch_lib()
-
-        # new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
-        #     self.prefetch_lib.__file__, "TorchAllocateDevice", "TorchFreeDevice"
-        # )
-        # # Swap the current allocator
-        # torch.cuda.memory.change_current_allocator(new_alloc)
 
         self.archer_engine = self.prefetch_lib.prefetch_handle(
             self.checkpoint, _archer_config.device_memory_ratio
@@ -178,22 +196,9 @@ class OffloadEngine(object):
         if _archer_config.trace_path is not None:
             self.expert_tracer.load_trace(_archer_config.trace_path)
 
-        # # truncate self.perfect_cache_file
-        # if (
-        #     os.path.exists(_archer_config.perfect_cache_file)
-        #     and _archer_config.save_cache
-        # ):
-        #     os.remove(_archer_config.perfect_cache_file)
-
         self.expert_executor = DistributedExpertExecutor(
             archer_config=_archer_config
         )
-        # self.expert_prefetcher = ExpertPrefetcher(self.config)
-        # self.device_map_manager = DeviceMapManager(archer_config=_archer_config)
-
-        # self.expert_executor.set_device_map_manager(self.device_map_manager)
-        # self.expert_prefetcher.set_device_map_manager(self.device_map_manager)
-        # self.expert_prefetcher.set_archer_engine(self.archer_engine)
 
         return self
 
@@ -203,7 +208,7 @@ class OffloadEngine(object):
             def archer_torch_index_select(input, dim, index):
                 return orig_torch_index_select(
                     input, dim, index.to(input.device)
-                ).to("cuda:0")
+                ).to(get_default_device())
 
             return archer_torch_index_select
 
@@ -272,16 +277,6 @@ class OffloadEngine(object):
 
         self.cls._old_init = self.cls.__init__
         self.cls.__init__ = do_nothing_decorator(self.cls._old_init)
-        # self.cls.config_class._old_from_pretrained = (
-        #     self.cls.config_class.from_pretrained)
-        # self.cls.config_class.from_pretrained = classmethod(
-        #     config_decorator(self.cls.config_class.from_pretrained))
-        # self.cls._old_load_pretrained_model = self.cls._load_pretrained_model
-        # self.cls._load_pretrained_model = classmethod(
-        #     load_pretrained_model_decorator(self.cls._load_pretrained_model))
-        # transformers.modeling_utils.old_load_state_dict = (
-        #     transformers.modeling_utils.load_state_dict)
-        # transformers.modeling_utils.load_state_dict = load_state_dict
         torch.nn.modules.module.Module._old_apply = (
             torch.nn.modules.module.Module.apply
         )
@@ -358,18 +353,12 @@ class OffloadEngine(object):
         ) -> Callable:
             @functools.wraps(orig_from_pretrained)
             def archer_from_pretrained(cls, *args, **kwargs):
-                # print("Creating model from scratch ...")
-
                 name_id_map_file = os.path.join(
                     self.checkpoint, "name_id_map.json"
                 )
 
                 self.model_name = model_name = args[0]
 
-                # if "arctic" in model_name:
-                #     self.config = ArcticConfig.from_pretrained(*args, **kwargs)
-                # else:
-                #     self.config = AutoConfig.from_pretrained(*args, **kwargs)
                 self.num_layers, self.num_experts, self.num_encoder_layers = (
                     parse_moe_param(self.config)
                 )
@@ -428,8 +417,6 @@ class OffloadEngine(object):
 
                         self._offload_state_dict(state_dict, empty_state_dict)
 
-                        # print("Loading ckpt file", ckpt, flush=True)
-
                         del state_dict
                         gc.collect()
                         torch.cuda.empty_cache()
@@ -443,18 +430,9 @@ class OffloadEngine(object):
                     with open(name_id_map_file, "r") as f:
                         self.name_id_map = json.load(f)
 
-                # print(self.name_id_map, flush=True)
-
-                # get max tensor id from the name_id_map
-                # max_tensor_id = max(self.name_id_map.values())
-                # self.model_create_counter = tqdm(
-                #     total=max_tensor_id, desc="Model create"
-                # )
-
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
                 )
-                # self.archer_prefetch.n_layer, self.archer_prefetch.n_expert, n_encoder_layers = parse_moe_param(self.config)
                 model = cls._from_config(
                     self.config,
                     torch_dtype=self.dtype_cls
@@ -467,39 +445,10 @@ class OffloadEngine(object):
                     ),
                 )
 
-                # script_expert(
-                #     self.checkpoint,
-                #     self.config.model_type,
-                #     self.config,
-                # )
-
                 if self.config.model_type == "deepseek_v3":
                     model = model.to(torch.float8_e4m3fn)
 
-                # if (
-                #     self.dtype_cls is torch.bfloat16
-                #     or self.dtype_cls is torch.float16
-                # ):
-                #     model = cls._from_config(
-                #         self.config,
-                #         torch_dtype=self.dtype_cls,
-                #         attn_implementation=(
-                #             "flash_attention_2"
-                #             if is_flash_attn_available
-                #             else "eager"
-                #         ),
-                #     )
-                # else:
-                #     model = cls._from_config(self.config)
-
                 base_model_prefix = model.base_model_prefix
-                # model = model.to(self.dtype).to("cpu")
-
-                # print("Model created with dtype", self.dtype, flush=True)
-                # for name, param in model.named_parameters(recurse=False):
-                #     print(name, param.dtype, flush=True)
-
-                # print(self.config, flush=True)
 
                 if hasattr(self.config, "quantization_config"):
                     self.quant_method = self.config.quantization_config[
@@ -507,11 +456,9 @@ class OffloadEngine(object):
                     ]
                     self.config.quantization_config["use_exllama"] = False
                     self.config.quantization_config["disable_exllama"] = True
-                    # print("Quantizing model ...", self.quant_method, flush=True)
                     if self.quant_method == "gptq":
                         from optimum.gptq import GPTQQuantizer
 
-                        # print("Quantizing model with GPTQ ...", self.config.quantization_config, flush=True)
                         optimum_quantizer = GPTQQuantizer.from_dict(
                             self.config.quantization_config
                         )
@@ -559,7 +506,6 @@ class OffloadEngine(object):
                     layer_id, expert_id = parse_expert_id(name, self.config)
                     if expert_id is not None:
                         self.expert_tensor_map[(layer_id, expert_id)] = id
-                # print("expert_tensor_map", self.expert_tensor_map, flush=True)
                 self.expert_prefetcher.expert_tensor_map = (
                     self.expert_tensor_map
                 )
@@ -571,37 +517,6 @@ class OffloadEngine(object):
                         self.config.first_k_dense_replace
                     )
                     first_k_dense_replace = self.config.first_k_dense_replace
-                # extracted_experts = []
-                # for param_name, tensor_id in self.name_id_map.items():
-                #     # extract encoder, digits from "encoder.layers.7.ffn.experts.expert_78.fc1.weight"
-                #     result = re.findall(
-                #         r"(encoder|decoder)\.[a-z]+\.(\d+).*expert_(\d+)",
-                #         param_name)
-                #     if result:
-                #         layer_type, layer_id, expert_id = result[0]
-                #         layer_id = int(layer_id)
-                #         expert_id = int(expert_id)
-                #         extracted_experts.append(
-                #             (layer_type, layer_id, expert_id, tensor_id))
-                # # remove duplicated experts
-                # extracted_experts = list(set(extracted_experts))
-
-                # extracted_experts = [(x[1], x[2],
-                #                       x[3]) if x[0] == "encoder" else
-                #                      (x[1] + 1000, x[2], x[3])
-                #                      for x in extracted_experts]
-
-                # # sort experts by first layer id, then expert id
-                # extracted_experts = sorted(extracted_experts,
-                #                            key=lambda x: (x[0], x[1]))
-                # # transform to np.array
-                # # self.archer_prefetch.extracted_experts = np.zeros(
-                # #     (self.archer_prefetch.n_layer,
-                # #      self.archer_prefetch.n_expert))
-
-                # layer_idx = [x[0] for x in extracted_experts]
-                # # make unique and sort
-                # layer_idx = sorted(list(set(layer_idx)))
 
                 self.expert_executor.set_expert_dispatcher(
                     self.expert_dispatcher
@@ -609,6 +524,15 @@ class OffloadEngine(object):
 
                 module_idx = 0
                 self.expert_layer_modules = []
+                # ATTENTION BACKEND INJECTION POINT (T15)
+                # When self._enable_attention_offload is True, replace attention modules here.
+                # Pattern: same as how SyncMixtralSparseMoeBlock replaces MixtralSparseMoeBlock.
+                # Future: self._attention_backend.forward() called in place of module.forward()
+                if (
+                    self._enable_attention_offload
+                    and self._attention_backend is not None
+                ):
+                    pass  # No-op: attention replacement not yet implemented
                 for module in model.modules():
                     if (
                         isinstance(module, SyncNllbMoeSparseMLP)
@@ -620,11 +544,8 @@ class OffloadEngine(object):
                         or isinstance(module, DeepseekMoEBlock)
                         or isinstance(module, Qwen3MoEBlock)
                     ):
-                        # module.archer_prefetch = self.archer_prefetch
-                        # module.archer_tracer = self.archer_tracer
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
-                        # module.expert_dispatcher = self.expert_dispatcher
                         self.expert_modules.append(module)
                         module.expert_executor = self.expert_executor
                         module.expert_prefetcher = self.expert_prefetcher
@@ -635,31 +556,11 @@ class OffloadEngine(object):
                         module.lib = self.prefetch_lib
 
                         self.expert_layer_modules.append(module)
-
-                        # module_experts = [
-                        #     x for x in extracted_experts
-                        #     if x[0] == layer_idx[module_idx]
-                        # ]
-
-                        # module.expert_tensor_ids = {
-                        #     x[1]: x[2]
-                        #     for x in module_experts
-                        # }
-                        # expert_tensor_ids = [
-                        #     item for item in module.expert_tensor_ids.items()
-                        # ]
-                        # #sort by k and v
-                        # expert_tensor_ids = sorted(expert_tensor_ids,
-                        #                            key=lambda x: (x[0], x[1]))
-                        # # self.archer_prefetch.extracted_experts[module_idx] = [
-                        # #     x[1] for x in expert_tensor_ids
-                        # # ]
                         module.layer_id = module_idx + first_k_dense_replace
 
                         module_idx += 1
 
                 self.setup_archer_hooks(model)
-                # print("OffloadEngine init done, rank", dist.get_rank(), flush=True)
                 return model
 
             return archer_from_pretrained
@@ -694,9 +595,6 @@ class OffloadEngine(object):
         name_lst = []
         ret_dict = {}
 
-        # print("Getting topology ...", self.name_id_map)
-
-        # for name in model.state_dict().keys():
         for name, _ in model.named_parameters(recurse=True):
             match = re.search(r"\d+", name)
             if name not in self.name_id_map:
@@ -749,7 +647,6 @@ class OffloadEngine(object):
         for name, _ in model.named_buffers(recurse=True):
             match = re.search(r"\d+", name)
             if name not in self.name_id_map:
-                # print("buffer not in self.name_id_map", name)
                 continue
             if match:
                 if "expert" in name and "shared_experts" not in name:
@@ -824,7 +721,6 @@ class OffloadEngine(object):
 
         @torch.no_grad()
         def _pre_forward_input_hook(module, input, kwargs, device, tensors):
-            # print("pre_forward_input_hook", device, input, tensors)
             self.archer_engine.fetch_tensors(self.request_id, tensors)
             new_args = copy_args_to_device(device, input)
             new_kwargs = copy_kwargs_to_device(device, kwargs)
@@ -844,7 +740,6 @@ class OffloadEngine(object):
             key, input_device_index, output_device_index, tensors
         ):
             keys = key.split(".")
-            # print(keys)
             m = model
             for k in keys:
                 if k.isdigit():
@@ -875,7 +770,6 @@ class OffloadEngine(object):
 
         output_device_index = None
         for key, tensors in topo:
-            # print(key, tensors)
             if "shared" in key or "lm_head" in key:
                 key = key.split(".")[0]
                 output_device_index = 0
@@ -896,12 +790,6 @@ class OffloadEngine(object):
                             expert_tensors
                         )
                     )
-                    # gen_args_hook(
-                    #     expert_key,
-                    #     input_device_index,
-                    #     output_device_index,
-                    #     expert_tensors,
-                    # )
 
                     self.expert_dispatcher.register_expert(
                         expert_layer_id,
@@ -918,14 +806,6 @@ class OffloadEngine(object):
                     key, input_device_index, output_device_index, tensors[0]
                 )
                 output_device_index = input_device_index
-
-        # @torch.no_grad()
-        # def request_id_hook(module, *args):
-        #     self.request_id_flag = False
-        #     # self.archer_tracer.clear_request_id()
-        #     # self.archer_prefetch.clear_request()
-
-        # model.register_forward_hook(request_id_hook)
 
         # likely one of them should be enough but just to be safe
         self._register_hooks_recursively(model)
@@ -969,20 +849,12 @@ class OffloadEngine(object):
 
         @torch.no_grad()
         def _pre_forward_module_hook(module, args, kwargs):
-            # if self.request_id_flag == False:
-            #     self.request_id_flag = True
-            #     # print(kwargs, args, type(module))
-
-            #     request_id = self._generate_request_id()
-            #     # self.archer_tracer.set_request_id(request_id)
-            #     # self.archer_prefetch.set_request(request_id)
-
             device_list = []
 
             for name, param in module.named_parameters(recurse=False):
                 if param.data.data_ptr() not in self.offload_set:
                     num_devices = torch.cuda.device_count()
-                    param.data = param.data.to(f"cuda:{num_devices-1}")
+                    param.data = param.data.to(get_device(num_devices - 1))
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
@@ -993,17 +865,24 @@ class OffloadEngine(object):
 
             for name, buf in module.named_buffers(recurse=False):
                 if buf.data.data_ptr() not in self.offload_set:
-                    buf.data = buf.data.to("cuda:0")
+                    buf.data = buf.data.to(get_default_device())
                     continue
-
-                # print("offload buffer", name, buf.data.data_ptr())
 
                 self.offload_set.remove(buf.data_ptr())
                 self.archer_engine.begin(self.request_id, buf)
-                # buf = buf.to(self.dtype)
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.data.device)
+
+            # KV CACHE RELOAD POINT (T16)
+            # When enable_kv_cache_offload=True, reload swapped-out KV cache here.
+            # Future: self._kv_cache_manager.swap_in(block_ids_for_this_layer)
+            # This fires BEFORE each module's forward(), giving time to H2D transfer KV blocks.
+            if (
+                self._enable_kv_cache_offload
+                and self._kv_cache_manager is not None
+            ):
+                pass  # No-op: KV cache reload not yet implemented
 
         @torch.no_grad()
         def _post_forward_module_hook(module, input, output):
@@ -1030,11 +909,24 @@ class OffloadEngine(object):
 
                 device_list.append(buf.device)
 
+            # KV CACHE CAPTURE POINT (T16)
+            # When enable_kv_cache_offload=True, capture past_key_values here.
+            # Future: extract output[1] (present_key_value) and call
+            #         self._kv_cache_manager.allocate_blocks(seq_id, num_blocks)
+            # This fires AFTER each module's forward(), when KV output is available.
+            if (
+                self._enable_kv_cache_offload
+                and self._kv_cache_manager is not None
+            ):
+                pass  # No-op: KV cache capture not yet implemented
+
             if param_not_offload:
                 if isinstance(output, torch.Tensor):
-                    return output.to(torch.device("cuda:0"))
+                    return output.to(torch.device(get_default_device()))
 
-                return copy_args_to_device(torch.device("cuda:0"), *output)
+                return copy_args_to_device(
+                    torch.device(get_default_device()), *output
+                )
 
         # Pre forward hook
         self.forward_hooks.append(

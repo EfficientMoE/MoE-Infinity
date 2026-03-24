@@ -1,11 +1,10 @@
 # MoE-Infinity Build & Test Dockerfile
 #
-# Reproduces the full build of the refactored core/aio/ I/O layer with:
-#   - Phase 0: Bug fixes (atomic bools, condition variables, round-robin)
-#   - Phase 1: Multi-threaded parallel reads
-#   - Phase 2: Pre-allocated pinned memory pool
-#   - Phase 3: Pipelined disk-to-GPU transfer
-#   - Phase 4: Partitioned storage files
+# Reproduces the full build including:
+#   - CUDA extensions (_store, _engine)
+#   - Unit tests
+#   - E2E example smoke tests (--help + import chain)
+#   - Docker I/O integration tests (Tier 1 / Tier 2)
 #
 # Usage:
 #   docker build -t moe-infinity-test -f docker/Dockerfile .
@@ -14,10 +13,10 @@
 # To enter an interactive shell:
 #   docker run --gpus all -it moe-infinity-test bash
 
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel
 
 LABEL maintainer="EfficientMoE Team"
-LABEL description="MoE-Infinity build environment for refactored AIO layer"
+LABEL description="MoE-Infinity build & E2E test environment"
 
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -45,7 +44,7 @@ RUN mkdir -p ${CCACHE_DIR}
 # ---------------------------------------------------------------
 ARG CUTLASS_REPO=https://github.com/NVIDIA/cutlass.git
 ARG CUTLASS_VERSION=v3.9.2
-ARG CUTLASS_NVCC_ARCHS=80
+ARG CUTLASS_NVCC_ARCHS=86
 ENV CUTLASS_DIR=/root/cutlass
 
 RUN git clone --branch ${CUTLASS_VERSION} --depth 1 ${CUTLASS_REPO} ${CUTLASS_DIR}
@@ -65,7 +64,7 @@ COPY . .
 
 # Install Python build dependencies first (torch is already in the base image)
 RUN pip install --no-cache-dir \
-    setuptools==75.3.2 \
+    setuptools>=75 \
     wheel \
     ninja \
     py-cpuinfo
@@ -73,12 +72,9 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ---------------------------------------------------------------
-# Build the torch extensions (inplace, no package install)
+# Build the torch extensions via editable install (handles .so placement)
 RUN --mount=type=cache,target=/ccache \
-    CUTLASS_DIR=${CUTLASS_DIR} python setup.py build_ext --inplace
-
-# Copy .so files to the expected location
-RUN cp build/lib.linux-x86_64-cpython-311/moe_infinity/_*.so moe_infinity/ 2>/dev/null || true
+    CUTLASS_DIR=${CUTLASS_DIR} pip install --no-cache-dir --no-build-isolation -e .
 
 # Verify the shared libraries were produced
 RUN ls -lh moe_infinity/*.so
@@ -106,6 +102,24 @@ RUN ls -lh tests/docker/test_io_module*.so
 
 # Install test dependencies
 RUN pip install --no-cache-dir pytest
+
+# ---------------------------------------------------------------
+# E2E Stage 1: verify CUDA extension imports with real CUDA
+# ---------------------------------------------------------------
+RUN python -c "\
+import torch; \
+print(f'CUDA available: {torch.cuda.is_available()}'); \
+import moe_infinity; \
+print('OK: import moe_infinity'); \
+import moe_infinity._store; \
+print(f'OK: _store from {moe_infinity._store.__file__}'); \
+"
+
+# ---------------------------------------------------------------
+# E2E Stage 2: example smoke tests (--help exits 0)
+# ---------------------------------------------------------------
+RUN python examples/interface_example.py --help
+RUN python examples/readme_example.py --help
 
 # ---------------------------------------------------------------
 # Run Tier 1 tests (build-time, no CUDA)

@@ -44,3 +44,29 @@ def test_trace_path_directory_raises(tmp_path: Path):
 
     with pytest.raises(ValueError):
         ArcherConfig(offload_path=str(tmp_path), trace_path=trace_dir)
+
+
+def test_kv_cache_fields_default(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    config = ArcherConfig(offload_path="/tmp")
+    assert config.kv_cache_memory_ratio == 0.0
+    assert config.enable_attention_offload is False
+    assert config.enable_kv_cache_offload is False
+    assert config.attention_backend == "default"
+
+
+def test_kv_cache_memory_ratio_validation(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.raises(ValueError):
+        ArcherConfig(
+            offload_path="/tmp",
+            device_memory_ratio=0.7,
+            kv_cache_memory_ratio=0.5,
+        )
+
+
+def test_backwards_compat_old_config(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    config = ArcherConfig(offload_path="/tmp", device_memory_ratio=0.75)
+    assert config.kv_cache_memory_ratio == 0.0
+    assert config.enable_kv_cache_offload is False

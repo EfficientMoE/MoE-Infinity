@@ -1,1 +1,1 @@
-from .router import launch_fused_softmax_topk, launch_fused_softmax_topk_nobias
+from .router import launch_fused_softmax_topk_nobias
