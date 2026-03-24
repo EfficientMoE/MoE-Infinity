@@ -17,5 +17,5 @@ pydantic==1.10.13
 scipy
 sentencepiece
 sphinx
-transformers==4.53.0
+transformers==4.57.6
 uvicorn
