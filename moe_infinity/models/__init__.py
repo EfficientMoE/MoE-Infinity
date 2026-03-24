@@ -4,8 +4,12 @@
 # EfficientMoE Team
 
 from .arctic import ArcticConfig, SyncArcticMoeBlock
+from .dbrx import SyncDbrxFFNBlock
 from .deepseek import DeepseekMoEBlock
+from .deepseek_v2_wrapper import SyncDeepseekV2MoEBlock
+from .deepseek_v3_wrapper import SyncDeepseekV3MoEBlock
 from .grok import SyncGrokMoeBlock
+from .jamba import SyncJambaMoEBlock
 from .mixtral import SyncMixtralSparseMoeBlock
 from .model_utils import (
     apply_rotary_pos_emb,
@@ -13,5 +17,6 @@ from .model_utils import (
     rotate_half,
 )
 from .nllb_moe import SyncNllbMoeSparseMLP
+from .olmoe import SyncOlmoeMoEBlock
 from .qwen import Qwen3MoEBlock
 from .switch_transformers import SyncSwitchTransformersSparseMLP

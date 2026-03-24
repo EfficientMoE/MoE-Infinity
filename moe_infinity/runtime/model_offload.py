@@ -37,12 +37,16 @@ from moe_infinity.common import parse_expert_type
 from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
 from moe_infinity.models import (
-    DeepseekMoEBlock,
     Qwen3MoEBlock,
     SyncArcticMoeBlock,
+    SyncDbrxFFNBlock,
+    SyncDeepseekV2MoEBlock,
+    SyncDeepseekV3MoEBlock,
     SyncGrokMoeBlock,
+    SyncJambaMoEBlock,
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
+    SyncOlmoeMoEBlock,
     SyncSwitchTransformersSparseMLP,
 )
 from moe_infinity.runtime.compile import script_expert
@@ -325,6 +329,25 @@ class OffloadEngine(object):
         transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
         transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = Qwen3MoEBlock
 
+        transformers.models.dbrx.modeling_dbrx._old_dbrx_ffn = (
+            transformers.models.dbrx.modeling_dbrx.DbrxFFN
+        )
+        transformers.models.dbrx.modeling_dbrx.DbrxFFN = SyncDbrxFFNBlock
+
+        transformers.models.olmoe.modeling_olmoe._old_olmoe_moe = (
+            transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock
+        )
+        transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock = (
+            SyncOlmoeMoEBlock
+        )
+
+        transformers.models.jamba.modeling_jamba._old_jamba_moe = (
+            transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock
+        )
+        transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock = (
+            SyncJambaMoEBlock
+        )
+
         moe_infinity.models.modeling_grok.modeling_grok1._old_sparse_mlp = (
             moe_infinity.models.modeling_grok.MoeBlock
         )
@@ -339,14 +362,14 @@ class OffloadEngine(object):
             SyncArcticMoeBlock
         )
 
-        moe_infinity.models.modeling_deepseek_v2._old_sparse_mlp = (
-            moe_infinity.models.modeling_deepseek_v2.DeepseekV2MoE
+        transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe = transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE
+        transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
+        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = (
+            SyncDeepseekV2MoEBlock
         )
-        moe_infinity.models.modeling_deepseek_v3._old_sparse_mlp = (
-            moe_infinity.models.modeling_deepseek_v3.DeepseekV3MoE
+        transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = (
+            SyncDeepseekV3MoEBlock
         )
-        moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.DeepseekV2MoE = DeepseekMoEBlock
-        moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = DeepseekMoEBlock
 
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
@@ -541,8 +564,12 @@ class OffloadEngine(object):
                         or isinstance(module, SyncMixtralSparseMoeBlock)
                         or isinstance(module, SyncGrokMoeBlock)
                         or isinstance(module, SyncArcticMoeBlock)
-                        or isinstance(module, DeepseekMoEBlock)
+                        or isinstance(module, SyncDeepseekV2MoEBlock)
+                        or isinstance(module, SyncDeepseekV3MoEBlock)
                         or isinstance(module, Qwen3MoEBlock)
+                        or isinstance(module, SyncDbrxFFNBlock)
+                        or isinstance(module, SyncOlmoeMoEBlock)
+                        or isinstance(module, SyncJambaMoEBlock)
                     ):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
@@ -953,6 +980,20 @@ class OffloadEngine(object):
             transformers.models.mixtral.modeling_mixtral._old_sparse_mlp
         )
 
+        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp
+
+        transformers.models.dbrx.modeling_dbrx.DbrxFFN = (
+            transformers.models.dbrx.modeling_dbrx._old_dbrx_ffn
+        )
+
+        transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock = (
+            transformers.models.olmoe.modeling_olmoe._old_olmoe_moe
+        )
+
+        transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock = (
+            transformers.models.jamba.modeling_jamba._old_jamba_moe
+        )
+
         moe_infinity.models.modeling_grok.modeling_grok1.MoeBlock = (
             moe_infinity.modeling_grok.modeling_grok1._old_sparse_mlp
         )
@@ -961,5 +1002,5 @@ class OffloadEngine(object):
             moe_infinity.models.modeling_arctic._old_sparse_mlp
         )
 
-        moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.DeepseekV2MoE = moe_infinity.models.modeling_deepseek_v2._old_sparse_mlp
-        moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = moe_infinity.models.modeling_deepseek_v3._old_sparse_mlp
+        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe
+        transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe

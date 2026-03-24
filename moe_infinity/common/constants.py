@@ -1,6 +1,11 @@
 from transformers import (
+    DbrxForCausalLM,
+    DeepseekV2ForCausalLM,
+    DeepseekV3ForCausalLM,
+    JambaForCausalLM,
     MixtralForCausalLM,
     NllbMoeForConditionalGeneration,
+    OlmoeForCausalLM,
     OPTForCausalLM,
     PretrainedConfig,
     Qwen3MoeForCausalLM,
@@ -10,8 +15,6 @@ from transformers import (
 from ..models.modeling_arctic import (
     ArcticForCausalLM,
 )  # TODO: Replace this with huggingface transformers
-from ..models.modeling_deepseek_v2 import DeepseekV2ForCausalLM
-from ..models.modeling_deepseek_v3 import DeepseekV3ForCausalLM
 from ..models.modeling_grok.modeling_grok1 import (
     Grok1ModelForCausalLM,
 )  # TODO: Replace this with huggingface transformers
@@ -26,17 +29,24 @@ MODEL_MAPPING_NAMES = {
     "deepseek": DeepseekV2ForCausalLM,
     "deepseek_v3": DeepseekV3ForCausalLM,
     "qwen3": Qwen3MoeForCausalLM,
+    "dbrx": DbrxForCausalLM,
+    "olmoe": OlmoeForCausalLM,
+    "jamba": JambaForCausalLM,
 }
 
 MODEL_MAPPING_TYPES = {
     "switch": 0,
     "nllb": 2,
     "mixtral": 4,
+    "opt": 3,
     "grok": 4,
     "arctic": 4,
     "deepseek": 5,
     "deepseek_v3": 5,
     "qwen3": 5,
+    "dbrx": 4,
+    "olmoe": 4,
+    "jamba": 4,
 }
 
 
