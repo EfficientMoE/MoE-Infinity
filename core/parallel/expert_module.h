@@ -241,7 +241,7 @@ struct MoEMLP : public torch::nn::Module {
   void SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids);
 
  private:
-  void ForwardHelper();
+  void ForwardHelper(cudaStream_t stream);
 
  private:
   std::vector<torch::Tensor> buffer_;

@@ -464,9 +464,8 @@ torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
   //   warmup_count_--;
   //   ForwardHelper();
   // }
-  ForwardHelper();
+  ForwardHelper(stream);
   param_set_ = false;
-  // slice until batch_size
   cudaStreamSynchronize(stream);
   // auto options = torch::TensorOptions()
   //                    .dtype(dtype_to_torch(dtype_))
@@ -478,7 +477,7 @@ torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
   return output_.index({torch::indexing::Slice(0, batch_size)});
 }
 
-void MoEMLP::ForwardHelper() {
+void MoEMLP::ForwardHelper(cudaStream_t stream) {
   torch::NoGradGuard no_grad;
   if (expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ||
       expert_type_ == MIXTRAL_MOE_DENSE_ACT_DENSE) {
@@ -502,7 +501,7 @@ void MoEMLP::ForwardHelper() {
     // Single fused CUTLASS call: 3 GEMMs, silu*up fused into GEMM1 epilogue.
     // Replaces: matmul(gate), matmul(up), silu, mul, matmul(down).
     fused_moe_ffn_into(input, gate_proj, up_proj, down_proj, gate_out,
-                       fused_out, output, /*stream=*/nullptr);
+                       fused_out, output, stream);
     return;
   }
   DLOG_FATAL("MoEMLP::forward: expert_type not supported", expert_type_);
