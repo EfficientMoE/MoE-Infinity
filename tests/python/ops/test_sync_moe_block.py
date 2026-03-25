@@ -59,7 +59,7 @@ class _PythonTopKSoftmax:
 
     def topk_softmax(
         self, router_logits: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(
             routing_weights, self.top_k, dim=-1
@@ -85,7 +85,7 @@ class _PythonTopKSoftmax:
         )
         routing_weights_mask.scatter_add_(1, selected_experts, routing_weights)
 
-        return router_mask, routing_weights_mask
+        return selected_experts, router_mask, routing_weights_mask
 
 
 def _hidden_states_from_output(output: Any) -> torch.Tensor:

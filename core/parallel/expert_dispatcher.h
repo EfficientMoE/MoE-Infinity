@@ -6,6 +6,7 @@
 #pragma once
 
 #include <torch/extension.h>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -50,19 +51,21 @@ class ExpertDispatcher : public base::noncopyable {
                             int expert_type, int num_threads = 1);
   ~ExpertDispatcher() {
     main_thread_stop_flag_.store(true);
+    for (int i = 0; i < static_cast<int>(input_queue_.size()); ++i) {
+      input_queue_[i].NotifyAll();
+    }
+    for (int i = 0; i < static_cast<int>(exec_queue_.size()); ++i) {
+      exec_queue_[i].NotifyAll();
+    }
     for (auto& thread : threads_) {
       thread->join();
     }
-
-    // for (auto& stream : fetch_streams_) {
-    //   cudaStreamDestroy(stream);
-    // }
     for (auto& stream : exec_streams_) {
       cudaStreamDestroy(stream);
     }
-    // for (auto& stream : out_streams_) {
-    //   cudaStreamDestroy(stream);
-    // }
+    for (auto* m : modules_) {
+      delete m;
+    }
   }
 
   void SetInputs(const torch::Tensor& hidden_states,
@@ -90,7 +93,7 @@ class ExpertDispatcher : public base::noncopyable {
   void Start() { start_ = true; }
 
   void GPUFetchFunc(int gpu_id);
-  void GPUExecFunc(int gpu_id);
+  void GPUExecFunc(int gpu_id, int thread_idx);
 
   // void GPUThreadFunc(int gpu_id);
 
@@ -129,12 +132,11 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<std::condition_variable> cache_cv_;
 
   std::mutex output_mutex_;
-  // std::mutex exec_mutex_;
-  // std::mutex gpu_overload_mutex_;
+  std::mutex accum_mutex_;
 
   std::vector<cudaStream_t> exec_streams_;
 
-  std::vector<bool> gpu_overload_;
+  std::unique_ptr<std::atomic<bool>[]> gpu_overload_;
 
   torch::Tensor hidden_states_;
   torch::Tensor final_hidden_states_;
@@ -145,6 +147,7 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<std::unordered_set<uint64_t>> cached_experts_;
 
   int cache_capacity_ = 0;
+  int num_threads_ = 1;
 
   std::vector<MoEMLP*> modules_;
 };

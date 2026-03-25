@@ -25,7 +25,7 @@ class ThreadSafeQueue : public base::noncopyable {
   }
 
   // Pops an item from the queue (blocking).
-  bool Pop(T& item) {
+  virtual bool Pop(T& item) {
     std::unique_lock<std::mutex> lock(mutex_);
     cond_.wait(lock, [this] { return !queue_.empty(); });
 
@@ -35,7 +35,7 @@ class ThreadSafeQueue : public base::noncopyable {
   }
 
   // Tries to pop an item without blocking. Returns false if the queue is empty.
-  bool TryPop(T& item) {
+  virtual bool TryPop(T& item) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (queue_.empty()) {
       return false;
@@ -68,14 +68,15 @@ class ThreadSafeRecyclingQueue : public ThreadSafeQueue<T> {
  public:
   ThreadSafeRecyclingQueue() = default;
 
-  void Pop(T& item) override {
-    ThreadSafeQueue<T>::Pop(item);
-    Push(item);
+  bool Pop(T& item) override {
+    bool result = ThreadSafeQueue<T>::Pop(item);
+    this->Push(item);
+    return result;
   }
 
   bool TryPop(T& item) override {
     bool success = ThreadSafeQueue<T>::TryPop(item);
-    Push(item);
+    this->Push(item);
     return success;
   }
 };

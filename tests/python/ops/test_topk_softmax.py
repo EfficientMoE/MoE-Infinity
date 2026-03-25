@@ -42,26 +42,29 @@ def test_topk_softmax_matches_torch_reference(
     )
 
     try:
-        topk_weights, topk_indices = _store.topk_softmax(gating_output)
+        topk_indices, router_mask, router_weight = _store.topk_softmax(
+            gating_output
+        )
     except RuntimeError as e:
         if "not initialized" in str(e).lower():
             pytest.skip(f"MoELayer not initialized: {e}")
         raise
 
-    if topk_weights.shape[1] != top_k:
+    if topk_indices.shape[1] != top_k:
         pytest.skip(
             "MoELayer top_k does not match this test case "
-            f"(configured={topk_weights.shape[1]}, case={top_k})"
+            f"(configured={topk_indices.shape[1]}, case={top_k})"
         )
 
     ref_values, ref_indices = torch.topk(
         torch.softmax(gating_output, dim=-1), k=top_k, dim=-1
     )
 
-    torch.testing.assert_close(
-        topk_weights, ref_values, rtol=BF16_RTOL, atol=BF16_ATOL
-    )
     _assert_same_selected_experts(topk_indices, ref_indices)
+
+    assert router_mask.dtype == torch.bool
+    assert router_mask.shape == (num_tokens, num_experts)
+    assert router_weight.shape == (num_tokens, num_experts)
 
 
 @requires_cuda

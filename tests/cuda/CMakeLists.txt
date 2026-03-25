@@ -145,6 +145,7 @@ endif()
 set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -g -G -lineinfo -rdynamic -O3 ${CUDA_NVCC_ARCH_FLAG} -Xcompiler -fopenmp")
 
 set(SRC_LIST
+    test_pinned_speed.cu
     test_uvm_kernel.cu
     test_fused_mlp.cu
     # test_single_gemm_tiled.cu
@@ -154,13 +155,17 @@ set(SRC_LIST
     test_autosize_tileload.cu
     test_autosize_tileload_stage.cu
     test_autotune_blocksize.cu
-
+    demo3a_server.cu
+    demo3a_client.cu
 )
 
 set(TORCH_SRC_LIST
+  test_l2_persistent.cu
+  test_l2_persist_shared_input.cu
   test_topk_softmax.cu
   test_expert_fusion.cu
   test_expert_fusion_v2.cu
+  test_mlp_fusion.cu
   # tests_masked_select.cu
   test_fused_mlp_wmma.cu
   test_fused_mlp_cutlass.cu
