@@ -73,23 +73,37 @@ def _call_hf_mixtral_apply(
     hf_apply_rope = mixtral_modeling.apply_rotary_pos_emb
 
     hf_params = inspect.signature(hf_apply_rope).parameters
-    if "position_ids" in hf_params:
+    use_unsqueeze_dim = "unsqueeze_dim" in hf_params
+    hf_cos = cos[position_ids]
+    hf_sin = sin[position_ids]
+
+    preindexed_kwargs = {"unsqueeze_dim": 1} if use_unsqueeze_dim else {}
+    try:
         return hf_apply_rope(
             q,
             k,
-            cos,
-            sin,
-            position_ids=position_ids,
-            unsqueeze_dim=1,
+            hf_cos,
+            hf_sin,
+            **preindexed_kwargs,
         )
+    except Exception as preindexed_error:
+        if "position_ids" not in hf_params:
+            raise
 
-    return hf_apply_rope(
-        q,
-        k,
-        cos[position_ids],
-        sin[position_ids],
-        unsqueeze_dim=1,
-    )
+        legacy_kwargs = {"position_ids": position_ids}
+        if use_unsqueeze_dim:
+            legacy_kwargs["unsqueeze_dim"] = 1
+
+        try:
+            return hf_apply_rope(
+                q,
+                k,
+                cos,
+                sin,
+                **legacy_kwargs,
+            )
+        except Exception:
+            raise preindexed_error
 
 
 @requires_cuda

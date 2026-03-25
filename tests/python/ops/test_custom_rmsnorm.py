@@ -1,5 +1,4 @@
 import pytest
-import torch
 
 from moe_infinity.models.modeling_arctic.modeling_arctic import ArcticRMSNorm
 from moe_infinity.models.modeling_deepseek_v2.modeling_deepseek import (
@@ -18,10 +17,13 @@ from tests.python.ops.conftest import (
     requires_cuda,
 )
 
+torch = pytest.importorskip("torch")
 
-def reference_rmsnorm_upcast(x: torch.Tensor, weight: torch.Tensor, eps: float):
+
+def reference_rmsnorm_upcast(x, weight, eps: float):
+    input_dtype = x.dtype
     x_f32 = x.to(torch.float32)
-    return reference_rmsnorm(x_f32, weight, eps)
+    return reference_rmsnorm(x_f32, weight, eps).to(input_dtype)
 
 
 @requires_cuda

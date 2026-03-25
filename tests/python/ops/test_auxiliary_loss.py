@@ -8,7 +8,6 @@ This module verifies:
 """
 
 import pytest
-import torch
 
 from moe_infinity.models.modeling_deepseek_v2.modeling_deepseek import (
     AddAuxiliaryLoss,
@@ -19,6 +18,8 @@ from tests.python.ops.conftest import (
     requires_cuda,
     seed_everything,
 )
+
+torch = pytest.importorskip("torch")
 
 
 class TestAddAuxiliaryLossForward:
@@ -88,7 +89,7 @@ class TestAddAuxiliaryLossBackward:
         out.sum().backward()
 
         # Gradient for loss should be ones(1), not the sum of grad_output
-        expected_loss_grad = torch.ones(1, dtype=torch.float32)
+        expected_loss_grad = torch.tensor(1.0, dtype=torch.float32)
         torch.testing.assert_close(
             loss.grad, expected_loss_grad, rtol=BF16_RTOL, atol=BF16_ATOL
         )
@@ -120,7 +121,9 @@ class TestAddAuxiliaryLossBackward:
         out.sum().backward()
 
         expected_x_grad = torch.ones_like(x)
-        expected_loss_grad = torch.ones(1, dtype=torch.float32, device="cuda")
+        expected_loss_grad = torch.tensor(
+            1.0, dtype=torch.float32, device="cuda"
+        )
 
         torch.testing.assert_close(
             x.grad, expected_x_grad, rtol=BF16_RTOL, atol=BF16_ATOL
@@ -195,7 +198,9 @@ class TestAddAuxiliaryLossBF16:
         out.sum().backward()
 
         expected_x_grad = torch.ones_like(x)
-        expected_loss_grad = torch.ones(1, dtype=torch.bfloat16, device="cuda")
+        expected_loss_grad = torch.tensor(
+            1.0, dtype=torch.bfloat16, device="cuda"
+        )
 
         torch.testing.assert_close(
             x.grad, expected_x_grad, rtol=BF16_RTOL, atol=BF16_ATOL
