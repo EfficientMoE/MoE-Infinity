@@ -140,3 +140,7 @@ class DistributedExpertExecutor:
                 result_list += result
 
         return result_list
+
+
+# Alias for backward compatibility
+ExpertExecutor = DistributedExpertExecutor

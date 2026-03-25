@@ -51,10 +51,10 @@ def launch_softmax(input_tensor):
 
 @triton.jit
 def fused_softmax_topk_kernel_nobias(
-    hidden_ptr,  # [B, H]
-    weight_ptr,  # [E, H]
-    routing_mask_ptr,  # [B, E]
-    routing_weight_ptr,  # [B, E]
+    hidden_ptr,
+    weight_ptr,
+    routing_mask_ptr,
+    routing_weight_ptr,
     B: tl.constexpr,
     H: tl.constexpr,
     E: tl.constexpr,
@@ -76,43 +76,34 @@ def fused_softmax_topk_kernel_nobias(
 
     logits = tl.where(off_e < E, logits, -float("inf"))
 
-    # Softmax
     max_logit = tl.max(logits, axis=0)
     logits = logits - max_logit
     exp_logits = tl.exp(logits)
     sum_exp = tl.sum(exp_logits, axis=0)
     probs = exp_logits / sum_exp
 
-    # Top-k (insertion sort)
-    top_vals = tl.full([TOPK], -float("inf"), dtype=tl.float32)
-    top_idxs = tl.full([TOPK], -1, dtype=tl.int32)
+    remaining = tl.where(off_e < E, probs, -float("inf"))
+    top_mask = tl.zeros([BLOCK_E], dtype=tl.int1)
 
-    for i in range(BLOCK_E):
-        if i < E:
-            p = probs[i]
-            idx = i
+    for _k in range(TOPK):
+        cur_max = tl.max(remaining, axis=0)
+        is_max = remaining == cur_max
+        first = is_max & (tl.cumsum(is_max.to(tl.int32), axis=0) == 1)
+        top_mask = top_mask | first
+        remaining = tl.where(first, -float("inf"), remaining)
 
-            for j in range(TOPK):
-                if p > top_vals[j]:
-                    for k in range(TOPK - 1, j, -1):
-                        top_vals[k] = top_vals[k - 1]
-                        top_idxs[k] = top_idxs[k - 1]
-                    top_vals[j] = p
-                    top_idxs[j] = idx
-                    break
+    top_probs = tl.where(top_mask, probs, tl.zeros([BLOCK_E], dtype=tl.float32))
 
     if normalize_topk:
-        sum_top = tl.sum(top_vals)
-        top_vals = top_vals / sum_top
+        top_sum = tl.sum(top_probs, axis=0)
+        top_probs = top_probs / top_sum
 
-    for i in range(TOPK):
-        idx = top_idxs[i]
-        val = top_vals[i]
-        if idx >= 0:
-            tl.store(routing_mask_ptr + batch_id * E + idx, True)
-            tl.store(
-                routing_weight_ptr + batch_id * E + idx, val.to(tl.float16)
-            )
+    tl.store(routing_mask_ptr + batch_id * E + off_e, top_mask, mask=off_e < E)
+    tl.store(
+        routing_weight_ptr + batch_id * E + off_e,
+        top_probs.to(tl.bfloat16),
+        mask=off_e < E,
+    )
 
 
 def launch_fused_softmax_topk_nobias(

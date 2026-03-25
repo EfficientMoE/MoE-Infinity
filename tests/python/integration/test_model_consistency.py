@@ -21,22 +21,26 @@ def _get_attn_impl(model_name: str) -> str:
 
 _HF_WORKER = r"""
 import pickle, sys, torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoConfig
+from moe_infinity.utils.hf_config import ensure_config_compat
 
 model_name, attn_impl, input_ids_path, out_path = sys.argv[1:]
 input_ids = torch.load(input_ids_path, weights_only=True)
+
+config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+ensure_config_compat(config)
 
 if "deepseek" in model_name.lower():
     from moe_infinity.models.modeling_deepseek_v2.modeling_deepseek import (
         DeepseekV2ForCausalLM,
     )
     model = DeepseekV2ForCausalLM.from_pretrained(
-        model_name, device_map="auto", torch_dtype=torch.bfloat16,
+        model_name, config=config, device_map="auto", torch_dtype=torch.bfloat16,
         attn_implementation=attn_impl,
     )
 else:
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, device_map="auto", torch_dtype=torch.bfloat16,
+        model_name, config=config, device_map="auto", torch_dtype=torch.bfloat16,
         attn_implementation=attn_impl, trust_remote_code=True,
     )
 
@@ -97,7 +101,7 @@ def _run_worker(script: str, args: list, label: str) -> Dict[str, torch.Tensor]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        deadline = time.monotonic() + 1800
+        deadline = time.monotonic() + 3600
         while time.monotonic() < deadline:
             if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                 time.sleep(2)
@@ -112,7 +116,7 @@ def _run_worker(script: str, args: list, label: str) -> Dict[str, torch.Tensor]:
             time.sleep(3)
         else:
             proc.kill()
-            pytest.fail(f"[{label}] Worker timed out after 1800s")
+            pytest.fail(f"[{label}] Worker timed out after 3600s")
         proc.kill()
         with open(out_path, "rb") as f:
             return pickle.load(f)

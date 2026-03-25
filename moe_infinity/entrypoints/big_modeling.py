@@ -18,6 +18,7 @@ from moe_infinity.models import (
 from moe_infinity.models.modeling_arctic import ArcticConfig
 from moe_infinity.runtime import OffloadEngine
 from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
+from moe_infinity.utils.hf_config import ensure_config_compat
 
 warnings.filterwarnings("ignore")
 
@@ -81,6 +82,7 @@ class MoE:
             model_config = AutoConfig.from_pretrained(
                 model_name_or_path, trust_remote_code=True
             )
+        model_config = ensure_config_compat(model_config)
         architecture = model_config.architectures[0].lower()
 
         arch = None
@@ -143,6 +145,7 @@ class MoE:
         with self.engine.init(cls=model_cls, ar_config=config):
             self.model = model_cls.from_pretrained(
                 model_name_or_path,
+                config=model_config,
                 attn_implementation=(
                     "flash_attention_2" if is_flash_attn_available else "eager"
                 ),

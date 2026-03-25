@@ -4,6 +4,48 @@ from typing import Optional, Tuple
 import torch
 from transformers import PretrainedConfig
 
+_DEEPSEEK_V2_DEFAULTS = {
+    "head_dim": None,
+    "mlp_bias": False,
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "aux_loss_alpha": 0.001,
+    "seq_aux": True,
+    "norm_topk_prob": False,
+}
+
+
+def _apply_missing_attrs(cfg, defaults):
+    changed = False
+    for key, default in defaults.items():
+        if key not in cfg.__dict__:
+            if key == "head_dim":
+                val = getattr(cfg, "qk_rope_head_dim", 0)
+                if val == 0 and hasattr(cfg, "num_attention_heads"):
+                    val = cfg.hidden_size // cfg.num_attention_heads
+            else:
+                val = default
+            cfg.__dict__[key] = val
+            changed = True
+    return changed
+
+
+def ensure_config_compat(config: PretrainedConfig) -> PretrainedConfig:
+    arch_name = getattr(config, "model_type", "")
+    if "deepseek" not in arch_name:
+        return config
+
+    if _apply_missing_attrs(config, _DEEPSEEK_V2_DEFAULTS):
+        cfg_cls = type(config)
+        _orig_init = cfg_cls.__init__
+
+        def _patched_init(self, *a, **kw):
+            _orig_init(self, *a, **kw)
+            _apply_missing_attrs(self, _DEEPSEEK_V2_DEFAULTS)
+
+        cfg_cls.__init__ = _patched_init
+    return config
+
 
 def parse_expert_dtype(config: PretrainedConfig) -> int:
     dtype = config.torch_dtype

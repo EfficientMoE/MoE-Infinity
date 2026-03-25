@@ -33,6 +33,7 @@ class SyncMixtralSparseMoeBlock(nn.Module):
             [MixtralBlockSparseTop2MLP(config) for _ in range(self.num_experts)]
         )
 
+        self.expert_executor = None
         self.archer_tracer = None
         self.archer_engine = None
         self.expert_tensor_ids: Dict[int, int] = None

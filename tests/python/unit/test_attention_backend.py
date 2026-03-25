@@ -8,13 +8,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-for module_name in list(sys.modules):
-    if module_name == "moe_infinity" or module_name.startswith("moe_infinity."):
-        del sys.modules[module_name]
 
-_ = sys.modules.setdefault("nvtx", MagicMock())
-_ = sys.modules.setdefault("moe_infinity._store", MagicMock())
-_ = sys.modules.setdefault("moe_infinity._engine", MagicMock())
+def _ensure_importable(name):
+    if name not in sys.modules:
+        try:
+            __import__(name)
+        except (ImportError, OSError):
+            sys.modules[name] = MagicMock()
+
+
+_ensure_importable("nvtx")
+_ensure_importable("moe_infinity._store")
+_ensure_importable("moe_infinity._engine")
 
 
 def test_import_attention_backend():

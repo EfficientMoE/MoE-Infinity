@@ -25,6 +25,9 @@ class Qwen3MoEBlock(nn.Module):
             ]
         )
 
+        self.expert_executor = None
+        self.lib = None
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
