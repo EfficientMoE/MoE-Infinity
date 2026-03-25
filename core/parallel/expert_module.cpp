@@ -417,12 +417,15 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
   assert(param_init_ == true);
   assert(param_set_ == false);
 
+  cudaStream_t current_stream;
+  cudaStreamCreate(&current_stream);
   for (size_t i = 0; i < tensor_ptrs.size(); i++) {
     auto [ptr, tensor_size] = tensor_ptrs[i];
-    auto tensor_shape = tensor_shapes[i];
-    CUDA_CHECK(cudaMemcpy(param_[i].data_ptr(), ptr, tensor_size,
-                          cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(param_[i].data_ptr(), ptr, tensor_size,
+                               cudaMemcpyDeviceToDevice, current_stream));
   }
+  cudaStreamSynchronize(current_stream);
+  cudaStreamDestroy(current_stream);
   param_set_ = true;
   // DLOG_FATAL(
   //     "MoEMLP::SetTensorsFromBlob: tensor_ids.size() should be 2,3,4, but got

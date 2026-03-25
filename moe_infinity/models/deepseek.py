@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from moe_infinity.kernel.router import launch_fused_softmax_topk_nobias
+from moe_infinity.kernel import topk_softmax as kernel_topk_softmax
 
 
 class DeepseekMoEGate(nn.Module):
@@ -97,17 +97,13 @@ class DeepseekMoEBlock(nn.Module):
                 )
             routing_weights = routing_weights.to(torch.float32)
         else:
-            # Fallback for legacy gates that return raw logits
-            router_logits = gate_output
-            routing_weights = F.softmax(
-                router_logits, dim=1, dtype=torch.float32
-            )
-            routing_weights, selected_experts = torch.topk(
-                routing_weights, self.num_experts_per_tok, dim=-1
+            return kernel_topk_softmax(
+                gate_output,
+                self.num_experts_per_tok,
+                self.num_expert,
+                renormalize=True,
             )
 
-        # Convert (topk_idx, topk_weight) -> (router_mask, routing_weights_mask)
-        # for expert_executor.dispatch_local()
         B, E = selected_experts.shape[0], self.num_expert
         router_mask = torch.zeros(
             B, E, dtype=torch.bool, device=selected_experts.device
