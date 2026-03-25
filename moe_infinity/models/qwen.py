@@ -13,7 +13,6 @@ class Qwen3MoEBlock(nn.Module):
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
 
-        # gating
         self.gate = nn.Linear(
             config.hidden_size, config.num_experts, bias=False
         )
