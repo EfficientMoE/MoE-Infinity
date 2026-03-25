@@ -9,7 +9,7 @@
 #include "utils/logger.h"
 #include "kernel/fused_moe_mlp.h"
 
-static const int64_t kMaxTokens = 128;
+static const int64_t kMaxTokens = 256;
 
 /*
 SwitchTransformersDenseActDense::SwitchTransformersDenseActDense(int dtype) {
@@ -434,6 +434,12 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
 
 torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
                               cudaStream_t stream) {
+  DLOG_FATAL_IF(param_set_ == false, "param_set_ should be true");
+  DLOG_FATAL_IF(param_init_ == false, "param_init_ should be true");
+
+  auto& input_ = buffer_[0];
+  auto& output_ = buffer_[1];
+
   int64_t batch_size = hidden_states.size(0);
   int64_t hdim = hidden_states.size(1);
 
@@ -441,43 +447,52 @@ torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
                 "batch_size should be (0,", kMaxTokens, "] , but got",
                 batch_size);
 
-  DLOG_FATAL_IF(param_set_ == false, "param_set_ should be true");
-  DLOG_FATAL_IF(param_init_ == false, "param_init_ should be true");
+  // Use async copy with the provided execution stream
+  cudaMemcpyAsync(input_.data_ptr(), hidden_states.data_ptr(),
+                  hidden_states.numel() * hidden_states.element_size(),
+                  cudaMemcpyDeviceToDevice, stream);
 
-  auto& input_ = buffer_[0];
-  auto& output_ = buffer_[1];
+  // Dynamically reshape buffers to match actual batch_size, avoiding
+  // computation on padded rows. The underlying memory is unchanged.
+  for (auto& buffer : buffer_) {
+    auto shape_vec = buffer.sizes().vec();
+    if (shape_vec.size() != 2) continue;
+    int64_t row = buffer.size(0);
+    int64_t col = buffer.size(1);
+    auto dtype = buffer.dtype();
 
-  // copy hidden_states to input_ using cudaMemcpy
-  cudaMemcpy(input_.data_ptr(), hidden_states.data_ptr(),
-             hidden_states.numel() * hidden_states.element_size(),
-             cudaMemcpyDeviceToDevice);
-  // cudaStreamSynchronize(stream);
-  // if (warmup_count_ == 0 && graph_mode_) {
-  //   graph_.replay();
-  // }
+    if (row == kMaxTokens) {
+      buffer.set_data(torch::from_blob(
+          buffer.data_ptr(), {batch_size, col}, DoNothingDeleter<void>{},
+          torch::TensorOptions().dtype(dtype).device(
+              CUDA_DEVICE(at::cuda::current_device()))));
+    }
+  }
+  cudaStreamSynchronize(stream);
 
-  // if (warmup_count_ == 0 && !graph_mode_) {
-  //   graph_.capture_begin();
-  //   ForwardHelper();
-  //   graph_.capture_end();
-  //   graph_mode_ = true;
-  // }
-
-  // if (warmup_count_ > 0) {
-  //   warmup_count_--;
-  //   ForwardHelper();
-  // }
   ForwardHelper(stream);
   param_set_ = false;
   cudaStreamSynchronize(stream);
-  // auto options = torch::TensorOptions()
-  //                    .dtype(dtype_to_torch(dtype_))
-  //                    .device(CUDA_DEVICE(at::cuda::current_device()));
-  // auto output = torch::empty({batch_size, hdim}, options);
-  // output.copy_(output_.index({torch::indexing::Slice(0, batch_size)}));
-  // cudaStreamSynchronize(stream);
-  // return std::move(output);
-  return output_.index({torch::indexing::Slice(0, batch_size)});
+
+  auto output = output_.clone();
+
+  // Restore buffers to kMaxTokens shape for next invocation
+  for (auto& buffer : buffer_) {
+    auto shape_vec = buffer.sizes().vec();
+    if (shape_vec.size() != 2) continue;
+    int64_t row = buffer.size(0);
+    int64_t col = buffer.size(1);
+    auto dtype = buffer.dtype();
+
+    if (row == batch_size && batch_size != kMaxTokens) {
+      buffer.set_data(torch::from_blob(
+          buffer.data_ptr(), {kMaxTokens, col}, DoNothingDeleter<void>{},
+          torch::TensorOptions().dtype(dtype).device(
+              CUDA_DEVICE(at::cuda::current_device()))));
+    }
+  }
+
+  return output;
 }
 
 void MoEMLP::ForwardHelper(cudaStream_t stream) {
