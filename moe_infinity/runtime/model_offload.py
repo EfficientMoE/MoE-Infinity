@@ -5,10 +5,13 @@
 
 import functools
 import gc
+import hashlib
 import importlib
 import json
+import logging
 import os
 import re
+import tempfile
 from typing import Callable, Dict, Type, Union
 
 import torch
@@ -66,6 +69,98 @@ from moe_infinity.utils.device import get_default_device, get_device
 _prefetch_lib = None
 # Alias for compatibility
 prefetch_op = None
+
+logger = logging.getLogger(__name__)
+
+
+def _compute_config_fingerprint(config: object) -> str:
+    fields = [
+        "model_type",
+        "architectures",
+        "num_hidden_layers",
+        "hidden_size",
+        "vocab_size",
+        "intermediate_size",
+        "num_local_experts",
+        "num_experts",
+        "n_routed_experts",
+        "num_experts_per_tok",
+        "torch_dtype",
+    ]
+    fingerprint_dict = {}
+    for field in fields:
+        val = getattr(config, field, None)
+        if val is not None:
+            fingerprint_dict[field] = str(val)
+    serialized = json.dumps(fingerprint_dict, sort_keys=True)
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def _write_model_signature(
+    offload_path: str, model_name: str, config: object
+) -> None:
+    signature = {
+        "model_name": model_name,
+        "config_fingerprint": _compute_config_fingerprint(config),
+        "signature_version": 1,
+    }
+    sig_path = os.path.join(offload_path, "model_signature.json")
+    fd, tmp_path = tempfile.mkstemp(dir=offload_path, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(signature, f)
+        os.replace(tmp_path, sig_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    logger.info(
+        "Created model signature for '%s' at %s", model_name, offload_path
+    )
+
+
+def _validate_model_signature(
+    offload_path: str, model_name: str, config: object
+) -> None:
+    sig_path = os.path.join(offload_path, "model_signature.json")
+
+    if not os.path.exists(sig_path):
+        logger.warning(
+            "No model signature found in %s. This appears to be a legacy cache. "
+            "Stamping with current model '%s'.",
+            offload_path,
+            model_name,
+        )
+        _write_model_signature(offload_path, model_name, config)
+        return
+
+    try:
+        with open(sig_path, "r") as f:
+            stored = json.load(f)
+        stored_model_name = stored["model_name"]
+        stored_fingerprint = stored["config_fingerprint"]
+    except (json.JSONDecodeError, KeyError) as e:
+        raise ValueError(
+            f"Corrupted model signature file at {sig_path}. Delete the file or the "
+            + f"entire offload directory and retry. (Detail: {e})"
+        ) from e
+
+    if stored_model_name != model_name:
+        raise ValueError(
+            f"Model name mismatch: offload cache at '{offload_path}' was created for "
+            + f"model '{stored_model_name}', but you are loading '{model_name}'. Use a "
+            + f"different offload_path or delete the existing cache."
+        )
+
+    current_fingerprint = _compute_config_fingerprint(config)
+    if stored_fingerprint != current_fingerprint:
+        raise ValueError(
+            f"Model config mismatch: offload cache at '{offload_path}' has a different "
+            + f"model configuration than '{model_name}'. The model architecture or version "
+            + f"may have changed. Delete the existing cache and retry."
+        )
 
 
 def _load_prefetch_lib():
@@ -446,8 +541,14 @@ class OffloadEngine(object):
 
                     with open(name_id_map_file, "w") as f:
                         json.dump(self.name_id_map, f)
+                    _write_model_signature(
+                        self.checkpoint, model_name, self.config
+                    )
                 else:
                     print("Loading model from offload_path ...", flush=True)
+                    _validate_model_signature(
+                        self.checkpoint, model_name, self.config
+                    )
                     self.cls.__init__ = self.cls._old_init
                     # load the name_id_map
                     with open(name_id_map_file, "r") as f:
