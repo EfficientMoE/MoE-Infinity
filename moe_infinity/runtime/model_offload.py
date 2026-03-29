@@ -141,7 +141,7 @@ def _validate_model_signature(
             stored = json.load(f)
         stored_model_name = stored["model_name"]
         stored_fingerprint = stored["config_fingerprint"]
-    except (json.JSONDecodeError, KeyError) as e:
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
         raise ValueError(
             f"Corrupted model signature file at {sig_path}. Delete the file or the "
             + f"entire offload directory and retry. (Detail: {e})"

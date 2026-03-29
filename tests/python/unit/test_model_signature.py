@@ -176,3 +176,15 @@ def test_validate_signature_missing_keys(tmp_path: Path):
         )
 
     assert "corrupted" in str(exc_info.value).lower()
+
+
+def test_validate_signature_non_dict_json(tmp_path: Path):
+    sig_path = tmp_path / "model_signature.json"
+    sig_path.write_text(json.dumps([]))  # valid JSON, but not a dict
+
+    with pytest.raises(ValueError) as exc_info:
+        _validate_model_signature(
+            str(tmp_path), "test-model", make_mixtral_config()
+        )
+
+    assert "corrupted" in str(exc_info.value).lower()
