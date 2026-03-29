@@ -11,7 +11,7 @@ from moe_infinity.runtime.model_offload import (
 )
 
 
-def make_mixtral_config(**overrides: object):
+def make_mixtral_config(**overrides):
     defaults = dict(
         model_type="mixtral",
         architectures=["MixtralForCausalLM"],
