@@ -159,7 +159,16 @@ class MoE:
             attention_backend=attention_backend,
             enable_attention_offload=attention_backend is not None,
             kv_cache_manager=kv_cache_manager,
-            enable_kv_cache_offload=kv_cache_manager is not None,
+            enable_kv_cache_offload=(
+                bool(
+                    getattr(
+                        engine_config,
+                        "enable_kv_cache_offload",
+                        False,
+                    )
+                )
+                and kv_cache_manager is not None
+            ),
         )
         self.engine.ckpt_files = checkpoint_paths
         # self.engine.save(config.offload_path, checkpoint_paths)

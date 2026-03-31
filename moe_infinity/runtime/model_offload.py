@@ -968,6 +968,8 @@ class OffloadEngine(object):
 
     @torch.no_grad()
     def _capture_kv_cache(self, seq_id: int, past_key_values):
+        if not getattr(self, "_enable_kv_cache_offload", True):
+            return
         if past_key_values is None:
             return
 
@@ -1007,6 +1009,8 @@ class OffloadEngine(object):
 
     @torch.no_grad()
     def _reload_kv_cache(self, seq_id: int):
+        if not getattr(self, "_enable_kv_cache_offload", True):
+            return None
         captured = self._captured_kv.pop(seq_id, None)
         if captured is None:
             return None
