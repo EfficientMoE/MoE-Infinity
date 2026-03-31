@@ -364,6 +364,12 @@ class MoE:
                 KVCacheOffloadCoordinator,
             )
 
+            # kv_tensors=None: The actual KV tensor storage (PagedAttentionBackend
+            # k_cache/v_cache) is not yet available at coordinator construction time.
+            # Call coordinator.set_kv_tensors(tensors) after model initialisation
+            # to enable real tensor copies. Until then, handlers are registered but
+            # copy operations are no-ops (guarded by `if self._kv_tensors is None`).
+            # This is intentional engine-path scaffolding per the plan scope.
             kv_offload_coordinator = KVCacheOffloadCoordinator(
                 kv_tensors=None,
                 block_pool=None,

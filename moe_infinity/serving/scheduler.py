@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from collections import deque
 from math import ceil
+
+logger = logging.getLogger(__name__)
 
 from .batch import SchedulerOutput
 from .kv_cache import PagedKVCache
@@ -269,7 +272,12 @@ class Scheduler:
             for sequence in swapped_sequences:
                 try:
                     self.kv_cache.swap_in(sequence.seq_id)
-                except Exception:
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "swap_in failed for seq_id=%s: %s",
+                        sequence.seq_id,
+                        exc,
+                    )
                     recovered = False
                     break
 
