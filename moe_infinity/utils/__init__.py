@@ -1,3 +1,4 @@
+from .async_transfer import async_d2h, async_h2d, wait_transfer
 from .checkpoints import get_checkpoint_paths
 from .config import ArcherConfig
 from .device import (
@@ -17,6 +18,8 @@ from .hf_config import (
 
 __all__ = [
     "ArcherConfig",
+    "async_d2h",
+    "async_h2d",
     "DeviceConfig",
     "get_checkpoint_paths",
     "get_default_device",
@@ -27,5 +30,6 @@ __all__ = [
     "parse_expert_dtype",
     "parse_expert_id",
     "parse_moe_param",
+    "wait_transfer",
     "to_device",
 ]
