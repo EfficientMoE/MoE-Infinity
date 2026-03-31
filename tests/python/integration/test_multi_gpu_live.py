@@ -59,7 +59,7 @@ def test_multi_gpu_expert_distribution():
     sys.path.insert(0, "/workspace/MoE-Infinity-dev")
     from moe_infinity import MoE
 
-    model_name = "google/switch-base-128"
+    model_name = "mistralai/Mixtral-8x7B-Instruct-v0.1"
     offload_dir = "/tmp/moe_multi_gpu_test"
     os.makedirs(offload_dir, exist_ok=True)
 

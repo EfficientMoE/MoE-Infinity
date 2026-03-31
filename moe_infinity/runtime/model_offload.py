@@ -50,7 +50,6 @@ from moe_infinity.models import (
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
     SyncOlmoeMoEBlock,
-    SyncSwitchTransformersSparseMLP,
 )
 from moe_infinity.runtime.compile import script_expert
 from moe_infinity.runtime.hooks import *
@@ -401,13 +400,6 @@ class OffloadEngine(object):
 
         activate_empty_init()
 
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._old_cast_classifier = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier = cast_classifier_decorator(
-            transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier
-        )
-
-        transformers.models.switch_transformers.modeling_switch_transformers._old_sparse_mlp = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP = SyncSwitchTransformersSparseMLP
         transformers.models.nllb_moe.modeling_nllb_moe._old_sparse_mlp = (
             transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP
         )
@@ -660,8 +652,6 @@ class OffloadEngine(object):
                 for module in model.modules():
                     if (
                         isinstance(module, SyncNllbMoeSparseMLP)
-                        or isinstance(module, SyncSwitchTransformersSparseMLP)
-                        or isinstance(module, SyncNllbMoeSparseMLP)
                         or isinstance(module, SyncMixtralSparseMoeBlock)
                         or isinstance(module, SyncGrokMoeBlock)
                         or isinstance(module, SyncArcticMoeBlock)
@@ -1074,9 +1064,6 @@ class OffloadEngine(object):
 
     # clean runtime hooks
     def clean_up(self):
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._old_cast_classifier
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP = transformers.models.switch_transformers.modeling_switch_transformers._old_sparse_mlp
-
         transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP = (
             transformers.models.nllb_moe.modeling_nllb_moe._old_sparse_mlp
         )

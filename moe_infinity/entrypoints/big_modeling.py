@@ -30,7 +30,7 @@ class MoE:
     ```python
     >>> from moe_infinity import MoE
 
-    >>> checkpoint = "google/switch-base-128"
+    >>> checkpoint = "deepseek-ai/DeepSeek-V2-Lite-Chat"
     >>> config = "config.json"
     >>> model = MoE(checkpoint, config)
 
@@ -169,12 +169,7 @@ class MoE:
 
             is_flash_attn_available = True
 
-            if (
-                arch == "switch"
-                or arch == "deepseek"
-                or arch == "deepseek_v3"
-                or arch == "nllb"
-            ):
+            if arch == "deepseek" or arch == "deepseek_v3" or arch == "nllb":
                 is_flash_attn_available = False
         except ImportError:
             print(
@@ -399,9 +394,14 @@ class MoE:
         self, token_ids: list[int], _attention_metadata: object
     ) -> torch.Tensor:
         input_tensor = torch.tensor([token_ids], dtype=torch.long)
-        model_device = getattr(self.model, "device", None)
-        if isinstance(model_device, torch.device):
-            input_tensor = input_tensor.to(model_device)
+        if torch.cuda.is_available():
+            input_tensor = input_tensor.to("cuda:0")
+        else:
+            model_device = getattr(self.model, "device", None)
+            if isinstance(
+                model_device, torch.device
+            ) and model_device.type not in ("meta", "cpu"):
+                input_tensor = input_tensor.to(model_device)
 
         with torch.no_grad():
             outputs = self.model(input_tensor)
