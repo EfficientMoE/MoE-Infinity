@@ -6,13 +6,17 @@
 import io
 import os
 import sys
+from typing import Any
 
 from setuptools import find_packages, setup
 
 torch_available = True
 cuda_available = False
+torch: Any = None
 try:
-    import torch  # noqa: F401
+    import torch as _torch
+
+    torch = _torch
 
     cuda_available = torch.version.cuda is not None
 except ImportError:
@@ -181,6 +185,10 @@ _KV_CACHE_SOURCES = [
     "core/python/py_kv_cache.cpp",
 ]
 
+_PAGED_ATTN_SOURCES = [
+    "extensions/kernel/paged_attention.cu",
+]
+
 # Note: _engine needs CUTLASS for fused_glu_cuda.cu
 
 ext_modules = []
@@ -228,6 +236,17 @@ if cuda_available:
                 "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,
             },
             extra_link_args=_STORE_EXTRA_LINK_ARGS,
+        )
+    )
+
+    ext_modules.append(
+        cpp_extension.CUDAExtension(
+            name="moe_infinity._paged_attn",
+            sources=_PAGED_ATTN_SOURCES,
+            include_dirs=COMMON_INCLUDE_PATHS,
+            extra_compile_args={
+                "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,
+            },
         )
     )
 
