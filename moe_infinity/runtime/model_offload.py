@@ -63,6 +63,11 @@ from moe_infinity.utils.arguments import (
     copy_args_to_device,
     copy_kwargs_to_device,
 )
+from moe_infinity.utils.async_transfer import (
+    async_d2h,
+    async_h2d,
+    wait_transfer,
+)
 from moe_infinity.utils.device import get_default_device, get_device
 
 _prefetch_lib = None
@@ -215,6 +220,8 @@ class OffloadEngine(object):
         # KVCacheManager scaffolding (no-op by default)
         self._kv_cache_manager = kv_cache_manager
         self._enable_kv_cache_offload: bool = enable_kv_cache_offload
+        self._captured_kv: dict[int, tuple[object, ...]] = {}
+        self.model = None
 
     def get_attention_backend(self):
         """Return the registered attention backend, or None if not configured.
@@ -563,6 +570,8 @@ class OffloadEngine(object):
 
                 if self.config.model_type == "deepseek_v3":
                     model = model.to(torch.float8_e4m3fn)
+
+                self.model = model
 
                 base_model_prefix = model.base_model_prefix
 
@@ -957,6 +966,136 @@ class OffloadEngine(object):
         gc.collect()
         torch.cuda.empty_cache()
 
+    @torch.no_grad()
+    def _capture_kv_cache(self, seq_id: int, past_key_values):
+        if past_key_values is None:
+            return
+
+        captured = []
+        stream_map: dict[str, object] = {}
+
+        def _get_stream(device: torch.device):
+            key = str(device)
+            if key not in stream_map:
+                stream_map[key] = torch.cuda.Stream(device=device)
+            return stream_map[key]
+
+        for layer_kv in past_key_values:
+            if (
+                isinstance(layer_kv, (list, tuple))
+                and len(layer_kv) >= 2
+                and isinstance(layer_kv[0], torch.Tensor)
+                and isinstance(layer_kv[1], torch.Tensor)
+            ):
+                k, v = layer_kv[0], layer_kv[1]
+                if k.is_cuda:
+                    k_cpu = async_d2h(k, _get_stream(k.device))
+                else:
+                    k_cpu = k.to("cpu", non_blocking=True)
+                if v.is_cuda:
+                    v_cpu = async_d2h(v, _get_stream(v.device))
+                else:
+                    v_cpu = v.to("cpu", non_blocking=True)
+                captured.append((k_cpu, v_cpu, k.device, v.device))
+            else:
+                captured.append(layer_kv)
+
+        for stream in stream_map.values():
+            wait_transfer(stream)
+
+        self._captured_kv[seq_id] = tuple(captured)
+
+    @torch.no_grad()
+    def _reload_kv_cache(self, seq_id: int):
+        captured = self._captured_kv.pop(seq_id, None)
+        if captured is None:
+            return None
+
+        model_device = None
+        model = getattr(self, "model", None)
+        if model is not None:
+            try:
+                model_device = next(model.parameters()).device
+            except StopIteration:
+                model_device = None
+
+        restored = []
+        stream_map: dict[str, object] = {}
+
+        def _get_stream(device: torch.device):
+            key = str(device)
+            if key not in stream_map:
+                stream_map[key] = torch.cuda.Stream(device=device)
+            return stream_map[key]
+
+        for layer_kv in captured:
+            if (
+                isinstance(layer_kv, tuple)
+                and len(layer_kv) == 4
+                and isinstance(layer_kv[0], torch.Tensor)
+                and isinstance(layer_kv[1], torch.Tensor)
+            ):
+                k_cpu, v_cpu, k_device, v_device = layer_kv
+                k_target = (
+                    k_device
+                    if isinstance(k_device, torch.device)
+                    else model_device
+                )
+                v_target = (
+                    v_device
+                    if isinstance(v_device, torch.device)
+                    else model_device
+                )
+
+                if k_target is None:
+                    k_target = k_cpu.device
+                if v_target is None:
+                    v_target = v_cpu.device
+
+                if k_target.type == "cuda":
+                    k = async_h2d(k_cpu, k_target, _get_stream(k_target))
+                else:
+                    k = k_cpu.to(k_target, non_blocking=True)
+
+                if v_target.type == "cuda":
+                    v = async_h2d(v_cpu, v_target, _get_stream(v_target))
+                else:
+                    v = v_cpu.to(v_target, non_blocking=True)
+
+                restored.append((k, v))
+            elif (
+                isinstance(layer_kv, tuple)
+                and len(layer_kv) == 2
+                and isinstance(layer_kv[0], torch.Tensor)
+                and isinstance(layer_kv[1], torch.Tensor)
+            ):
+                k_cpu, v_cpu = layer_kv
+                target = (
+                    model_device if model_device is not None else k_cpu.device
+                )
+                if target.type == "cuda":
+                    stream = _get_stream(target)
+                    restored.append(
+                        (
+                            async_h2d(k_cpu, target, stream),
+                            async_h2d(v_cpu, target, stream),
+                        )
+                    )
+                else:
+                    restored.append(
+                        (
+                            k_cpu.to(target, non_blocking=True),
+                            v_cpu.to(target, non_blocking=True),
+                        )
+                    )
+            else:
+                restored.append(layer_kv)
+
+        for stream in stream_map.values():
+            wait_transfer(stream)
+
+        return tuple(restored)
+
     def _register_hooks_recursively(self, module, count=[0]):
         my_count = count[0]
         module.id = my_count
@@ -1001,7 +1140,7 @@ class OffloadEngine(object):
                 self._enable_kv_cache_offload
                 and self._kv_cache_manager is not None
             ):
-                pass  # No-op: KV cache reload not yet implemented
+                _ = self._reload_kv_cache(seq_id=self.request_id)
 
         @torch.no_grad()
         def _post_forward_module_hook(module, input, output):
@@ -1037,7 +1176,15 @@ class OffloadEngine(object):
                 self._enable_kv_cache_offload
                 and self._kv_cache_manager is not None
             ):
-                pass  # No-op: KV cache capture not yet implemented
+                past_key_values = None
+                if isinstance(output, (list, tuple)):
+                    if len(output) > 1:
+                        past_key_values = output[1]
+                else:
+                    past_key_values = getattr(output, "past_key_values", None)
+                self._capture_kv_cache(
+                    seq_id=self.request_id, past_key_values=past_key_values
+                )
 
             if param_not_offload:
                 if device_list:
