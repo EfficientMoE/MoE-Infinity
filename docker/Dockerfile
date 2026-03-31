@@ -60,7 +60,7 @@ RUN --mount=type=cache,target=/ccache \
 WORKDIR /workspace/MoE-Infinity
 
 # Copy source code
-COPY . .
+COPY requirements.txt .
 
 # Install Python build dependencies first (torch is already in the base image)
 RUN pip install --no-cache-dir \
@@ -70,6 +70,9 @@ RUN pip install --no-cache-dir \
     py-cpuinfo
 
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the source code (after installing dependencies for better caching)
+COPY . .
 
 # ---------------------------------------------------------------
 # Build the torch extensions via editable install (handles .so placement)
@@ -107,13 +110,13 @@ RUN pip install --no-cache-dir pytest
 # E2E Stage 1: verify CUDA extension imports with real CUDA
 # ---------------------------------------------------------------
 RUN python -c "\
-import torch; \
-print(f'CUDA available: {torch.cuda.is_available()}'); \
-import moe_infinity; \
-print('OK: import moe_infinity'); \
-import moe_infinity._store; \
-print(f'OK: _store from {moe_infinity._store.__file__}'); \
-"
+    import torch; \
+    print(f'CUDA available: {torch.cuda.is_available()}'); \
+    import moe_infinity; \
+    print('OK: import moe_infinity'); \
+    import moe_infinity._store; \
+    print(f'OK: _store from {moe_infinity._store.__file__}'); \
+    "
 
 # ---------------------------------------------------------------
 # E2E Stage 2: example smoke tests (--help exits 0)

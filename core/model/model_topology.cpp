@@ -691,11 +691,47 @@ std::mutex kReadMutex;
 // DISK -> CPU
 void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
                              bool on_demand) {
+  if (tensor_ids.empty()) return;
+
+  // Check whether all tensors sit contiguously in the same partition file.
+  // If so, read the whole region in one I/O call instead of per-tensor.
+  bool contiguous = true;
+  auto first_it = kTensorIndex->find(tensor_ids[0]);
+  std::uint32_t file_id = first_it->second.file_id;
+  std::int64_t start_offset = first_it->second.offset;
+  std::int64_t expected_offset = start_offset;
+  std::int64_t total_aligned = 0;
+
+  for (const auto& tensor_id : tensor_ids) {
+    auto it = kTensorIndex->find(tensor_id);
+    std::int64_t sz =
+        (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
+    if (it->second.file_id != file_id || it->second.offset != expected_offset) {
+      contiguous = false;
+      break;
+    }
+    expected_offset += sz;
+    total_aligned += sz;
+  }
+
+  if (contiguous && total_aligned > 0) {
+    auto filename = kArcherTensorHandle->GetIndexFileName(file_id);
+    kArcherTensorHandle->ReadBulk(filename, host_ptr, on_demand, total_aligned,
+                                  start_offset);
+  } else {
+    std::int64_t offset = 0;
+    for (const auto& tensor_id : tensor_ids) {
+      kArcherTensorHandle->ReadTensor(
+          tensor_id, static_cast<char*>(host_ptr) + offset, on_demand);
+      auto it = kTensorIndex->find(tensor_id);
+      std::int64_t sz =
+          (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
+      offset += sz;
+    }
+  }
+
   std::int64_t param_size = 0;
   for (const auto& tensor_id : tensor_ids) {
-    // void* old_ptr = kTensorIndex->find(tensor_id)->second.tensor.data_ptr();
-    kArcherTensorHandle->ReadTensor(
-        tensor_id, (void*)((char*)host_ptr + param_size), on_demand);
     auto it = kTensorIndex->find(tensor_id);
     auto options = torch::TensorOptions()
                        .dtype(it->second.options.dtype())
@@ -706,7 +742,7 @@ void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
 
     DLOG_TRACE("SetModuleMemoryFromDisk tensor {}", it->second.DebugString());
     auto tensor_tmp =
-        torch::from_blob((void*)((char*)host_ptr + param_size),
+        torch::from_blob(static_cast<char*>(host_ptr) + param_size,
                          it->second.shape, DoNothingDeleter<void>{}, options);
     if (!it->second.tensor.defined()) {
       it->second.tensor = torch::zeros({1}, options);

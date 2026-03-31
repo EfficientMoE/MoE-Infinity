@@ -30,6 +30,8 @@ class ArcherTensorHandle : public base::noncopyable {
 
   void ReadTensor(const std::uint32_t tensor_id, void* memory_ptr,
                   bool on_demand = false);
+  void ReadBulk(const std::string& filename, void* memory_ptr, bool on_demand,
+                std::int64_t num_bytes, std::int64_t offset);
 
   void MoveTensor(const std::uint32_t tensor_id,
                   const torch::Device& src_device,
@@ -42,13 +44,9 @@ class ArcherTensorHandle : public base::noncopyable {
 
   int64_t GetTensorSizeAligned(const std::uint32_t tensor_id) const;
   torch::TensorOptions GetTensorOptions(const std::uint32_t tensor_id) const;
-
- private:
-  // bool ValidateTensorMove(const std::uint32_t tensor_id,
-  //                         const torch::Device& src_device,
-  //                         const torch::Device& dst_device);
   std::string GetIndexFileName(const std::uint32_t file_id) const;
 
+ private:
  private:
   std::string prefix_;
   ArcherPrioAioHandle prio_aio_handle_;
