@@ -11,7 +11,6 @@ def test_all_models_registered():
     )
 
     expected_models = {
-        "switch",
         "nllb",
         "mixtral",
         "opt",

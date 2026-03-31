@@ -64,12 +64,7 @@ def parse_expert_dtype(config: PretrainedConfig) -> int:
 def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
     arch = config.architectures[0].lower()
 
-    if "switch" in arch:
-        num_encoder_layers = config.num_sparse_encoder_layers
-        num_decoder_layers = config.num_sparse_decoder_layers
-        num_layers = num_encoder_layers + num_decoder_layers
-        num_experts = config.num_experts
-    elif "nllb" in arch:
+    if "nllb" in arch:
         num_encoder_layers = config.encoder_layers // config.encoder_sparse_step
         num_decoder_layers = config.decoder_layers // config.decoder_sparse_step
         num_layers = num_encoder_layers + num_decoder_layers
@@ -101,7 +96,7 @@ def parse_expert_id(
     arch = config.architectures[0].lower()
     _, _, num_encoder_layers = parse_moe_param(config)
 
-    if "switch" in arch or "nllb" in arch:
+    if "nllb" in arch:
         # example "decoder.block.1.layer.2.mlp.experts.expert_100.wi.weight"
         encoder_sparse_step = config.encoder_sparse_step
         decoder_sparse_step = config.decoder_sparse_step

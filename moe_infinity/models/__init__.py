@@ -19,4 +19,3 @@ from .model_utils import (
 from .nllb_moe import SyncNllbMoeSparseMLP
 from .olmoe import SyncOlmoeMoEBlock
 from .qwen import Qwen3MoEBlock
-from .switch_transformers import SyncSwitchTransformersSparseMLP

@@ -4,6 +4,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+# Auto-mark every test in tests/python/ops/ as ``gpu`` so that
+# ``pytest -m "not gpu"`` deselects the entire directory in CPU-only CI.
+pytestmark = pytest.mark.gpu
+
 BF16_RTOL = 1e-2
 BF16_ATOL = 1e-2
 FP8_RTOL = 0.1

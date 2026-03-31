@@ -78,13 +78,6 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       experts_[i][j]->expert_type = expert_type;
       int expert_type = expert_type_;
       switch (expert_type) {
-        case SWITCH_TRANSFORMERS_DENSE_ACT_DENSE:
-          experts_[i][j]->module = new SwitchTransformersDenseActDense(dtype);
-          break;
-        case SWITCH_TRANSFORMERS_DENSE_GATED_ACT_DENSE:
-          experts_[i][j]->module =
-              new SwitchTransformersDenseGatedActDense(dtype);
-          break;
         case NLLB_MOE_DENSE_ACT_DENSE:
           experts_[i][j]->module = new NllbMoeDenseActDense(dtype);
           break;
@@ -379,25 +372,6 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
     //           << gpu_id << " layer_idx " << layer_idx << " expert_idx "
     //           << expert_idx << " node "
     //           << expert_node->node->device.str() << std::endl;
-
-    // int expert_type = expert_type_;
-    // torch::Tensor input;
-    // auto token_indices =
-    //     router_mask_.index({"...", expert_idx}).to(torch::kBool);
-    // switch (expert_type) {
-    //   case SWITCH_TRANSFORMERS_DENSE_ACT_DENSE:
-    //   case SWITCH_TRANSFORMERS_DENSE_GATED_ACT_DENSE:
-    //   case NLLB_MOE_DENSE_ACT_DENSE:
-    //   case FSGPT_MOE_DENSE_ACT_DENSE:
-    //   case MIXTRAL_MOE_DENSE_ACT_DENSE:
-    //   case DEEPSEEK_MOE_DENSE_ACT_DENSE:
-    //     input =
-    //         hidden_states_.index({token_indices}).to(expert_node->node->device);
-    //     break;
-    //   default:
-    //     DLOG_FATAL("ExpertDispatcher::expert_type: unknown expert type ",
-    //                expert_type);
-    // }
 
     // DLOG_TRACE("ExpertDispatcher::GPUFetchFunc gpu_id ", gpu_id, "layer_idx
     // ",

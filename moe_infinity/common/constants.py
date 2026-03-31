@@ -9,7 +9,6 @@ from transformers import (
     OPTForCausalLM,
     PretrainedConfig,
     Qwen3MoeForCausalLM,
-    SwitchTransformersForConditionalGeneration,
 )
 
 from ..models.modeling_arctic import (
@@ -20,7 +19,6 @@ from ..models.modeling_grok.modeling_grok1 import (
 )  # TODO: Replace this with huggingface transformers
 
 MODEL_MAPPING_NAMES = {
-    "switch": SwitchTransformersForConditionalGeneration,
     "nllb": NllbMoeForConditionalGeneration,
     "mixtral": MixtralForCausalLM,
     "opt": OPTForCausalLM,
@@ -35,7 +33,6 @@ MODEL_MAPPING_NAMES = {
 }
 
 MODEL_MAPPING_TYPES = {
-    "switch": 0,
     "nllb": 2,
     "mixtral": 4,
     "opt": 3,

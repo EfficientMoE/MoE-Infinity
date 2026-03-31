@@ -46,7 +46,7 @@ class StopWatch(TextStreamer):
             print(f"Decoding time: {self.decoding_time} seconds")
             print(f"Decoding iterations: {self.decoding_iterations}")
             print(
-                f"Decoding time per iteration: {(current_time-self.start_decoding) / self.decoding_iterations} seconds"
+                f"Decoding time per iteration: {(current_time - self.start_decoding) / self.decoding_iterations} seconds"
             )
 
         return super().put(value)
@@ -108,9 +108,7 @@ all_inputs = dataset["question"]
 # all_inputs = text_list
 
 custom_kwargs = {}
-if "switch" in args.model_name_or_path.lower():
-    custom_kwargs = {"decoder_start_token_id": 0}
-elif "nllb" in args.model_name_or_path.lower():
+if "nllb" in args.model_name_or_path.lower():
     custom_kwargs = {"forced_bos_token_id": 256057}  # translate to French
 elif "mixtral" in args.model_name_or_path.lower():
     custom_kwargs = {"pad_token_id": tokenizer.eos_token_id}

@@ -24,7 +24,6 @@
 #include "utils/tqdm.h"
 
 #include <fcntl.h>
-#include <future>
 #include <map>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -617,19 +616,10 @@ void ArcherTopologyHandle::InitializeTopology(
     for (auto& [fid, _] : nodes_by_partition) partition_ids.push_back(fid);
     std::sort(partition_ids.begin(), partition_ids.end());
 
-    auto future =
-        std::async(std::launch::async, read_partition,
-                   kArcherTensorHandle->GetIndexFileName(partition_ids[0]));
-
     for (size_t pi = 0; pi < partition_ids.size(); pi++) {
-      auto [buf, buf_size] = future.get();
+      auto [buf, buf_size] = read_partition(
+          kArcherTensorHandle->GetIndexFileName(partition_ids[pi]));
       assert(buf != nullptr);
-
-      if (pi + 1 < partition_ids.size()) {
-        future = std::async(
-            std::launch::async, read_partition,
-            kArcherTensorHandle->GetIndexFileName(partition_ids[pi + 1]));
-      }
 
       uint32_t current_fid = partition_ids[pi];
       DLOG_INFO("Processing partition ", current_fid, " (",
