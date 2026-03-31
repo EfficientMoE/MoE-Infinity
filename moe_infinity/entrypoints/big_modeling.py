@@ -2,8 +2,7 @@
 
 import os
 import warnings
-from types import SimpleNamespace
-from typing import Any, Dict, Optional, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 import torch
 
@@ -46,8 +45,17 @@ class MoE:
         model_name_or_path: Union[str, os.PathLike],
         config: Union[str, os.PathLike, Dict] = None,
     ) -> None:
-        from accelerate.utils.versions import is_torch_version
-        from huggingface_hub import snapshot_download
+        try:
+            from accelerate.utils.versions import is_torch_version
+        except Exception:
+            is_torch_version = None
+
+        try:
+            from huggingface_hub import snapshot_download
+        except Exception as exc:
+            raise RuntimeError(
+                "huggingface_hub is required to load model checkpoints"
+            ) from exc
 
         from moe_infinity.common.constants import MODEL_MAPPING_NAMES
         from moe_infinity.models.modeling_arctic import ArcticConfig
@@ -56,7 +64,7 @@ class MoE:
         from moe_infinity.utils.hf_config import ensure_config_compat
 
         # TODO: remove the torch version check once older versions are supported
-        if not is_torch_version(">=", "2.0"):
+        if is_torch_version is not None and not is_torch_version(">=", "2.0"):
             raise RuntimeError(
                 "The `load_checkpoint_and_dispatch` function requires PyTorch >= 2.0. "
                 "Please update PyTorch."
@@ -84,7 +92,10 @@ class MoE:
                 model_name_or_path, trust_remote_code=True
             )
         model_config = ensure_config_compat(model_config)
-        architecture = model_config.architectures[0].lower()
+        architectures = getattr(model_config, "architectures", None)
+        if not architectures or not isinstance(architectures, list):
+            raise RuntimeError("Unable to resolve model architecture")
+        architecture = str(architectures[0]).lower()
 
         arch = None
         for supp_arch in MODEL_MAPPING_NAMES:
@@ -123,7 +134,33 @@ class MoE:
         else:
             engine_config = ArcherConfig.load_from_file(config)
 
-        self.engine = OffloadEngine(engine_config.trace_capacity, model_config)
+        self.use_native_engine = bool(
+            getattr(engine_config, "use_native_engine", True)
+        )
+        default_max_seq_length = getattr(
+            model_config, "max_position_embeddings", None
+        )
+        self.max_seq_length = (
+            int(default_max_seq_length)
+            if isinstance(default_max_seq_length, int)
+            else 4096
+        )
+
+        native_components = self._build_native_components(
+            model_config=model_config,
+            engine_config=engine_config,
+        )
+        attention_backend = native_components.get("attention_backend")
+        kv_cache_manager = native_components.get("kv_cache_manager")
+
+        self.engine = OffloadEngine(
+            engine_config.trace_capacity,
+            model_config,
+            attention_backend=attention_backend,
+            enable_attention_offload=attention_backend is not None,
+            kv_cache_manager=kv_cache_manager,
+            enable_kv_cache_offload=kv_cache_manager is not None,
+        )
         self.engine.ckpt_files = checkpoint_paths
         # self.engine.save(config.offload_path, checkpoint_paths)
         is_flash_attn_available = False
@@ -143,7 +180,7 @@ class MoE:
             print(
                 "[WARNING] FlashAttention is not available in the current environment. Using default attention."
             )
-        with self.engine.init(cls=model_cls, ar_config=config):
+        with self.engine.init(cls=model_cls, ar_config=engine_config):
             self.model = model_cls.from_pretrained(
                 model_name_or_path,
                 config=model_config,
@@ -155,10 +192,11 @@ class MoE:
             )
 
         self._ensure_generation_mixin()
+        self.engine_config = engine_config
 
     def _ensure_generation_mixin(self):
         from transformers import GenerationConfig
-        from transformers.generation import GenerationMixin
+        from transformers.generation.utils import GenerationMixin
 
         if not hasattr(self.model, "generate"):
             cls = self.model.__class__
@@ -171,6 +209,215 @@ class MoE:
             self.model.generation_config = GenerationConfig.from_model_config(
                 self.model.config
             )
+
+    @staticmethod
+    def _resolve_model_int_attr(
+        model_config: object, *names: str
+    ) -> Optional[int]:
+        for name in names:
+            value = getattr(model_config, name, None)
+            if isinstance(value, int):
+                return value
+        return None
+
+    @staticmethod
+    def _resolve_torch_dtype(model_config: object) -> torch.dtype:
+        torch_dtype = getattr(model_config, "torch_dtype", None)
+        if isinstance(torch_dtype, torch.dtype):
+            return torch_dtype
+        if isinstance(torch_dtype, str):
+            mapping = {
+                "float16": torch.float16,
+                "half": torch.float16,
+                "float32": torch.float32,
+                "float": torch.float32,
+                "bfloat16": torch.bfloat16,
+            }
+            return mapping.get(torch_dtype.replace("torch.", ""), torch.float16)
+        return torch.float16
+
+    def _build_native_components(
+        self, model_config: object, engine_config: object
+    ) -> dict[str, object]:
+        if not self.use_native_engine:
+            self._native_memory_coordinator = None
+            self._native_kv_cache_manager = None
+            self._native_attention_backend = None
+            self._native_transfer_scheduler = None
+            self._native_scheduler = None
+            self._native_generation_engine = None
+            return {}
+
+        from moe_infinity.engine.generation_loop import GenerationEngine
+        from moe_infinity.engine.scheduler import Scheduler
+        from moe_infinity.engine.unified_transfer_scheduler import (
+            UnifiedTransferScheduler,
+        )
+        from moe_infinity.memory.kv_cache_manager import KVCacheManager
+        from moe_infinity.memory.memory_coordinator import MemoryCoordinator
+        from moe_infinity.runtime.attention_backend import PagedAttentionBackend
+        from moe_infinity.runtime.attention_types import KVCacheSpec
+
+        model_num_layers = self._resolve_model_int_attr(
+            model_config,
+            "num_hidden_layers",
+            "num_layers",
+            "n_layer",
+        )
+        num_layers = model_num_layers if model_num_layers is not None else 1
+
+        num_attention_heads = self._resolve_model_int_attr(
+            model_config,
+            "num_attention_heads",
+            "n_head",
+        )
+        if num_attention_heads is None:
+            num_attention_heads = 1
+
+        num_kv_heads = self._resolve_model_int_attr(
+            model_config,
+            "num_key_value_heads",
+            "num_kv_heads",
+            "n_head_kv",
+        )
+        if num_kv_heads is None:
+            num_kv_heads = num_attention_heads
+
+        head_dim = self._resolve_model_int_attr(model_config, "head_dim")
+        if head_dim is None:
+            hidden_size = self._resolve_model_int_attr(
+                model_config, "hidden_size", "n_embd"
+            )
+            if hidden_size is None:
+                hidden_size = max(1, num_attention_heads * 128)
+            head_dim = max(1, hidden_size // max(1, num_attention_heads))
+
+        vocab_size = self._resolve_model_int_attr(model_config, "vocab_size")
+        if vocab_size is None:
+            vocab_size = 32000
+
+        eos_token_id = getattr(model_config, "eos_token_id", 2)
+        if isinstance(eos_token_id, list):
+            eos_token_id = eos_token_id[0] if eos_token_id else 2
+        if not isinstance(eos_token_id, int):
+            eos_token_id = 2
+
+        if (
+            self.use_native_engine
+            and getattr(engine_config, "kv_cache_memory_ratio", 0.0) == 0.0
+        ):
+            setattr(engine_config, "kv_cache_memory_ratio", 0.15)
+            warnings.warn(
+                "kv_cache_memory_ratio was 0.0 with use_native_engine=True; auto-set to 0.15.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        memory_coordinator = MemoryCoordinator.from_config(
+            {
+                "device_memory_ratio": float(
+                    getattr(engine_config, "device_memory_ratio", 0.75)
+                ),
+                "kv_cache_memory_ratio": float(
+                    getattr(engine_config, "kv_cache_memory_ratio", 0.15)
+                ),
+                "use_native_engine": True,
+            }
+        )
+
+        kv_spec = KVCacheSpec(
+            num_kv_heads=int(num_kv_heads),
+            head_dim=int(head_dim),
+            dtype=self._resolve_torch_dtype(model_config),
+            block_size=16,
+        )
+
+        block_size_bytes = kv_spec.page_size_bytes * max(1, int(num_layers))
+        num_gpu_blocks = max(
+            1, memory_coordinator.compute_num_kv_blocks(block_size_bytes)
+        )
+        num_cpu_blocks = max(32, num_gpu_blocks * 2)
+
+        kv_cache_manager = KVCacheManager(
+            num_gpu_blocks=num_gpu_blocks,
+            num_cpu_blocks=num_cpu_blocks,
+            block_size=kv_spec.block_size,
+        )
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        try:
+            attention_backend = PagedAttentionBackend(
+                spec=kv_spec,
+                num_gpu_blocks=num_gpu_blocks,
+                device=device,
+            )
+        except Exception:
+            attention_backend = None
+        transfer_scheduler = UnifiedTransferScheduler()
+        scheduler = Scheduler(
+            kv_cache_manager=kv_cache_manager,
+            transfer_scheduler=transfer_scheduler,
+        )
+
+        generation_engine = GenerationEngine(
+            kv_cache_manager=kv_cache_manager,
+            kv_spec=kv_spec,
+            num_layers=int(num_layers),
+            vocab_size=int(vocab_size),
+            model_forward_fn=self._native_model_forward,
+            eos_token_id=int(eos_token_id),
+            max_seq_length=self.max_seq_length,
+        )
+
+        max_seq_length = self._resolve_model_int_attr(
+            model_config,
+            "max_position_embeddings",
+            "n_positions",
+            "max_sequence_length",
+            "seq_length",
+        )
+        if max_seq_length is not None:
+            self.max_seq_length = max_seq_length
+            generation_engine.max_seq_length = max_seq_length
+
+        self._native_memory_coordinator = memory_coordinator
+        self._native_kv_cache_manager = kv_cache_manager
+        self._native_attention_backend = attention_backend
+        self._native_transfer_scheduler = transfer_scheduler
+        self._native_scheduler = scheduler
+        self._native_generation_engine = generation_engine
+
+        return {
+            "memory_coordinator": memory_coordinator,
+            "kv_cache_manager": kv_cache_manager,
+            "attention_backend": attention_backend,
+            "transfer_scheduler": transfer_scheduler,
+            "scheduler": scheduler,
+            "generation_engine": generation_engine,
+        }
+
+    def _native_model_forward(
+        self, token_ids: list[int], _attention_metadata: object
+    ) -> torch.Tensor:
+        input_tensor = torch.tensor([token_ids], dtype=torch.long)
+        model_device = getattr(self.model, "device", None)
+        if isinstance(model_device, torch.device):
+            input_tensor = input_tensor.to(model_device)
+
+        with torch.no_grad():
+            outputs = self.model(input_tensor)
+
+        logits = getattr(outputs, "logits", None)
+        if logits is None and isinstance(outputs, tuple) and outputs:
+            logits = outputs[0]
+        if logits is None:
+            raise RuntimeError("model forward did not return logits")
+        if not isinstance(logits, torch.Tensor):
+            raise RuntimeError("model logits must be a torch.Tensor")
+        if logits.ndim == 3:
+            return logits[0, -len(token_ids) :, :].detach().to("cpu")
+        if logits.ndim == 2:
+            return logits.detach().to("cpu")
+        raise RuntimeError(f"unexpected logits shape: {tuple(logits.shape)}")
 
     def _configure_hook(self, input_ids: torch.LongTensor):
         import transformers
@@ -236,12 +483,42 @@ class MoE:
                 stacklevel=2,
             )
 
-        self._configure_hook(input_ids)
+        if (
+            not self.use_native_engine
+            or self._native_generation_engine is None
+            or input_ids.ndim != 2
+            or input_ids.shape[0] != 1
+        ):
+            self._configure_hook(input_ids)
+            self.model.eval()
+            with torch.no_grad():
+                return self.model.generate(input_ids, **kwargs)
 
-        self.model.eval()
-        with torch.no_grad():
-            return self.model.generate(input_ids, **kwargs)
-        self.engine.expert_dispatcher.clear_expert_cache_counts()
+        from moe_infinity.engine.types import SamplingParams
+
+        prompt_token_ids = [int(token) for token in input_ids[0].tolist()]
+        if len(prompt_token_ids) > self.max_seq_length:
+            raise ValueError(
+                f"prompt length {len(prompt_token_ids)} exceeds max_seq_length {self.max_seq_length}"
+            )
+
+        max_tokens = kwargs.get("max_new_tokens", kwargs.get("max_tokens", 256))
+        sampling_params = SamplingParams(
+            temperature=float(kwargs.get("temperature", 1.0)),
+            top_p=float(kwargs.get("top_p", 1.0)),
+            top_k=int(kwargs.get("top_k", 0)),
+            max_tokens=int(max_tokens) if max_tokens is not None else 256,
+        )
+        result = self._native_generation_engine.generate(
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+        )
+        output_ids = prompt_token_ids + result.output_token_ids
+        return torch.tensor(
+            [output_ids],
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
 
     def serve(
         self,
@@ -274,34 +551,25 @@ class MoE:
 
         import importlib
 
-        from moe_infinity.entrypoints.openai import api_server_v2
-        from moe_infinity.serving import ContinuousBatchingEngine, StreamManager
+        from moe_infinity.entrypoints.openai import api_server
 
-        engine_config = api_server_v2._build_engine_config(
-            args=SimpleNamespace(
-                device_memory_ratio=device_memory_ratio,
-                kv_cache_ratio=kv_cache_ratio,
-                max_batch_size=max_batch_size,
-                enable_prefix_caching=enable_prefix_caching,
-            ),
-            model=self.model,
-        )
-        engine_config["offload_dir"] = offload_dir
-
-        api_server_v2.model_name_global = getattr(
+        model_name = getattr(
             getattr(self.model, "config", None), "_name_or_path", None
         )
-        api_server_v2.tokenizer = getattr(self, "tokenizer", None)
-        api_server_v2.engine = ContinuousBatchingEngine(
-            model=self.model,
-            engine=self.engine,
-            config=engine_config,
-            tokenizer=api_server_v2.tokenizer,
+        api_server.initialize_runtime(
+            moe_model=self,
+            model_name=model_name,
+            tokenizer=getattr(self, "tokenizer", None),
+            max_seq_length=self.max_seq_length,
+            device_memory_ratio=device_memory_ratio,
+            kv_cache_ratio=kv_cache_ratio,
+            max_batch_size=max_batch_size,
+            enable_prefix_caching=enable_prefix_caching,
+            offload_dir=offload_dir,
         )
-        api_server_v2.stream_manager = StreamManager()
 
         uvicorn = importlib.import_module("uvicorn")
-        uvicorn.run(api_server_v2.app, host=host, port=port)
+        uvicorn.run(api_server.app, host=host, port=port)
 
     def forward(self, input_ids: torch.LongTensor, *args, **kwargs) -> Any:
         """

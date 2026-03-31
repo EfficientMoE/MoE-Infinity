@@ -1,11 +1,14 @@
 # Copyright (c) EfficientMoE.
 # SPDX-License-Identifier: Apache-2.0
 
+# pyright: reportMissingTypeArgument=false, reportArgumentType=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false
+
 # EfficientMoE Team
 
 import os
+import warnings
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from transformers import HfArgumentParser
@@ -19,9 +22,11 @@ class ArcherConfig:
     trace_capacity: int = field(
         default=1000, metadata={"help": "Capacity of trace"}
     )
-    trace_path: Optional[os.PathLike] = field(
+    trace_path: Optional[os.PathLike[str]] = field(
         default=None, metadata={"help": "Path to trace file"}
     )
+    perfect_cache_file: str = field(init=False)
+    device_per_node: int = field(init=False)
     # master_addr: str = field(
     #     default="127.0.0.1",
     #     metadata={"help": "Hosts for running archer"},
@@ -54,6 +59,12 @@ class ArcherConfig:
             "help": "Fraction of GPU memory reserved for KV cache blocks. Default 0.0 (disabled). Set > 0 alongside enable_kv_cache_offload=True. Must satisfy: device_memory_ratio + kv_cache_memory_ratio <= 1.0"
         },
     )
+    use_native_engine: bool = field(
+        default=True,
+        metadata={
+            "help": "Enable native serving engine path. Default True. Set False to keep HuggingFace generate() path."
+        },
+    )
     enable_attention_offload: bool = field(
         default=False,
         metadata={
@@ -74,16 +85,16 @@ class ArcherConfig:
     )
 
     @classmethod
-    def load_from_file(self, config_path):
-        parser = HfArgumentParser(self)
-        self = parser.parse_json_file(json_file=config_path)[0]
-        return self
+    def load_from_file(cls, config_path: Union[str, os.PathLike]):
+        parser = HfArgumentParser(cls)
+        config = parser.parse_json_file(json_file=config_path)[0]
+        return config
 
     @classmethod
-    def load_from_json(self, config_json):
-        parser = HfArgumentParser(self)
-        self = parser.parse_dict(config_json)[0]
-        return self
+    def load_from_json(cls, config_json: dict):
+        parser = HfArgumentParser(cls)
+        config = parser.parse_dict(config_json)[0]
+        return config
 
     def __post_init__(self):
         self.perfect_cache_file = os.path.join(
@@ -101,6 +112,29 @@ class ArcherConfig:
                     "The trace path should be a file, not a directory."
                 )
 
+        kv_autocorrected = False
+        if self.use_native_engine and self.kv_cache_memory_ratio == 0.0:
+            self.kv_cache_memory_ratio = 0.15
+            kv_autocorrected = True
+            warnings.warn(
+                "kv_cache_memory_ratio was 0.0 with use_native_engine=True; auto-set to 0.15.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        if (
+            kv_autocorrected
+            and self.device_memory_ratio + self.kv_cache_memory_ratio > 1.0
+        ):
+            self.device_memory_ratio = max(
+                0.0, 1.0 - self.kv_cache_memory_ratio
+            )
+            warnings.warn(
+                f"device_memory_ratio auto-adjusted to {self.device_memory_ratio:.2f} to satisfy memory budget.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         if not 0.0 <= self.device_memory_ratio <= 1.0:
             raise ValueError(
                 f"device_memory_ratio must be in [0, 1], got {self.device_memory_ratio}"
@@ -111,6 +145,5 @@ class ArcherConfig:
             )
         if self.device_memory_ratio + self.kv_cache_memory_ratio > 1.0:
             raise ValueError(
-                f"device_memory_ratio ({self.device_memory_ratio}) + "
-                f"kv_cache_memory_ratio ({self.kv_cache_memory_ratio}) > 1.0"
+                f"device_memory_ratio ({self.device_memory_ratio}) + kv_cache_memory_ratio ({self.kv_cache_memory_ratio}) > 1.0"
             )

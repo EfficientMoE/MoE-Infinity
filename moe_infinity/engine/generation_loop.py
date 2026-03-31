@@ -12,6 +12,14 @@ from moe_infinity.memory.kv_cache_manager import KVCacheManager
 from moe_infinity.runtime.attention_types import AttentionMetadata, KVCacheSpec
 
 
+class PromptTooLongError(ValueError):
+    pass
+
+
+class KVCacheAllocationError(RuntimeError):
+    pass
+
+
 @dataclass
 class GenerationResult:
     request_id: str
@@ -29,6 +37,7 @@ class GenerationEngine:
     _model_forward: Optional[
         Callable[[list[int], AttentionMetadata], torch.Tensor]
     ]
+    max_seq_length: Optional[int]
 
     def __init__(
         self,
@@ -40,6 +49,7 @@ class GenerationEngine:
             Callable[[list[int], AttentionMetadata], torch.Tensor]
         ] = None,
         eos_token_id: int = 2,
+        max_seq_length: Optional[int] = None,
     ) -> None:
         self.kv_mgr = kv_cache_manager
         self.kv_spec = kv_spec
@@ -47,6 +57,7 @@ class GenerationEngine:
         self.vocab_size = vocab_size
         self.eos_token_id = eos_token_id
         self._model_forward = model_forward_fn
+        self.max_seq_length = max_seq_length
 
     def generate(
         self,
@@ -61,8 +72,16 @@ class GenerationEngine:
         sp = sampling_params or SamplingParams()
 
         num_prompt_tokens = len(prompt_token_ids)
+        if (
+            self.max_seq_length is not None
+            and num_prompt_tokens > self.max_seq_length
+        ):
+            raise PromptTooLongError(
+                f"prompt length {num_prompt_tokens} exceeds max_seq_length {self.max_seq_length}"
+            )
+
         if not self.kv_mgr.allocate_blocks_for_sequence(rid, num_prompt_tokens):
-            raise RuntimeError(
+            raise KVCacheAllocationError(
                 f"Failed to allocate KV blocks for {num_prompt_tokens} tokens"
             )
 
@@ -211,4 +230,9 @@ class GenerationEngine:
         return int(sampled.item())
 
 
-__all__ = ["GenerationEngine", "GenerationResult"]
+__all__ = [
+    "GenerationEngine",
+    "GenerationResult",
+    "KVCacheAllocationError",
+    "PromptTooLongError",
+]
