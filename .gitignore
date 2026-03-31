@@ -236,3 +236,4 @@ AGENTS.md
 .sisyphus/
 /tests/cuda/build/
 /tests/queues/build/
+.hf_cache/

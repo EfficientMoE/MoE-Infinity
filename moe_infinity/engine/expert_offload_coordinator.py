@@ -57,8 +57,10 @@ class ExpertOffloadCoordinator:
         self,
         config: object | None = None,
         expert_prefetcher: ExpertPrefetcherLike | None = None,
+        num_devices: int = 1,
     ) -> None:
         self._transfer_scheduler: Optional[UnifiedTransferScheduler] = None
+        self._num_devices = max(1, num_devices)
         self._expert_prefetcher: ExpertPrefetcherLike = self._build_prefetcher(
             config=config,
             expert_prefetcher=expert_prefetcher,
@@ -91,6 +93,10 @@ class ExpertOffloadCoordinator:
             self._handle_expert_evict,
         )
 
+    def _target_device_for_expert(self, expert_id: int) -> str:
+        gpu_id = expert_id % self._num_devices
+        return f"cuda:{gpu_id}"
+
     def prefetch_experts(
         self,
         layer_id: int,
@@ -100,12 +106,18 @@ class ExpertOffloadCoordinator:
         if self._transfer_scheduler is None:
             raise RuntimeError("transfer scheduler must be registered first")
 
+        target_device = (
+            self._target_device_for_expert(expert_ids[0])
+            if expert_ids
+            else "cuda:0"
+        )
+
         request = TransferRequest(
             transfer_id="",
             transfer_type=TransferType.EXPERT_FETCH,
             priority=priority,
             source_device="cpu",
-            target_device="cuda:0",
+            target_device=target_device,
             tensor_id=str(layer_id),
             block_ids=list(expert_ids),
         )

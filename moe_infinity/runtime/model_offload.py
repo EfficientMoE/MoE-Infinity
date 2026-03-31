@@ -993,7 +993,8 @@ class OffloadEngine(object):
 
             for name, buf in module.named_buffers(recurse=False):
                 if buf.data.data_ptr() not in self.offload_set:
-                    buf.data = buf.data.to(get_default_device())
+                    num_devices = torch.cuda.device_count()
+                    buf.data = buf.data.to(get_device(num_devices - 1))
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
@@ -1049,12 +1050,15 @@ class OffloadEngine(object):
                 pass  # No-op: KV cache capture not yet implemented
 
             if param_not_offload:
+                if device_list:
+                    target = device_list[0]
+                else:
+                    num_devices = torch.cuda.device_count()
+                    target = torch.device(get_device(num_devices - 1))
                 if isinstance(output, torch.Tensor):
-                    return output.to(torch.device(get_default_device()))
+                    return output.to(target)
 
-                return copy_args_to_device(
-                    torch.device(get_default_device()), *output
-                )
+                return copy_args_to_device(target, *output)
 
         # Pre forward hook
         self.forward_hooks.append(

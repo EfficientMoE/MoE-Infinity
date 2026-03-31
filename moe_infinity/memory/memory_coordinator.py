@@ -55,29 +55,70 @@ class MemoryCoordinator:
             kv_cache_memory_ratio=kv_ratio,
         )
 
-    def total_gpu_memory_bytes(self) -> int:
+    def num_gpu_devices(self) -> int:
         try:
             import torch
 
             cuda = getattr(torch, "cuda", None)
             if cuda is not None and cuda.is_available():
-                props = cuda.get_device_properties(0)
-                total = getattr(props, "total_memory", None)
-                if isinstance(total, int):
-                    return total
+                return cuda.device_count()
+        except Exception:
+            pass
+        return 0
+
+    def total_gpu_memory_bytes(self, device_id: int = 0) -> int:
+        """Return total GPU memory for a specific device.
+
+        Args:
+            device_id: CUDA device index (default 0).
+        """
+        try:
+            import torch
+
+            cuda = getattr(torch, "cuda", None)
+            if cuda is not None and cuda.is_available():
+                count = cuda.device_count()
+                if 0 <= device_id < count:
+                    props = cuda.get_device_properties(device_id)
+                    total = getattr(props, "total_memory", None)
+                    if isinstance(total, int):
+                        return total
         except Exception:
             pass
         return 24 * 1024**3
 
-    def expert_cache_bytes(self) -> int:
-        return int(self.total_gpu_memory_bytes() * self.device_memory_ratio)
+    def aggregate_gpu_memory_bytes(self) -> int:
+        """Return the sum of GPU memory across all visible devices."""
+        n = self.num_gpu_devices()
+        if n == 0:
+            return 24 * 1024**3
+        return sum(self.total_gpu_memory_bytes(i) for i in range(n))
 
-    def kv_cache_bytes(self) -> int:
-        return int(self.total_gpu_memory_bytes() * self.kv_cache_memory_ratio)
+    def expert_cache_bytes(self, device_id: int = 0) -> int:
+        return int(
+            self.total_gpu_memory_bytes(device_id) * self.device_memory_ratio
+        )
 
-    def remaining_bytes(self) -> int:
-        total = self.total_gpu_memory_bytes()
-        used = self.expert_cache_bytes() + self.kv_cache_bytes()
+    def expert_cache_bytes_total(self) -> int:
+        """Total expert cache budget across all GPUs."""
+        n = max(1, self.num_gpu_devices())
+        return sum(self.expert_cache_bytes(i) for i in range(n))
+
+    def kv_cache_bytes(self, device_id: int = 0) -> int:
+        return int(
+            self.total_gpu_memory_bytes(device_id) * self.kv_cache_memory_ratio
+        )
+
+    def kv_cache_bytes_total(self) -> int:
+        """Total KV cache budget across all GPUs."""
+        n = max(1, self.num_gpu_devices())
+        return sum(self.kv_cache_bytes(i) for i in range(n))
+
+    def remaining_bytes(self, device_id: int = 0) -> int:
+        total = self.total_gpu_memory_bytes(device_id)
+        used = self.expert_cache_bytes(device_id) + self.kv_cache_bytes(
+            device_id
+        )
         return max(0, total - used)
 
     def can_allocate_kv_blocks(
@@ -102,4 +143,6 @@ class MemoryCoordinator:
             "remaining_bytes": self.remaining_bytes(),
             "device_memory_ratio": self.device_memory_ratio,
             "kv_cache_memory_ratio": self.kv_cache_memory_ratio,
+            "num_gpu_devices": self.num_gpu_devices(),
+            "aggregate_gpu_bytes": self.aggregate_gpu_memory_bytes(),
         }

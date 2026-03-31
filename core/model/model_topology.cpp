@@ -23,6 +23,12 @@
 #include "utils/logger.h"
 #include "utils/tqdm.h"
 
+#include <fcntl.h>
+#include <future>
+#include <map>
+#include <sys/stat.h>
+#include <unistd.h>
+
 // cudaStream_t kCudaStreamH2D = NULL;
 std::unique_ptr<ArcherTopologyHandle> kTopologyHandle = nullptr;
 
@@ -575,10 +581,103 @@ void ArcherTopologyHandle::InitializeTopology(
   dense_nodes.back()->default_device = torch::Device(torch::kCUDA, num_gpu - 1);
 
   DLOG_INFO("Moving sparse parameters to CPU");
-  for (auto& node_ptr : tqdm::tqdm(sparse_nodes)) {
-    node_ptr->default_device = torch::Device(torch::kCUDA, target_device_id);
-    target_device_id = (target_device_id + 1) % num_gpu;
-    node_ptr->SetDevice(CPU_DEVICE, false);
+  if (!sparse_nodes.empty()) {
+    std::map<uint32_t, std::vector<size_t>> nodes_by_partition;
+    for (size_t i = 0; i < sparse_nodes.size(); i++) {
+      auto fid =
+          kTensorIndex->find(sparse_nodes[i]->tensor_ids[0])->second.file_id;
+      nodes_by_partition[fid].push_back(i);
+    }
+
+    auto read_partition =
+        [](const std::string& filename) -> std::pair<void*, int64_t> {
+      struct stat st;
+      if (stat(filename.c_str(), &st) != 0) return {nullptr, 0};
+      int64_t file_size = st.st_size;
+      void* buf = nullptr;
+      if (posix_memalign(&buf, 4096, file_size) != 0) return {nullptr, 0};
+      int fd = open(filename.c_str(), O_RDONLY);
+      if (fd < 0) {
+        free(buf);
+        return {nullptr, 0};
+      }
+      int64_t total = 0;
+      while (total < file_size) {
+        auto n = ::read(fd, static_cast<char*>(buf) + total,
+                        std::min(file_size - total,
+                                 static_cast<int64_t>(256 * 1024 * 1024)));
+        if (n <= 0) break;
+        total += n;
+      }
+      close(fd);
+      return {buf, file_size};
+    };
+
+    std::vector<uint32_t> partition_ids;
+    for (auto& [fid, _] : nodes_by_partition) partition_ids.push_back(fid);
+    std::sort(partition_ids.begin(), partition_ids.end());
+
+    auto future =
+        std::async(std::launch::async, read_partition,
+                   kArcherTensorHandle->GetIndexFileName(partition_ids[0]));
+
+    for (size_t pi = 0; pi < partition_ids.size(); pi++) {
+      auto [buf, buf_size] = future.get();
+      assert(buf != nullptr);
+
+      if (pi + 1 < partition_ids.size()) {
+        future = std::async(
+            std::launch::async, read_partition,
+            kArcherTensorHandle->GetIndexFileName(partition_ids[pi + 1]));
+      }
+
+      uint32_t current_fid = partition_ids[pi];
+      DLOG_INFO("Processing partition ", current_fid, " (",
+                buf_size / (1024 * 1024), " MB, ",
+                nodes_by_partition[current_fid].size(), " nodes)");
+
+      for (auto idx : nodes_by_partition[current_fid]) {
+        auto& node_ptr = sparse_nodes[idx];
+        node_ptr->default_device =
+            torch::Device(torch::kCUDA, target_device_id);
+        target_device_id = (target_device_id + 1) % num_gpu;
+
+        node_ptr->host_memory_ptr = kHostMemoryPool->AllocateMemory(
+            node_ptr->id, node_ptr->byte_size, CPU_DEVICE);
+        assert(node_ptr->host_memory_ptr != nullptr);
+
+        int64_t param_offset = 0;
+        bool need_fallback = false;
+        for (auto& tensor_id : node_ptr->tensor_ids) {
+          auto it = kTensorIndex->find(tensor_id);
+          auto& meta = it->second;
+          int64_t size_aligned =
+              (static_cast<int64_t>(meta.size) + kAioAlignment - 1) &
+              ~(kAioAlignment - 1);
+
+          if (meta.file_id == current_fid) {
+            memcpy(static_cast<char*>(node_ptr->host_memory_ptr) + param_offset,
+                   static_cast<char*>(buf) + meta.offset, meta.size);
+          } else {
+            kArcherTensorHandle->ReadTensor(
+                tensor_id,
+                static_cast<char*>(node_ptr->host_memory_ptr) + param_offset,
+                false);
+            need_fallback = true;
+          }
+          param_offset += size_aligned;
+        }
+        if (need_fallback) {
+          DLOG_WARN("Node ", node_ptr->id,
+                    " has cross-partition tensors, used ReadTensor fallback");
+        }
+
+        SetModuleMemoryFromDisk_Views(node_ptr->tensor_ids,
+                                      node_ptr->host_memory_ptr);
+        node_ptr->device = CPU_DEVICE;
+      }
+      free(buf);
+    }
   }
 
   DLOG_TRACE("InitializeTopology pipeline_.stages.size() {}",

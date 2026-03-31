@@ -60,7 +60,9 @@ def test_can_allocate_kv_blocks_large_count(monkeypatch: pytest.MonkeyPatch):
     mc = memory_coordinator(
         device_memory_ratio=0.75, kv_cache_memory_ratio=0.15
     )
-    monkeypatch.setattr(mc, "total_gpu_memory_bytes", lambda: total_gpu_bytes)
+    monkeypatch.setattr(
+        mc, "total_gpu_memory_bytes", lambda device_id=0: total_gpu_bytes
+    )
     block_size_bytes = 64 * 1024
     num_fit = mc.compute_num_kv_blocks(block_size_bytes)
     assert num_fit >= 50000
@@ -75,7 +77,9 @@ def test_compute_num_kv_blocks_deterministic(monkeypatch: pytest.MonkeyPatch):
     mc = memory_coordinator(
         device_memory_ratio=0.75, kv_cache_memory_ratio=kv_ratio
     )
-    monkeypatch.setattr(mc, "total_gpu_memory_bytes", lambda: total_gpu_bytes)
+    monkeypatch.setattr(
+        mc, "total_gpu_memory_bytes", lambda device_id=0: total_gpu_bytes
+    )
     expected = int((total_gpu_bytes * kv_ratio) // block_size_bytes)
     assert mc.compute_num_kv_blocks(block_size_bytes) == expected
 
@@ -84,7 +88,9 @@ def test_get_budget_status_keys(monkeypatch: pytest.MonkeyPatch):
     memory_coordinator = _memory_coordinator_class()
     total_gpu_bytes = 24 * 1024**3
     mc = memory_coordinator(device_memory_ratio=0.7, kv_cache_memory_ratio=0.15)
-    monkeypatch.setattr(mc, "total_gpu_memory_bytes", lambda: total_gpu_bytes)
+    monkeypatch.setattr(
+        mc, "total_gpu_memory_bytes", lambda device_id=0: total_gpu_bytes
+    )
     status = mc.get_budget_status()
     expected_keys = {
         "total_gpu_bytes",
@@ -101,7 +107,9 @@ def test_budget_invariant(monkeypatch: pytest.MonkeyPatch):
     memory_coordinator = _memory_coordinator_class()
     total_gpu_bytes = 24 * 1024**3
     mc = memory_coordinator(device_memory_ratio=0.7, kv_cache_memory_ratio=0.15)
-    monkeypatch.setattr(mc, "total_gpu_memory_bytes", lambda: total_gpu_bytes)
+    monkeypatch.setattr(
+        mc, "total_gpu_memory_bytes", lambda device_id=0: total_gpu_bytes
+    )
     assert (
         mc.expert_cache_bytes() + mc.kv_cache_bytes()
         <= mc.total_gpu_memory_bytes()
