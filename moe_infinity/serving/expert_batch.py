@@ -172,4 +172,6 @@ class BatchedExpertDispatch:
             )
 
 
-__all__ = ["BatchedExpertDispatch"]
+ExpertBatch = BatchedExpertDispatch
+
+__all__ = ["BatchedExpertDispatch", "ExpertBatch"]

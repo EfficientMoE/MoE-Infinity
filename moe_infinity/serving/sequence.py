@@ -115,8 +115,12 @@ class SequenceGroup:
         return None
 
 
+Sequence = SequenceData
+
+
 __all__ = [
     "SamplingParams",
+    "Sequence",
     "SequenceData",
     "SequenceGroup",
     "SequenceStatus",

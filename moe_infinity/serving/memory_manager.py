@@ -361,4 +361,11 @@ class AdaptiveKVScheduler:
             self._last_adjust_timestamp = now
 
 
-__all__ = ["MemoryBudget", "MemoryManager", "AdaptiveKVScheduler"]
+GPUMemoryBudgetManager = MemoryManager
+
+__all__ = [
+    "MemoryBudget",
+    "MemoryManager",
+    "AdaptiveKVScheduler",
+    "GPUMemoryBudgetManager",
+]

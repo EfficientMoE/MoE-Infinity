@@ -297,4 +297,7 @@ class Scheduler:
         return max(0, sequence.prompt_length - sequence.num_computed_tokens)
 
 
-__all__ = ["Scheduler"]
+RequestScheduler = Scheduler
+
+
+__all__ = ["Scheduler", "RequestScheduler"]

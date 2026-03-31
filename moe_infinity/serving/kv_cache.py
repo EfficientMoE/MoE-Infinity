@@ -5,6 +5,19 @@ from dataclasses import dataclass, field
 
 import torch
 
+try:
+    import flashinfer
+    from flashinfer import (
+        BatchDecodeWithPagedKVCacheWrapper,
+        BatchPrefillWithPagedKVCacheWrapper,
+    )
+except ImportError:
+    flashinfer = None
+    BatchDecodeWithPagedKVCacheWrapper = None
+    BatchPrefillWithPagedKVCacheWrapper = None
+
+HAS_FLASHINFER = flashinfer is not None
+
 
 @dataclass
 class BlockAllocator:
@@ -197,6 +210,33 @@ class PagedKVCache:
                 )
 
         self._swapped_out_sequences.discard(seq_id)
+
+    def _compute_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+        is_causal: bool = True,
+    ) -> torch.Tensor:
+        # Use FlashInfer paged attention if available, else fall back to torch SDPA.
+        if HAS_FLASHINFER:
+            # FlashInfer path (future: use BatchDecodeWithPagedKVCacheWrapper).
+            _ = (
+                flashinfer,
+                BatchPrefillWithPagedKVCacheWrapper,
+                BatchDecodeWithPagedKVCacheWrapper,
+            )
+            pass  # currently falls through to SDPA until integration complete
+
+        return torch.nn.functional.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            is_causal=is_causal,
+        )
 
     def _require_sequence(self, seq_id: int) -> BlockTable:
         block_table = self._sequence_tables.get(seq_id)
