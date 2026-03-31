@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -17,7 +18,7 @@ class Sampler:
     def sample(
         self,
         logits: torch.Tensor,
-        sampling_params: list[_SamplingParamsLike],
+        sampling_params: Sequence[_SamplingParamsLike],
     ) -> torch.Tensor:
         if logits.dim() != 2:
             raise ValueError("logits must have shape [num_seqs, vocab_size]")
