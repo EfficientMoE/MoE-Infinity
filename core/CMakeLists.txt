@@ -13,6 +13,7 @@ set(ARCHER_CORE_CXX_SOURCES
   ${CMAKE_SOURCE_DIR}/core/memory/caching_allocator.cpp
   ${CMAKE_SOURCE_DIR}/core/memory/memory_pool.cpp
   ${CMAKE_SOURCE_DIR}/core/memory/pinned_memory_pool.cpp
+  ${CMAKE_SOURCE_DIR}/core/memory/kv_cache_pool.cpp
   ${CMAKE_SOURCE_DIR}/core/memory/stream_pool.cpp
   ${CMAKE_SOURCE_DIR}/core/memory/host_caching_allocator.cpp
   ${CMAKE_SOURCE_DIR}/core/memory/device_caching_allocator.cpp

@@ -3,17 +3,24 @@
 
 # EfficientMoE Team
 
-from .expert_predictor import ExpertPredictor
-from .expert_prefetcher import ExpertPrefetcher
 from .expert_priority_score import *
-from .expert_tracer import ExpertTracer
 from .kv_cache_manager import BlockPool, KVCacheManager, MemoryBudget
+from .offloading_policy import ARCPolicy, CachePolicy, LRUPolicy
 
 __all__ = [
-    "ExpertPredictor",
-    "ExpertPrefetcher",
-    "ExpertTracer",
     "BlockPool",
     "KVCacheManager",
     "MemoryBudget",
+    "CachePolicy",
+    "LRUPolicy",
+    "ARCPolicy",
 ]
+
+try:
+    from .expert_predictor import ExpertPredictor
+    from .expert_prefetcher import ExpertPrefetcher
+    from .expert_tracer import ExpertTracer
+
+    __all__.extend(["ExpertPredictor", "ExpertPrefetcher", "ExpertTracer"])
+except ModuleNotFoundError:
+    pass

@@ -3,7 +3,6 @@ from .attention_backend import (
     AttentionMetadata,
     PlaceholderAttentionBackend,
 )
-from .model_offload import OffloadEngine
 
 __all__ = [
     "AttentionBackend",
@@ -11,3 +10,14 @@ __all__ = [
     "PlaceholderAttentionBackend",
     "OffloadEngine",
 ]
+
+
+def __getattr__(name: str):
+    if name == "OffloadEngine":
+        import importlib
+
+        module = importlib.import_module("moe_infinity.runtime.model_offload")
+        return getattr(module, "OffloadEngine")
+    raise AttributeError(
+        f"module 'moe_infinity.runtime' has no attribute {name!r}"
+    )

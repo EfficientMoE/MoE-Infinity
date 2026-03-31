@@ -19,7 +19,10 @@ def test_interface_example_help():
         cwd=repo_root,
         env=env,
     )
-    if result.returncode != 0 and "moe_infinity._store" in result.stderr:
+    if result.returncode != 0 and (
+        "moe_infinity._store" in result.stderr
+        or "No module named 'nvtx'" in result.stderr
+    ):
         pytest.skip("moe_infinity compiled extensions not available")
     assert (
         result.returncode == 0
@@ -39,7 +42,10 @@ def test_readme_example_help():
         cwd=repo_root,
         env=env,
     )
-    if result.returncode != 0 and "moe_infinity._store" in result.stderr:
+    if result.returncode != 0 and (
+        "moe_infinity._store" in result.stderr
+        or "No module named 'nvtx'" in result.stderr
+    ):
         pytest.skip("moe_infinity compiled extensions not available")
     assert (
         result.returncode == 0

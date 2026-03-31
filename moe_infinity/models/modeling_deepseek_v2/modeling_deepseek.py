@@ -1299,9 +1299,63 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
         )
 
 
+class DeepseekV2PagedAttention(DeepseekV2Attention):
+    _paged_backend = None
+    _attention_metadata = None
+
+    @classmethod
+    def set_paged_context(cls, backend, metadata):
+        cls._paged_backend = backend
+        cls._attention_metadata = metadata
+
+    @classmethod
+    def clear_paged_context(cls):
+        cls._paged_backend = None
+        cls._attention_metadata = None
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        **kwargs,
+    ) -> Tuple[
+        torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]
+    ]:
+        return super().forward(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            **kwargs,
+        )
+
+    @classmethod
+    def get_kv_cache_spec_for_config(cls, config) -> dict[str, int]:
+        if getattr(config, "kv_lora_rank", None):
+            return {
+                "num_kv_heads": 1,
+                "head_dim": config.kv_lora_rank,
+            }
+        return {
+            "num_kv_heads": getattr(
+                config,
+                "num_key_value_heads",
+                config.num_attention_heads,
+            ),
+            "head_dim": config.hidden_size // config.num_attention_heads,
+        }
+
+
 ATTENTION_CLASSES = {
     "eager": DeepseekV2Attention,
     "flash_attention_2": DeepseekV2FlashAttention2,
+    "paged": DeepseekV2PagedAttention,
 }
 
 

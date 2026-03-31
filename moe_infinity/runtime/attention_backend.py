@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Optional, Protocol, runtime_checkable
+from typing import Optional, Protocol, cast, runtime_checkable
 
 import torch
+import torch.nn.functional as F
+
+from moe_infinity.kernel.paged_attention_ops import paged_attention_fwd
+from moe_infinity.runtime.attention_types import (
+    AttentionMetadata as RuntimeAttentionMetadata,
+)
+from moe_infinity.runtime.attention_types import (
+    KVCacheSpec,
+)
 
 
 @dataclass
@@ -62,3 +72,296 @@ class PlaceholderAttentionBackend:
     def supports_dtype(self, dtype: torch.dtype) -> bool:
         _ = dtype
         return True
+
+
+class PagedAttentionBackend:
+    spec: KVCacheSpec
+    num_gpu_blocks: int
+    device: torch.device
+    k_cache: torch.Tensor
+    v_cache: torch.Tensor
+
+    def __init__(
+        self,
+        spec: KVCacheSpec,
+        num_gpu_blocks: int,
+        device: torch.device,
+    ) -> None:
+        if spec.head_dim % 8 != 0:
+            raise ValueError("spec.head_dim must be divisible by 8")
+
+        self.spec = spec
+        self.num_gpu_blocks = int(num_gpu_blocks)
+        self.device = device
+
+        x = 8
+        self.k_cache = torch.zeros(
+            self.num_gpu_blocks,
+            spec.num_kv_heads,
+            spec.head_dim // x,
+            spec.block_size,
+            x,
+            dtype=spec.dtype,
+            device=device,
+        )
+        self.v_cache = torch.zeros(
+            self.num_gpu_blocks,
+            spec.num_kv_heads,
+            spec.head_dim,
+            spec.block_size,
+            dtype=spec.dtype,
+            device=device,
+        )
+
+    def write_kv(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if key.shape != value.shape:
+            raise ValueError("key and value must have the same shape")
+        if key.ndim != 3:
+            raise ValueError(
+                "key/value must have shape [num_tokens, num_kv_heads, head_dim]"
+            )
+        if slot_mapping.ndim != 1 or slot_mapping.shape[0] != key.shape[0]:
+            raise ValueError("slot_mapping must have shape [num_tokens]")
+
+        num_tokens, num_kv_heads, head_dim = key.shape
+        if num_kv_heads != self.spec.num_kv_heads:
+            raise ValueError("num_kv_heads mismatch with cache spec")
+        if head_dim != self.spec.head_dim:
+            raise ValueError("head_dim mismatch with cache spec")
+
+        x = self.k_cache.shape[-1]
+        block_size = self.spec.block_size
+
+        k_src = key.to(device=self.device, dtype=self.k_cache.dtype)
+        v_src = value.to(device=self.device, dtype=self.v_cache.dtype)
+        slots = slot_mapping.to(device=self.device, dtype=torch.long)
+
+        for i in range(num_tokens):
+            slot = int(slots[i].item())
+            if slot < 0:
+                raise ValueError("slot_mapping contains negative slot index")
+
+            block_id = slot // block_size
+            token_offset = slot % block_size
+            if block_id >= self.num_gpu_blocks:
+                raise ValueError(
+                    "slot_mapping points past allocated GPU blocks"
+                )
+
+            self.k_cache[block_id, :, :, token_offset, :] = k_src[i].reshape(
+                self.spec.num_kv_heads,
+                self.spec.head_dim // x,
+                x,
+            )
+            self.v_cache[block_id, :, :, token_offset] = v_src[i]
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: Optional[torch.Tensor] = None,
+        attn_metadata: Optional[
+            AttentionMetadata | RuntimeAttentionMetadata
+        ] = None,
+        scale: Optional[float] = None,
+        attention_metadata: Optional[
+            AttentionMetadata | RuntimeAttentionMetadata
+        ] = None,
+    ) -> torch.Tensor:
+        _ = kv_cache
+        metadata = (
+            attention_metadata
+            if attention_metadata is not None
+            else attn_metadata
+        )
+        if metadata is None:
+            raise ValueError("attention metadata is required")
+
+        if self._is_prefill(metadata):
+            slot_mapping = self._get_slot_mapping(metadata)
+            if slot_mapping is None:
+                raise ValueError("prefill requires slot_mapping")
+            self.write_kv(key, value, slot_mapping)
+            return self._prefill_forward(query, key, value, scale=scale)
+
+        return self._decode_forward(query, metadata, scale=scale)
+
+    def _prefill_forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        if query.ndim != 3 or key.ndim != 3 or value.ndim != 3:
+            raise ValueError(
+                "prefill query/key/value must have shape [num_tokens, num_heads, head_dim]"
+            )
+
+        q = (
+            query.to(self.device, dtype=self.spec.dtype)
+            .transpose(0, 1)
+            .unsqueeze(0)
+        )
+        k = (
+            key.to(self.device, dtype=self.spec.dtype)
+            .transpose(0, 1)
+            .unsqueeze(0)
+        )
+        v = (
+            value.to(self.device, dtype=self.spec.dtype)
+            .transpose(0, 1)
+            .unsqueeze(0)
+        )
+
+        num_heads = q.shape[1]
+        num_kv_heads = k.shape[1]
+        if num_heads % num_kv_heads != 0:
+            raise ValueError(
+                "query num_heads must be divisible by num_kv_heads"
+            )
+        head_ratio = num_heads // num_kv_heads
+        if head_ratio > 1:
+            k = k.repeat_interleave(head_ratio, dim=1)
+            v = v.repeat_interleave(head_ratio, dim=1)
+
+        attn_scale = (
+            float(scale)
+            if scale is not None
+            else 1.0 / math.sqrt(float(self.spec.head_dim))
+        )
+
+        try:
+            out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                scale=attn_scale,
+                is_causal=True,
+            )
+        except TypeError:
+            out = F.scaled_dot_product_attention(
+                q * attn_scale,
+                k,
+                v,
+                is_causal=True,
+            )
+
+        return out.squeeze(0).transpose(0, 1)
+
+    def _decode_forward(
+        self,
+        query: torch.Tensor,
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+        scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        if query.ndim == 2:
+            query = query.unsqueeze(0)
+        if query.ndim != 3:
+            raise ValueError(
+                "decode query must have shape [batch_size, num_heads, head_dim]"
+            )
+
+        block_tables = self._get_block_tables(metadata)
+        seq_lens = self._get_seq_lens(metadata)
+        max_seq_len = self._get_max_seq_len(metadata, seq_lens)
+        if block_tables is None or seq_lens is None:
+            raise ValueError("decode requires block_tables and seq_lens")
+
+        attn_scale = (
+            float(scale)
+            if scale is not None
+            else 1.0 / math.sqrt(float(self.spec.head_dim))
+        )
+
+        return paged_attention_fwd(
+            query=query.to(self.device, dtype=self.spec.dtype),
+            key_cache=self.k_cache,
+            value_cache=self.v_cache,
+            block_tables=block_tables.to(self.device),
+            seq_lens=seq_lens.to(self.device),
+            scale=attn_scale,
+            num_kv_heads=self.spec.num_kv_heads,
+            block_size=self.spec.block_size,
+            max_seq_len=max_seq_len,
+        )
+
+    @classmethod
+    def get_kv_cache_shape(
+        cls,
+        spec: KVCacheSpec,
+        num_gpu_blocks: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        _ = cls
+        x = 8
+        k_shape = (
+            int(num_gpu_blocks),
+            spec.num_kv_heads,
+            spec.head_dim // x,
+            spec.block_size,
+            x,
+        )
+        v_shape = (
+            int(num_gpu_blocks),
+            spec.num_kv_heads,
+            spec.head_dim,
+            spec.block_size,
+        )
+        return k_shape, v_shape
+
+    def supports_dtype(self, dtype: torch.dtype) -> bool:
+        return dtype in (torch.float16, torch.bfloat16, torch.float32)
+
+    @staticmethod
+    def _is_prefill(
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+    ) -> bool:
+        return bool(getattr(metadata, "is_prefill", False))
+
+    @staticmethod
+    def _get_slot_mapping(
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+    ) -> Optional[torch.Tensor]:
+        slot_mapping = cast(
+            Optional[torch.Tensor], getattr(metadata, "slot_mapping", None)
+        )
+        return slot_mapping
+
+    @staticmethod
+    def _get_block_tables(
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+    ) -> Optional[torch.Tensor]:
+        block_tables = getattr(metadata, "block_tables", None)
+        if block_tables is not None:
+            return cast(torch.Tensor, block_tables)
+        block_table = getattr(metadata, "block_table", None)
+        if block_table is not None:
+            return cast(torch.Tensor, block_table)
+        return None
+
+    @staticmethod
+    def _get_seq_lens(
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+    ) -> Optional[torch.Tensor]:
+        seq_lens = getattr(metadata, "seq_lens", None)
+        if seq_lens is None:
+            return None
+        return cast(torch.Tensor, seq_lens)
+
+    @staticmethod
+    def _get_max_seq_len(
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+        seq_lens: Optional[torch.Tensor],
+    ) -> int:
+        max_seq_len_obj = cast(object, getattr(metadata, "max_seq_len", None))
+        if isinstance(max_seq_len_obj, (int, float)):
+            return int(max_seq_len_obj)
+        if seq_lens is None or seq_lens.numel() == 0:
+            return 0
+        return int(seq_lens.max().item())
