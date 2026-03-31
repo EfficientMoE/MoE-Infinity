@@ -28,6 +28,7 @@ Note that: The open-sourced MoE-Infinity has been redesigned for making it Huggi
 - [Usage and Examples](#usage-and-examples)
     - [Sample Code of Huggingface LLM Inference](#sample-code-of-huggingface-llm-inference)
     - [Running Inference](#running-inference)
+    - [Benchmarking](#benchmarking)
 - [Release Plan](#release-plan)
 - [Citation](#citation)
 
@@ -138,6 +139,38 @@ We provide a simple example to run inference on a Huggingface LLM model. The scr
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python examples/interface_example.py --model_name_or_path "deepseek-ai/DeepSeek-V2-Lite-Chat" --offload_dir <your local path on SSD>
+```
+
+### Benchmarking
+
+For correct throughput and latency measurement, it is critical to separate **prefill time (TTFT)** from **decode throughput**. Including prefill in your throughput calculation will produce misleadingly low numbers.
+
+We provide a `StopWatch` utility and ready-to-use benchmark scripts. See the **[Benchmarking Guide](docs/benchmarking.md)** for:
+
+- How to correctly measure decode throughput vs TTFT
+- Common measurement pitfalls and how to avoid them
+- Ready-to-use benchmark scripts (`benchmarks/serving/`)
+- Fair comparison methodology with llama.cpp, vLLM, and other frameworks
+- Tuning `device_memory_ratio` for optimal performance
+
+Quick example using the benchmark scripts:
+```bash
+# Single-request baseline (TTFT + per-token latency + peak memory)
+python benchmarks/serving/baseline_performance.py \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir /path/to/offload/dir
+
+# Throughput sweep across batch sizes
+python benchmarks/serving/throughput.py \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir /path/to/offload/dir \
+    --batch-sizes 1 2 4 8 16
+
+# Latency percentiles (TTFT + ITL at p50/p90/p99)
+python benchmarks/serving/latency.py \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir /path/to/offload/dir \
+    --concurrency 1 2 4 8
 ```
 
 ### OpenAI-Compatible Server
