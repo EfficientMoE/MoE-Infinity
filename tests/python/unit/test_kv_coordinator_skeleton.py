@@ -47,7 +47,9 @@ def test_register_with_scheduler_accepts_scheduler_like_object():
             self.handlers.append((transfer_type, handler))
 
     coordinator = KVCacheOffloadCoordinator(
-        kv_tensors=torch.zeros(2, 4, 8), block_pool=object(), config=None
+        kv_tensors=torch.zeros(2, 4, 8),
+        block_pool=object(),
+        config={"enable_kv_cache_offload": True},
     )
     scheduler = DummyScheduler()
     coordinator.register_with_scheduler(scheduler)
