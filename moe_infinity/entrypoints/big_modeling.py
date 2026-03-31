@@ -241,6 +241,7 @@ class MoE:
             self._native_transfer_scheduler = None
             self._native_scheduler = None
             self._native_generation_engine = None
+            self._native_kv_offload_coordinator = None
             return {}
 
         from moe_infinity.engine.generation_loop import GenerationEngine
@@ -348,6 +349,19 @@ class MoE:
         except Exception:
             attention_backend = None
         transfer_scheduler = UnifiedTransferScheduler()
+        kv_offload_coordinator = None
+        if getattr(engine_config, "enable_kv_cache_offload", False):
+            from moe_infinity.engine.kv_cache_offload_coordinator import (
+                KVCacheOffloadCoordinator,
+            )
+
+            kv_offload_coordinator = KVCacheOffloadCoordinator(
+                kv_tensors=None,
+                block_pool=None,
+                config=engine_config,
+            )
+            kv_offload_coordinator.register_with_scheduler(transfer_scheduler)
+
         scheduler = Scheduler(
             kv_cache_manager=kv_cache_manager,
             transfer_scheduler=transfer_scheduler,
@@ -380,12 +394,14 @@ class MoE:
         self._native_transfer_scheduler = transfer_scheduler
         self._native_scheduler = scheduler
         self._native_generation_engine = generation_engine
+        self._native_kv_offload_coordinator = kv_offload_coordinator
 
         return {
             "memory_coordinator": memory_coordinator,
             "kv_cache_manager": kv_cache_manager,
             "attention_backend": attention_backend,
             "transfer_scheduler": transfer_scheduler,
+            "kv_offload_coordinator": kv_offload_coordinator,
             "scheduler": scheduler,
             "generation_engine": generation_engine,
         }
