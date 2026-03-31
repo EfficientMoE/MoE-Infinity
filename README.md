@@ -7,15 +7,15 @@ MoE-Infinity is cost-effective yet fast:
 - Offloading MoE's experts to host memory, allowing memory-constrained GPUs to serve MoE models.
 - Minimizing the expert offloading overheads through several novel techniques: expert activation tracing, activation-aware expert prefetching, and activation-aware expert caching.
 - Supporting LLM acceleration techniques (such as [FlashAttention](https://github.com/Dao-AILab/flash-attention)).
-- Supporting multi-GPU environments with numeorous OS-level performance optimizations.
+- Supporting multi-GPU environments with numerous OS-level performance optimizations.
 - Achieving SOTA latency performance when serving MoEs in a resource-constrained GPU environment (in comparison with [vLLM](https://github.com/vllm-project/vllm), HuggingFace [Accelerate](https://github.com/huggingface/accelerate), [DeepSpeed](https://github.com/microsoft/DeepSpeed), [Mixtral-Offloading](https://github.com/dvmazur/mixtral-offloading), and [Ollama/LLama.cpp](https://github.com/ollama/ollama)).
 
 MoE-Infinity is easy-to-use:
 
 - HuggingFace model compatible, and HuggingFace programmer friendly.
-- Supporting all available MoE checkpoints (including [Deepseek-V2](https://huggingface.co/collections/deepseek-ai/deepseek-v2-669a1c8b8f2dbc203fbd7746), [Google Switch Transformers](https://huggingface.co/google/switch-large-128), [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b), and [Mixtral](mistralai/Mixtral-8x7B-Instruct-v0.1)).
+- Supporting all available MoE checkpoints (including [Deepseek-V2/V3](https://huggingface.co/collections/deepseek-ai/deepseek-v2-669a1c8b8f2dbc203fbd7746), [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b), [Mixtral](mistralai/Mixtral-8x7B-Instruct-v0.1), and [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B)).
 
-Note that: The open-sourced MoE-Infinity has been redesigned for making it HuggingFace-users friendly. This version is different from the version reported in the paper, which takes extreme performance as the top priority. As a result, distributed inference is currently not supported in this open-sourced version.
+Note that: The open-sourced MoE-Infinity has been redesigned for making it HuggingFace-users friendly. This version is different from the version reported in the paper, which takes extreme performance as the top priority. Single-server multi-GPU inference is supported: expert parameters are distributed round-robin across all visible GPUs, with per-GPU caching, peer-to-peer transfers, and dedicated I/O threads. Multi-node distributed inference (across separate machines) is not yet supported in this open-sourced version.
 
 ## Contents
 - [Performance](#performance)
@@ -36,29 +36,16 @@ Note that: The open-sourced MoE-Infinity has been redesigned for making it Huggi
 Single GPU A5000 (24GB Memory), per-token-latency (seconds) for generation with a mixed dataset that includes [LongBench](https://huggingface.co/datasets/THUDM/LongBench), [GSM8K](https://huggingface.co/datasets/openai/gsm8k),  [FLAN](https://huggingface.co/datasets/Muennighoff/flan), [BIG-Bench](https://huggingface.co/datasets/bigbench) and [MMLU](https://huggingface.co/datasets/lukaemon/mmlu) datasets.
 Lower per-token-latency is preferable.
 
-|  | Switch-large-128 | NLLB-MoE-54B | Mixtral-8x7b | DeepSeek-V2-Lite-Chat | Qwen3-30B-A3B |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| <ins>MoE-Infinity</ins> | <ins>*0.130*</ins>	| <ins>*0.119*</ins> | <ins>*0.735*</ins> | <ins>*0.100*</ins> | <ins>*0.150*</ins> |
-| Accelerate | 1.043 | 3.071 | 6.633 |  1.743  | |
-|DeepSpeed (0.16.2) | 4.578 | 8.381 | 2.486 | 0.737 | 7.857 |
-|Mixtral Offloading| X | X | 1.752 | X |X|
-|Ollama | X | X | 0.903 | 1.250 ||
-|vLLM (v0.8.5)| X | X | 2.137 | 0.149 | 0.205 |
+|  | NLLB-MoE-54B | Mixtral-8x7b | DeepSeek-V2-Lite-Chat | Qwen3-30B-A3B |
+| :---: | :---: | :---: | :---: | :---: |
+| <ins>MoE-Infinity</ins> | <ins>*0.119*</ins> | <ins>*0.735*</ins> | <ins>*0.100*</ins> | <ins>*0.150*</ins> |
+| Accelerate | 3.071 | 6.633 |  1.743  | |
+|DeepSpeed (0.16.2) | 8.381 | 2.486 | 0.737 | 7.857 |
+|Mixtral Offloading| X | 1.752 | X |X|
+|Ollama | X | 0.903 | 1.250 ||
+|vLLM (v0.8.5)| X | 2.137 | 0.149 | 0.205 |
 
-<!-- Single GPU A5000, throughput (token/s) for generation with batch size 32.
-Higher throughput is preferable.
 
-|  | switch-large-128 | NLLB-MoE-54B | Mixtral-8x7b |
-| :---: | :---: | :---: | :---: |
-| <ins>MoE-Infinity</ins> | <ins>*69.105*</ins>	| <ins>*30.300*</ins> | <ins>*12.579*</ins> |
-| Accelerate | 5.788 | 4.344 | 1.245 |
-|DeepSpeed | 7.416 | 4.334 | 7.727 |
-|Mixtral Offloading| X | X | 7.684 |
-|Ollama | X | X | 1.107 |
-
-> The Mixtral Offloading experiment was carried out with a batch size of 16, as utilizing a batch size of 32 would result in Out of Memory errors on the GPU.
-
-> Ollama does not support batching for generation, so the throughput is calculated with a batch size of 1. -->
 
 ## Installation
 
@@ -76,8 +63,8 @@ conda activate moe-infinity
 # install stable release
 pip install moe-infinity
 
-# install nightly release
-pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ moe-infinity
+# install nightly release (latest development build from main branch)
+pip install --pre moe-infinity
 ```
 
 ### Install from Source
@@ -137,7 +124,12 @@ print(output_text)
 
 ### Running Inference
 
-This command runs the script on selected GPUs.
+Run on a single GPU:
+```bash
+CUDA_VISIBLE_DEVICES=0 python script.py
+```
+
+Run on multiple GPUs (expert parameters are automatically distributed across all visible devices):
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 python script.py
 ```
