@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -188,4 +189,176 @@ class MemoryManager:
             return 0
 
 
-__all__ = ["MemoryBudget", "MemoryManager"]
+class AdaptiveKVScheduler:
+    initial_max_batch_size: int
+    kv_high_watermark: float
+    kv_low_watermark: float
+    expert_hit_target: float
+    cooldown_seconds: float
+    _current_max_batch_size: int
+    _adjust_step: int
+    _last_adjust_timestamp: Optional[float]
+    _kv_utilization: float
+    _expert_hit_rate: Optional[float]
+    _kv_used_blocks: int
+    _kv_total_blocks: int
+
+    def __init__(
+        self,
+        initial_max_batch_size: int = 32,
+        kv_high_watermark: float = 0.90,
+        kv_low_watermark: float = 0.50,
+        expert_hit_target: float = 0.70,
+        cooldown_seconds: float = 10.0,
+    ) -> None:
+        if initial_max_batch_size <= 0:
+            raise ValueError(
+                f"initial_max_batch_size must be > 0, got {initial_max_batch_size}"
+            )
+        for name, value in (
+            ("kv_high_watermark", kv_high_watermark),
+            ("kv_low_watermark", kv_low_watermark),
+            ("expert_hit_target", expert_hit_target),
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1], got {value}")
+        if kv_low_watermark >= kv_high_watermark:
+            raise ValueError(
+                "kv_low_watermark must be < kv_high_watermark, got "
+                + f"{kv_low_watermark} >= {kv_high_watermark}"
+            )
+        if cooldown_seconds < 0.0:
+            raise ValueError(
+                f"cooldown_seconds must be >= 0, got {cooldown_seconds}"
+            )
+
+        self.initial_max_batch_size = initial_max_batch_size
+        self.kv_high_watermark = kv_high_watermark
+        self.kv_low_watermark = kv_low_watermark
+        self.expert_hit_target = expert_hit_target
+        self.cooldown_seconds = cooldown_seconds
+
+        self._current_max_batch_size = initial_max_batch_size
+        self._adjust_step = max(1, initial_max_batch_size // 8)
+        self._last_adjust_timestamp = None
+        self._kv_utilization = 0.0
+        self._expert_hit_rate = None
+        self._kv_used_blocks = 0
+        self._kv_total_blocks = 0
+
+    def observe(
+        self,
+        kv_used_blocks: int,
+        kv_total_blocks: int,
+        expert_hit_rate: Optional[float] = None,
+    ) -> None:
+        if kv_used_blocks < 0:
+            raise ValueError(
+                f"kv_used_blocks must be >= 0, got {kv_used_blocks}"
+            )
+        if kv_total_blocks < 0:
+            raise ValueError(
+                f"kv_total_blocks must be >= 0, got {kv_total_blocks}"
+            )
+        if kv_total_blocks > 0 and kv_used_blocks > kv_total_blocks:
+            raise ValueError(
+                "kv_used_blocks must be <= kv_total_blocks when total > 0, "
+                + f"got {kv_used_blocks} > {kv_total_blocks}"
+            )
+        if expert_hit_rate is not None and not 0.0 <= expert_hit_rate <= 1.0:
+            raise ValueError(
+                f"expert_hit_rate must be in [0, 1], got {expert_hit_rate}"
+            )
+
+        self._kv_used_blocks = kv_used_blocks
+        self._kv_total_blocks = kv_total_blocks
+        self._kv_utilization = (
+            0.0 if kv_total_blocks == 0 else kv_used_blocks / kv_total_blocks
+        )
+        if expert_hit_rate is not None:
+            self._expert_hit_rate = expert_hit_rate
+
+        self._maybe_adjust()
+
+    def get_max_batch_size(self) -> int:
+        return self._current_max_batch_size
+
+    def should_preempt_aggressively(self) -> bool:
+        return self._kv_utilization >= self.kv_high_watermark
+
+    def get_tuning_recommendations(self) -> dict[str, Union[str, float, int]]:
+        if self._kv_utilization >= self.kv_high_watermark:
+            return {
+                "recommendation": "increase kv_cache_ratio",
+                "reason": "kv_cache_near_capacity",
+                "current_kv_utilization": self._kv_utilization,
+                "suggested_kv_cache_ratio_delta": 0.10,
+            }
+
+        if (
+            self._expert_hit_rate is not None
+            and self._expert_hit_rate < self.expert_hit_target
+        ):
+            return {
+                "recommendation": "increase expert_cache_ratio",
+                "reason": "expert_cache_hit_rate_below_target",
+                "current_expert_hit_rate": self._expert_hit_rate,
+                "target_expert_hit_rate": self.expert_hit_target,
+            }
+
+        if (
+            self._kv_utilization <= self.kv_low_watermark
+            and self._current_max_batch_size < self.initial_max_batch_size
+        ):
+            return {
+                "recommendation": "increase scheduler_batch_size",
+                "reason": "kv_cache_underutilized",
+                "current_max_batch_size": self._current_max_batch_size,
+                "suggested_max_batch_size": min(
+                    self.initial_max_batch_size,
+                    self._current_max_batch_size + self._adjust_step,
+                ),
+            }
+
+        return {
+            "recommendation": "keep_current_policy",
+            "current_kv_utilization": self._kv_utilization,
+            "current_max_batch_size": self._current_max_batch_size,
+        }
+
+    def _maybe_adjust(self) -> None:
+        now = time.monotonic()
+        if self._last_adjust_timestamp is not None:
+            elapsed = now - self._last_adjust_timestamp
+            if elapsed < self.cooldown_seconds:
+                return
+
+        next_batch_size = self._current_max_batch_size
+        kv_pressure_high = self._kv_utilization >= self.kv_high_watermark
+        expert_pressure_high = (
+            self._expert_hit_rate is not None
+            and self._expert_hit_rate < self.expert_hit_target
+        )
+        kv_pressure_low = self._kv_utilization <= self.kv_low_watermark
+
+        if kv_pressure_high and expert_pressure_high:
+            next_batch_size -= self._adjust_step * 2
+        elif kv_pressure_high or expert_pressure_high:
+            next_batch_size -= self._adjust_step
+        elif kv_pressure_low and (
+            self._expert_hit_rate is None
+            or self._expert_hit_rate >= self.expert_hit_target
+        ):
+            next_batch_size += self._adjust_step
+
+        next_batch_size = max(
+            1,
+            min(self.initial_max_batch_size, next_batch_size),
+        )
+
+        if next_batch_size != self._current_max_batch_size:
+            self._current_max_batch_size = next_batch_size
+            self._last_adjust_timestamp = now
+
+
+__all__ = ["MemoryBudget", "MemoryManager", "AdaptiveKVScheduler"]

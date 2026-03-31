@@ -231,7 +231,7 @@ class ContinuousBatchingEngine:
         }
 
     def abort_request(self, request_id: str) -> None:
-        seq_ids = self._request_to_seq_ids.get(request_id, [])
+        seq_ids = list(self._request_to_seq_ids.get(request_id, []))
         was_pending = any(
             self._sequences[seq_id].status
             in {
@@ -245,10 +245,18 @@ class ContinuousBatchingEngine:
         )
 
         self.scheduler.abort_request(request_id)
-        if was_pending:
-            self._cancelled_request_ids.add(request_id)
-
         _ = self._callbacks.pop(request_id, None)
+
+        if not was_pending:
+            return
+
+        self._cancelled_request_ids.add(request_id)
+        _ = self._request_outputs.pop(request_id, None)
+        _ = self._request_to_seq_ids.pop(request_id, None)
+
+        for seq_id in seq_ids:
+            _ = self._sequence_to_request_id.pop(seq_id, None)
+            _ = self._sequences.pop(seq_id, None)
 
     def has_pending_requests(self) -> bool:
         return bool(self._pending_request_ids())

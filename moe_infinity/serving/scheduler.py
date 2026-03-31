@@ -201,6 +201,7 @@ class Scheduler:
         )
 
         self._drop_request_metadata(group)
+        self._prune_finished_and_cancelled_requests()
 
     def has_work(self) -> bool:
         return bool(self._waiting or self._running)
