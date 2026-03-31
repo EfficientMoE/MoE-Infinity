@@ -28,6 +28,12 @@ sys.path.insert(0, ROOT_DIR)
 
 from torch.utils import cpp_extension
 
+TORCH_LIB_DIR = (
+    os.path.join(os.path.dirname(torch.__file__), "lib")
+    if torch_available
+    else ""
+)
+
 RED_START = "\033[31m"
 RED_END = "\033[0m"
 ERROR = f"{RED_START} [ERROR] {RED_END}"
@@ -147,9 +153,32 @@ _STORE_EXTRA_LINK_ARGS = [
     "-lpthread",
 ]
 
+if TORCH_LIB_DIR:
+    _STORE_EXTRA_LINK_ARGS.append(f"-Wl,-rpath,{TORCH_LIB_DIR}")
+
 # _engine extension: compute kernels (fused_glu + expert_gemm)
 _ENGINE_SOURCES = [
     "core/python/fused_glu_cuda.cu",
+]
+
+_KV_CACHE_SOURCES = [
+    "core/utils/logger.cpp",
+    "core/utils/cuda_utils.cpp",
+    "core/memory/stream_pool.cpp",
+    "core/memory/kv_cache_pool.cpp",
+    "core/base/thread.cc",
+    "core/base/exception.cc",
+    "core/base/date.cc",
+    "core/base/process_info.cc",
+    "core/base/logging.cc",
+    "core/base/log_file.cc",
+    "core/base/timestamp.cc",
+    "core/base/file_util.cc",
+    "core/base/countdown_latch.cc",
+    "core/base/timezone.cc",
+    "core/base/log_stream.cc",
+    "core/base/thread_pool.cc",
+    "core/python/py_kv_cache.cpp",
 ]
 
 # Note: _engine needs CUTLASS for fused_glu_cuda.cu
@@ -186,6 +215,19 @@ if cuda_available:
                 + _cuda_arch_flags
                 + ["-DBF16_AVAILABLE"],
             },
+        )
+    )
+
+    ext_modules.append(
+        cpp_extension.CUDAExtension(
+            name="moe_infinity._kv_cache",
+            sources=_KV_CACHE_SOURCES,
+            include_dirs=COMMON_INCLUDE_PATHS,
+            extra_compile_args={
+                "cxx": COMMON_CXX_ARGS,
+                "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,
+            },
+            extra_link_args=_STORE_EXTRA_LINK_ARGS,
         )
     )
 
