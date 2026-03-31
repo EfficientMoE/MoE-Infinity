@@ -176,6 +176,12 @@ class PagedKVCache:
         _ = self._swapped_cpu_buffers.pop(seq_id, None)
         self._swapped_out_sequences.discard(seq_id)
 
+    def free_gpu_blocks(self, seq_id: int) -> None:
+        if seq_id not in self._sequence_tables:
+            return
+
+        return
+
     def get_block_table(self, seq_id: int) -> list[int]:
         block_table = self._require_sequence(seq_id)
         return block_table.get_block_ids()

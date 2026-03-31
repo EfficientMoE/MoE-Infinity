@@ -59,6 +59,7 @@ class Scheduler:
 
     def schedule(self) -> SchedulerOutput:
         output = SchedulerOutput()
+        swapped_snapshot = list(self._swapped)
 
         scheduled_seqs = 0
         scheduled_tokens = 0
@@ -117,6 +118,8 @@ class Scheduler:
             scheduled_seqs += len(next_seqs)
             scheduled_tokens += prefill_tokens
             output.num_prefill_tokens += prefill_tokens
+
+        self._recover_swapped_groups(swapped_snapshot)
 
         for group in self._running:
             for sequence in group.sequences:
@@ -233,7 +236,7 @@ class Scheduler:
                     self.kv_cache.swap_out(sequence.seq_id)
                 except KeyError:
                     pass
-                self.kv_cache.free_sequence(sequence.seq_id)
+                self.kv_cache.free_gpu_blocks(sequence.seq_id)
                 sequence.set_status(SequenceStatus.SWAPPED)
                 preempted_seq_ids.append(sequence.seq_id)
 
@@ -242,6 +245,42 @@ class Scheduler:
                 return preempted_seq_ids
 
         return []
+
+    def _recover_swapped_groups(
+        self, swapped_groups: list[SequenceGroup]
+    ) -> None:
+        if self.kv_cache.block_allocator.num_free_blocks <= 0:
+            return
+
+        for group in swapped_groups:
+            if group not in self._swapped:
+                continue
+
+            swapped_sequences = [
+                sequence
+                for sequence in group.sequences
+                if sequence.status is SequenceStatus.SWAPPED
+            ]
+            if not swapped_sequences:
+                _ = self._swapped.remove(group)
+                continue
+
+            recovered = True
+            for sequence in swapped_sequences:
+                try:
+                    self.kv_cache.swap_in(sequence.seq_id)
+                except Exception:
+                    recovered = False
+                    break
+
+            if not recovered:
+                continue
+
+            for sequence in swapped_sequences:
+                sequence.set_status(SequenceStatus.DECODE)
+
+            _ = self._swapped.remove(group)
+            self._running.appendleft(group)
 
     def _prune_finished_and_cancelled_requests(self) -> None:
         active_requests: dict[str, SequenceGroup] = {}
