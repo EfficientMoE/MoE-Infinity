@@ -1,24 +1,13 @@
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportCallIssue=false, reportUnannotatedClassAttribute=false, reportUninitializedInstanceVariable=false, reportPrivateUsage=false, reportPrivateLocalImportUsage=false, reportUnusedImport=false, reportUnusedCallResult=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportExplicitAny=false, reportAny=false, reportArgumentType=false, reportOperatorIssue=false, reportImplicitStringConcatenation=false, reportUnnecessaryComparison=false, reportUnreachable=false, reportMissingTypeArgument=false, reportDeprecated=false, reportGeneralTypeIssues=false
+
 import os
 import warnings
-from typing import Any, Dict, Union
+from types import SimpleNamespace
+from typing import Any, Dict, Optional, Union
 
 import torch
-import transformers
-from accelerate.utils.versions import is_torch_version
-from huggingface_hub import snapshot_download
-from transformers import AutoConfig, GenerationConfig
-from transformers.generation import GenerationMixin
 
 import moe_infinity
-from moe_infinity.common.constants import MODEL_MAPPING_NAMES
-from moe_infinity.models import (
-    apply_rotary_pos_emb,
-    apply_rotary_pos_emb_deepseek,
-)
-from moe_infinity.models.modeling_arctic import ArcticConfig
-from moe_infinity.runtime import OffloadEngine
-from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
-from moe_infinity.utils.hf_config import ensure_config_compat
 
 warnings.filterwarnings("ignore")
 
@@ -57,6 +46,15 @@ class MoE:
         model_name_or_path: Union[str, os.PathLike],
         config: Union[str, os.PathLike, Dict] = None,
     ) -> None:
+        from accelerate.utils.versions import is_torch_version
+        from huggingface_hub import snapshot_download
+
+        from moe_infinity.common.constants import MODEL_MAPPING_NAMES
+        from moe_infinity.models.modeling_arctic import ArcticConfig
+        from moe_infinity.runtime import OffloadEngine
+        from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
+        from moe_infinity.utils.hf_config import ensure_config_compat
+
         # TODO: remove the torch version check once older versions are supported
         if not is_torch_version(">=", "2.0"):
             raise RuntimeError(
@@ -74,6 +72,9 @@ class MoE:
                     f"Please provide a configuration file or create a default one at {default_config_path}."
                 )
             config = default_config_path
+
+        from transformers import AutoConfig
+
         if "arctic" in model_name_or_path:
             model_config = ArcticConfig.from_pretrained(
                 model_name_or_path, trust_remote_code=True
@@ -156,6 +157,9 @@ class MoE:
         self._ensure_generation_mixin()
 
     def _ensure_generation_mixin(self):
+        from transformers import GenerationConfig
+        from transformers.generation import GenerationMixin
+
         if not hasattr(self.model, "generate"):
             cls = self.model.__class__
             self.model.__class__ = type(
@@ -169,16 +173,32 @@ class MoE:
             )
 
     def _configure_hook(self, input_ids: torch.LongTensor):
+        import transformers
+
+        from moe_infinity.models import (
+            apply_rotary_pos_emb,
+            apply_rotary_pos_emb_deepseek,
+        )
+
         if self.arch == "mixtral":
+            import moe_infinity.models.modeling_mixtral
+
             transformers.models.mixtral.modeling_mixtral.apply_rotary_pos_emb = apply_rotary_pos_emb
 
         if self.arch == "grok":
+            import moe_infinity.models.modeling_grok.modeling_grok1
+
             moe_infinity.models.modeling_grok.modeling_grok1.apply_rotary_pos_emb = apply_rotary_pos_emb
 
         if self.arch == "arctic":
+            import moe_infinity.models.modeling_arctic.modeling_arctic
+
             moe_infinity.models.modeling_arctic.modeling_arctic.apply_rotary_pos_emb = apply_rotary_pos_emb
 
         if self.arch == "deepseek" or self.arch == "deepseek_v3":
+            import moe_infinity.models.modeling_deepseek_v2.modeling_deepseek
+            import moe_infinity.models.modeling_deepseek_v3.modeling_deepseek
+
             moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.apply_rotary_pos_emb = apply_rotary_pos_emb_deepseek
             moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.apply_rotary_pos_emb = apply_rotary_pos_emb_deepseek
             # apply_rotary_pos_emb is defined in deepseek and differs from this version.
@@ -207,12 +227,81 @@ class MoE:
                 The generated sequences. Sequences shorter than `min_length` are padded with `pad_token_id`.
         """
 
+        with warnings.catch_warnings():
+            warnings.simplefilter("default", DeprecationWarning)
+            warnings.warn(
+                "MoE.generate() is deprecated. Use MoE.serve() for continuous batching "
+                "with higher throughput. MoE.generate() will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         self._configure_hook(input_ids)
 
         self.model.eval()
         with torch.no_grad():
             return self.model.generate(input_ids, **kwargs)
         self.engine.expert_dispatcher.clear_expert_cache_counts()
+
+    def serve(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8000,
+        device_memory_ratio: float = 0.75,
+        kv_cache_ratio: float = 0.25,
+        max_batch_size: int = 32,
+        enable_prefix_caching: bool = False,
+        offload_dir: Optional[str] = None,
+    ) -> None:
+        """
+        Start the OpenAI-compatible continuous batching server.
+
+        This is the recommended entry point for production serving.
+        Replaces the deprecated MoE.generate() for serving use cases.
+
+        Args:
+            host: Server host (default: 0.0.0.0)
+            port: Server port (default: 8000)
+            device_memory_ratio: GPU memory fraction for caching (default: 0.75)
+            kv_cache_ratio: Fraction of device_memory_ratio for KV cache (default: 0.25)
+            max_batch_size: Maximum concurrent sequences (default: 32)
+            enable_prefix_caching: Enable hash-based prefix caching (default: False)
+            offload_dir: Path to offload directory (required)
+        """
+
+        if offload_dir is None:
+            raise ValueError("offload_dir is required for MoE.serve()")
+
+        import importlib
+
+        from moe_infinity.entrypoints.openai import api_server_v2
+        from moe_infinity.serving import ContinuousBatchingEngine, StreamManager
+
+        engine_config = api_server_v2._build_engine_config(
+            args=SimpleNamespace(
+                device_memory_ratio=device_memory_ratio,
+                kv_cache_ratio=kv_cache_ratio,
+                max_batch_size=max_batch_size,
+                enable_prefix_caching=enable_prefix_caching,
+            ),
+            model=self.model,
+        )
+        engine_config["offload_dir"] = offload_dir
+
+        api_server_v2.model_name_global = getattr(
+            getattr(self.model, "config", None), "_name_or_path", None
+        )
+        api_server_v2.tokenizer = getattr(self, "tokenizer", None)
+        api_server_v2.engine = ContinuousBatchingEngine(
+            model=self.model,
+            engine=self.engine,
+            config=engine_config,
+            tokenizer=api_server_v2.tokenizer,
+        )
+        api_server_v2.stream_manager = StreamManager()
+
+        uvicorn = importlib.import_module("uvicorn")
+        uvicorn.run(api_server_v2.app, host=host, port=port)
 
     def forward(self, input_ids: torch.LongTensor, *args, **kwargs) -> Any:
         """
