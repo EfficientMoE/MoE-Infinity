@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import tempfile
+import warnings
 from typing import Callable, Dict, Type, Union
 
 import torch
@@ -70,6 +71,7 @@ from moe_infinity.utils.async_transfer import (
     wait_transfer,
 )
 from moe_infinity.utils.device import get_default_device, get_device
+from moe_infinity.utils.mxfp4 import identify_mxfp4_pairs, is_mxfp4_quantized
 
 _prefetch_lib = None
 # Alias for compatibility
@@ -522,7 +524,20 @@ class OffloadEngine(object):
                             with safe_open(
                                 ckpt, framework="pt", device="cpu"
                             ) as f:
-                                for k in f.keys():
+                                weight_keys = list(f.keys())
+                                mxfp4_pairs = identify_mxfp4_pairs(weight_keys)
+                                is_mxfp4_ckpt = bool(mxfp4_pairs)
+                                if not is_mxfp4_ckpt:
+                                    try:
+                                        is_mxfp4_ckpt = is_mxfp4_quantized(
+                                            self.config
+                                        )
+                                    except Exception:
+                                        is_mxfp4_ckpt = False
+
+                                for k in weight_keys:
+                                    if is_mxfp4_ckpt and k.endswith("_scales"):
+                                        continue
                                     state_dict[k] = f.get_tensor(k)
                         else:
                             state_dict = torch.load(ckpt)
@@ -531,6 +546,21 @@ class OffloadEngine(object):
                         for k, v in state_dict.items():
                             try:
                                 state_dict[k] = v.to(self.dtype_cls).to("cpu")
+                            except (RuntimeError, TypeError) as e:
+                                if k.endswith("_blocks"):
+                                    warnings.warn(
+                                        f"Could not convert tensor {k} (dtype={v.dtype}) "
+                                        f"to {self.dtype_cls}: {e}. Keeping original dtype.",
+                                        UserWarning,
+                                        stacklevel=2,
+                                    )
+                                    state_dict[k] = v.to("cpu")
+                                    continue
+                                print(
+                                    f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
+                                    flush=True,
+                                )
+                                raise
                             except Exception as e:
                                 print(
                                     f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
