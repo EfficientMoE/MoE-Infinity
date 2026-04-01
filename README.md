@@ -85,6 +85,22 @@ FLASH_ATTENTION_FORCE_BUILD=TRUE pip install flash-attn
 ```
 Post-installation, MoE-Infinity will automatically integrate with FlashAttention to enhance performance.
 
+### Enable FlashInfer (Optional)
+
+Install [FlashInfer](https://flashinfer.ai/) for optimized paged attention kernels during prefill and decode. FlashInfer provides significant speedups for paged KV cache attention compared to standard PyTorch SDPA.
+
+```bash
+# For CUDA 12.4 + PyTorch 2.5:
+pip install flashinfer -i https://flashinfer.ai/whl/cu124/torch2.5/
+
+# For CUDA 12.1 + PyTorch 2.4:
+pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
+```
+
+Check the [FlashInfer installation guide](https://docs.flashinfer.ai/installation.html) for other CUDA/PyTorch version combinations.
+
+Post-installation, MoE-Infinity will automatically detect and use FlashInfer for faster paged attention in both prefill and decode phases. When FlashInfer is not installed, MoE-Infinity gracefully falls back to its built-in attention kernels with no behavior change.
+
 ## Usage and Examples
 
 We provide a simple API for diverse setups, including single GPU, multiple GPUs, and multiple nodes. The following examples show how to use MoE-Infinity to run generation on a Huggingface LLM model.

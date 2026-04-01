@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Optional, Protocol, runtime_checkable
+from collections.abc import Iterable, Mapping
+from typing import Any, Optional, Protocol, runtime_checkable
 
 import torch
+
+from moe_infinity.runtime.attention_types import (
+    AttentionMetadata as RuntimeAttentionMetadata,
+)
 
 from .batch import BatchMetadata
 
@@ -113,8 +117,24 @@ class ModelRunner:
         if not callable(forward_fn):
             raise ValueError("model must define callable forward()")
 
+        paged_attention_classes = self._get_paged_attention_classes()
+        backend = self._get_attention_backend()
+        use_paged_context = bool(
+            paged_attention_classes and backend is not None
+        )
+
         with torch.no_grad():
-            outputs = forward_fn(**forward_kwargs)
+            if not use_paged_context:
+                outputs = forward_fn(**forward_kwargs)
+            else:
+                metadata = self._build_runtime_attention_metadata(batch)
+                for attn_cls in paged_attention_classes:
+                    attn_cls.set_paged_context(backend, metadata)
+                try:
+                    outputs = forward_fn(**forward_kwargs)
+                finally:
+                    for attn_cls in paged_attention_classes:
+                        attn_cls.clear_paged_context()
 
         logits = self._extract_logits(outputs)
         if logits.dim() == 3:
@@ -159,6 +179,138 @@ class ModelRunner:
         return torch.empty(
             (0, vocab_size), dtype=torch.float32, device=self.device
         )
+
+    def _build_runtime_attention_metadata(
+        self, batch: BatchMetadata
+    ) -> RuntimeAttentionMetadata:
+        block_size = self._resolve_block_size()
+        max_blocks = max((len(row) for row in batch.block_tables), default=0)
+        block_tables = torch.zeros(
+            (len(batch.block_tables), max_blocks),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        for row_idx, row in enumerate(batch.block_tables):
+            if row:
+                block_tables[row_idx, : len(row)] = torch.tensor(
+                    row,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+
+        seq_lens_values = [
+            context_len + seq_len
+            for context_len, seq_len in zip(
+                batch.context_lengths, batch.seq_lengths
+            )
+        ]
+        seq_lens = torch.tensor(
+            seq_lens_values,
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+        slot_mapping = torch.tensor(
+            self._build_slot_mapping(batch, block_size),
+            dtype=torch.int64,
+            device=self.device,
+        )
+
+        num_prefill_tokens = sum(
+            seq_len
+            for seq_len, is_prefill in zip(batch.seq_lengths, batch.is_prefill)
+            if is_prefill
+        )
+        num_decode_tokens = batch.total_tokens - num_prefill_tokens
+
+        return RuntimeAttentionMetadata(
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            max_seq_len=max(seq_lens_values, default=0),
+            num_prefill_tokens=num_prefill_tokens,
+            num_decode_tokens=num_decode_tokens,
+            slot_mapping=slot_mapping,
+            is_prefill=bool(batch.is_prefill and all(batch.is_prefill)),
+        )
+
+    @staticmethod
+    def _build_slot_mapping(batch: BatchMetadata, block_size: int) -> list[int]:
+        slots: list[int] = []
+        for seq_idx, seq_len in enumerate(batch.seq_lengths):
+            block_table = batch.block_tables[seq_idx]
+            context_len = batch.context_lengths[seq_idx]
+            for token_idx in range(seq_len):
+                token_pos = context_len + token_idx
+                block_idx = token_pos // block_size
+                token_offset = token_pos % block_size
+                if block_idx >= len(block_table):
+                    raise ValueError(
+                        "batch metadata block table is too short for sequence length"
+                    )
+                slots.append(block_table[block_idx] * block_size + token_offset)
+        return slots
+
+    def _resolve_block_size(self) -> int:
+        kv_cache = getattr(self.engine, "kv_cache", None)
+        block_size = getattr(kv_cache, "block_size", None)
+        if isinstance(block_size, int) and block_size > 0:
+            return block_size
+
+        backend = self._get_attention_backend()
+        spec = getattr(backend, "spec", None)
+        spec_block_size = getattr(spec, "block_size", None)
+        if isinstance(spec_block_size, int) and spec_block_size > 0:
+            return spec_block_size
+
+        return 1
+
+    def _get_attention_backend(self) -> object | None:
+        getter = getattr(self.engine, "get_attention_backend", None)
+        if callable(getter):
+            backend = getter()
+            if backend is not None:
+                return backend
+
+        for attr_name in (
+            "attention_backend",
+            "_attention_backend",
+            "_native_attention_backend",
+        ):
+            backend = getattr(self.engine, attr_name, None)
+            if backend is not None:
+                return backend
+        return None
+
+    def _get_paged_attention_classes(self) -> list[type[Any]]:
+        paged_class_names = {
+            "DeepseekV2PagedAttention",
+            "DeepseekV3PagedAttention",
+        }
+        classes: list[type[Any]] = []
+        seen: set[type[Any]] = set()
+
+        modules_fn = getattr(self.model, "modules", None)
+        if not callable(modules_fn):
+            return classes
+
+        modules = modules_fn()
+        if not isinstance(modules, Iterable):
+            return classes
+
+        for module in modules:
+            cls = module.__class__
+            if cls in seen:
+                continue
+            if cls.__name__ not in paged_class_names:
+                continue
+            if not hasattr(cls, "set_paged_context") or not hasattr(
+                cls, "clear_paged_context"
+            ):
+                continue
+            seen.add(cls)
+            classes.append(cls)
+
+        return classes
 
     def _resolve_vocab_size(self) -> int:
         config = getattr(self.model, "config", None)

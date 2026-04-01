@@ -1270,15 +1270,132 @@ class DeepseekV3PagedAttention(DeepseekV3Attention):
     ) -> Tuple[
         torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]
     ]:
-        return super().forward(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            **kwargs,
+        paged_backend = self.__class__._paged_backend
+        attention_metadata = self.__class__._attention_metadata
+        if paged_backend is None or attention_metadata is None:
+            return super().forward(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                **kwargs,
+            )
+
+        if "padding_mask" in kwargs:
+            warnings.warn(
+                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+            )
+
+        bsz, q_len, _ = hidden_states.size()
+
+        if self.q_lora_rank is None:
+            q = self.q_proj(hidden_states)
+        else:
+            q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
+        q = q.view(bsz, q_len, self.num_heads, self.q_head_dim).transpose(1, 2)
+        q_nope, q_pe = torch.split(
+            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
+
+        compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
+        compressed_kv, k_pe = torch.split(
+            compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
+        kv = (
+            self.kv_b_proj(self.kv_a_layernorm(compressed_kv))
+            .view(
+                bsz,
+                q_len,
+                self.num_heads,
+                self.qk_nope_head_dim + self.v_head_dim,
+            )
+            .transpose(1, 2)
+        )
+
+        k_nope, value_states = torch.split(
+            kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+        kv_seq_len = value_states.shape[-2]
+        if past_key_value is not None:
+            if self.layer_idx is None:
+                raise ValueError(
+                    f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
+                    "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
+                    "with a layer index."
+                )
+            kv_seq_len += past_key_value.get_seq_length(self.layer_idx)
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+
+        q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
+
+        query_states = k_pe.new_empty(
+            bsz, self.num_heads, q_len, self.q_head_dim
+        )
+        query_states[:, :, :, : self.qk_nope_head_dim] = q_nope
+        query_states[:, :, :, self.qk_nope_head_dim :] = q_pe
+
+        key_states = k_pe.new_empty(bsz, self.num_heads, q_len, self.q_head_dim)
+        key_states[:, :, :, : self.qk_nope_head_dim] = k_nope
+        key_states[:, :, :, self.qk_nope_head_dim :] = k_pe
+        if past_key_value is not None:
+            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
+
+        query_tokens = (
+            query_states.transpose(1, 2)
+            .contiguous()
+            .view(-1, self.num_heads, self.q_head_dim)
+        )
+        key_tokens = (
+            key_states.transpose(1, 2)
+            .contiguous()
+            .view(-1, self.num_heads, self.q_head_dim)
+        )
+        value_tokens = (
+            value_states.transpose(1, 2)
+            .contiguous()
+            .view(-1, self.num_heads, self.v_head_dim)
+        )
+
+        attn_output_tokens = paged_backend.forward(
+            query_tokens,
+            key_tokens,
+            value_tokens,
+            attention_metadata=attention_metadata,
+            scale=self.softmax_scale,
+        )
+
+        if attn_output_tokens.ndim != 3:
+            raise ValueError(
+                "paged attention backend must return rank-3 tensor"
+            )
+
+        attn_output = attn_output_tokens.view(
+            bsz,
+            q_len,
+            self.num_heads,
+            self.v_head_dim,
+        ).transpose(1, 2)
+
+        if attn_output.size() != (bsz, self.num_heads, q_len, self.v_head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.v_head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(
+            bsz, q_len, self.num_heads * self.v_head_dim
+        )
+        attn_output = self.o_proj(attn_output)
+
+        attn_weights = None
+        return attn_output, attn_weights, past_key_value
 
     @classmethod
     def get_kv_cache_spec_for_config(cls, config) -> dict[str, int]:

@@ -48,7 +48,7 @@ def _make_group(
 
 
 def test_swap_recovery_lifecycle() -> None:
-    scheduler = _make_scheduler(num_blocks=3)
+    scheduler = _make_scheduler(num_blocks=4)
     group1 = _make_group("req-1", seq_id=1, prompt_len=4)
     scheduler.add_request(group1)
 
@@ -57,12 +57,14 @@ def test_swap_recovery_lifecycle() -> None:
     scheduler.update_after_step(completed_seq_ids=[], new_decode_seq_ids=[1])
     assert group1.sequences[0].status is SequenceStatus.DECODE
 
-    group2 = _make_group("req-2", seq_id=2)
+    group2 = _make_group("req-2", seq_id=2, prompt_len=12)
     scheduler.add_request(group2)
 
     preempt_cycle = scheduler.schedule()
     assert 1 in preempt_cycle.preempted_seq_ids
     assert group1.sequences[0].status is SequenceStatus.SWAPPED
+
+    scheduler.update_after_step(completed_seq_ids=[2], new_decode_seq_ids=[])
 
     recovery_cycle = scheduler.schedule()
     assert group1.sequences[0].status is SequenceStatus.DECODE
@@ -104,8 +106,12 @@ def test_free_gpu_blocks_preserves_cpu_buffer() -> None:
     )
 
     assert 33 in swapped_cpu_buffers
+    blocks_before = kv_cache.get_block_table(33)
+    assert len(blocks_before) == 2
+
     kv_cache.free_gpu_blocks(seq_id=33)
 
     assert 33 in swapped_cpu_buffers
     assert 33 in sequence_tables
-    assert kv_cache.get_block_table(33)
+    assert kv_cache.get_block_table(33) == []
+    assert kv_cache.block_allocator.num_free_blocks == 2
