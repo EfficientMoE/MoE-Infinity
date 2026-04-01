@@ -49,16 +49,18 @@ def ensure_config_compat(config: PretrainedConfig) -> PretrainedConfig:
 
 def parse_expert_dtype(config: PretrainedConfig) -> int:
     dtype = config.torch_dtype
+    if dtype is None:
+        dtype = getattr(config, "dtype", None)
+    if dtype is None:
+        dtype = torch.bfloat16
     if dtype == torch.bfloat16:
-        dtype = 0
+        return 0
     elif dtype == torch.float32:
-        dtype = 1
+        return 1
     elif dtype == torch.float16:
-        dtype = 2
+        return 2
     else:
         assert False, "Unknown dtype %s" % dtype
-
-    return dtype
 
 
 def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:

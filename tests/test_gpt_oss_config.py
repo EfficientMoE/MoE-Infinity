@@ -70,6 +70,16 @@ def test_parse_expert_id_gpt_oss_down_proj():
     assert expert_id is None
 
 
+def test_parse_expert_dtype_gpt_oss_none():
+    from moe_infinity.utils.hf_config import parse_expert_dtype
+
+    config = MagicMock()
+    config.torch_dtype = None
+    config.dtype = None
+    result = parse_expert_dtype(config)
+    assert result == 0, f"Expected 0 (bfloat16), got {result}"
+
+
 def test_gpt_oss_model_mapping():
     MODEL_MAPPING_NAMES = import_constants_module().MODEL_MAPPING_NAMES
     from transformers import GptOssForCausalLM

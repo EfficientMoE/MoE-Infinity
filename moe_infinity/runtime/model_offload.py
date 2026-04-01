@@ -499,6 +499,10 @@ class OffloadEngine(object):
 
                 self.dtype = parse_expert_dtype(self.config)
                 self.dtype_cls = self.config.torch_dtype
+                if self.dtype_cls is None:
+                    self.dtype_cls = getattr(
+                        self.config, "dtype", torch.bfloat16
+                    )
 
                 if self.config.model_type == "deepseek_v3":
                     self.dtype_cls = torch.float8_e4m3fn
