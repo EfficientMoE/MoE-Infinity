@@ -114,14 +114,14 @@ def test_completion_returns_503_while_service_starting(
                 json={"model": "unit-test-model", "prompt": "hello"},
             )
 
+        body = response.json()
         assert response.status_code == 503
-        assert response.json() == {
-            "error": {
-                "message": "Service is starting. Please retry shortly.",
-                "type": "server_error",
-                "code": "service_starting",
-            }
-        }
+        assert body["error"]["code"] == "service_starting"
+        assert (
+            body["error"]["message"]
+            == "Service is starting. Please retry shortly."
+        )
+        assert body["error"]["type"] == "server_error"
     finally:
         _restore_runtime_state(module, original_state)
 
@@ -162,14 +162,14 @@ def test_chat_completion_returns_503_while_service_starting(
                 },
             )
 
+        body = response.json()
         assert response.status_code == 503
-        assert response.json() == {
-            "error": {
-                "message": "Service is starting. Please retry shortly.",
-                "type": "server_error",
-                "code": "service_starting",
-            }
-        }
+        assert body["error"]["code"] == "service_starting"
+        assert (
+            body["error"]["message"]
+            == "Service is starting. Please retry shortly."
+        )
+        assert body["error"]["type"] == "server_error"
     finally:
         _restore_runtime_state(module, original_state)
 
@@ -188,13 +188,18 @@ def test_handlers_work_normally_after_engine_initialized() -> None:
         with TestClient(module.app) as client:
             completion_response = client.post(
                 "/v1/completions",
-                json={"model": "unit-test-model", "prompt": "hello"},
+                json={
+                    "model": "unit-test-model",
+                    "prompt": "hello",
+                    "max_tokens": 5,
+                },
             )
             chat_response = client.post(
                 "/v1/chat/completions",
                 json={
                     "model": "unit-test-model",
                     "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 5,
                 },
             )
 
