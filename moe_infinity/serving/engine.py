@@ -441,8 +441,11 @@ class ContinuousBatchingEngine:
     @staticmethod
     def _resolve_device(model: object) -> torch.device:
         model_device = getattr(model, "device", None)
-        if isinstance(model_device, torch.device):
-            if model_device.type == "cuda" and not torch.cuda.is_available():
+        if (
+            isinstance(model_device, torch.device)
+            and model_device.type == "cuda"
+        ):
+            if not torch.cuda.is_available():
                 return torch.device("cpu")
             return model_device
 
@@ -461,16 +464,20 @@ class ContinuousBatchingEngine:
             except Exception:
                 first_param = None
 
-            if isinstance(first_param, torch.Tensor):
-                if (
-                    first_param.device.type == "cuda"
-                    and not torch.cuda.is_available()
-                ):
+            if (
+                isinstance(first_param, torch.Tensor)
+                and first_param.device.type == "cuda"
+            ):
+                if not torch.cuda.is_available():
                     return torch.device("cpu")
                 return first_param.device
 
+        # model.device / first_param.device returned "cpu" — when CUDA is
+        # available this means the model is managed by OffloadEngine which
+        # moves tensors to GPU during forward (model_offload.py:1117-1130).
         if torch.cuda.is_available():
-            return torch.device("cuda")
+            last_gpu = torch.cuda.device_count() - 1
+            return torch.device(f"cuda:{last_gpu}")
         return torch.device("cpu")
 
     @staticmethod

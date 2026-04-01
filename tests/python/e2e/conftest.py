@@ -9,6 +9,6 @@ def pytest_addoption(parser):
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def model_name(request):
     return request.config.getoption("--model")
