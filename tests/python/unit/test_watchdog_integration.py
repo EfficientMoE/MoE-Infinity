@@ -11,11 +11,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import moe_infinity.serving.watchdog as watchdog_module
-
-MODULE_NAME = "moe_infinity.entrypoints.openai.api_server_v2"
-
 try:
+    import moe_infinity.serving.watchdog as watchdog_module
+
+    MODULE_NAME = "moe_infinity.entrypoints.openai.api_server_v2"
     importlib.import_module(MODULE_NAME)
 except TypeError:
     pytest.skip(

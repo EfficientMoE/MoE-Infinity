@@ -4,9 +4,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 try:
+    from fastapi.testclient import TestClient
+
     import moe_infinity.entrypoints.openai.api_server_v2 as server_module
 except TypeError:
     pytest.skip(

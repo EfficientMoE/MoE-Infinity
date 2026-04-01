@@ -5,11 +5,11 @@ import importlib
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
-
-MODULE_NAME = "moe_infinity.entrypoints.openai.api_server_v2"
 
 try:
+    from fastapi.testclient import TestClient
+
+    MODULE_NAME = "moe_infinity.entrypoints.openai.api_server_v2"
     importlib.import_module(MODULE_NAME)
 except TypeError:
     pytest.skip(

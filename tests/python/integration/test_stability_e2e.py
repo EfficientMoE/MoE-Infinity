@@ -15,11 +15,17 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 
-import moe_infinity.entrypoints.openai.api_server_v2 as server_module
-import moe_infinity.serving.watchdog as watchdog_module
-from moe_infinity.serving.health import ServerHealthState
+try:
+    from fastapi.testclient import TestClient
+
+    import moe_infinity.entrypoints.openai.api_server_v2 as server_module
+    import moe_infinity.serving.watchdog as watchdog_module
+    from moe_infinity.serving.health import ServerHealthState
+except TypeError:
+    pytest.skip(
+        "Pydantic v1 incompatible with Python 3.12+", allow_module_level=True
+    )
 
 
 class _FakeTokenizer:
