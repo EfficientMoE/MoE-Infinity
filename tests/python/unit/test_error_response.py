@@ -5,10 +5,15 @@ import json
 
 import pytest
 
-from moe_infinity.entrypoints.openai.protocol import (
-    ErrorResponse,
-    create_error_response,
-)
+try:
+    from moe_infinity.entrypoints.openai.protocol import (
+        ErrorResponse,
+        create_error_response,
+    )
+except TypeError:
+    pytest.skip(
+        "Pydantic v1 incompatible with Python 3.12+", allow_module_level=True
+    )
 
 
 def _decode_body(response) -> dict:

@@ -1,4 +1,4 @@
-# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportMissingParameterType=false
+# pyright: reportAny=false, reportExplicitAny=false, reportUnannotatedClassAttribute=false, reportUnusedCallResult=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportMissingParameterType=false
 from __future__ import annotations
 
 import asyncio
@@ -6,9 +6,17 @@ import importlib
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 MODULE_NAME = "moe_infinity.entrypoints.openai.api_server_v2"
+
+try:
+    importlib.import_module(MODULE_NAME)
+except TypeError:
+    pytest.skip(
+        "Pydantic v1 incompatible with Python 3.12+", allow_module_level=True
+    )
 
 
 class _FakeTokenizer:

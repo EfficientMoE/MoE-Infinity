@@ -12,6 +12,10 @@ MODULE_NAME = "moe_infinity.entrypoints.openai.api_server"
 
 def _import_fresh_api_server():
     _ = sys.modules.pop(MODULE_NAME, None)
+    import moe_infinity
+
+    if not hasattr(moe_infinity, "MoE"):
+        setattr(moe_infinity, "MoE", mock.MagicMock())
     with mock.patch("logging.warning") as warning_mock:
         module = importlib.import_module(MODULE_NAME)
     return module, warning_mock
