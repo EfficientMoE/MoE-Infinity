@@ -793,6 +793,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kv-cache-ratio", type=float, default=0.25)
     parser.add_argument("--max-batch-size", type=int, default=32)
     parser.add_argument("--enable-prefix-caching", action="store_true")
+    parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        default=None,
+        help="Startup watchdog timeout in seconds (disabled by default)",
+    )
+    parser.add_argument(
+        "--decode-step-timeout",
+        type=float,
+        default=None,
+        help="Decode step watchdog timeout in seconds (disabled by default)",
+    )
+    parser.add_argument(
+        "--enable-pyspy-dump",
+        action="store_true",
+        help="Enable py-spy stack dump on watchdog timeout (requires py-spy installed)",
+    )
     return parser.parse_args()
 
 
