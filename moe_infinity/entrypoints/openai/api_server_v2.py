@@ -70,6 +70,7 @@ except Exception:
     fastapi = SimpleNamespace(FastAPI=_FallbackFastAPI)
     uvicorn = SimpleNamespace(run=lambda *args, **kwargs: None)
 
+import moe_infinity.serving.watchdog as watchdog_module
 from moe_infinity.serving.engine import ContinuousBatchingEngine, RequestOutput
 from moe_infinity.serving.health import ServerHealthState
 from moe_infinity.serving.sequence import SamplingParams
@@ -111,6 +112,9 @@ _engine_shutdown_event: Optional[asyncio.Event] = None
 _model_init_task: Optional[asyncio.Task[None]] = None
 _startup_args: Optional[argparse.Namespace] = None
 _health_state = ServerHealthState()
+_startup_watchdog: Optional[Any] = None
+_decode_watchdog: Optional[Any] = None
+_watchdog_config: Optional[Any] = None
 
 
 def parse_prompt_format(prompt: Any) -> tuple[bool, list[Any]]:
@@ -386,10 +390,16 @@ async def _engine_loop() -> None:
             continue
 
         if engine.has_pending_requests():
+            if _decode_watchdog is not None:
+                _decode_watchdog.activate()
             _ = engine.step()
+            if _decode_watchdog is not None:
+                _decode_watchdog.feed()
             await asyncio.sleep(0)
             continue
 
+        if _decode_watchdog is not None:
+            _decode_watchdog.deactivate()
         await asyncio.sleep(0.005)
 
 
@@ -414,50 +424,82 @@ async def _initialize_model() -> None:
     global stream_manager
     global tokenizer
     global model_name_global
+    global _startup_watchdog
+    global _decode_watchdog
+    global _watchdog_config
 
     args = _startup_args
     if args is None or engine is not None:
         return
 
     _health_state.set_starting()
+    _startup_watchdog = None
+    _decode_watchdog = None
+    _watchdog_config = None
 
-    from transformers import AutoTokenizer
+    startup_timeout = getattr(args, "startup_timeout", None)
+    decode_step_timeout = getattr(args, "decode_step_timeout", None)
+    if startup_timeout is not None or decode_step_timeout is not None:
+        _watchdog_config = watchdog_module.WatchdogConfig(
+            startup_timeout=startup_timeout,
+            decode_step_timeout=decode_step_timeout,
+            enable_pyspy_dump=getattr(args, "enable_pyspy_dump", False),
+        )
+        _startup_watchdog = watchdog_module.start_startup_watchdog(
+            _health_state,
+            _watchdog_config,
+            is_ready=lambda: engine is not None,
+        )
 
-    model_name_global = args.model
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model,
-        trust_remote_code=True,
-    )
+    try:
+        from transformers import AutoTokenizer
 
-    moe_config = {
-        "offload_path": os.path.join(args.offload_dir, args.model),
-        "device_memory_ratio": args.device_memory_ratio,
-    }
-    if args.enable_prefix_caching:
-        moe_config["enable_prefix_caching"] = True
+        model_name_global = args.model
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model,
+            trust_remote_code=True,
+        )
 
-    moe_module = importlib.import_module("moe_infinity")
-    moe_ctor = getattr(moe_module, "MoE", None)
-    if moe_ctor is None:
-        raise RuntimeError("MoE is unavailable in this environment")
+        moe_config = {
+            "offload_path": os.path.join(args.offload_dir, args.model),
+            "device_memory_ratio": args.device_memory_ratio,
+        }
+        if args.enable_prefix_caching:
+            moe_config["enable_prefix_caching"] = True
 
-    moe_model = moe_ctor(args.model, moe_config)
-    engine_config = _build_engine_config(args=args, model=moe_model.model)
+        moe_module = importlib.import_module("moe_infinity")
+        moe_ctor = getattr(moe_module, "MoE", None)
+        if moe_ctor is None:
+            raise RuntimeError("MoE is unavailable in this environment")
 
-    initialized_engine = ContinuousBatchingEngine(
-        model=moe_model.model,
-        engine=moe_model.engine,
-        config=engine_config,
-        tokenizer=tokenizer,
-    )
-    if stream_manager is None:
-        stream_manager = StreamManager()
+        moe_model = moe_ctor(args.model, moe_config)
+        engine_config = _build_engine_config(args=args, model=moe_model.model)
 
-    engine = initialized_engine
-    configured_max_seq_length = engine_config.get("max_seq_length")
-    if isinstance(configured_max_seq_length, int):
-        runtime_max_seq_length = configured_max_seq_length
-    _ensure_engine_loop_running()
+        initialized_engine = ContinuousBatchingEngine(
+            model=moe_model.model,
+            engine=moe_model.engine,
+            config=engine_config,
+            tokenizer=tokenizer,
+        )
+        if stream_manager is None:
+            stream_manager = StreamManager()
+
+        engine = initialized_engine
+        configured_max_seq_length = engine_config.get("max_seq_length")
+        if isinstance(configured_max_seq_length, int):
+            runtime_max_seq_length = configured_max_seq_length
+
+        if _watchdog_config is not None:
+            _decode_watchdog = watchdog_module.start_decode_watchdog(
+                _health_state,
+                _watchdog_config,
+            )
+
+        _ensure_engine_loop_running()
+    finally:
+        if _startup_watchdog is not None:
+            _startup_watchdog.cancel()
+
     _health_state.set_healthy()
 
 
@@ -482,6 +524,7 @@ async def startup_event() -> None:
 async def shutdown_event() -> None:
     global _engine_task
     global _model_init_task
+    global _decode_watchdog
 
     if _model_init_task is not None:
         if not _model_init_task.done():
@@ -496,6 +539,12 @@ async def shutdown_event() -> None:
     if _engine_task is not None:
         await _engine_task
         _engine_task = None
+
+    if _decode_watchdog is not None:
+        _decode_watchdog.deactivate()
+        _decode_watchdog.stop()
+        _decode_watchdog.join(timeout=1.0)
+        _decode_watchdog = None
 
     if engine is not None:
         shutdown_fn = getattr(engine, "shutdown", None)
