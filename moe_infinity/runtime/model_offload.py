@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportCallIssue=false, reportUnannotatedClassAttribute=false, reportUninitializedInstanceVariable=false, reportPrivateUsage=false, reportPrivateLocalImportUsage=false, reportUnusedImport=false, reportUnusedCallResult=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportExplicitAny=false, reportAny=false, reportArgumentType=false, reportOperatorIssue=false, reportImplicitStringConcatenation=false, reportUnnecessaryComparison=false, reportUnreachable=false, reportMissingTypeArgument=false, reportDeprecated=false, reportGeneralTypeIssues=false
 # Copyright (c) EfficientMoE.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -69,6 +70,11 @@ from moe_infinity.utils.async_transfer import (
     wait_transfer,
 )
 from moe_infinity.utils.device import get_default_device, get_device
+from moe_infinity.utils.quantization import (
+    detect_quantization,
+    should_cast_tensor,
+    validate_quantization_support,
+)
 
 _prefetch_lib = None
 # Alias for compatibility
@@ -209,6 +215,7 @@ class OffloadEngine(object):
         self.config = config
 
         self.quant_method = None
+        self._quant_info = None
 
         # AttentionBackend scaffolding (no-op by default)
         # Set enable_attention_offload=True to activate (future work)
@@ -476,6 +483,16 @@ class OffloadEngine(object):
 
                 self.model_name = model_name = args[0]
 
+                checkpoint_path = self.ckpt_files[0] if self.ckpt_files else ""
+                checkpoint_dir = (
+                    os.path.dirname(checkpoint_path) if checkpoint_path else ""
+                )
+                self._quant_info = detect_quantization(
+                    self.config, checkpoint_dir
+                )
+                if self._quant_info is not None:
+                    validate_quantization_support(self._quant_info, model_name)
+
                 self.num_layers, self.num_experts, self.num_encoder_layers = (
                     parse_moe_param(self.config)
                 )
@@ -521,16 +538,7 @@ class OffloadEngine(object):
                         else:
                             state_dict = torch.load(ckpt)
 
-                        # convert all tensors in state_dict to self.dtype_cls
-                        for k, v in state_dict.items():
-                            try:
-                                state_dict[k] = v.to(self.dtype_cls).to("cpu")
-                            except Exception as e:
-                                print(
-                                    f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
-                                    flush=True,
-                                )
-                                raise
+                        self._cast_state_dict_tensors(state_dict)
 
                         self._offload_state_dict(state_dict, empty_state_dict)
 
@@ -575,20 +583,7 @@ class OffloadEngine(object):
 
                 base_model_prefix = model.base_model_prefix
 
-                if hasattr(self.config, "quantization_config"):
-                    self.quant_method = self.config.quantization_config[
-                        "quant_method"
-                    ]
-                    self.config.quantization_config["use_exllama"] = False
-                    self.config.quantization_config["disable_exllama"] = True
-                    if self.quant_method == "gptq":
-                        from optimum.gptq import GPTQQuantizer
-
-                        optimum_quantizer = GPTQQuantizer.from_dict(
-                            self.config.quantization_config
-                        )
-
-                        model = optimum_quantizer.convert_model(model)
+                model = self._apply_quantized_model_conversion(model)
 
                 self.expert_prefetcher = ExpertPrefetcher(self.config)
                 self.expert_prefetcher.set_archer_engine(self.archer_engine)
@@ -752,7 +747,16 @@ class OffloadEngine(object):
 
                 else:
                     match = re.match(r"(.*\.\d+\.)", name)
-                    last_number_position = match.end() - 2
+                    if match:
+                        last_number_position = match.end() - 2
+                    else:
+                        matches = [
+                            each_match
+                            for each_match in re.finditer(r"\d", name)
+                        ]
+                        last_number_position = (
+                            matches[-1].start() if matches else -1
+                        )
                     stored_name = name[: last_number_position + 1]
 
                     if stored_name in name_lst:
@@ -965,6 +969,104 @@ class OffloadEngine(object):
 
         gc.collect()
         torch.cuda.empty_cache()
+
+    def _cast_state_dict_tensors(
+        self, state_dict: Dict[str, torch.Tensor]
+    ) -> None:
+        for k, v in state_dict.items():
+            try:
+                if should_cast_tensor(k, self._quant_info):
+                    state_dict[k] = v.to(self.dtype_cls).to("cpu")
+                else:
+                    state_dict[k] = v.to("cpu")
+            except Exception as e:
+                print(
+                    f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
+                    flush=True,
+                )
+                raise
+
+    def _apply_quantized_model_conversion(self, model):
+        if self._quant_info is None:
+            return model
+
+        if self._quant_info.method == "gptq":
+            self.quant_method = "gptq"
+            quantization_config = getattr(
+                self.config, "quantization_config", None
+            )
+            if not isinstance(quantization_config, dict):
+                quantization_config = dict(self._quant_info.config_dict)
+                self.config.quantization_config = quantization_config
+
+            quantization_config.setdefault("quant_method", "gptq")
+            quantization_config["use_exllama"] = False
+            quantization_config["disable_exllama"] = True
+
+            try:
+                gptq_module = importlib.import_module("optimum.gptq")
+                GPTQQuantizer = getattr(gptq_module, "GPTQQuantizer")
+            except ImportError as e:
+                raise ImportError(
+                    "GPTQ model detected but 'optimum' is not installed. "
+                    "Install with: pip install optimum[gptq]"
+                ) from e
+
+            optimum_quantizer = GPTQQuantizer.from_dict(quantization_config)
+            return optimum_quantizer.convert_model(model)
+
+        if self._quant_info.method == "awq":
+            self.quant_method = "awq"
+            return self._convert_model_for_awq(model)
+
+        return model
+
+    def _convert_model_for_awq(self, model):
+        try:
+            awq_module = importlib.import_module("awq")
+        except ImportError as e:
+            raise ImportError(
+                "AWQ model detected but 'autoawq' is not installed. "
+                "Install with: pip install autoawq"
+            ) from e
+
+        replace_fn = getattr(awq_module, "replace_linear_modules", None)
+        if callable(replace_fn):
+            converted_model = replace_fn(model)
+            return converted_model if converted_model is not None else model
+
+        autoawq_cls = getattr(awq_module, "AutoAWQForCausalLM", None)
+        if autoawq_cls is not None:
+            for fn_name in ("replace_linear_modules", "convert_model"):
+                autoawq_fn = getattr(autoawq_cls, fn_name, None)
+                if callable(autoawq_fn):
+                    converted_model = autoawq_fn(model)
+                    return (
+                        converted_model
+                        if converted_model is not None
+                        else model
+                    )
+
+        try:
+            awq_linear_module = importlib.import_module("awq.modules.linear")
+        except Exception:
+            awq_linear_module = None
+
+        if awq_linear_module is not None:
+            for fn_name in (
+                "replace_linear_modules",
+                "replace_with_awq_linear",
+            ):
+                linear_replace_fn = getattr(awq_linear_module, fn_name, None)
+                if callable(linear_replace_fn):
+                    converted_model = linear_replace_fn(model)
+                    return (
+                        converted_model
+                        if converted_model is not None
+                        else model
+                    )
+
+        return model
 
     @torch.no_grad()
     def _capture_kv_cache(self, seq_id: int, past_key_values):

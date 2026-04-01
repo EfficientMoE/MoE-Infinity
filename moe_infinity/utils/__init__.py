@@ -15,11 +15,17 @@ from .hf_config import (
     parse_expert_id,
     parse_moe_param,
 )
+from .quantization import (
+    QuantizationInfo,
+    detect_quantization,
+    validate_quantization_support,
+)
 
 __all__ = [
     "ArcherConfig",
     "async_d2h",
     "async_h2d",
+    "detect_quantization",
     "DeviceConfig",
     "get_checkpoint_paths",
     "get_default_device",
@@ -30,6 +36,8 @@ __all__ = [
     "parse_expert_dtype",
     "parse_expert_id",
     "parse_moe_param",
+    "QuantizationInfo",
+    "validate_quantization_support",
     "wait_transfer",
     "to_device",
 ]
