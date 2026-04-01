@@ -103,18 +103,9 @@ class _MockOffloadEngine:
 
 def _make_engine() -> ContinuousBatchingEngine:
     with (
-        patch(
-            "moe_infinity.serving.engine.torch.cuda.is_available",
-            return_value=False,
-        ),
-        patch(
-            "moe_infinity.serving.model_runner.torch.cuda.is_available",
-            return_value=False,
-        ),
-        patch(
-            "moe_infinity.serving.kv_cache.torch.cuda.is_available",
-            return_value=False,
-        ),
+        patch.object(torch.cuda, "is_available", return_value=False),
+        patch.object(torch.cuda, "is_available", return_value=False),
+        patch.object(torch.cuda, "is_available", return_value=False),
     ):
         return ContinuousBatchingEngine(
             model=_MockModel(),

@@ -1,5 +1,6 @@
 # pyright: reportUnknownMemberType=false, reportUnknownParameterType=false, reportMissingParameterType=false
 
+import os
 import time
 from unittest.mock import patch
 
@@ -36,7 +37,7 @@ def test_cancel_on_ready() -> None:
     assert health.get_status_dict() == {"status": "starting", "reason": None}
 
 
-@patch("moe_infinity.serving.watchdog.os._exit")
+@patch.object(os, "_exit")
 def test_timeout_triggers_unhealthy(mock_exit) -> None:
     health = ServerHealthState()
     config = WatchdogConfig(startup_timeout=0.1)
