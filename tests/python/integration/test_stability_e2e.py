@@ -327,6 +327,7 @@ def test_v1_responses_include_deprecation_header() -> None:
     v1_module: Any = importlib.import_module(
         "moe_infinity.entrypoints.openai.api_server"
     )
+    v1_module = importlib.reload(v1_module)
 
     async def _fake_submit_generation(**_: Any) -> dict[str, Any]:
         return {
