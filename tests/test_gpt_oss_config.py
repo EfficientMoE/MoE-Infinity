@@ -1,6 +1,20 @@
 from unittest.mock import MagicMock
 
 
+def import_constants_module():
+    import importlib.machinery
+    import sys
+    import types
+
+    module = types.ModuleType("flash_attn")
+    module.__spec__ = importlib.machinery.ModuleSpec("flash_attn", loader=None)
+    sys.modules["flash_attn"] = module
+
+    from moe_infinity.common import constants
+
+    return constants
+
+
 def make_gpt_oss_config():
     cfg = MagicMock()
     cfg.architectures = ["GptOssForCausalLM"]
@@ -54,3 +68,34 @@ def test_parse_expert_id_gpt_oss_down_proj():
     )
     assert layer_id == 11
     assert expert_id is None
+
+
+def test_gpt_oss_model_mapping():
+    MODEL_MAPPING_NAMES = import_constants_module().MODEL_MAPPING_NAMES
+    from transformers import GptOssForCausalLM
+
+    assert (
+        "gptoss" in MODEL_MAPPING_NAMES
+    ), "gptoss key missing from MODEL_MAPPING_NAMES"
+    assert MODEL_MAPPING_NAMES["gptoss"] is GptOssForCausalLM
+
+
+def test_gpt_oss_model_type():
+    MODEL_MAPPING_TYPES = import_constants_module().MODEL_MAPPING_TYPES
+
+    assert (
+        "gptoss" in MODEL_MAPPING_TYPES
+    ), "gptoss key missing from MODEL_MAPPING_TYPES"
+    assert MODEL_MAPPING_TYPES["gptoss"] == 4
+
+
+def test_gpt_oss_arch_string_matching():
+    MODEL_MAPPING_NAMES = import_constants_module().MODEL_MAPPING_NAMES
+
+    arch_str = "gptossforcausallm"
+    matched = None
+    for k in MODEL_MAPPING_NAMES:
+        if k in arch_str:
+            matched = k
+            break
+    assert matched == "gptoss", f"Expected 'gptoss' to match, got: {matched}"
