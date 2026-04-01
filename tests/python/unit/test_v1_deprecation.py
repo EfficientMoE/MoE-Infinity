@@ -5,7 +5,14 @@ import importlib
 import sys
 from unittest import mock
 
-from fastapi.testclient import TestClient
+import pytest
+
+try:
+    from fastapi.testclient import TestClient
+except TypeError:
+    pytest.skip(
+        "Pydantic v1 incompatible with Python 3.12+", allow_module_level=True
+    )
 
 MODULE_NAME = "moe_infinity.entrypoints.openai.api_server"
 
