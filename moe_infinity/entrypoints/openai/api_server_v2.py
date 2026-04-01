@@ -71,6 +71,7 @@ except Exception:
     uvicorn = SimpleNamespace(run=lambda *args, **kwargs: None)
 
 from moe_infinity.serving.engine import ContinuousBatchingEngine, RequestOutput
+from moe_infinity.serving.health import ServerHealthState
 from moe_infinity.serving.sequence import SamplingParams
 from moe_infinity.serving.stream import StreamManager
 
@@ -100,6 +101,7 @@ _engine_task: Optional[asyncio.Task[None]] = None
 _engine_shutdown_event: Optional[asyncio.Event] = None
 _model_init_task: Optional[asyncio.Task[None]] = None
 _startup_args: Optional[argparse.Namespace] = None
+_health_state = ServerHealthState()
 
 
 def parse_prompt_format(prompt: Any) -> tuple[bool, list[Any]]:
@@ -403,6 +405,7 @@ def _ensure_engine_loop_running() -> None:
 
 async def _initialize_model() -> None:
     global engine
+    global _health_state
     global stream_manager
     global tokenizer
     global model_name_global
@@ -410,6 +413,8 @@ async def _initialize_model() -> None:
     args = _startup_args
     if args is None or engine is not None:
         return
+
+    _health_state.set_starting()
 
     from transformers import AutoTokenizer
 
@@ -445,6 +450,7 @@ async def _initialize_model() -> None:
 
     engine = initialized_engine
     _ensure_engine_loop_running()
+    _health_state.set_healthy()
 
 
 @app.on_event("startup")
@@ -491,7 +497,10 @@ async def shutdown_event() -> None:
 
 @app.get("/health")
 async def health() -> Response:
-    return Response(status_code=200)
+    status_dict = _health_state.get_status_dict()
+    is_healthy = _health_state.is_healthy()
+    status_code = 200 if is_healthy else 503
+    return JSONResponse(content=status_dict, status_code=status_code)
 
 
 @app.post("/v1/completions")
