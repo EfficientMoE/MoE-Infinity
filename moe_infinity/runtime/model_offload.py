@@ -725,11 +725,13 @@ class OffloadEngine(object):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
                         self.expert_modules.append(module)
-                        module.expert_executor = self.expert_executor
-                        module.expert_prefetcher = self.expert_prefetcher
-                        module.expert_tracer = self.expert_tracer
-                        module.expert_predictor = self.expert_predictor
-                        module.expert_tensor_map = self.expert_tensor_map
+
+                        if not isinstance(module, SyncGptOssMLP):
+                            module.expert_executor = self.expert_executor
+                            module.expert_prefetcher = self.expert_prefetcher
+                            module.expert_tracer = self.expert_tracer
+                            module.expert_predictor = self.expert_predictor
+                            module.expert_tensor_map = self.expert_tensor_map
 
                         module.lib = self.prefetch_lib
 
@@ -956,7 +958,7 @@ class OffloadEngine(object):
                 key = key.split(".")[0]
                 output_device_index = 0
 
-            if "expert" in key:
+            if "expert" in key and self.config.model_type != "gpt_oss":
                 for expert_idx, expert_tensors in enumerate(tensors):
                     expert_key = (
                         f"{key}.expert_{expert_idx}"
