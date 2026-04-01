@@ -45,6 +45,7 @@ from moe_infinity.models import (
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
+    SyncGptOssMLP,
     SyncGrokMoeBlock,
     SyncJambaMoEBlock,
     SyncMixtralSparseMoeBlock,
@@ -668,6 +669,7 @@ class OffloadEngine(object):
                         or isinstance(module, SyncDeepseekV3MoEBlock)
                         or isinstance(module, Qwen3MoEBlock)
                         or isinstance(module, SyncDbrxFFNBlock)
+                        or isinstance(module, SyncGptOssMLP)
                         or isinstance(module, SyncOlmoeMoEBlock)
                         or isinstance(module, SyncJambaMoEBlock)
                     ):
