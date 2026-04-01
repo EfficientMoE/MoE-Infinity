@@ -36,10 +36,10 @@ def test_sync_gpt_oss_mlp_forward_shape():
     config.num_experts_per_tok = 2
 
     mlp = SyncGptOssMLP(config)
-    torch.nn.init.normal_(mlp.gate_up_proj)
-    torch.nn.init.normal_(mlp.down_proj)
-    torch.nn.init.zeros_(mlp.gate_up_proj_bias)
-    torch.nn.init.zeros_(mlp.down_proj_bias)
+    torch.nn.init.normal_(mlp.experts.gate_up_proj)
+    torch.nn.init.normal_(mlp.experts.down_proj)
+    torch.nn.init.zeros_(mlp.experts.gate_up_proj_bias)
+    torch.nn.init.zeros_(mlp.experts.down_proj_bias)
     torch.nn.init.normal_(mlp.router.weight)
     torch.nn.init.zeros_(mlp.router.bias)
 

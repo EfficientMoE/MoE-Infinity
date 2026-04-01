@@ -46,21 +46,26 @@ def test_sync_gpt_oss_mlp_instantiation():
     assert hasattr(mlp, "expert_tensor_ids"), "Must have expert_tensor_ids"
     assert hasattr(mlp, "layer_id"), "Must have layer_id"
 
-    assert hasattr(mlp, "gate_up_proj"), "Must have gate_up_proj parameter"
-    assert hasattr(mlp, "down_proj"), "Must have down_proj parameter"
+    assert hasattr(mlp, "experts"), "Must have experts submodule"
+    assert hasattr(
+        mlp.experts, "gate_up_proj"
+    ), "Must have experts.gate_up_proj parameter"
+    assert hasattr(
+        mlp.experts, "down_proj"
+    ), "Must have experts.down_proj parameter"
     assert hasattr(mlp, "router"), "Must have router"
 
     E, H, I = 4, 64, 64
-    assert mlp.gate_up_proj.shape == (
+    assert mlp.experts.gate_up_proj.shape == (
         E,
         H,
         2 * I,
-    ), f"Expected ({E}, {H}, {2 * I}), got {mlp.gate_up_proj.shape}"
-    assert mlp.down_proj.shape == (
+    ), f"Expected ({E}, {H}, {2 * I}), got {mlp.experts.gate_up_proj.shape}"
+    assert mlp.experts.down_proj.shape == (
         E,
         I,
         H,
-    ), f"Expected ({E}, {I}, {H}), got {mlp.down_proj.shape}"
+    ), f"Expected ({E}, {I}, {H}), got {mlp.experts.down_proj.shape}"
 
 
 def test_sync_gpt_oss_mlp_swiglu_activation():

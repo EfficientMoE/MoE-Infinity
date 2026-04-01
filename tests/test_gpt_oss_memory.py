@@ -17,8 +17,16 @@ def test_sync_gpt_oss_mlp_packed_param_count():
     mlp = SyncGptOssMLP(config)
     experts, hidden, intermediate = 8, 64, 64
 
-    assert mlp.gate_up_proj.shape == (experts, hidden, 2 * intermediate)
-    assert mlp.down_proj.shape == (experts, intermediate, hidden)
+    assert mlp.experts.gate_up_proj.shape == (
+        experts,
+        hidden,
+        2 * intermediate,
+    )
+    assert mlp.experts.down_proj.shape == (
+        experts,
+        intermediate,
+        hidden,
+    )
 
     total_expert_params = experts * (
         hidden * 2 * intermediate

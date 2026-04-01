@@ -7,6 +7,25 @@ import torch.nn.functional as F
 from moe_infinity.utils import ArcherConfig
 
 
+class _PackedExperts(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        num_experts = config.num_local_experts
+        hidden = config.hidden_size
+        intermediate = config.intermediate_size
+
+        self.gate_up_proj = nn.Parameter(
+            torch.empty(num_experts, hidden, 2 * intermediate)
+        )
+        self.gate_up_proj_bias = nn.Parameter(
+            torch.empty(num_experts, 2 * intermediate)
+        )
+        self.down_proj = nn.Parameter(
+            torch.empty(num_experts, intermediate, hidden)
+        )
+        self.down_proj_bias = nn.Parameter(torch.empty(num_experts, hidden))
+
+
 class SyncGptOssMLP(nn.Module):
     archer_config: Optional[ArcherConfig] = None
     layer_id: Optional[int] = None
@@ -21,23 +40,7 @@ class SyncGptOssMLP(nn.Module):
         self.swiglu_limit = 7.0
 
         self.router = nn.Linear(self.hidden_size, self.num_experts, bias=True)
-
-        self.gate_up_proj = nn.Parameter(
-            torch.empty(
-                self.num_experts, self.hidden_size, 2 * self.intermediate_size
-            )
-        )
-        self.gate_up_proj_bias = nn.Parameter(
-            torch.empty(self.num_experts, 2 * self.intermediate_size)
-        )
-        self.down_proj = nn.Parameter(
-            torch.empty(
-                self.num_experts, self.intermediate_size, self.hidden_size
-            )
-        )
-        self.down_proj_bias = nn.Parameter(
-            torch.empty(self.num_experts, self.hidden_size)
-        )
+        self.experts = _PackedExperts(config)
 
         self.expert_executor = None
         self.archer_tracer = None
@@ -52,10 +55,10 @@ class SyncGptOssMLP(nn.Module):
     def _expert_forward(
         self, hidden_states: torch.Tensor, expert_idx: int
     ) -> torch.Tensor:
-        gate_up_w = self.gate_up_proj[expert_idx]
-        gate_up_b = self.gate_up_proj_bias[expert_idx]
-        down_w = self.down_proj[expert_idx]
-        down_b = self.down_proj_bias[expert_idx]
+        gate_up_w = self.experts.gate_up_proj[expert_idx]
+        gate_up_b = self.experts.gate_up_proj_bias[expert_idx]
+        down_w = self.experts.down_proj[expert_idx]
+        down_b = self.experts.down_proj_bias[expert_idx]
 
         gate_up = F.linear(hidden_states, gate_up_w.t(), gate_up_b)
         gate, up = gate_up[..., ::2], gate_up[..., 1::2]

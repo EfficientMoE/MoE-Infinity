@@ -578,6 +578,16 @@ class OffloadEngine(object):
                         gc.collect()
                         torch.cuda.empty_cache()
 
+                    if is_mxfp4_quantized(self.config):
+                        blocks_aliases = {}
+                        for key in list(self.name_id_map.keys()):
+                            if key.endswith("_blocks"):
+                                base_name = key[: -len("_blocks")]
+                                blocks_aliases[base_name] = self.name_id_map[
+                                    key
+                                ]
+                        self.name_id_map.update(blocks_aliases)
+
                     with open(name_id_map_file, "w") as f:
                         json.dump(self.name_id_map, f)
                     _write_model_signature(
