@@ -15,6 +15,13 @@ class _ConfigWithQuantization(Protocol):
     def quantization_config(self) -> Optional[_QuantizationConfigLike]: ...
 
 
+def _get_quant_field(quant_config, field: str):
+    """Get a field from quantization_config, handling both dict and object."""
+    if isinstance(quant_config, dict):
+        return quant_config.get(field)
+    return getattr(quant_config, field, None)
+
+
 def is_mxfp4_quantized(config: _ConfigWithQuantization) -> bool:
     try:
         quant_config = config.quantization_config
@@ -22,7 +29,7 @@ def is_mxfp4_quantized(config: _ConfigWithQuantization) -> bool:
         return False
     if quant_config is None:
         return False
-    return quant_config.quant_method == "mxfp4"
+    return _get_quant_field(quant_config, "quant_method") == "mxfp4"
 
 
 def get_mxfp4_modules_to_not_convert(
@@ -34,7 +41,7 @@ def get_mxfp4_modules_to_not_convert(
         return []
     if quant_config is None:
         return []
-    modules = quant_config.modules_to_not_convert
+    modules = _get_quant_field(quant_config, "modules_to_not_convert")
     if modules is None:
         return []
     if isinstance(modules, str):
