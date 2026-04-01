@@ -99,3 +99,27 @@ def test_gpt_oss_arch_string_matching():
             matched = k
             break
     assert matched == "gptoss", f"Expected 'gptoss' to match, got: {matched}"
+
+
+def test_gpt_oss_flash_attn_excluded_in_big_modeling():
+    import re
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "moe_infinity"
+        / "entrypoints"
+        / "big_modeling.py"
+    )
+    content = source.read_text(encoding="utf-8")
+
+    exclusion_pattern = (
+        r"if\s*\([\s\S]*arch\s*==\s*\"deepseek\"[\s\S]*"
+        r"arch\s*==\s*\"deepseek_v3\"[\s\S]*"
+        r"arch\s*==\s*\"nllb\"[\s\S]*"
+        r"arch\s*==\s*\"gptoss\"[\s\S]*\):\s*"
+        r"is_flash_attn_available\s*=\s*False"
+    )
+    assert re.search(
+        exclusion_pattern, content
+    ), "big_modeling.py must exclude gptoss from flash attention"
