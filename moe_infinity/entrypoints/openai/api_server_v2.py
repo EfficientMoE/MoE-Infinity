@@ -7,7 +7,7 @@ import time
 from contextlib import suppress
 from threading import Event
 from types import SimpleNamespace
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 try:
     fastapi = importlib.import_module("fastapi")
@@ -160,15 +160,10 @@ def _build_sampling_params(
     max_tokens: Optional[int],
     stop: Any,
 ) -> SamplingParams:
-    resolved_max_tokens = (
-        int(max_tokens)
-        if isinstance(max_tokens, int) and max_tokens > 0
-        else SamplingParams().max_tokens
-    )
     return SamplingParams(
         temperature=float(temperature) if temperature is not None else 1.0,
         top_p=float(top_p) if top_p is not None else 1.0,
-        max_tokens=resolved_max_tokens,
+        max_tokens=cast(int, max_tokens),
         stop=_extract_stop_sequences(stop),
     )
 

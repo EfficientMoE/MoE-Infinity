@@ -160,7 +160,7 @@ class CompletionRequest(BaseModel):
     # a string, array of strings, array of tokens, or array of token arrays
     prompt: Union[List[int], List[List[int]], str, List[str]]
     suffix: Optional[str] = None
-    max_tokens: Optional[int] = 1024
+    max_tokens: Optional[int] = None
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
