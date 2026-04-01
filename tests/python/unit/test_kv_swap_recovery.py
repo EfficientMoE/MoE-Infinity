@@ -108,4 +108,4 @@ def test_free_gpu_blocks_preserves_cpu_buffer() -> None:
 
     assert 33 in swapped_cpu_buffers
     assert 33 in sequence_tables
-    assert kv_cache.get_block_table(33)
+    assert kv_cache.get_block_table(33) == []

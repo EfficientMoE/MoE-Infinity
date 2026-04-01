@@ -180,7 +180,8 @@ class PagedKVCache:
         if seq_id not in self._sequence_tables:
             return
 
-        return
+        block_table = self._sequence_tables[seq_id]
+        block_table.release()
 
     def get_block_table(self, seq_id: int) -> list[int]:
         block_table = self._require_sequence(seq_id)
