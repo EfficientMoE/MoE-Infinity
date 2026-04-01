@@ -55,10 +55,11 @@ class SyncGptOssMLP(nn.Module):
     def _expert_forward(
         self, hidden_states: torch.Tensor, expert_idx: int
     ) -> torch.Tensor:
-        gate_up_w = self.experts.gate_up_proj[expert_idx]
-        gate_up_b = self.experts.gate_up_proj_bias[expert_idx]
-        down_w = self.experts.down_proj[expert_idx]
-        down_b = self.experts.down_proj_bias[expert_idx]
+        device = hidden_states.device
+        gate_up_w = self.experts.gate_up_proj[expert_idx].to(device)
+        gate_up_b = self.experts.gate_up_proj_bias[expert_idx].to(device)
+        down_w = self.experts.down_proj[expert_idx].to(device)
+        down_b = self.experts.down_proj_bias[expert_idx].to(device)
 
         gate_up = F.linear(hidden_states, gate_up_w.t(), gate_up_b)
         gate, up = gate_up[..., ::2], gate_up[..., 1::2]
