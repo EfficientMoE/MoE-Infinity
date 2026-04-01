@@ -64,6 +64,8 @@ def test_swap_recovery_lifecycle() -> None:
     assert 1 in preempt_cycle.preempted_seq_ids
     assert group1.sequences[0].status is SequenceStatus.SWAPPED
 
+    scheduler.update_after_step(completed_seq_ids=[2], new_decode_seq_ids=[])
+
     recovery_cycle = scheduler.schedule()
     assert group1.sequences[0].status is SequenceStatus.DECODE
     assert 1 in recovery_cycle.decode_seq_ids
@@ -108,4 +110,5 @@ def test_free_gpu_blocks_preserves_cpu_buffer() -> None:
 
     assert 33 in swapped_cpu_buffers
     assert 33 in sequence_tables
-    assert kv_cache.get_block_table(33)
+    assert kv_cache.get_block_table(33) == []
+    assert kv_cache.block_allocator.num_free_blocks == kv_cache.num_blocks
