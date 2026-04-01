@@ -466,6 +466,11 @@ class OffloadEngine(object):
             SyncDeepseekV3MoEBlock
         )
 
+        transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp = (
+            transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP
+        )
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = SyncGptOssMLP
+
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
         ) -> Callable:
@@ -719,6 +724,10 @@ class OffloadEngine(object):
         PreTrainedModel.post_init = PreTrainedModel._old_post_init
 
         deactivate_empty_init()
+
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
+            transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
+        )
 
     def get_topology(self, model):
         name_lst = []
@@ -1249,3 +1258,6 @@ class OffloadEngine(object):
 
         transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
+            transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
+        )
