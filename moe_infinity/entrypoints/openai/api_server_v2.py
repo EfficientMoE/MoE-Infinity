@@ -74,6 +74,13 @@ from moe_infinity.serving.engine import ContinuousBatchingEngine, RequestOutput
 from moe_infinity.serving.health import ServerHealthState
 from moe_infinity.serving.sequence import SamplingParams
 from moe_infinity.serving.stream import StreamManager
+from moe_infinity.serving.validation import (
+    ContextLengthExceededError,
+    InvalidRequestError,
+    validate_context_length,
+    validate_required_params,
+    validate_sampling_params,
+)
 
 from .protocol import (
     ChatCompletionRequest,
@@ -86,6 +93,7 @@ from .protocol import (
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
     UsageInfo,
+    create_error_response,
     random_uuid,
 )
 
@@ -96,6 +104,7 @@ engine: Optional[ContinuousBatchingEngine] = None
 stream_manager: Optional[StreamManager] = None
 tokenizer: Optional[object] = None
 model_name_global: Optional[str] = None
+runtime_max_seq_length: int = 4096
 
 _engine_task: Optional[asyncio.Task[None]] = None
 _engine_shutdown_event: Optional[asyncio.Event] = None
@@ -401,6 +410,7 @@ def _ensure_engine_loop_running() -> None:
 async def _initialize_model() -> None:
     global engine
     global _health_state
+    global runtime_max_seq_length
     global stream_manager
     global tokenizer
     global model_name_global
@@ -444,6 +454,9 @@ async def _initialize_model() -> None:
         stream_manager = StreamManager()
 
     engine = initialized_engine
+    configured_max_seq_length = engine_config.get("max_seq_length")
+    if isinstance(configured_max_seq_length, int):
+        runtime_max_seq_length = configured_max_seq_length
     _ensure_engine_loop_running()
     _health_state.set_healthy()
 
@@ -501,22 +514,43 @@ async def health() -> Response:
 @app.post("/v1/completions")
 async def completion(request: CompletionRequest, raw_request: Request):
     if engine is None:
-        return JSONResponse(
+        return create_error_response(
             status_code=503,
-            content={
-                "error": {
-                    "message": "Service is starting. Please retry shortly.",
-                    "type": "server_error",
-                    "code": "service_starting",
-                }
-            },
+            message="Service is starting. Please retry shortly.",
+            error_type="server_error",
+            code="service_starting",
         )
 
     runtime_engine, runtime_stream_manager = _ensure_runtime_ready()
     created_time = int(time.monotonic())
     model_name = request.model or model_name_global or "unknown"
 
-    prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
+    try:
+        validate_required_params(request.max_tokens)
+        validate_sampling_params(
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=request.max_tokens,
+        )
+    except InvalidRequestError as exc:
+        return create_error_response(
+            status_code=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            param=exc.param,
+        )
+
+    try:
+        prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
+    except ValueError as exc:
+        return create_error_response(
+            status_code=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
     sampling_params = _build_sampling_params(
         temperature=request.temperature,
         top_p=request.top_p,
@@ -526,11 +560,11 @@ async def completion(request: CompletionRequest, raw_request: Request):
 
     if request.stream:
         if len(prompts) != 1:
-            return JSONResponse(
+            return create_error_response(
                 status_code=400,
-                content={
-                    "error": "streaming completion only supports a single prompt"
-                },
+                message="streaming completion only supports a single prompt",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
             )
 
         request_id = random_uuid()
@@ -539,6 +573,20 @@ async def completion(request: CompletionRequest, raw_request: Request):
             prompt_token_ids = [int(token_id) for token_id in prompt]
         else:
             prompt_token_ids = _tokenize_text(str(prompt))
+
+        try:
+            validate_context_length(
+                len(prompt_token_ids),
+                cast(int, request.max_tokens),
+                runtime_max_seq_length,
+            )
+        except ContextLengthExceededError as exc:
+            return create_error_response(
+                status_code=400,
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="context_length_exceeded",
+            )
 
         stream = runtime_stream_manager.create_stream(
             request_id=request_id,
@@ -582,6 +630,20 @@ async def completion(request: CompletionRequest, raw_request: Request):
         else:
             prompt_token_ids = _tokenize_text(str(prompt))
 
+        try:
+            validate_context_length(
+                len(prompt_token_ids),
+                cast(int, request.max_tokens),
+                runtime_max_seq_length,
+            )
+        except ContextLengthExceededError as exc:
+            return create_error_response(
+                status_code=400,
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="context_length_exceeded",
+            )
+
         output_text, usage = await _wait_non_stream_result(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
@@ -616,21 +678,33 @@ async def completion(request: CompletionRequest, raw_request: Request):
 @app.post("/v1/chat/completions")
 async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
     if engine is None:
-        return JSONResponse(
+        return create_error_response(
             status_code=503,
-            content={
-                "error": {
-                    "message": "Service is starting. Please retry shortly.",
-                    "type": "server_error",
-                    "code": "service_starting",
-                }
-            },
+            message="Service is starting. Please retry shortly.",
+            error_type="server_error",
+            code="service_starting",
         )
 
     runtime_engine, runtime_stream_manager = _ensure_runtime_ready()
     created_time = int(time.monotonic())
     model_name = request.model or model_name_global or "unknown"
     request_id = random_uuid()
+
+    try:
+        validate_required_params(request.max_tokens)
+        validate_sampling_params(
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=request.max_tokens,
+        )
+    except InvalidRequestError as exc:
+        return create_error_response(
+            status_code=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            param=exc.param,
+        )
 
     sampling_params = _build_sampling_params(
         temperature=request.temperature,
@@ -639,6 +713,20 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
         stop=request.stop,
     )
     prompt_token_ids = _chat_prompt_to_token_ids(request)
+
+    try:
+        validate_context_length(
+            len(prompt_token_ids),
+            cast(int, request.max_tokens),
+            runtime_max_seq_length,
+        )
+    except ContextLengthExceededError as exc:
+        return create_error_response(
+            status_code=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="context_length_exceeded",
+        )
 
     if request.stream:
         stream = runtime_stream_manager.create_stream(
@@ -742,6 +830,14 @@ def _build_engine_config(
         "n_head_kv",
     )
     hidden_size = _resolve_int_attr(model_config, "hidden_size", "n_embd")
+    max_seq_length = _resolve_int_attr(
+        model_config,
+        "max_position_embeddings",
+        "max_seq_len",
+        "max_sequence_length",
+        "n_positions",
+        "model_max_length",
+    )
     head_dim = _resolve_int_attr(model_config, "head_dim")
 
     if num_layers is None:
@@ -772,6 +868,7 @@ def _build_engine_config(
         "kv_cache_ratio": args.kv_cache_ratio,
         "max_batch_size": args.max_batch_size,
         "max_tokens_per_step": 2048,
+        "max_seq_length": max_seq_length or 4096,
         "block_size": 16,
         "num_layers": num_layers,
         "num_kv_heads": num_kv_heads,
