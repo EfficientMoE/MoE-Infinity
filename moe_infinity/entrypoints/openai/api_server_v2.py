@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import time
+from contextlib import suppress
 from threading import Event
 from types import SimpleNamespace
 from typing import Any, Literal, Optional
@@ -97,6 +98,8 @@ model_name_global: Optional[str] = None
 
 _engine_task: Optional[asyncio.Task[None]] = None
 _engine_shutdown_event: Optional[asyncio.Event] = None
+_model_init_task: Optional[asyncio.Task[None]] = None
+_startup_args: Optional[argparse.Namespace] = None
 
 
 def parse_prompt_format(prompt: Any) -> tuple[bool, list[Any]]:
@@ -384,14 +387,9 @@ async def _engine_loop() -> None:
         await asyncio.sleep(0.005)
 
 
-@app.on_event("startup")
-async def startup_event() -> None:
+def _ensure_engine_loop_running() -> None:
     global _engine_task
     global _engine_shutdown_event
-    global stream_manager
-
-    if stream_manager is None:
-        stream_manager = StreamManager()
 
     if engine is None:
         return
@@ -403,9 +401,80 @@ async def startup_event() -> None:
         _engine_task = asyncio.create_task(_engine_loop())
 
 
+async def _initialize_model() -> None:
+    global engine
+    global stream_manager
+    global tokenizer
+    global model_name_global
+
+    args = _startup_args
+    if args is None or engine is not None:
+        return
+
+    from transformers import AutoTokenizer
+
+    model_name_global = args.model
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        trust_remote_code=True,
+    )
+
+    moe_config = {
+        "offload_path": os.path.join(args.offload_dir, args.model),
+        "device_memory_ratio": args.device_memory_ratio,
+    }
+    if args.enable_prefix_caching:
+        moe_config["enable_prefix_caching"] = True
+
+    moe_module = importlib.import_module("moe_infinity")
+    moe_ctor = getattr(moe_module, "MoE", None)
+    if moe_ctor is None:
+        raise RuntimeError("MoE is unavailable in this environment")
+
+    moe_model = moe_ctor(args.model, moe_config)
+    engine_config = _build_engine_config(args=args, model=moe_model.model)
+
+    initialized_engine = ContinuousBatchingEngine(
+        model=moe_model.model,
+        engine=moe_model.engine,
+        config=engine_config,
+        tokenizer=tokenizer,
+    )
+    if stream_manager is None:
+        stream_manager = StreamManager()
+
+    engine = initialized_engine
+    _ensure_engine_loop_running()
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    global _model_init_task
+    global _engine_task
+    global stream_manager
+
+    if stream_manager is None:
+        stream_manager = StreamManager()
+
+    if _startup_args is not None and engine is None:
+        if _model_init_task is None or _model_init_task.done():
+            _model_init_task = asyncio.create_task(_initialize_model())
+        return
+
+    _ensure_engine_loop_running()
+
+
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     global _engine_task
+    global _model_init_task
+
+    if _model_init_task is not None:
+        if not _model_init_task.done():
+            _model_init_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _model_init_task
+        _model_init_task = None
 
     if _engine_shutdown_event is not None:
         _engine_shutdown_event.set()
@@ -427,6 +496,18 @@ async def health() -> Response:
 
 @app.post("/v1/completions")
 async def completion(request: CompletionRequest, raw_request: Request):
+    if engine is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "message": "Service is starting. Please retry shortly.",
+                    "type": "server_error",
+                    "code": "service_starting",
+                }
+            },
+        )
+
     runtime_engine, runtime_stream_manager = _ensure_runtime_ready()
     created_time = int(time.monotonic())
     model_name = request.model or model_name_global or "unknown"
@@ -530,6 +611,18 @@ async def completion(request: CompletionRequest, raw_request: Request):
 
 @app.post("/v1/chat/completions")
 async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
+    if engine is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "message": "Service is starting. Please retry shortly.",
+                    "type": "server_error",
+                    "code": "service_starting",
+                }
+            },
+        )
+
     runtime_engine, runtime_stream_manager = _ensure_runtime_ready()
     created_time = int(time.monotonic())
     model_name = request.model or model_name_global or "unknown"
@@ -704,38 +797,8 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    from transformers import AutoTokenizer
-
     args = parse_args()
-
-    model_name_global = args.model
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model,
-        trust_remote_code=True,
-    )
-
-    moe_config = {
-        "offload_path": os.path.join(args.offload_dir, args.model),
-        "device_memory_ratio": args.device_memory_ratio,
-    }
-    if args.enable_prefix_caching:
-        moe_config["enable_prefix_caching"] = True
-
-    moe_module = importlib.import_module("moe_infinity")
-    moe_ctor = getattr(moe_module, "MoE", None)
-    if moe_ctor is None:
-        raise RuntimeError("MoE is unavailable in this environment")
-
-    moe_model = moe_ctor(args.model, moe_config)
-    engine_config = _build_engine_config(args=args, model=moe_model.model)
-
-    engine = ContinuousBatchingEngine(
-        model=moe_model.model,
-        engine=moe_model.engine,
-        config=engine_config,
-        tokenizer=tokenizer,
-    )
-    stream_manager = StreamManager()
+    _startup_args = args
 
     uvicorn.run(
         app,
