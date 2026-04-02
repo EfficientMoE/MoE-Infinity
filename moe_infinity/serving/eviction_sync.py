@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import threading
+from enum import Enum
 from typing import Optional, Protocol
 
 
 class _CPMiddlewareLike(Protocol):
     def on_request_complete(self, request_id: str) -> None: ...
+
+
+class EvictionEvent(Enum):
+    COMPLETED = "completed"
+    ABORTED = "aborted"
+    FREED = "freed"
+    SWAPPED = "swapped"
 
 
 class EvictionSyncAdapter:
@@ -17,22 +25,25 @@ class EvictionSyncAdapter:
         self._evict_incoming: int = 0
         self._evict_removed: int = 0
         self._evict_not_found: int = 0
+        self._event_counters: dict[EvictionEvent, int] = {
+            event: 0 for event in EvictionEvent
+        }
 
     def on_request_finished(self, request_id: str) -> None:
         """Terminal completion — CP index should be evicted."""
-        self._evict_request(request_id)
+        self._handle_event(request_id, EvictionEvent.COMPLETED)
 
     def on_request_aborted(self, request_id: str) -> None:
         """Terminal abort — CP index should be evicted."""
-        self._evict_request(request_id)
+        self._handle_event(request_id, EvictionEvent.ABORTED)
 
     def on_kv_blocks_freed(self, request_id: str) -> None:
         """True KV deallocation — CP index should be evicted."""
-        self._evict_request(request_id)
+        self._handle_event(request_id, EvictionEvent.FREED)
 
     def on_kv_blocks_swapped(self, request_id: str) -> None:
         """Swap-out only — NO CP action (blocks recoverable)."""
-        _ = request_id
+        self._handle_event(request_id, EvictionEvent.SWAPPED)
 
     def get_counters(self) -> dict[str, int]:
         """Returns: evict_incoming, evict_removed, evict_not_found."""
@@ -42,6 +53,26 @@ class EvictionSyncAdapter:
                 "evict_removed": self._evict_removed,
                 "evict_not_found": self._evict_not_found,
             }
+
+    def get_event_counters(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                event.value: self._event_counters[event]
+                for event in EvictionEvent
+            }
+
+    def _handle_event(
+        self,
+        request_id: str,
+        event: EvictionEvent,
+    ) -> None:
+        should_evict = False
+        with self._lock:
+            self._event_counters[event] += 1
+            should_evict = event is not EvictionEvent.SWAPPED
+
+        if should_evict:
+            self._evict_request(request_id)
 
     def _evict_request(self, request_id: str) -> None:
         middleware_complete = (
