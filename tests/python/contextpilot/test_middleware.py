@@ -157,3 +157,94 @@ def test_process_completion_request_returns_string() -> None:
     output = middleware.process_completion_request("explain this")
 
     assert isinstance(output, str)
+
+
+def test_dedup_removes_duplicates(monkeypatch: MonkeyPatch) -> None:
+    class FakeCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+
+        def optimize(
+            self, contexts: list[str], query: str
+        ) -> list[dict[str, str]]:
+            output = [{"role": "system", "content": ctx} for ctx in contexts]
+            if query:
+                output.append({"role": "user", "content": query})
+            return output
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
+    middleware = ContextPilotMiddleware(
+        use_gpu=False,
+        enabled=True,
+        dedup_enabled=True,
+        reorder_enabled=True,
+    )
+    repeated = "duplicate-system-block " * 8
+    messages = [
+        {"role": "system", "content": repeated},
+        {"role": "system", "content": repeated},
+        {"role": "user", "content": "final query"},
+    ]
+
+    output = middleware.process_chat_request(messages)
+    stats = middleware.get_token_savings()
+
+    assert any(
+        "Deduplicated content" in str(message.get("content", ""))
+        for message in output
+    )
+    assert stats["total_tokens_saved"] > 0
+
+
+def test_dedup_without_reorder() -> None:
+    middleware = ContextPilotMiddleware(
+        use_gpu=False,
+        enabled=True,
+        reorder_enabled=False,
+        dedup_enabled=True,
+    )
+    repeated = "same-system-context " * 8
+    messages = [
+        {"role": "system", "content": repeated},
+        {"role": "system", "content": repeated},
+        {"role": "user", "content": "query"},
+    ]
+
+    output = middleware.process_chat_request(messages)
+    stats = middleware.get_token_savings()
+
+    assert any(
+        "Deduplicated content" in str(message.get("content", ""))
+        for message in output
+    )
+    assert stats["total_tokens_saved"] > 0
+
+
+def test_token_savings_tracked() -> None:
+    middleware = ContextPilotMiddleware(
+        use_gpu=False,
+        enabled=True,
+        reorder_enabled=False,
+        dedup_enabled=True,
+    )
+    repeated = "dedup-me " * 12
+    request = [
+        {"role": "system", "content": repeated},
+        {"role": "system", "content": repeated},
+        {"role": "user", "content": "q"},
+    ]
+
+    _ = middleware.process_chat_request(request)
+    _ = middleware.process_chat_request(request)
+    stats = middleware.get_token_savings()
+
+    assert set(stats.keys()) == {
+        "total_tokens_saved",
+        "avg_savings_pct",
+        "requests_processed",
+    }
+    assert isinstance(stats["total_tokens_saved"], int)
+    assert isinstance(stats["avg_savings_pct"], float)
+    assert isinstance(stats["requests_processed"], int)
+    assert stats["requests_processed"] == 2
+    assert stats["total_tokens_saved"] > 0

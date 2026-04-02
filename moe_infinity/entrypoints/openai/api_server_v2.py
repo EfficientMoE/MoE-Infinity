@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import importlib
 import json
+import logging
 import os
 import time
 from contextlib import suppress
@@ -120,12 +121,130 @@ _contextpilot_enabled: bool = False
 _contextpilot_debug: bool = False
 _contextpilot_fault: str = "none"
 _contextpilot_state_lock = Lock()
+_contextpilot_fallback_count: int = 0
+_contextpilot_last_fallback_count: int = 0
+
+_cp_logger = logging.getLogger("moe_infinity.contextpilot")
+_cp_middleware: Optional[Any] = None
 
 
 def _resolve_contextpilot_enabled(cli_enabled: bool) -> bool:
     if os.environ.get("CONTEXTPILOT_ENABLED", "1") == "0":
         return False
     return bool(cli_enabled)
+
+
+def _is_contextpilot_active() -> bool:
+    with _contextpilot_state_lock:
+        enabled = _contextpilot_enabled
+    return enabled and os.environ.get("CONTEXTPILOT_ENABLED", "1") != "0"
+
+
+def _current_contextpilot_fault() -> str:
+    with _contextpilot_state_lock:
+        return _contextpilot_fault
+
+
+def _record_contextpilot_fallback(request_id: str, exc: Exception) -> None:
+    with _contextpilot_state_lock:
+        global _contextpilot_fallback_count
+        global _contextpilot_last_fallback_count
+        _contextpilot_fallback_count += 1
+        _contextpilot_last_fallback_count = _contextpilot_fallback_count
+    _cp_logger.warning(
+        "request_id=%s CP middleware error, falling back: %s",
+        request_id,
+        exc,
+    )
+
+
+def _ensure_cp_middleware_initialized() -> Optional[Any]:
+    if not _is_contextpilot_active():
+        return None
+
+    with _contextpilot_state_lock:
+        global _cp_middleware
+        if _cp_middleware is not None:
+            return _cp_middleware
+
+    try:
+        from moe_infinity.serving.contextpilot_middleware import (
+            ContextPilotMiddleware,
+        )
+
+        middleware = ContextPilotMiddleware(use_gpu=False)
+    except Exception as exc:
+        _cp_logger.warning(
+            "Failed to initialize ContextPilot middleware: %s",
+            exc,
+        )
+        return None
+
+    with _contextpilot_state_lock:
+        if _cp_middleware is None:
+            _cp_middleware = middleware
+            _cp_logger.info("ContextPilot middleware initialized")
+        return _cp_middleware
+
+
+def _process_chat_messages_with_contextpilot(
+    messages: Any,
+    *,
+    request_id: str,
+) -> Any:
+    if not isinstance(messages, list):
+        return messages
+    if not _is_contextpilot_active():
+        return messages
+
+    middleware = _ensure_cp_middleware_initialized()
+    if middleware is None:
+        return messages
+
+    try:
+        fault = _current_contextpilot_fault()
+        if fault != "none":
+            raise RuntimeError(f"CP fault injected: {fault}")
+
+        t0 = time.monotonic()
+        processed_messages = middleware.process_chat_request(messages)
+        cp_latency_ms = (time.monotonic() - t0) * 1000
+        _cp_logger.debug(
+            "request_id=%s reorder=%.1fms", request_id, cp_latency_ms
+        )
+        return processed_messages
+    except Exception as exc:
+        _record_contextpilot_fallback(request_id, exc)
+        return messages
+
+
+def _process_completion_prompt_with_contextpilot(
+    prompt: str,
+    *,
+    request_id: str,
+) -> str:
+    if not _is_contextpilot_active():
+        return prompt
+
+    middleware = _ensure_cp_middleware_initialized()
+    if middleware is None:
+        return prompt
+
+    try:
+        fault = _current_contextpilot_fault()
+        if fault != "none":
+            raise RuntimeError(f"CP fault injected: {fault}")
+
+        t0 = time.monotonic()
+        optimized_prompt = middleware.process_completion_request(prompt)
+        cp_latency_ms = (time.monotonic() - t0) * 1000
+        _cp_logger.debug(
+            "request_id=%s reorder=%.1fms", request_id, cp_latency_ms
+        )
+        return optimized_prompt
+    except Exception as exc:
+        _record_contextpilot_fallback(request_id, exc)
+        return prompt
 
 
 def initialize_with_model(
@@ -578,6 +697,8 @@ async def startup_event() -> None:
     if stream_manager is None:
         stream_manager = StreamManager()
 
+    _ = _ensure_cp_middleware_initialized()
+
     if _startup_args is not None and engine is None:
         if _model_init_task is None or _model_init_task.done():
             _model_init_task = asyncio.create_task(_initialize_model())
@@ -639,6 +760,9 @@ async def contextpilot_toggle(payload: dict[str, Any]) -> JSONResponse:
         global _contextpilot_enabled
         _contextpilot_enabled = enabled
 
+    if enabled:
+        _ = _ensure_cp_middleware_initialized()
+
     return JSONResponse(
         content={"enabled": enabled},
         status_code=200,
@@ -655,10 +779,10 @@ async def contextpilot_inject_fault(payload: dict[str, Any]) -> JSONResponse:
             )
 
     fault = payload.get("fault")
-    if not isinstance(fault, str) or not fault:
+    if fault not in {"none", "reorder_exception"}:
         raise HTTPException(
             status_code=400,
-            detail="'fault' must be a non-empty string",
+            detail="'fault' must be one of: none, reorder_exception",
         )
 
     duration_s = payload.get("duration_s", 0)
@@ -676,6 +800,28 @@ async def contextpilot_inject_fault(payload: dict[str, Any]) -> JSONResponse:
         content={
             "fault": fault,
             "duration_s": duration_s,
+        },
+        status_code=200,
+    )
+
+
+@app.get("/contextpilot/status")
+async def contextpilot_status() -> JSONResponse:
+    with _contextpilot_state_lock:
+        enabled = _contextpilot_enabled
+        debug = _contextpilot_debug
+        fault = _contextpilot_fault
+        fallback_count = _contextpilot_fallback_count
+        last_fallback_count = _contextpilot_last_fallback_count
+
+    return JSONResponse(
+        content={
+            "enabled": enabled,
+            "debug": debug,
+            "fault": fault,
+            "fallback_count": fallback_count,
+            "last_fallback_count": last_fallback_count,
+            "env_enabled": os.environ.get("CONTEXTPILOT_ENABLED", "1") != "0",
         },
         status_code=200,
     )
@@ -742,7 +888,11 @@ async def completion(request: CompletionRequest, raw_request: Request):
         if prompt_is_tokens:
             prompt_token_ids = [int(token_id) for token_id in prompt]
         else:
-            prompt_token_ids = _tokenize_text(str(prompt))
+            processed_prompt = _process_completion_prompt_with_contextpilot(
+                str(prompt),
+                request_id=request_id,
+            )
+            prompt_token_ids = _tokenize_text(processed_prompt)
 
         try:
             validate_context_length(
@@ -799,7 +949,11 @@ async def completion(request: CompletionRequest, raw_request: Request):
         if prompt_is_tokens:
             prompt_token_ids = [int(token_id) for token_id in prompt]
         else:
-            prompt_token_ids = _tokenize_text(str(prompt))
+            processed_prompt = _process_completion_prompt_with_contextpilot(
+                str(prompt),
+                request_id=request_id,
+            )
+            prompt_token_ids = _tokenize_text(processed_prompt)
 
         try:
             validate_context_length(
@@ -889,7 +1043,16 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
         max_tokens=request.max_tokens,
         stop=request.stop,
     )
-    prompt_token_ids = _chat_prompt_to_token_ids(request)
+    processed_messages = _process_chat_messages_with_contextpilot(
+        request.messages,
+        request_id=request_id,
+    )
+    original_messages = request.messages
+    request.messages = processed_messages
+    try:
+        prompt_token_ids = _chat_prompt_to_token_ids(request)
+    finally:
+        request.messages = original_messages
 
     try:
         validate_context_length(

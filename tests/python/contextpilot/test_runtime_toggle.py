@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 from typing import Any
 
 import pytest
+
+from moe_infinity.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    CompletionRequest,
+)
 
 try:
     from fastapi.testclient import TestClient
@@ -15,6 +21,11 @@ except TypeError:
     pytest.skip(
         "Pydantic v1 incompatible with Python 3.12+", allow_module_level=True
     )
+
+
+class _DummyRequest:
+    async def is_disconnected(self) -> bool:
+        return False
 
 
 def test_cli_flag_recognized(monkeypatch: Any, capsys: Any) -> None:
@@ -81,3 +92,125 @@ def test_inject_fault_endpoint_disabled_without_debug(monkeypatch: Any) -> None:
     finally:
         monkeypatch.setattr(server_module, "_contextpilot_debug", old_debug)
         monkeypatch.setattr(server_module, "_contextpilot_fault", old_fault)
+
+
+def test_completion_uses_contextpilot_before_tokenization(
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeMiddleware:
+        def process_completion_request(self, prompt: str) -> str:
+            captured["middleware_prompt"] = prompt
+            return f"optimized::{prompt}"
+
+    async def _fake_wait_non_stream_result(
+        **_: Any,
+    ) -> tuple[str, dict[str, int], str]:
+        return (
+            "ok",
+            {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+            "stop",
+        )
+
+    def _fake_tokenize(prompt: str) -> list[int]:
+        captured["tokenized_prompt"] = prompt
+        return [1, 2]
+
+    monkeypatch.setenv("CONTEXTPILOT_ENABLED", "1")
+    monkeypatch.setattr(server_module, "engine", object())
+    monkeypatch.setattr(server_module, "model_name_global", "unit-test-model")
+    monkeypatch.setattr(server_module, "runtime_max_seq_length", 32)
+    monkeypatch.setattr(server_module, "_contextpilot_enabled", True)
+    monkeypatch.setattr(server_module, "_contextpilot_fault", "none")
+    monkeypatch.setattr(server_module, "_cp_middleware", FakeMiddleware())
+    monkeypatch.setattr(server_module, "_tokenize_text", _fake_tokenize)
+    monkeypatch.setattr(
+        server_module,
+        "_ensure_runtime_ready",
+        lambda: (object(), object()),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_wait_non_stream_result",
+        _fake_wait_non_stream_result,
+    )
+
+    request = CompletionRequest(
+        model="unit-test-model",
+        prompt="hello",
+        max_tokens=8,
+        stream=False,
+    )
+    response = asyncio.run(server_module.completion(request, _DummyRequest()))
+
+    assert captured["middleware_prompt"] == "hello"
+    assert captured["tokenized_prompt"] == "optimized::hello"
+    assert response.choices[0].text == "ok"
+
+
+def test_chat_middleware_failure_falls_back_to_original_messages(
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FailingMiddleware:
+        def process_chat_request(
+            self, messages: list[dict[str, str]]
+        ) -> list[dict[str, str]]:
+            _ = messages
+            raise RuntimeError("boom")
+
+    async def _fake_wait_non_stream_result(
+        **_: Any,
+    ) -> tuple[str, dict[str, int], str]:
+        return (
+            "ok",
+            {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+            "stop",
+        )
+
+    def _fake_chat_prompt_to_token_ids(request: Any) -> list[int]:
+        captured["messages"] = request.messages
+        return [1, 2]
+
+    monkeypatch.setenv("CONTEXTPILOT_ENABLED", "1")
+    monkeypatch.setattr(server_module, "engine", object())
+    monkeypatch.setattr(server_module, "model_name_global", "unit-test-model")
+    monkeypatch.setattr(server_module, "runtime_max_seq_length", 32)
+    monkeypatch.setattr(server_module, "_contextpilot_enabled", True)
+    monkeypatch.setattr(server_module, "_contextpilot_fault", "none")
+    monkeypatch.setattr(server_module, "_cp_middleware", FailingMiddleware())
+    monkeypatch.setattr(server_module, "_contextpilot_fallback_count", 0)
+    monkeypatch.setattr(server_module, "_contextpilot_last_fallback_count", 0)
+    monkeypatch.setattr(
+        server_module,
+        "_chat_prompt_to_token_ids",
+        _fake_chat_prompt_to_token_ids,
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_ensure_runtime_ready",
+        lambda: (object(), object()),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_wait_non_stream_result",
+        _fake_wait_non_stream_result,
+    )
+
+    original_messages = [{"role": "user", "content": "hello"}]
+    request = ChatCompletionRequest(
+        model="unit-test-model",
+        messages=original_messages,
+        max_tokens=8,
+        stream=False,
+    )
+
+    response = asyncio.run(
+        server_module.chat_completion(request, _DummyRequest())
+    )
+
+    assert captured["messages"] == original_messages
+    assert response.choices[0].message.content == "ok"
+    assert server_module._contextpilot_last_fallback_count == 1

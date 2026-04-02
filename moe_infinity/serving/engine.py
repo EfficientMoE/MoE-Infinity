@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from math import ceil
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol, cast
 
 import torch
 
@@ -19,6 +19,20 @@ from .sequence import (
     SequenceGroup,
     SequenceStatus,
 )
+
+
+class EvictionSyncAdapter(Protocol):
+    def on_request_finished(self, request_id: str) -> None: ...
+
+    def on_request_aborted(self, request_id: str) -> None: ...
+
+
+_eviction_sync: Optional[EvictionSyncAdapter] = None
+
+
+def set_eviction_sync(adapter: Optional[EvictionSyncAdapter]) -> None:
+    global _eviction_sync
+    _eviction_sync = adapter
 
 
 @dataclass
@@ -213,6 +227,8 @@ class ContinuousBatchingEngine:
             for callback in self._callbacks.get(output.request_id, []):
                 callback(output)
             if output.finished:
+                if _eviction_sync is not None:
+                    _eviction_sync.on_request_finished(output.request_id)
                 _ = self._callbacks.pop(output.request_id, None)
 
         return outputs
@@ -252,6 +268,9 @@ class ContinuousBatchingEngine:
 
         if not was_pending:
             return
+
+        if _eviction_sync is not None:
+            _eviction_sync.on_request_aborted(request_id)
 
         self._cancelled_request_ids.add(request_id)
         _ = self._request_outputs.pop(request_id, None)
@@ -318,7 +337,17 @@ class ContinuousBatchingEngine:
     def _execute_batch(self, batch: BatchMetadata) -> torch.Tensor:
         has_prefill = any(batch.is_prefill)
         has_decode = any(not p for p in batch.is_prefill)
-        uses_paged = bool(self.model_runner._get_paged_attention_classes())
+        paged_classes_getter = getattr(
+            self.model_runner,
+            "_get_paged_attention_classes",
+            None,
+        )
+        paged_classes: list[object] = []
+        if callable(paged_classes_getter):
+            maybe_paged_classes: object = paged_classes_getter()
+            if isinstance(maybe_paged_classes, list):
+                paged_classes = cast(list[object], maybe_paged_classes)
+        uses_paged = bool(paged_classes)
 
         if not uses_paged or not (has_prefill and has_decode):
             return self.model_runner.execute(batch)
@@ -559,4 +588,8 @@ class ContinuousBatchingEngine:
         return value
 
 
-__all__ = ["ContinuousBatchingEngine", "RequestOutput"]
+__all__ = [
+    "ContinuousBatchingEngine",
+    "RequestOutput",
+    "set_eviction_sync",
+]
