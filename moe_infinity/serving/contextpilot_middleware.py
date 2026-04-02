@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Optional, cast
 
 from contextpilot import ContextPilot
@@ -18,6 +19,12 @@ class ContextPilotMiddleware:
     token_savings_total: int
     _requests_processed: int
     _savings_pct_total: float
+    _reorder_count: int
+    _dedup_count: int
+    _last_reorder_latency_ms: float
+    _last_dedup_latency_ms: float
+    _last_tokens_saved: int
+    _last_savings_pct: float
 
     def __init__(
         self,
@@ -34,6 +41,12 @@ class ContextPilotMiddleware:
         self.token_savings_total = 0
         self._requests_processed = 0
         self._savings_pct_total = 0.0
+        self._reorder_count = 0
+        self._dedup_count = 0
+        self._last_reorder_latency_ms = 0.0
+        self._last_dedup_latency_ms = 0.0
+        self._last_tokens_saved = 0
+        self._last_savings_pct = 0.0
 
     def process_chat_request(
         self, messages: list[dict[str, str]]
@@ -44,31 +57,54 @@ class ContextPilotMiddleware:
             return []
 
         try:
+            reorder_latency_ms = 0.0
+            dedup_latency_ms = 0.0
             if self._reorder_enabled:
+                reorder_started_at = time.monotonic()
                 optimized_messages = self._reorder_messages(messages)
+                reorder_latency_ms = (
+                    time.monotonic() - reorder_started_at
+                ) * 1000
             else:
                 optimized_messages = [dict(message) for message in messages]
 
             request_tokens_saved = 0
             request_savings_pct = 0.0
             if self._dedup_enabled:
+                dedup_started_at = time.monotonic()
                 (
                     optimized_messages,
                     request_tokens_saved,
                     request_savings_pct,
                 ) = self._deduplicate_messages(optimized_messages)
+                dedup_latency_ms = (time.monotonic() - dedup_started_at) * 1000
                 logger.info(
                     "CP dedup: removed ~%d duplicate tokens (%.1f%%)",
                     request_tokens_saved,
                     request_savings_pct,
                 )
 
-            self.token_savings_total += request_tokens_saved
-            self._requests_processed += 1
-            self._savings_pct_total += request_savings_pct
+            with self._lock:
+                self.token_savings_total += request_tokens_saved
+                self._requests_processed += 1
+                self._savings_pct_total += request_savings_pct
+                if self._reorder_enabled:
+                    self._reorder_count += 1
+                if self._dedup_enabled:
+                    self._dedup_count += 1
+                self._last_reorder_latency_ms = reorder_latency_ms
+                self._last_dedup_latency_ms = dedup_latency_ms
+                self._last_tokens_saved = request_tokens_saved
+                self._last_savings_pct = request_savings_pct
             return optimized_messages
         except Exception as exc:
             logger.warning("ContextPilot optimize failed: %s", exc)
+            with self._lock:
+                self._requests_processed += 1
+                self._last_reorder_latency_ms = 0.0
+                self._last_dedup_latency_ms = 0.0
+                self._last_tokens_saved = 0
+                self._last_savings_pct = 0.0
         return messages
 
     def process_completion_request(self, prompt: str) -> str:
@@ -76,18 +112,47 @@ class ContextPilotMiddleware:
             return prompt
 
         try:
+            started_at = time.monotonic()
             with self._lock:
                 optimized = self._cp.optimize(contexts=[], query=str(prompt))
+            reorder_latency_ms = (time.monotonic() - started_at) * 1000
             if not optimized:
+                with self._lock:
+                    self._requests_processed += 1
+                    self._reorder_count += 1
+                    self._last_reorder_latency_ms = reorder_latency_ms
+                    self._last_dedup_latency_ms = 0.0
+                    self._last_tokens_saved = 0
+                    self._last_savings_pct = 0.0
                 return prompt
 
             for message in reversed(optimized):
                 content = message.get("content")
                 if isinstance(content, str):
+                    with self._lock:
+                        self._requests_processed += 1
+                        self._reorder_count += 1
+                        self._last_reorder_latency_ms = reorder_latency_ms
+                        self._last_dedup_latency_ms = 0.0
+                        self._last_tokens_saved = 0
+                        self._last_savings_pct = 0.0
                     return content
+            with self._lock:
+                self._requests_processed += 1
+                self._reorder_count += 1
+                self._last_reorder_latency_ms = reorder_latency_ms
+                self._last_dedup_latency_ms = 0.0
+                self._last_tokens_saved = 0
+                self._last_savings_pct = 0.0
             return prompt
         except Exception as exc:
             logger.warning("ContextPilot completion optimize failed: %s", exc)
+            with self._lock:
+                self._requests_processed += 1
+                self._last_reorder_latency_ms = 0.0
+                self._last_dedup_latency_ms = 0.0
+                self._last_tokens_saved = 0
+                self._last_savings_pct = 0.0
             return prompt
 
     def on_request_complete(self, request_id: str) -> None:
@@ -124,6 +189,18 @@ class ContextPilotMiddleware:
             "avg_savings_pct": float(avg_savings_pct),
             "requests_processed": int(self._requests_processed),
         }
+
+    def get_last_request_metrics(self) -> dict[str, float | int]:
+        with self._lock:
+            return {
+                "reorder_latency_ms": float(self._last_reorder_latency_ms),
+                "dedup_latency_ms": float(self._last_dedup_latency_ms),
+                "tokens_saved": int(self._last_tokens_saved),
+                "savings_pct": float(self._last_savings_pct),
+                "reorder_count": int(self._reorder_count),
+                "dedup_count": int(self._dedup_count),
+                "requests_processed": int(self._requests_processed),
+            }
 
     @staticmethod
     def _extract_query(

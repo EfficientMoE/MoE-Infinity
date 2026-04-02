@@ -74,6 +74,32 @@ def test_toggle_endpoint_exists() -> None:
     assert route_exists
 
 
+def test_status_endpoint_includes_required_fields() -> None:
+    required_fields = {
+        "enabled",
+        "circuit_breaker_state",
+        "requests_processed",
+        "reorder_count",
+        "dedup_count",
+        "avg_reorder_latency_ms",
+        "p99_reorder_latency_ms",
+        "token_savings_total",
+        "token_savings_avg_pct",
+        "eviction_sync",
+        "cp_index_size",
+        "last_fallback_count",
+    }
+
+    with TestClient(server_module.app) as client:
+        response = client.get("/contextpilot/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert required_fields.issubset(payload)
+    assert payload["circuit_breaker_state"] in {"closed", "open", "half_open"}
+    assert set(payload["eviction_sync"]) == {"incoming", "removed", "not_found"}
+
+
 def test_inject_fault_endpoint_disabled_without_debug(monkeypatch: Any) -> None:
     old_debug = server_module._contextpilot_debug
     old_fault = server_module._contextpilot_fault
