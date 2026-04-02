@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-MoE-Infinity currently publishes from the `0.0.x` series (base version set in `setup.py` as `0.0.1`, with CI-generated `0.0.1dev*` builds for TestPyPI).
+MoE-Infinity currently publishes from the `0.0.x` series (base version set in `setup.py` as `0.0.1`, with CI-generated `0.0.x.dev*` nightly pre-release builds published to PyPI).
 
 We provide security support for the latest maintained code as follows:
 

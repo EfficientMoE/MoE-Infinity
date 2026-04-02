@@ -439,8 +439,25 @@ class MoE:
             ) and model_device.type not in ("meta", "cpu"):
                 input_tensor = input_tensor.to(model_device)
 
+        paged_attention_classes = self._get_paged_attention_classes()
+        use_paged_context = bool(
+            paged_attention_classes
+            and _attention_metadata is not None
+            and getattr(self, "_native_attention_backend", None) is not None
+        )
+
         with torch.no_grad():
-            outputs = self.model(input_tensor)
+            if not use_paged_context:
+                outputs = self.model(input_tensor)
+            else:
+                backend = self._native_attention_backend
+                for attn_cls in paged_attention_classes:
+                    attn_cls.set_paged_context(backend, _attention_metadata)
+                try:
+                    outputs = self.model(input_tensor)
+                finally:
+                    for attn_cls in paged_attention_classes:
+                        attn_cls.clear_paged_context()
 
         logits = getattr(outputs, "logits", None)
         if logits is None and isinstance(outputs, tuple) and outputs:
@@ -454,6 +471,33 @@ class MoE:
         if logits.ndim == 2:
             return logits.detach().to("cpu")
         raise RuntimeError(f"unexpected logits shape: {tuple(logits.shape)}")
+
+    def _get_paged_attention_classes(self) -> list[type[Any]]:
+        paged_class_names = {
+            "DeepseekV2PagedAttention",
+            "DeepseekV3PagedAttention",
+        }
+        classes: list[type[Any]] = []
+        seen: set[type[Any]] = set()
+
+        modules_fn = getattr(self.model, "modules", None)
+        if not callable(modules_fn):
+            return classes
+
+        for module in modules_fn():
+            cls = module.__class__
+            if cls in seen:
+                continue
+            if cls.__name__ not in paged_class_names:
+                continue
+            if not hasattr(cls, "set_paged_context") or not hasattr(
+                cls, "clear_paged_context"
+            ):
+                continue
+            seen.add(cls)
+            classes.append(cls)
+
+        return classes
 
     def _configure_hook(self, input_ids: torch.LongTensor):
         import transformers
@@ -587,25 +631,24 @@ class MoE:
 
         import importlib
 
-        from moe_infinity.entrypoints.openai import api_server
+        from moe_infinity.entrypoints.openai import api_server_v2
 
         model_name = getattr(
             getattr(self.model, "config", None), "_name_or_path", None
         )
-        api_server.initialize_runtime(
+        api_server_v2.initialize_with_model(
             moe_model=self,
             model_name=model_name,
-            tokenizer=getattr(self, "tokenizer", None),
+            tok=getattr(self, "tokenizer", None),
             max_seq_length=self.max_seq_length,
             device_memory_ratio=device_memory_ratio,
             kv_cache_ratio=kv_cache_ratio,
             max_batch_size=max_batch_size,
             enable_prefix_caching=enable_prefix_caching,
-            offload_dir=offload_dir,
         )
 
         uvicorn = importlib.import_module("uvicorn")
-        uvicorn.run(api_server.app, host=host, port=port)
+        uvicorn.run(api_server_v2.app, host=host, port=port)
 
     def forward(self, input_ids: torch.LongTensor, *args, **kwargs) -> Any:
         """

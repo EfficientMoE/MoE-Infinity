@@ -67,6 +67,8 @@ class Scheduler:
         scheduled_seqs = 0
         scheduled_tokens = 0
 
+        self._recover_swapped_groups(swapped_snapshot)
+
         waiting_blocked = False
         while self._waiting and not waiting_blocked:
             next_group = self._waiting[0]
@@ -121,8 +123,6 @@ class Scheduler:
             scheduled_seqs += len(next_seqs)
             scheduled_tokens += prefill_tokens
             output.num_prefill_tokens += prefill_tokens
-
-        self._recover_swapped_groups(swapped_snapshot)
 
         for group in self._running:
             for sequence in group.sequences:

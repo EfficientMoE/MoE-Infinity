@@ -51,6 +51,7 @@ class _Output:
             "total_tokens": 2,
         }
         self.finished = True
+        self.finish_reason = "stop"
 
 
 class _FakeEngine:

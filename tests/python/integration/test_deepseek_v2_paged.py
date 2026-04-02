@@ -1,3 +1,4 @@
+import importlib.machinery
 import importlib.util
 import sys
 import types
@@ -7,6 +8,18 @@ from types import ModuleType, SimpleNamespace
 import torch
 
 from moe_infinity.runtime.attention_types import KVCacheSpec
+
+if (
+    "flash_attn" not in sys.modules
+    or getattr(sys.modules["flash_attn"], "__spec__", None) is None
+):
+    flash_attn_stub = sys.modules.get(
+        "flash_attn", types.ModuleType("flash_attn")
+    )
+    flash_attn_stub.__spec__ = importlib.machinery.ModuleSpec(
+        name="flash_attn", loader=None
+    )
+    sys.modules["flash_attn"] = flash_attn_stub
 
 
 def _load_deepseek_v2_modeling_module() -> ModuleType:

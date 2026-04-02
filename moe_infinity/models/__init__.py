@@ -20,3 +20,4 @@ from .model_utils import (
 from .nllb_moe import SyncNllbMoeSparseMLP
 from .olmoe import SyncOlmoeMoEBlock
 from .qwen import Qwen3MoEBlock
+from .qwen3_paged_attention import Qwen3PagedAttention

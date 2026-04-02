@@ -1,15 +1,22 @@
 # Package Release Guide
 
-This document describes the process of releasing a new version of the MoE-Infinity-Rel package.
+This document describes the process of releasing a new version of the MoE-Infinity package.
 
 ## Automated Release Process
 
-The release mechanism is fully automated through a GitHub Actions workflow, which is defined in the `.github/workflows/publish.yml` file. This workflow triggers upon the creation and publication of a new version tag formatted as `v*` within the repository.
+Stable releases are automated through GitHub Actions workflows in `.github/workflows/`:
+
+- `.github/workflows/publish.yml`: builds and publishes tagged stable releases (`v*`) to PyPI and creates a GitHub release.
+- `.github/workflows/publish-test.yml`: publishes nightly pre-release builds from `main` to PyPI.
+- `.github/workflows/build-test.yml`: build validation for pull requests.
 
 ### Steps to Release a New Version
 To release a new version, such as version 1.0.0, please adhere to the following procedure:
 
-1. Update Version: Modify the version number in the setup.py file to reflect the new release version.
+1. Update Version:
+   - Update `moe_infinity/__init__.py` (`__version__ = "..."`) to the new stable version.
+   - Ensure `setup.py` remains `version=os.getenv("MOEINF_VERSION", "...")` and update the default fallback version there to match the new stable version.
+   - If needed, bump `NIGHTLY_BASE_VERSION` in `.github/workflows/publish-test.yml` to the next planned stable series so nightly dev builds sort correctly.
 2. Commit Changes: Commit these changes with an appropriate commit message that summarizes the update, such as "Update version for 1.0.0 release".
 3. Create and Push Tag: Tag the latest commit with the new version number and push the tag to the repository. Use the following commands to accomplish this:
     ```bash
@@ -17,7 +24,7 @@ To release a new version, such as version 1.0.0, please adhere to the following 
     git push origin v1.0.0
     ```
 
-Upon the successful push of the tag, the workflow will creata a new release draft, build the package and publish it to the GitHub Package Registry and PyPI repositories.
+Upon a successful tag push, the release workflow will create a release draft, build artifacts, and publish the package to PyPI.
 
 
 ## Manual Package Building and Publishing

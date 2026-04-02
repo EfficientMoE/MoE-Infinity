@@ -117,6 +117,57 @@ _decode_watchdog: Optional[Any] = None
 _watchdog_config: Optional[Any] = None
 
 
+def initialize_with_model(
+    *,
+    moe_model: object,
+    model_name: Optional[str],
+    tok: Optional[object],
+    max_seq_length: int,
+    device_memory_ratio: float = 0.75,
+    kv_cache_ratio: float = 0.25,
+    max_batch_size: int = 32,
+    enable_prefix_caching: bool = False,
+) -> None:
+    """Initialize the v2 server with a pre-loaded MoE model.
+
+    This is the programmatic entry point used by ``MoE.serve()``.  Instead of
+    loading a model from scratch (which ``_initialize_model`` does when the
+    server is started via CLI), this function wires a *pre-existing* MoE
+    instance into the continuous-batching engine.
+    """
+    global engine, stream_manager, tokenizer, model_name_global
+    global runtime_max_seq_length, _health_state
+
+    hf_model = getattr(moe_model, "model", moe_model)
+    offload_engine = getattr(moe_model, "engine", None)
+
+    args = argparse.Namespace(
+        device_memory_ratio=device_memory_ratio,
+        kv_cache_ratio=kv_cache_ratio,
+        max_batch_size=max_batch_size,
+        enable_prefix_caching=enable_prefix_caching,
+    )
+    engine_config = _build_engine_config(args=args, model=hf_model)
+
+    tokenizer = tok
+    model_name_global = model_name
+    runtime_max_seq_length = int(
+        engine_config.get("max_seq_length", max_seq_length) or max_seq_length
+    )
+
+    initialized_engine = ContinuousBatchingEngine(
+        model=hf_model,
+        engine=offload_engine,
+        config=engine_config,
+        tokenizer=tokenizer,
+    )
+    if stream_manager is None:
+        stream_manager = StreamManager()
+
+    engine = initialized_engine
+    _health_state.set_healthy()
+
+
 def parse_prompt_format(prompt: Any) -> tuple[bool, list[Any]]:
     prompt_is_tokens = False
     prompts: list[Any] = [prompt]
@@ -236,7 +287,7 @@ async def _wait_non_stream_result(
     prompt_token_ids: list[int],
     sampling_params: SamplingParams,
     raw_request: Request,
-) -> tuple[str, dict[str, int]]:
+) -> tuple[str, dict[str, int], Optional[str]]:
     runtime_engine, _ = _ensure_runtime_ready()
     done_event = Event()
     token_texts: list[str] = []
@@ -245,15 +296,17 @@ async def _wait_non_stream_result(
         "completion_tokens": 0,
         "total_tokens": len(prompt_token_ids),
     }
+    finish_reason: Optional[str] = None
 
     def on_token(output: RequestOutput) -> None:
-        nonlocal usage
+        nonlocal usage, finish_reason
         token_texts.append(
             _decode_token_text(output.token_id, output.token_text)
         )
         if output.usage is not None:
             usage = output.usage
         if output.finished:
+            finish_reason = output.finish_reason or "stop"
             done_event.set()
 
     runtime_engine.add_request(
@@ -269,7 +322,7 @@ async def _wait_non_stream_result(
             raise HTTPException(status_code=499, detail="client disconnected")
         await asyncio.sleep(0.01)
 
-    return "".join(token_texts), usage
+    return "".join(token_texts), usage, finish_reason
 
 
 def _next_stream_event(generator: Any) -> Optional[str]:
@@ -649,6 +702,7 @@ async def completion(request: CompletionRequest, raw_request: Request):
                     output.token_id, output.token_text
                 ),
                 finished=output.finished,
+                finish_reason=output.finish_reason,
             )
 
         runtime_engine.add_request(
@@ -693,7 +747,11 @@ async def completion(request: CompletionRequest, raw_request: Request):
                 code="context_length_exceeded",
             )
 
-        output_text, usage = await _wait_non_stream_result(
+        (
+            output_text,
+            usage,
+            result_finish_reason,
+        ) = await _wait_non_stream_result(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
@@ -705,7 +763,9 @@ async def completion(request: CompletionRequest, raw_request: Request):
                 index=index,
                 text=output_text,
                 logprobs=None,
-                finish_reason="stop",
+                finish_reason=cast(
+                    Literal["stop", "length"], result_finish_reason or "stop"
+                ),
             )
         )
         usage_prompt_tokens += usage.get("prompt_tokens", 0)
@@ -790,6 +850,7 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
                     output.token_id, output.token_text
                 ),
                 finished=output.finished,
+                finish_reason=output.finish_reason,
             )
 
         runtime_engine.add_request(
@@ -807,7 +868,7 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
             media_type="text/event-stream",
         )
 
-    output_text, usage = await _wait_non_stream_result(
+    output_text, usage, chat_finish_reason = await _wait_non_stream_result(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
@@ -822,7 +883,9 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
             ChatCompletionResponseChoice(
                 index=0,
                 message=ChatMessage(role="assistant", content=output_text),
-                finish_reason="stop",
+                finish_reason=cast(
+                    Literal["stop", "length"], chat_finish_reason or "stop"
+                ),
             )
         ],
         usage=UsageInfo(

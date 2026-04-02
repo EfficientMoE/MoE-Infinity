@@ -13,11 +13,12 @@ MoE-Infinity is cost-effective yet fast:
 MoE-Infinity is easy-to-use:
 
 - HuggingFace model compatible, and HuggingFace programmer friendly.
-- Supporting all available MoE checkpoints (including [Deepseek-V2/V3](https://huggingface.co/collections/deepseek-ai/deepseek-v2-669a1c8b8f2dbc203fbd7746), [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b), [Mixtral](mistralai/Mixtral-8x7B-Instruct-v0.1), and [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B)).
+- Supporting all available MoE checkpoints (including [DeepSeek-V2/V3](https://huggingface.co/collections/deepseek-ai/deepseek-v2-669a1c8b8f2dbc203fbd7746), [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b), [Mixtral](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1), [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B), [Arctic](https://huggingface.co/Snowflake/snowflake-arctic-instruct), [DBRX](https://huggingface.co/models?search=dbrx), [Grok](https://huggingface.co/models?search=grok-1), [Jamba](https://huggingface.co/models?search=jamba), and [OLMoE](https://huggingface.co/models?search=olmoe)).
 
 Note that: The open-sourced MoE-Infinity has been redesigned for making it HuggingFace-users friendly. This version is different from the version reported in the paper, which takes extreme performance as the top priority. Single-server multi-GPU inference is supported: expert parameters are distributed round-robin across all visible GPUs, with per-GPU caching, peer-to-peer transfers, and dedicated I/O threads. Multi-node distributed inference (across separate machines) is not yet supported in this open-sourced version.
 
 ## Contents
+- [Key Features](#key-features)
 - [Performance](#performance)
 - [Installation](#installation)
     - [Prerequisites](#prerequisites)
@@ -30,7 +31,17 @@ Note that: The open-sourced MoE-Infinity has been redesigned for making it Huggi
     - [Running Inference](#running-inference)
     - [Benchmarking](#benchmarking)
 - [Release Plan](#release-plan)
+- [Contributing and Security](#contributing-and-security)
 - [Citation](#citation)
+
+## Key Features
+
+- Expert offloading with activation-aware caching and prefetching for memory-constrained GPUs.
+- KV cache offloading with paged attention support for long-context serving.
+- Continuous batching serving engine with request scheduling, preemption, and prefix caching.
+- Streaming responses for OpenAI-compatible chat completion APIs.
+- Serving stability hardening with watchdogs and health monitoring.
+- Memory coordination and expert prefetch coordination to improve throughput and utilization.
 
 ## Performance
 
@@ -52,6 +63,14 @@ Lower per-token-latency is preferable.
 
 We recommend installing MoE-Infinity in a virtual environment. To install MoE-Infinity, you can either install it from PyPI or build it from source.
 
+### Prerequisites
+
+- Python 3.8+
+- CUDA-capable environment for GPU inference
+- Recommended: isolated virtual environment
+
+### Install from conda environment
+
 ```bash
 conda create -n moe-infinity python=3.9
 conda activate moe-infinity
@@ -64,7 +83,7 @@ conda activate moe-infinity
 # install stable release
 pip install moe-infinity
 
-# install nightly release (latest development build from main branch)
+# install nightly release (latest development build from main branch, published to PyPI as pre-release dev versions)
 pip install --pre moe-infinity
 ```
 
@@ -85,9 +104,25 @@ FLASH_ATTENTION_FORCE_BUILD=TRUE pip install flash-attn
 ```
 Post-installation, MoE-Infinity will automatically integrate with FlashAttention to enhance performance.
 
+### Enable FlashInfer (Optional)
+
+Install [FlashInfer](https://flashinfer.ai/) for optimized paged attention kernels during prefill and decode. FlashInfer provides significant speedups for paged KV cache attention compared to standard PyTorch SDPA.
+
+```bash
+# For CUDA 12.4 + PyTorch 2.5:
+pip install flashinfer -i https://flashinfer.ai/whl/cu124/torch2.5/
+
+# For CUDA 12.1 + PyTorch 2.4:
+pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
+```
+
+Check the [FlashInfer installation guide](https://docs.flashinfer.ai/installation.html) for other CUDA/PyTorch version combinations.
+
+Post-installation, MoE-Infinity will automatically detect and use FlashInfer for faster paged attention in both prefill and decode phases. When FlashInfer is not installed, MoE-Infinity gracefully falls back to its built-in attention kernels with no behavior change.
+
 ## Usage and Examples
 
-We provide a simple API for diverse setups, including single GPU, multiple GPUs, and multiple nodes. The following examples show how to use MoE-Infinity to run generation on a Huggingface LLM model.
+We provide a simple API for diverse setups, including single GPU and multiple GPUs. The following examples show how to use MoE-Infinity to run generation on a Huggingface LLM model.
 
 ### Important Note
 
@@ -105,7 +140,7 @@ from moe_infinity import MoE
 user_home = os.path.expanduser('~')
 
 checkpoint = "deepseek-ai/DeepSeek-V2-Lite-Chat"
-tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote=True)
+tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
 
 config = {
     "offload_path": os.path.join(user_home, "moe-infinity"),
@@ -173,29 +208,50 @@ python benchmarks/serving/latency.py \
     --concurrency 1 2 4 8
 ```
 
-### OpenAI-Compatible Server
+### OpenAI-Compatible Server (Continuous Batching)
 
-Start the OpenAI-compatible server locally
+MoE-Infinity includes a continuous batching serving engine with an OpenAI-compatible API. The server supports concurrent requests, streaming, request scheduling with preemption, and paged KV cache management.
+
+Start the server:
 ```bash
-python -m moe_infinity.entrypoints.openai.api_server --model deepseek-ai/DeepSeek-V2-Lite-Chat --offload-dir ./offload_dir
+python -m moe_infinity.entrypoints.openai.api_server_v2 \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir ./offload_dir \
+    --device-memory-ratio 0.5 \
+    --kv-cache-ratio 0.15 \
+    --max-batch-size 8
 ```
 
-Query the model via `/v1/components/`. (We currently only support the required fields, i.e., "model" and "prompt").
+| Flag | Default | Description |
+|---|---|---|
+| `--device-memory-ratio` | 0.75 | Fraction of GPU memory for expert caching. Lower this if you hit OOM (0.5 is a safe starting point for 24GB GPUs). |
+| `--kv-cache-ratio` | 0.25 | Fraction of remaining GPU memory for paged KV cache blocks. |
+| `--max-batch-size` | 32 | Maximum number of concurrent sequences in a batch. |
+| `--enable-prefix-caching` | off | Enable prefix caching for shared prompt prefixes. |
+
+You can also start the server programmatically from Python:
+```python
+from moe_infinity import MoE
+
+model = MoE("deepseek-ai/DeepSeek-V2-Lite-Chat", {
+    "offload_path": "./offload_dir/deepseek-v2-lite",
+    "device_memory_ratio": 0.5,
+})
+model.serve(host="0.0.0.0", port=8000, offload_dir="./offload_dir")
+```
+
+Query via `/v1/completions`:
 ```bash
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
-        "prompt": "Hello, my name is"
+        "prompt": "Hello, my name is",
+        "max_tokens": 32
     }'
 ```
-You can also use `openai` python package to query the model.
-```bash
-pip install openai
-python tests/test_oai_completions.py
-```
 
-Query the model via `/v1/chat/completions`. (We currently only support the required fields, i.e., "model" and "messages").
+Query via `/v1/chat/completions` with streaming:
 ```bash
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
@@ -204,22 +260,36 @@ curl http://localhost:8000/v1/chat/completions \
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Tell me a joke"}
-        ]
+        ],
+        "max_tokens": 128,
+        "stream": true
     }'
 ```
-You can also use `openai` python package to query the model.
+
+Supported request fields: `model`, `prompt`/`messages`, `max_tokens`, `temperature`, `top_p`, `stop`, `stream`.
+
+The server returns `finish_reason: "stop"` when the model emits an EOS token or hits a stop sequence, and `finish_reason: "length"` when `max_tokens` is reached.
+
+You can also use the `openai` Python package:
 ```bash
 pip install openai
-python tests/test_oai_chat_completions.py
+python tests/python/integration/test_oai_completions.py
+python tests/python/integration/test_oai_chat_completions.py
 ```
 
 ## Release Plan
 
-We plan to release two functions in the following months:
+Recent releases and near-term roadmap:
 
-* We currently support PyTorch as the default inference engine, and we are in the process of supporting vLLM as another inference runtime, which includes the support of KV cache offloading.
-* Supporting expert parallelism for distributed MoE inference.
-* More (We welcome contributors to join us!)
+* ✅ PyTorch runtime now includes KV cache offloading, paged attention kernels, continuous batching serving, streaming support, preemptive request scheduling with prefix caching, watchdog-based health hardening, memory coordination, and expert prefetch coordination.
+* 🚧 We continue improving vLLM runtime interoperability.
+* 🚧 Supporting expert parallelism for distributed MoE inference.
+* More (We welcome contributors to join us!).
+
+## Contributing and Security
+
+- See [CONTRIBUTING.md](./CONTRIBUTING.md) for development workflow, coding standards, and tests.
+- See [SECURITY.md](./SECURITY.md) for vulnerability reporting and support policy.
 
 ## Citation
 
