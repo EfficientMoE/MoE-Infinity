@@ -80,6 +80,14 @@ jobs:
             -m "not gpu and not multi_gpu and not slow and not perf and not network" \
             -x --timeout=120 -v
 
+      - name: Install contextpilot
+        run: pip install contextpilot
+
+      - name: Run contextpilot CPU tests
+        run: |
+          pytest tests/python/contextpilot/ \
+            -v -m "not gpu and not integration" --tb=short
+
   build:
     runs-on: ubuntu-22.04
     steps:

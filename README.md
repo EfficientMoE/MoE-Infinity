@@ -277,6 +277,39 @@ python tests/python/integration/test_oai_completions.py
 python tests/python/integration/test_oai_chat_completions.py
 ```
 
+## ContextPilot Integration (Optional)
+
+ContextPilot is an optional overlap-aware prompt optimization layer for shared-prefix and multi-turn workloads. You can run it as a sidecar proxy in front of the OpenAI-compatible server, or enable it inside the server before tokenization. Phase C extends the same signals into KV allocation and scheduling for deeper reuse gains.
+
+Phase A quick start, sidecar proxy:
+
+```bash
+# Start ContextPilot sidecar proxy
+bash scripts/contextpilot_sidecar.sh --backend-url http://localhost:8000
+```
+
+Phase B quick start, in-process middleware:
+
+```bash
+python -m moe_infinity.entrypoints.openai.api_server_v2 \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir ./offload_dir \
+    --enable-contextpilot
+```
+
+Set `CONTEXTPILOT_ENABLED=0` to force-disable ContextPilot at runtime, even if the CLI flag is enabled.
+
+Representative dry-run benchmark results:
+
+| Phase | Integration mode | TTFT p50 vs baseline | Token savings vs baseline |
+|---|---|---:|---:|
+| Baseline | No ContextPilot | 0% | 0% |
+| Phase A | Sidecar proxy | 17% faster | 18% |
+| Phase B | In-process middleware | 21% faster | 27% |
+| Phase C | Deep scheduler integration | 26% faster | 28% |
+
+See [docs/contextpilot/README.md](docs/contextpilot/README.md) for setup details, CLI flags, environment variables, admin endpoints, and troubleshooting.
+
 ## Release Plan
 
 Recent releases and near-term roadmap:
