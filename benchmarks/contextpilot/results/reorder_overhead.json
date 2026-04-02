@@ -1,0 +1,82 @@
+{
+  "1k_1blocks": {
+    "reorder_p50_ms": 0.050426,
+    "reorder_p90_ms": 0.052902,
+    "reorder_p99_ms": 0.0588119
+  },
+  "1k_5blocks": {
+    "reorder_p50_ms": 0.251085,
+    "reorder_p90_ms": 0.25639,
+    "reorder_p99_ms": 0.26476279
+  },
+  "1k_10blocks": {
+    "reorder_p50_ms": 0.493074,
+    "reorder_p90_ms": 0.498822,
+    "reorder_p99_ms": 0.5018364000000001
+  },
+  "1k_50blocks": {
+    "reorder_p50_ms": 2.445169,
+    "reorder_p90_ms": 2.458596,
+    "reorder_p99_ms": 2.4787233300000007
+  },
+  "4k_1blocks": {
+    "reorder_p50_ms": 0.109237,
+    "reorder_p90_ms": 0.11218,
+    "reorder_p99_ms": 0.1156827
+  },
+  "4k_5blocks": {
+    "reorder_p50_ms": 0.54522,
+    "reorder_p90_ms": 0.5528080000000001,
+    "reorder_p99_ms": 0.57329771
+  },
+  "4k_10blocks": {
+    "reorder_p50_ms": 1.1148600000000002,
+    "reorder_p90_ms": 1.131453,
+    "reorder_p99_ms": 1.1521027300000009
+  },
+  "4k_50blocks": {
+    "reorder_p50_ms": 5.6064419999999995,
+    "reorder_p90_ms": 5.7148999,
+    "reorder_p99_ms": 5.736560720000001
+  },
+  "16k_1blocks": {
+    "reorder_p50_ms": 0.1304275,
+    "reorder_p90_ms": 0.13217410000000002,
+    "reorder_p99_ms": 0.13788920000000002
+  },
+  "16k_5blocks": {
+    "reorder_p50_ms": 0.6588215,
+    "reorder_p90_ms": 0.664234,
+    "reorder_p99_ms": 0.67097089
+  },
+  "16k_10blocks": {
+    "reorder_p50_ms": 1.1213305,
+    "reorder_p90_ms": 1.3180049999999999,
+    "reorder_p99_ms": 1.3294964200000003
+  },
+  "16k_50blocks": {
+    "reorder_p50_ms": 5.412969,
+    "reorder_p90_ms": 5.495531000000001,
+    "reorder_p99_ms": 5.507591400000001
+  },
+  "64k_1blocks": {
+    "reorder_p50_ms": 0.16317350000000003,
+    "reorder_p90_ms": 0.168444,
+    "reorder_p99_ms": 0.17490969000000003
+  },
+  "64k_5blocks": {
+    "reorder_p50_ms": 0.8286450000000001,
+    "reorder_p90_ms": 0.8568739,
+    "reorder_p99_ms": 0.8705379999999999
+  },
+  "64k_10blocks": {
+    "reorder_p50_ms": 1.6823455,
+    "reorder_p90_ms": 1.7119309,
+    "reorder_p99_ms": 1.7514344900000027
+  },
+  "64k_50blocks": {
+    "reorder_p50_ms": 8.3327115,
+    "reorder_p90_ms": 8.4452231,
+    "reorder_p99_ms": 8.537729030000001
+  }
+}
