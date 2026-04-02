@@ -263,6 +263,9 @@ setup(
     packages=find_packages(exclude=["extensions", "extensions.*"]),
     include_package_data=True,
     install_requires=install_requires,
+    extras_require={
+        "flashinfer": ["flashinfer"],
+    },
     author="EfficientMoE Team",
     long_description=read_readme(),
     long_description_content_type="text/markdown",

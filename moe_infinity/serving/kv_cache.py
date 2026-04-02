@@ -1,22 +1,39 @@
 from __future__ import annotations
 
 import heapq
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from math import ceil
+from typing import Protocol, cast
 
 import torch
 
-try:
-    import flashinfer
-    from flashinfer import (
-        BatchDecodeWithPagedKVCacheWrapper,
-        BatchPrefillWithPagedKVCacheWrapper,
-    )
-except ImportError:
-    flashinfer = None
-    BatchDecodeWithPagedKVCacheWrapper = None
-    BatchPrefillWithPagedKVCacheWrapper = None
+from moe_infinity.runtime import flashinfer_utils
 
-HAS_FLASHINFER = flashinfer is not None
+
+class _FlashinferPrefillWrapperLike(Protocol):
+    def plan(self, *args: object, **kwargs: object) -> None: ...
+
+    def run(
+        self, query: torch.Tensor, kv_cache: torch.Tensor
+    ) -> torch.Tensor: ...
+
+
+class _FlashinferDecodeWrapperLike(Protocol):
+    def plan(self, *args: object, **kwargs: object) -> None: ...
+
+    def run(
+        self, query: torch.Tensor, kv_cache: torch.Tensor
+    ) -> torch.Tensor: ...
+
+
+class _FlashinferModuleLike(Protocol):
+    BatchPrefillWithPagedKVCacheWrapper: Callable[
+        [torch.Tensor, str], _FlashinferPrefillWrapperLike
+    ]
+    BatchDecodeWithPagedKVCacheWrapper: Callable[
+        [torch.Tensor, str], _FlashinferDecodeWrapperLike
+    ]
 
 
 @dataclass
@@ -126,6 +143,14 @@ class PagedKVCache:
     )
     _swapped_out_sequences: set[int] = field(init=False, default_factory=set)
     _kv_cache: torch.Tensor = field(init=False)
+    _use_flashinfer: bool = field(init=False, default=False)
+    _fi_workspace: torch.Tensor | None = field(init=False, default=None)
+    _fi_prefill: _FlashinferPrefillWrapperLike | None = field(
+        init=False, default=None
+    )
+    _fi_decode: _FlashinferDecodeWrapperLike | None = field(
+        init=False, default=None
+    )
 
     def __post_init__(self) -> None:
         if self.num_layers <= 0:
@@ -153,6 +178,36 @@ class PagedKVCache:
             dtype=self.dtype,
             device=self.device,
         )
+
+        self._use_flashinfer = False
+        self._fi_workspace = None
+        self._fi_prefill = None
+        self._fi_decode = None
+        if flashinfer_utils.HAS_FLASHINFER:
+            flashinfer_module = flashinfer_utils.get_flashinfer_module()
+            if flashinfer_module is not None:
+                try:
+                    fi_module = cast(_FlashinferModuleLike, flashinfer_module)
+                    workspace = flashinfer_utils.get_workspace(self.device)
+                    self._fi_workspace = workspace
+                    self._fi_prefill = (
+                        fi_module.BatchPrefillWithPagedKVCacheWrapper(
+                            workspace,
+                            "NHD",
+                        )
+                    )
+                    self._fi_decode = (
+                        fi_module.BatchDecodeWithPagedKVCacheWrapper(
+                            workspace,
+                            "NHD",
+                        )
+                    )
+                    self._use_flashinfer = True
+                except Exception:
+                    self._use_flashinfer = False
+                    self._fi_workspace = None
+                    self._fi_prefill = None
+                    self._fi_decode = None
 
     def allocate_sequence(self, seq_id: int, num_tokens: int) -> None:
         if seq_id in self._sequence_tables:
@@ -213,7 +268,7 @@ class PagedKVCache:
         self._swapped_out_sequences.add(seq_id)
 
     def swap_in(self, seq_id: int) -> None:
-        _ = self._require_sequence(seq_id)
+        block_table = self._require_sequence(seq_id)
         if seq_id not in self._swapped_out_sequences:
             return
 
@@ -247,16 +302,59 @@ class PagedKVCache:
         value: torch.Tensor,
         attn_mask: torch.Tensor | None = None,
         is_causal: bool = True,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         # Use FlashInfer paged attention if available, else fall back to torch SDPA.
-        if HAS_FLASHINFER:
-            # FlashInfer path (future: use BatchDecodeWithPagedKVCacheWrapper).
-            _ = (
-                flashinfer,
-                BatchPrefillWithPagedKVCacheWrapper,
-                BatchDecodeWithPagedKVCacheWrapper,
+        if self._flashinfer_enabled():
+            layer_kv_cache = self._kv_cache[layer_idx]
+            query_src = query.to(self.device, dtype=self._kv_cache.dtype)
+            query_tokens = int(query_src.shape[-2])
+            kv_tokens = int(key.shape[-2])
+            num_qo_heads = int(query_src.shape[-3])
+            batch_size = int(query_src.shape[0]) if query_src.ndim >= 4 else 1
+            block_size = int(self.block_size)
+
+            kv_indptr, kv_indices, kv_last_page_len = (
+                self._build_flashinfer_paged_metadata(
+                    batch_size=batch_size,
+                    kv_tokens=kv_tokens,
+                    block_size=block_size,
+                )
             )
-            pass  # currently falls through to SDPA until integration complete
+
+            if query_tokens > 1:
+                if self._fi_prefill is None:
+                    raise RuntimeError(
+                        "FlashInfer prefill wrapper is unavailable"
+                    )
+                qo_indptr = self._build_qo_indptr(
+                    batch_size=batch_size,
+                    query_tokens=query_tokens,
+                )
+                self._fi_prefill.plan(
+                    qo_indptr,
+                    kv_indptr,
+                    kv_indices,
+                    kv_last_page_len,
+                    num_qo_heads,
+                    self.num_heads,
+                    self.head_dim,
+                    block_size,
+                )
+                return self._fi_prefill.run(query_src, layer_kv_cache)
+
+            if self._fi_decode is None:
+                raise RuntimeError("FlashInfer decode wrapper is unavailable")
+            self._fi_decode.plan(
+                kv_indptr,
+                kv_indices,
+                kv_last_page_len,
+                num_qo_heads,
+                self.num_heads,
+                self.head_dim,
+                block_size,
+            )
+            return self._fi_decode.run(query_src, layer_kv_cache)
 
         return torch.nn.functional.scaled_dot_product_attention(
             query,
@@ -266,6 +364,63 @@ class PagedKVCache:
             dropout_p=0.0,
             is_causal=is_causal,
         )
+
+    def _flashinfer_enabled(self) -> bool:
+        return bool(
+            self._use_flashinfer
+            and self._fi_prefill is not None
+            and self._fi_decode is not None
+        )
+
+    def _build_qo_indptr(
+        self,
+        batch_size: int,
+        query_tokens: int,
+    ) -> torch.Tensor:
+        qo_indptr = torch.zeros(
+            batch_size + 1,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        if batch_size > 0:
+            qo_indptr[1:] = torch.arange(
+                query_tokens,
+                query_tokens * (batch_size + 1),
+                query_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+        return qo_indptr
+
+    def _build_flashinfer_paged_metadata(
+        self,
+        batch_size: int,
+        kv_tokens: int,
+        block_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_pages = max((max(kv_tokens, 1) + block_size - 1) // block_size, 1)
+        kv_indptr_vals = [idx * num_pages for idx in range(batch_size + 1)]
+        kv_indptr = torch.tensor(
+            kv_indptr_vals,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        kv_indices = torch.arange(
+            num_pages,
+            dtype=torch.int32,
+            device=self.device,
+        ).repeat(batch_size)
+        rem = kv_tokens % block_size
+        last_page_len = (
+            block_size if rem == 0 and kv_tokens > 0 else max(rem, 1)
+        )
+        kv_last_page_len = torch.full(
+            (batch_size,),
+            fill_value=int(last_page_len),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        return kv_indptr, kv_indices, kv_last_page_len
 
     def _require_sequence(self, seq_id: int) -> BlockTable:
         block_table = self._sequence_tables.get(seq_id)
