@@ -3,7 +3,6 @@ from __future__ import annotations
 import heapq
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from math import ceil
 from typing import Protocol, cast
 
 import torch
@@ -110,6 +109,13 @@ class BlockTable:
 
     def num_computed_tokens(self) -> int:
         return self._num_tokens
+
+    def has_blocks(self) -> bool:
+        return bool(self._block_ids)
+
+    def restore_blocks(self, block_ids: list[int], num_tokens: int) -> None:
+        self._block_ids = list(block_ids)
+        self._num_tokens = num_tokens
 
     def release(self) -> None:
         if self._block_ids:
@@ -236,11 +242,10 @@ class PagedKVCache:
         if block_table is None:
             return
 
-        block_ids = block_table.get_block_ids()
-        if block_ids:
-            self.block_allocator.free(block_ids)
-            block_table._block_ids = []
-        # _num_tokens preserved so swap_in knows how many blocks to re-allocate
+        if not block_table.has_blocks():
+            return
+
+        block_table.release()
 
     def get_block_table(self, seq_id: int) -> list[int]:
         block_table = self._require_sequence(seq_id)
@@ -266,13 +271,20 @@ class PagedKVCache:
         if seq_id not in self._swapped_out_sequences:
             return
 
-        if not block_table.get_block_ids() and block_table._num_tokens > 0:
-            needed = ceil(block_table._num_tokens / block_table.block_size)
-            new_blocks = self.block_allocator.allocate(needed)
-            block_table._block_ids = new_blocks
-
+        block_table = self._sequence_tables[seq_id]
         cpu_buffer = self._swapped_cpu_buffers.pop(seq_id, None)
         if cpu_buffer is not None:
+            if not block_table.has_blocks():
+                num_blocks_needed = int(cpu_buffer.shape[1])
+                restored_block_ids = self.block_allocator.allocate(
+                    num_blocks_needed,
+                )
+                block_table.restore_blocks(
+                    restored_block_ids,
+                    num_tokens=num_blocks_needed
+                    * self.block_allocator.block_size,
+                )
+
             block_ids = block_table.get_block_ids()
             if block_ids:
                 self._kv_cache[:, block_ids, ...] = cpu_buffer.to(
