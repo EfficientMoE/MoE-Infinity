@@ -141,6 +141,9 @@ class PagedKVCache:
     _swapped_cpu_buffers: dict[int, torch.Tensor] = field(
         init=False, default_factory=dict
     )
+    _swapped_num_tokens: dict[int, int] = field(
+        init=False, default_factory=dict
+    )
     _swapped_out_sequences: set[int] = field(init=False, default_factory=set)
     _kv_cache: torch.Tensor = field(init=False)
     _use_flashinfer: bool = field(init=False, default=False)
@@ -236,6 +239,7 @@ class PagedKVCache:
 
         block_table.release()
         _ = self._swapped_cpu_buffers.pop(seq_id, None)
+        _ = self._swapped_num_tokens.pop(seq_id, None)
         self._swapped_out_sequences.discard(seq_id)
 
     def free_gpu_blocks(self, seq_id: int) -> None:
@@ -260,6 +264,7 @@ class PagedKVCache:
         if seq_id in self._swapped_out_sequences:
             return
 
+        self._swapped_num_tokens[seq_id] = block_table.num_computed_tokens()
         block_ids = block_table.get_block_ids()
         if block_ids:
             self._swapped_cpu_buffers[seq_id] = (
@@ -274,6 +279,7 @@ class PagedKVCache:
 
         block_table = self._sequence_tables[seq_id]
         cpu_buffer = self._swapped_cpu_buffers.pop(seq_id, None)
+        saved_num_tokens = self._swapped_num_tokens.pop(seq_id, 0)
         if cpu_buffer is not None:
             if not block_table.has_blocks():
                 num_blocks_needed = int(cpu_buffer.shape[1])
@@ -282,8 +288,7 @@ class PagedKVCache:
                 )
                 block_table.restore_blocks(
                     restored_block_ids,
-                    num_tokens=num_blocks_needed
-                    * self.block_allocator.block_size,
+                    num_tokens=saved_num_tokens,
                 )
 
             block_ids = block_table.get_block_ids()

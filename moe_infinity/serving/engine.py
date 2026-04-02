@@ -7,7 +7,7 @@ from typing import Callable, Optional
 
 import torch
 
-from .batch import BatchBuilder, BatchMetadata
+from .batch import BatchBuilder, BatchMetadata, split_prefill_decode_batch
 from .kv_cache import PagedKVCache
 from .memory_manager import MemoryManager
 from .model_runner import ModelRunner
@@ -27,6 +27,7 @@ class RequestOutput:
     token_id: int
     token_text: Optional[str]
     finished: bool
+    finish_reason: Optional[str] = None
     usage: Optional[dict[str, int]] = None
 
 
@@ -163,7 +164,7 @@ class ContinuousBatchingEngine:
                 "scheduler produced an empty batch; empty prompts are not supported"
             )
 
-        logits = self.model_runner.execute(batch)
+        logits = self._execute_batch(batch)
         last_token_logits = self._extract_last_token_logits(logits, batch)
         next_token_ids = self.sampler.sample(
             last_token_logits,
@@ -183,7 +184,8 @@ class ContinuousBatchingEngine:
             self._request_outputs[request_id].append(token_id)
             self._total_generated_tokens += 1
 
-            finished = self._should_finish_sequence(sequence, token_id)
+            finish_reason = self._get_finish_reason(sequence, token_id)
+            finished = finish_reason is not None
             if finished:
                 completed_seq_ids.append(seq_id)
                 self._completed_request_ids.add(request_id)
@@ -196,6 +198,7 @@ class ContinuousBatchingEngine:
                     token_id=token_id,
                     token_text=self._decode_token(token_id),
                     finished=finished,
+                    finish_reason=finish_reason,
                     usage=(self._build_usage(sequence) if finished else None),
                 )
             )
@@ -312,6 +315,23 @@ class ContinuousBatchingEngine:
         max_tokens_per_step = self._get_int_config("max_tokens_per_step", 1)
         return max(1, ceil(max_tokens_per_step / max(1, block_size)))
 
+    def _execute_batch(self, batch: BatchMetadata) -> torch.Tensor:
+        has_prefill = any(batch.is_prefill)
+        has_decode = any(not p for p in batch.is_prefill)
+        uses_paged = bool(self.model_runner._get_paged_attention_classes())
+
+        if not uses_paged or not (has_prefill and has_decode):
+            return self.model_runner.execute(batch)
+
+        split = split_prefill_decode_batch(batch)
+        prefill_logits = None
+        decode_logits = None
+        if split.prefill_batch is not None:
+            prefill_logits = self.model_runner.execute(split.prefill_batch)
+        if split.decode_batch is not None:
+            decode_logits = self.model_runner.execute(split.decode_batch)
+        return split.recombine_outputs(prefill_logits, decode_logits)
+
     @staticmethod
     def _extract_last_token_logits(
         logits: torch.Tensor,
@@ -327,30 +347,32 @@ class ContinuousBatchingEngine:
 
         return logits[last_token_indices]
 
-    def _should_finish_sequence(
+    def _get_finish_reason(
         self,
         sequence: SequenceData,
         token_id: int,
-    ) -> bool:
+    ) -> Optional[str]:
         if self.eos_token_id is not None and token_id == self.eos_token_id:
-            return True
+            return "stop"
         if (
             len(sequence.output_token_ids)
             >= sequence.sampling_params.max_tokens
         ):
-            return True
+            return "length"
 
         if not sequence.sampling_params.stop:
-            return False
+            return None
 
         decoded_text = self._decode_tokens(sequence.output_token_ids)
         if decoded_text is None:
-            return False
+            return None
 
-        return any(
+        if any(
             decoded_text.endswith(stop_text)
             for stop_text in sequence.sampling_params.stop
-        )
+        ):
+            return "stop"
+        return None
 
     @staticmethod
     def _build_usage(sequence: SequenceData) -> dict[str, int]:

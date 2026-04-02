@@ -41,6 +41,7 @@ from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
 from moe_infinity.models import (
     Qwen3MoEBlock,
+    Qwen3PagedAttention,
     SyncArcticMoeBlock,
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
@@ -422,6 +423,11 @@ class OffloadEngine(object):
 
         transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
         transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = Qwen3MoEBlock
+
+        transformers.models.qwen3_moe.modeling_qwen3_moe._old_qwen3_attention = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention
+        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention = (
+            Qwen3PagedAttention
+        )
 
         transformers.models.dbrx.modeling_dbrx._old_dbrx_ffn = (
             transformers.models.dbrx.modeling_dbrx.DbrxFFN
@@ -1224,6 +1230,12 @@ class OffloadEngine(object):
         )
 
         transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp
+
+        if hasattr(
+            transformers.models.qwen3_moe.modeling_qwen3_moe,
+            "_old_qwen3_attention",
+        ):
+            transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention = transformers.models.qwen3_moe.modeling_qwen3_moe._old_qwen3_attention
 
         transformers.models.dbrx.modeling_dbrx.DbrxFFN = (
             transformers.models.dbrx.modeling_dbrx._old_dbrx_ffn

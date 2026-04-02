@@ -208,29 +208,50 @@ python benchmarks/serving/latency.py \
     --concurrency 1 2 4 8
 ```
 
-### OpenAI-Compatible Server
+### OpenAI-Compatible Server (Continuous Batching)
 
-Start the OpenAI-compatible server locally
+MoE-Infinity includes a continuous batching serving engine with an OpenAI-compatible API. The server supports concurrent requests, streaming, request scheduling with preemption, and paged KV cache management.
+
+Start the server:
 ```bash
-python -m moe_infinity.entrypoints.openai.api_server --model deepseek-ai/DeepSeek-V2-Lite-Chat --offload-dir ./offload_dir
+python -m moe_infinity.entrypoints.openai.api_server_v2 \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir ./offload_dir \
+    --device-memory-ratio 0.5 \
+    --kv-cache-ratio 0.15 \
+    --max-batch-size 8
 ```
 
-Query the model via `/v1/completions`. (We currently only support the required fields, i.e., "model" and "prompt").
+| Flag | Default | Description |
+|---|---|---|
+| `--device-memory-ratio` | 0.75 | Fraction of GPU memory for expert caching. Lower this if you hit OOM (0.5 is a safe starting point for 24GB GPUs). |
+| `--kv-cache-ratio` | 0.25 | Fraction of remaining GPU memory for paged KV cache blocks. |
+| `--max-batch-size` | 32 | Maximum number of concurrent sequences in a batch. |
+| `--enable-prefix-caching` | off | Enable prefix caching for shared prompt prefixes. |
+
+You can also start the server programmatically from Python:
+```python
+from moe_infinity import MoE
+
+model = MoE("deepseek-ai/DeepSeek-V2-Lite-Chat", {
+    "offload_path": "./offload_dir/deepseek-v2-lite",
+    "device_memory_ratio": 0.5,
+})
+model.serve(host="0.0.0.0", port=8000, offload_dir="./offload_dir")
+```
+
+Query via `/v1/completions`:
 ```bash
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
-        "prompt": "Hello, my name is"
+        "prompt": "Hello, my name is",
+        "max_tokens": 32
     }'
 ```
-You can also use `openai` python package to query the model.
-```bash
-pip install openai
-python tests/python/integration/test_oai_completions.py
-```
 
-Query the model via `/v1/chat/completions`. (We currently only support the required fields, i.e., "model" and "messages").
+Query via `/v1/chat/completions` with streaming:
 ```bash
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
@@ -239,12 +260,20 @@ curl http://localhost:8000/v1/chat/completions \
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Tell me a joke"}
-        ]
+        ],
+        "max_tokens": 128,
+        "stream": true
     }'
 ```
-You can also use `openai` python package to query the model.
+
+Supported request fields: `model`, `prompt`/`messages`, `max_tokens`, `temperature`, `top_p`, `stop`, `stream`.
+
+The server returns `finish_reason: "stop"` when the model emits an EOS token or hits a stop sequence, and `finish_reason: "length"` when `max_tokens` is reached.
+
+You can also use the `openai` Python package:
 ```bash
 pip install openai
+python tests/python/integration/test_oai_completions.py
 python tests/python/integration/test_oai_chat_completions.py
 ```
 

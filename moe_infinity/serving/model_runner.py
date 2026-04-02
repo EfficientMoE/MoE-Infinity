@@ -282,10 +282,6 @@ class ModelRunner:
         return None
 
     def _get_paged_attention_classes(self) -> list[type[Any]]:
-        paged_class_names = {
-            "DeepseekV2PagedAttention",
-            "DeepseekV3PagedAttention",
-        }
         classes: list[type[Any]] = []
         seen: set[type[Any]] = set()
 
@@ -300,8 +296,6 @@ class ModelRunner:
         for module in modules:
             cls = module.__class__
             if cls in seen:
-                continue
-            if cls.__name__ not in paged_class_names:
                 continue
             if not hasattr(cls, "set_paged_context") or not hasattr(
                 cls, "clear_paged_context"
