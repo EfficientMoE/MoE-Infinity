@@ -177,10 +177,13 @@ class PagedKVCache:
         self._swapped_out_sequences.discard(seq_id)
 
     def free_gpu_blocks(self, seq_id: int) -> None:
-        if seq_id not in self._sequence_tables:
+        block_table = self._sequence_tables.get(seq_id)
+        if block_table is None:
             return
 
-        return
+        if block_table._block_ids:
+            self.block_allocator.free(block_table._block_ids)
+            block_table._block_ids = []
 
     def get_block_table(self, seq_id: int) -> list[int]:
         block_table = self._require_sequence(seq_id)
@@ -202,13 +205,20 @@ class PagedKVCache:
         self._swapped_out_sequences.add(seq_id)
 
     def swap_in(self, seq_id: int) -> None:
-        _ = self._require_sequence(seq_id)
+        block_table = self._require_sequence(seq_id)
         if seq_id not in self._swapped_out_sequences:
             return
 
+        # Re-allocate blocks if they were freed during swap-out
+        if not block_table._block_ids and block_table._num_tokens > 0:
+            from math import ceil
+
+            needed = ceil(block_table._num_tokens / block_table.block_size)
+            block_table._block_ids = self.block_allocator.allocate(needed)
+
         cpu_buffer = self._swapped_cpu_buffers.pop(seq_id, None)
         if cpu_buffer is not None:
-            block_ids = self.get_block_table(seq_id)
+            block_ids = block_table.get_block_ids()
             if block_ids:
                 self._kv_cache[:, block_ids, ...] = cpu_buffer.to(
                     device=self._kv_cache.device,

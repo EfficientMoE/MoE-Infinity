@@ -49,6 +49,8 @@ class PagedKVCacheProtocol(Protocol):
 
     def free_sequence(self, seq_id: int) -> None: ...
 
+    def free_gpu_blocks(self, seq_id: int) -> None: ...
+
     def get_block_table(self, seq_id: int) -> list[int]: ...
 
     def swap_out(self, seq_id: int) -> None: ...
@@ -169,3 +171,52 @@ def test_free_sequence_returns_blocks():
 
     cache.free_sequence(2)
     assert cache.block_allocator.num_free_blocks == 8
+
+
+def test_free_gpu_blocks_releases_blocks():
+    _, PagedKVCache = _load_classes()
+    cache = PagedKVCache(
+        num_blocks=4,
+        block_size=4,
+        num_layers=1,
+        num_heads=2,
+        head_dim=8,
+        dtype=torch.float16,
+    )
+
+    cache.allocate_sequence(seq_id=1, num_tokens=8)
+    assert cache.block_allocator.num_free_blocks == 2
+
+    cache.free_gpu_blocks(1)
+    assert cache.block_allocator.num_free_blocks == 4
+    assert cache.get_block_table(1) == []
+
+
+def test_swap_out_free_gpu_blocks_swap_in_round_trip():
+    _, PagedKVCache = _load_classes()
+    cache = PagedKVCache(
+        num_blocks=4,
+        block_size=4,
+        num_layers=1,
+        num_heads=2,
+        head_dim=8,
+        dtype=torch.float16,
+    )
+
+    cache.allocate_sequence(seq_id=1, num_tokens=8)
+    assert cache.block_allocator.num_free_blocks == 2
+
+    cache.swap_out(1)
+    cache.free_gpu_blocks(1)
+    assert cache.block_allocator.num_free_blocks == 4
+
+    cache.allocate_sequence(seq_id=2, num_tokens=4)
+    assert cache.block_allocator.num_free_blocks == 3
+
+    cache.swap_in(1)
+    assert cache.block_allocator.num_free_blocks == 1
+    assert len(cache.get_block_table(1)) == 2
+
+    cache.free_sequence(1)
+    cache.free_sequence(2)
+    assert cache.block_allocator.num_free_blocks == 4
