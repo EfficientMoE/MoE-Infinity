@@ -299,14 +299,14 @@ python -m moe_infinity.entrypoints.openai.api_server_v2 \
 
 Set `CONTEXTPILOT_ENABLED=0` to force-disable ContextPilot at runtime, even if the CLI flag is enabled.
 
-Representative dry-run benchmark results:
+Representative dry-run benchmark results (shared-prefix RAG workload):
 
-| Phase | Integration mode | TTFT p50 vs baseline | Token savings vs baseline |
-|---|---|---:|---:|
-| Baseline | No ContextPilot | 0% | 0% |
-| Phase A | Sidecar proxy | 17% faster | 18% |
-| Phase B | In-process middleware | 21% faster | 27% |
-| Phase C | Deep scheduler integration | 26% faster | 28% |
+| Phase | Integration mode | TTFT p50 vs baseline | Token savings | KV cache hit rate |
+|---|---|---:|---:|---:|
+| Baseline | No ContextPilot | — | 0% | 30% |
+| Phase A | Sidecar proxy | 17% faster | 18% | 60% |
+| Phase B | In-process middleware | 21% faster | 27% | 61% |
+| Phase C | Deep scheduler integration | 26% faster | 28% | 69% |
 
 See [docs/contextpilot/README.md](docs/contextpilot/README.md) for setup details, CLI flags, environment variables, admin endpoints, and troubleshooting.
 
