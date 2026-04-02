@@ -1,0 +1,139 @@
+{
+  "metadata": {
+    "name": "no_overlap_baseline",
+    "overlap_ratio": 0.0,
+    "request_count": 8,
+    "description":
+        "Synthetic baseline workload with fully independent requests and no shared textual prefix."
+  },
+  "requests": [
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "You are a logistics analyst preparing a one-time route recommendation for refrigerated deliveries in a coastal city during heavy rain conditions."
+        },
+        {
+          "role": "user",
+          "content":
+              "Suggest a morning route strategy that minimizes spoilage risk while accounting for two flooded arterial roads."
+        }
+      ],
+      "expected_token_count": 120,
+      "context_overlap_with_prev": 0.0
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "You are a curriculum designer building a workshop agenda for first-year data science interns with limited production experience."
+        },
+        {
+          "role": "user",
+          "content":
+              "Create a two-day agenda balancing model evaluation basics, experiment tracking, and communication of uncertainty."
+        }
+      ],
+      "expected_token_count": 118,
+      "context_overlap_with_prev": 0.0
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "You are a sustainability advisor estimating water savings opportunities for a beverage plant operating older cleaning-in-place equipment."
+        },
+        {
+          "role": "user",
+          "content":
+              "Outline three retrofit options and explain tradeoffs between capital cost, downtime, and annual water reduction."
+        }
+      ],
+      "expected_token_count": 122,
+      "context_overlap_with_prev": 0.0
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "You are a museum operations planner coordinating crowd flow for a temporary exhibition expected to exceed normal attendance by 40 percent."
+        },
+        {
+          "role": "user",
+          "content":
+              "Design an entry-timing strategy with staffing recommendations that reduces queue length without reducing visitor experience quality."
+        }
+      ],
+      "expected_token_count": 126,
+      "context_overlap_with_prev": 0.0
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "You are an agronomy consultant advising a cooperative that is transitioning from conventional irrigation to precision drip systems across mixed crops."
+        },
+        {
+          "role": "user",
+          "content":
+              "Provide a staged rollout plan that prioritizes high-variance fields and includes farmer training checkpoints."
+        }
+      ],
+      "expected_token_count": 124,
+      "context_overlap_with_prev": 0.0
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "You are a film post-production coordinator managing color grading handoffs across three studios working in different time zones."
+        },
+        {
+          "role": "user",
+          "content":
+              "Recommend a file delivery and review cadence that prevents version conflicts and keeps final cut milestones on schedule."
+        }
+      ],
+      "expected_token_count": 119,
+      "context_overlap_with_prev": 0.0
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "You are a nonprofit program manager redesigning volunteer onboarding for weekend literacy events in underserved neighborhoods."
+        },
+        {
+          "role": "user",
+          "content":
+              "Draft an onboarding flow that improves volunteer retention and ensures safeguarding training completion before deployment."
+        }
+      ],
+      "expected_token_count": 121,
+      "context_overlap_with_prev": 0.0
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "You are an observability engineer creating a migration checklist for moving legacy cron jobs into an event-driven orchestration platform."
+        },
+        {
+          "role": "user",
+          "content":
+              "List critical migration steps, rollback criteria, and validation signals to confirm parity with the legacy workflow."
+        }
+      ],
+      "expected_token_count": 123,
+      "context_overlap_with_prev": 0.0
+    }
+  ]
+}

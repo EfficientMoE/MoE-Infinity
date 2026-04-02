@@ -1,0 +1,139 @@
+{
+  "metadata": {
+    "name": "batch_with_overlap",
+    "overlap_ratio": 0.6,
+    "request_count": 8,
+    "description":
+        "Synthetic batched requests that share one FAQ prefix while asking different topical questions."
+  },
+  "requests": [
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "Company FAQ Document: This internal FAQ explains billing cycles, account permissions, API rate-limit behavior, support escalation paths, security response times, and release communication standards. Billing closes on the last calendar day, role changes require manager approval, API clients should retry with exponential backoff after 429 responses, critical incidents are triaged within 15 minutes, and customer-facing changes require at least one notice in release notes."
+        },
+        {
+          "role": "user",
+          "content":
+              "How should we explain billing cutoff timing and prorated charges to an enterprise customer onboarding mid-cycle?"
+        }
+      ],
+      "expected_token_count": 220,
+      "context_overlap_with_prev": 0.0
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "Company FAQ Document: This internal FAQ explains billing cycles, account permissions, API rate-limit behavior, support escalation paths, security response times, and release communication standards. Billing closes on the last calendar day, role changes require manager approval, API clients should retry with exponential backoff after 429 responses, critical incidents are triaged within 15 minutes, and customer-facing changes require at least one notice in release notes."
+        },
+        {
+          "role": "user",
+          "content":
+              "What is the recommended response when a customer asks for immediate admin role transfer during an ongoing audit?"
+        }
+      ],
+      "expected_token_count": 225,
+      "context_overlap_with_prev": 0.62
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "Company FAQ Document: This internal FAQ explains billing cycles, account permissions, API rate-limit behavior, support escalation paths, security response times, and release communication standards. Billing closes on the last calendar day, role changes require manager approval, API clients should retry with exponential backoff after 429 responses, critical incidents are triaged within 15 minutes, and customer-facing changes require at least one notice in release notes."
+        },
+        {
+          "role": "user",
+          "content":
+              "Draft guidance for developers who hit API rate limits during bulk data export and need safe retry behavior."
+        }
+      ],
+      "expected_token_count": 215,
+      "context_overlap_with_prev": 0.6
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "Company FAQ Document: This internal FAQ explains billing cycles, account permissions, API rate-limit behavior, support escalation paths, security response times, and release communication standards. Billing closes on the last calendar day, role changes require manager approval, API clients should retry with exponential backoff after 429 responses, critical incidents are triaged within 15 minutes, and customer-facing changes require at least one notice in release notes."
+        },
+        {
+          "role": "user",
+          "content":
+              "How should frontline support triage a suspected data exposure incident in the first 30 minutes?"
+        }
+      ],
+      "expected_token_count": 210,
+      "context_overlap_with_prev": 0.61
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "Company FAQ Document: This internal FAQ explains billing cycles, account permissions, API rate-limit behavior, support escalation paths, security response times, and release communication standards. Billing closes on the last calendar day, role changes require manager approval, API clients should retry with exponential backoff after 429 responses, critical incidents are triaged within 15 minutes, and customer-facing changes require at least one notice in release notes."
+        },
+        {
+          "role": "user",
+          "content":
+              "Provide a template status update for customers during a severity-1 outage with uncertain root cause."
+        }
+      ],
+      "expected_token_count": 205,
+      "context_overlap_with_prev": 0.6
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "Company FAQ Document: This internal FAQ explains billing cycles, account permissions, API rate-limit behavior, support escalation paths, security response times, and release communication standards. Billing closes on the last calendar day, role changes require manager approval, API clients should retry with exponential backoff after 429 responses, critical incidents are triaged within 15 minutes, and customer-facing changes require at least one notice in release notes."
+        },
+        {
+          "role": "user",
+          "content":
+              "What should product teams include in release notes when deprecating a legacy endpoint next quarter?"
+        }
+      ],
+      "expected_token_count": 215,
+      "context_overlap_with_prev": 0.59
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "Company FAQ Document: This internal FAQ explains billing cycles, account permissions, API rate-limit behavior, support escalation paths, security response times, and release communication standards. Billing closes on the last calendar day, role changes require manager approval, API clients should retry with exponential backoff after 429 responses, critical incidents are triaged within 15 minutes, and customer-facing changes require at least one notice in release notes."
+        },
+        {
+          "role": "user",
+          "content":
+              "How do we explain escalation timelines to a customer who reports a potentially exploitable vulnerability?"
+        }
+      ],
+      "expected_token_count": 220,
+      "context_overlap_with_prev": 0.61
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content":
+              "Company FAQ Document: This internal FAQ explains billing cycles, account permissions, API rate-limit behavior, support escalation paths, security response times, and release communication standards. Billing closes on the last calendar day, role changes require manager approval, API clients should retry with exponential backoff after 429 responses, critical incidents are triaged within 15 minutes, and customer-facing changes require at least one notice in release notes."
+        },
+        {
+          "role": "user",
+          "content":
+              "Summarize best practices for combining billing clarification, API limits, and release messaging in one customer success handoff note."
+        }
+      ],
+      "expected_token_count": 235,
+      "context_overlap_with_prev": 0.6
+    }
+  ]
+}
