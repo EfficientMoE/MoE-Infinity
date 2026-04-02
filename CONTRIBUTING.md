@@ -110,7 +110,15 @@ Please run formatting/lint checks before opening a PR.
 
 ## Running Tests
 
-We keep tests under `tests/` with unit tests and Docker/integration tests.
+We keep tests under `tests/` with Python suites and Docker/integration coverage.
+
+Current Python test layout:
+
+- `tests/python/unit/`: unit tests for core runtime and utilities
+- `tests/python/integration/`: integration tests (including OpenAI-compatible API tests)
+- `tests/python/serving/`: serving engine, scheduler, streaming, and cache tests
+- `tests/python/ops/`: kernel/operator correctness tests (paged attention, fused ops, routing)
+- `tests/python/e2e/`: end-to-end KV/offloading and serving scenarios
 
 Recommended full local test command:
 
@@ -123,6 +131,18 @@ Useful targeted commands:
 ```bash
 # Unit tests
 python -m pytest -v --tb=short tests/python/unit/
+
+# Integration tests
+python -m pytest -v --tb=short tests/python/integration/
+
+# Serving tests
+python -m pytest -v --tb=short tests/python/serving/
+
+# Operator/kernel tests
+python -m pytest -v --tb=short tests/python/ops/
+
+# End-to-end tests
+python -m pytest -v --tb=short tests/python/e2e/
 
 # Integration tests without CUDA
 python -m pytest -v --tb=short -m "not cuda" tests/docker/test_io_integration.py
