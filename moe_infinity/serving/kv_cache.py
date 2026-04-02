@@ -247,10 +247,9 @@ class PagedKVCache:
         if block_table is None:
             return
 
-        if not block_table.has_blocks():
-            return
-
-        block_table.release()
+        if block_table._block_ids:
+            self.block_allocator.free(block_table._block_ids)
+            block_table._block_ids = []
 
     def get_block_table(self, seq_id: int) -> list[int]:
         block_table = self._require_sequence(seq_id)
@@ -277,7 +276,6 @@ class PagedKVCache:
         if seq_id not in self._swapped_out_sequences:
             return
 
-        block_table = self._sequence_tables[seq_id]
         cpu_buffer = self._swapped_cpu_buffers.pop(seq_id, None)
         saved_num_tokens = self._swapped_num_tokens.pop(seq_id, 0)
         if cpu_buffer is not None:

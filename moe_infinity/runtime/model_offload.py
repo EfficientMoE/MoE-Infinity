@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import tempfile
+import warnings
 from typing import Callable, Dict, Type, Union
 
 import torch
@@ -46,6 +47,7 @@ from moe_infinity.models import (
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
+    SyncGptOssMLP,
     SyncGrokMoeBlock,
     SyncJambaMoEBlock,
     SyncMixtralSparseMoeBlock,
@@ -70,6 +72,7 @@ from moe_infinity.utils.async_transfer import (
     wait_transfer,
 )
 from moe_infinity.utils.device import get_default_device, get_device
+from moe_infinity.utils.mxfp4 import identify_mxfp4_pairs, is_mxfp4_quantized
 
 _prefetch_lib = None
 # Alias for compatibility
@@ -471,6 +474,11 @@ class OffloadEngine(object):
             SyncDeepseekV3MoEBlock
         )
 
+        transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp = (
+            transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP
+        )
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = SyncGptOssMLP
+
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
         ) -> Callable:
@@ -497,6 +505,10 @@ class OffloadEngine(object):
 
                 self.dtype = parse_expert_dtype(self.config)
                 self.dtype_cls = self.config.torch_dtype
+                if self.dtype_cls is None:
+                    self.dtype_cls = getattr(
+                        self.config, "dtype", torch.bfloat16
+                    )
 
                 if self.config.model_type == "deepseek_v3":
                     self.dtype_cls = torch.float8_e4m3fn
@@ -522,7 +534,20 @@ class OffloadEngine(object):
                             with safe_open(
                                 ckpt, framework="pt", device="cpu"
                             ) as f:
-                                for k in f.keys():
+                                weight_keys = list(f.keys())
+                                mxfp4_pairs = identify_mxfp4_pairs(weight_keys)
+                                is_mxfp4_ckpt = bool(mxfp4_pairs)
+                                if not is_mxfp4_ckpt:
+                                    try:
+                                        is_mxfp4_ckpt = is_mxfp4_quantized(
+                                            self.config
+                                        )
+                                    except Exception:
+                                        is_mxfp4_ckpt = False
+
+                                for k in weight_keys:
+                                    if is_mxfp4_ckpt and k.endswith("_scales"):
+                                        continue
                                     state_dict[k] = f.get_tensor(k)
                         else:
                             state_dict = torch.load(ckpt)
@@ -531,6 +556,21 @@ class OffloadEngine(object):
                         for k, v in state_dict.items():
                             try:
                                 state_dict[k] = v.to(self.dtype_cls).to("cpu")
+                            except (RuntimeError, TypeError) as e:
+                                if k.endswith("_blocks"):
+                                    warnings.warn(
+                                        f"Could not convert tensor {k} (dtype={v.dtype}) "
+                                        f"to {self.dtype_cls}: {e}. Keeping original dtype.",
+                                        UserWarning,
+                                        stacklevel=2,
+                                    )
+                                    state_dict[k] = v.to("cpu")
+                                    continue
+                                print(
+                                    f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
+                                    flush=True,
+                                )
+                                raise
                             except Exception as e:
                                 print(
                                     f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
@@ -543,6 +583,16 @@ class OffloadEngine(object):
                         del state_dict
                         gc.collect()
                         torch.cuda.empty_cache()
+
+                    if is_mxfp4_quantized(self.config):
+                        blocks_aliases = {}
+                        for key in list(self.name_id_map.keys()):
+                            if key.endswith("_blocks"):
+                                base_name = key[: -len("_blocks")]
+                                blocks_aliases[base_name] = self.name_id_map[
+                                    key
+                                ]
+                        self.name_id_map.update(blocks_aliases)
 
                     with open(name_id_map_file, "w") as f:
                         json.dump(self.name_id_map, f)
@@ -674,17 +724,20 @@ class OffloadEngine(object):
                         or isinstance(module, SyncDeepseekV3MoEBlock)
                         or isinstance(module, Qwen3MoEBlock)
                         or isinstance(module, SyncDbrxFFNBlock)
+                        or isinstance(module, SyncGptOssMLP)
                         or isinstance(module, SyncOlmoeMoEBlock)
                         or isinstance(module, SyncJambaMoEBlock)
                     ):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
                         self.expert_modules.append(module)
-                        module.expert_executor = self.expert_executor
-                        module.expert_prefetcher = self.expert_prefetcher
-                        module.expert_tracer = self.expert_tracer
-                        module.expert_predictor = self.expert_predictor
-                        module.expert_tensor_map = self.expert_tensor_map
+
+                        if not isinstance(module, SyncGptOssMLP):
+                            module.expert_executor = self.expert_executor
+                            module.expert_prefetcher = self.expert_prefetcher
+                            module.expert_tracer = self.expert_tracer
+                            module.expert_predictor = self.expert_predictor
+                            module.expert_tensor_map = self.expert_tensor_map
 
                         module.lib = self.prefetch_lib
 
@@ -723,6 +776,10 @@ class OffloadEngine(object):
         PreTrainedModel.post_init = PreTrainedModel._old_post_init
 
         deactivate_empty_init()
+
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
+            transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
+        )
 
     def get_topology(self, model):
         name_lst = []
@@ -907,7 +964,7 @@ class OffloadEngine(object):
                 key = key.split(".")[0]
                 output_device_index = 0
 
-            if "expert" in key:
+            if "expert" in key and self.config.model_type != "gpt_oss":
                 for expert_idx, expert_tensors in enumerate(tensors):
                     expert_key = (
                         f"{key}.expert_{expert_idx}"
@@ -1259,3 +1316,6 @@ class OffloadEngine(object):
 
         transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
+            transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
+        )

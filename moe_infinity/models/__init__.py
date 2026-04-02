@@ -8,6 +8,7 @@ from .dbrx import SyncDbrxFFNBlock
 from .deepseek import DeepseekMoEBlock
 from .deepseek_v2_wrapper import SyncDeepseekV2MoEBlock
 from .deepseek_v3_wrapper import SyncDeepseekV3MoEBlock
+from .gpt_oss import SyncGptOssMLP
 from .grok import SyncGrokMoeBlock
 from .jamba import SyncJambaMoEBlock
 from .mixtral import SyncMixtralSparseMoeBlock

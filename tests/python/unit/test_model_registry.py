@@ -18,6 +18,7 @@ def test_all_models_registered():
         "arctic",
         "deepseek",
         "deepseek_v3",
+        "gptoss",
         "qwen3",
         "dbrx",
         "olmoe",

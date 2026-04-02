@@ -49,20 +49,22 @@ def ensure_config_compat(config: PretrainedConfig) -> PretrainedConfig:
 
 def parse_expert_dtype(config: PretrainedConfig) -> int:
     dtype = config.torch_dtype
+    if dtype is None:
+        dtype = getattr(config, "dtype", None)
+    if dtype is None:
+        dtype = torch.bfloat16
     if dtype == torch.bfloat16:
-        dtype = 0
+        return 0
     elif dtype == torch.float32:
-        dtype = 1
+        return 1
     elif dtype == torch.float16:
-        dtype = 2
+        return 2
     else:
         assert False, "Unknown dtype %s" % dtype
 
-    return dtype
-
 
 def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
-    arch = config.architectures[0].lower()
+    arch = (config.architectures or [""])[0].lower()
 
     if "nllb" in arch:
         num_encoder_layers = config.encoder_layers // config.encoder_sparse_step
@@ -84,6 +86,11 @@ def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
         num_decoder_layers = config.num_hidden_layers
         num_layers = config.num_hidden_layers
         num_experts = config.n_routed_experts
+    elif "gpt_oss" in arch or "gptoss" in arch:
+        num_encoder_layers = 0
+        num_decoder_layers = config.num_hidden_layers
+        num_layers = config.num_hidden_layers
+        num_experts = config.num_local_experts
     else:
         raise RuntimeError(f"Unsupported architecture {arch}")
 
@@ -93,8 +100,14 @@ def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
 def parse_expert_id(
     param_name: str, config: PretrainedConfig
 ) -> Tuple[Optional[int], Optional[int]]:
-    arch = config.architectures[0].lower()
+    arch = (config.architectures or [""])[0].lower()
     _, _, num_encoder_layers = parse_moe_param(config)
+    result = None
+    layer_type = ""
+    layer_id = 0
+    expert_id = 0
+    encoder_sparse_step = 1
+    decoder_sparse_step = 1
 
     if "nllb" in arch:
         # example "decoder.block.1.layer.2.mlp.experts.expert_100.wi.weight"
@@ -149,6 +162,14 @@ def parse_expert_id(
             # print(f"layer_id: {layer_id}, expert_id: {expert_id}")
             layer_id = int(layer_id)
             expert_id = int(expert_id)
+    elif "gpt_oss" in arch or "gptoss" in arch:
+        result = re.findall(
+            r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)",
+            param_name,
+        )
+        if result:
+            layer_id = int(result[0][0])
+            return layer_id, None
 
     if result:
         if layer_type == "decoder":

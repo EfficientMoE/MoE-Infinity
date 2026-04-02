@@ -2,6 +2,7 @@ from transformers import (
     DbrxForCausalLM,
     DeepseekV2ForCausalLM,
     DeepseekV3ForCausalLM,
+    GptOssForCausalLM,
     JambaForCausalLM,
     MixtralForCausalLM,
     NllbMoeForConditionalGeneration,
@@ -26,6 +27,7 @@ MODEL_MAPPING_NAMES = {
     "arctic": ArcticForCausalLM,
     "deepseek": DeepseekV2ForCausalLM,
     "deepseek_v3": DeepseekV3ForCausalLM,
+    "gptoss": GptOssForCausalLM,
     "qwen3": Qwen3MoeForCausalLM,
     "dbrx": DbrxForCausalLM,
     "olmoe": OlmoeForCausalLM,
@@ -40,6 +42,7 @@ MODEL_MAPPING_TYPES = {
     "arctic": 4,
     "deepseek": 5,
     "deepseek_v3": 5,
+    "gptoss": 4,
     "qwen3": 5,
     "dbrx": 4,
     "olmoe": 4,
@@ -48,7 +51,9 @@ MODEL_MAPPING_TYPES = {
 
 
 def parse_expert_type(config: PretrainedConfig) -> int:
-    architecture = config.architectures[0].lower()
+    architecture = (
+        config.architectures[0].lower() if config.architectures else ""
+    )
     arch = None
     for supp_arch in MODEL_MAPPING_NAMES:
         if supp_arch in architecture:
