@@ -626,25 +626,24 @@ class MoE:
 
         import importlib
 
-        from moe_infinity.entrypoints.openai import api_server
+        from moe_infinity.entrypoints.openai import api_server_v2
 
         model_name = getattr(
             getattr(self.model, "config", None), "_name_or_path", None
         )
-        api_server.initialize_runtime(
+        api_server_v2.initialize_with_model(
             moe_model=self,
             model_name=model_name,
-            tokenizer=getattr(self, "tokenizer", None),
+            tok=getattr(self, "tokenizer", None),
             max_seq_length=self.max_seq_length,
             device_memory_ratio=device_memory_ratio,
             kv_cache_ratio=kv_cache_ratio,
             max_batch_size=max_batch_size,
             enable_prefix_caching=enable_prefix_caching,
-            offload_dir=offload_dir,
         )
 
         uvicorn = importlib.import_module("uvicorn")
-        uvicorn.run(api_server.app, host=host, port=port)
+        uvicorn.run(api_server_v2.app, host=host, port=port)
 
     def forward(self, input_ids: torch.LongTensor, *args, **kwargs) -> Any:
         """

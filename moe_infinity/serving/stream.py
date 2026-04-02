@@ -87,10 +87,15 @@ class StreamManager:
         return state
 
     def push_token(
-        self, request_id: str, token_text: str, finished: bool
+        self,
+        request_id: str,
+        token_text: str,
+        finished: bool,
+        finish_reason: Optional[str] = None,
     ) -> None:
         state = self._require_stream(request_id)
-        finish_reason = "stop" if finished else None
+        if finished and finish_reason is None:
+            finish_reason = "stop"
         chunk = self.format_completion_chunk(
             request_id=request_id,
             token_text=token_text,

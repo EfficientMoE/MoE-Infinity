@@ -55,6 +55,7 @@ class _Output:
         self.token_id = 1
         self.token_text = "ok"
         self.finished = True
+        self.finish_reason = "stop"
         self.usage = {
             "prompt_tokens": 3,
             "completion_tokens": 1,
