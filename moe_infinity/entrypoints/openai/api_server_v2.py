@@ -5,7 +5,7 @@ import json
 import os
 import time
 from contextlib import suppress
-from threading import Event
+from threading import Event, Lock
 from types import SimpleNamespace
 from typing import Any, Literal, Optional, cast
 
@@ -116,6 +116,17 @@ _startup_watchdog: Optional[Any] = None
 _decode_watchdog: Optional[Any] = None
 _watchdog_config: Optional[Any] = None
 
+_contextpilot_enabled: bool = False
+_contextpilot_debug: bool = False
+_contextpilot_fault: str = "none"
+_contextpilot_state_lock = Lock()
+
+
+def _resolve_contextpilot_enabled(cli_enabled: bool) -> bool:
+    if os.environ.get("CONTEXTPILOT_ENABLED", "1") == "0":
+        return False
+    return bool(cli_enabled)
+
 
 def initialize_with_model(
     *,
@@ -151,9 +162,11 @@ def initialize_with_model(
 
     tokenizer = tok
     model_name_global = model_name
-    runtime_max_seq_length = int(
-        engine_config.get("max_seq_length", max_seq_length) or max_seq_length
-    )
+    configured_max_seq_length = engine_config.get("max_seq_length")
+    if isinstance(configured_max_seq_length, int):
+        runtime_max_seq_length = configured_max_seq_length
+    else:
+        runtime_max_seq_length = int(max_seq_length)
 
     initialized_engine = ContinuousBatchingEngine(
         model=hf_model,
@@ -613,6 +626,61 @@ async def health() -> Response:
     return JSONResponse(content=status_dict, status_code=status_code)
 
 
+@app.post("/contextpilot/toggle")
+async def contextpilot_toggle(payload: dict[str, Any]) -> JSONResponse:
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(
+            status_code=400,
+            detail="'enabled' must be a boolean",
+        )
+
+    with _contextpilot_state_lock:
+        global _contextpilot_enabled
+        _contextpilot_enabled = enabled
+
+    return JSONResponse(
+        content={"enabled": enabled},
+        status_code=200,
+    )
+
+
+@app.post("/contextpilot/inject-fault")
+async def contextpilot_inject_fault(payload: dict[str, Any]) -> JSONResponse:
+    with _contextpilot_state_lock:
+        if not _contextpilot_debug:
+            raise HTTPException(
+                status_code=403,
+                detail="ContextPilot debug endpoints are disabled",
+            )
+
+    fault = payload.get("fault")
+    if not isinstance(fault, str) or not fault:
+        raise HTTPException(
+            status_code=400,
+            detail="'fault' must be a non-empty string",
+        )
+
+    duration_s = payload.get("duration_s", 0)
+    if not isinstance(duration_s, int) or duration_s < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="'duration_s' must be a non-negative integer",
+        )
+
+    with _contextpilot_state_lock:
+        global _contextpilot_fault
+        _contextpilot_fault = fault
+
+    return JSONResponse(
+        content={
+            "fault": fault,
+            "duration_s": duration_s,
+        },
+        status_code=200,
+    )
+
+
 @app.post("/v1/completions")
 async def completion(request: CompletionRequest, raw_request: Request):
     if engine is None:
@@ -1023,11 +1091,29 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable py-spy stack dump on watchdog timeout (requires py-spy installed)",
     )
+    parser.add_argument(
+        "--enable-contextpilot",
+        action="store_true",
+        default=False,
+        help="Enable ContextPilot middleware",
+    )
+    parser.add_argument(
+        "--contextpilot-debug",
+        action="store_true",
+        default=False,
+        help="Enable CP debug endpoints (inject-fault)",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    with _contextpilot_state_lock:
+        _contextpilot_enabled = _resolve_contextpilot_enabled(
+            args.enable_contextpilot
+        )
+        _contextpilot_debug = bool(args.contextpilot_debug)
+        _contextpilot_fault = "none"
     _startup_args = args
 
     uvicorn.run(

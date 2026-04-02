@@ -1,1 +1,1 @@
-contextpilot>=0.3.5.post2,<0.4
+contextpilot>=0.4.0,<1.0

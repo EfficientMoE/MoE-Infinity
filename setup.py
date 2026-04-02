@@ -265,6 +265,7 @@ setup(
     install_requires=install_requires,
     extras_require={
         "flashinfer": ["flashinfer"],
+        "contextpilot": ["contextpilot>=0.4.0"],
     },
     author="EfficientMoE Team",
     long_description=read_readme(),
