@@ -94,6 +94,13 @@ class BlockTable:
     def num_computed_tokens(self) -> int:
         return self._num_tokens
 
+    def has_blocks(self) -> bool:
+        return bool(self._block_ids)
+
+    def restore_blocks(self, block_ids: list[int], num_tokens: int) -> None:
+        self._block_ids = list(block_ids)
+        self._num_tokens = num_tokens
+
     def release(self) -> None:
         if self._block_ids:
             self.block_allocator.free(self._block_ids)

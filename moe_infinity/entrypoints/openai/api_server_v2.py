@@ -4,9 +4,10 @@ import importlib
 import json
 import os
 import time
+from contextlib import suppress
 from threading import Event
 from types import SimpleNamespace
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 try:
     fastapi = importlib.import_module("fastapi")
@@ -69,9 +70,18 @@ except Exception:
     fastapi = SimpleNamespace(FastAPI=_FallbackFastAPI)
     uvicorn = SimpleNamespace(run=lambda *args, **kwargs: None)
 
+import moe_infinity.serving.watchdog as watchdog_module
 from moe_infinity.serving.engine import ContinuousBatchingEngine, RequestOutput
+from moe_infinity.serving.health import ServerHealthState
 from moe_infinity.serving.sequence import SamplingParams
 from moe_infinity.serving.stream import StreamManager
+from moe_infinity.serving.validation import (
+    ContextLengthExceededError,
+    InvalidRequestError,
+    validate_context_length,
+    validate_required_params,
+    validate_sampling_params,
+)
 
 from .protocol import (
     ChatCompletionRequest,
@@ -84,6 +94,7 @@ from .protocol import (
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
     UsageInfo,
+    create_error_response,
     random_uuid,
 )
 
@@ -94,9 +105,16 @@ engine: Optional[ContinuousBatchingEngine] = None
 stream_manager: Optional[StreamManager] = None
 tokenizer: Optional[object] = None
 model_name_global: Optional[str] = None
+runtime_max_seq_length: int = 4096
 
 _engine_task: Optional[asyncio.Task[None]] = None
 _engine_shutdown_event: Optional[asyncio.Event] = None
+_model_init_task: Optional[asyncio.Task[None]] = None
+_startup_args: Optional[argparse.Namespace] = None
+_health_state = ServerHealthState()
+_startup_watchdog: Optional[Any] = None
+_decode_watchdog: Optional[Any] = None
+_watchdog_config: Optional[Any] = None
 
 
 def parse_prompt_format(prompt: Any) -> tuple[bool, list[Any]]:
@@ -155,15 +173,10 @@ def _build_sampling_params(
     max_tokens: Optional[int],
     stop: Any,
 ) -> SamplingParams:
-    resolved_max_tokens = (
-        int(max_tokens)
-        if isinstance(max_tokens, int) and max_tokens > 0
-        else SamplingParams().max_tokens
-    )
     return SamplingParams(
         temperature=float(temperature) if temperature is not None else 1.0,
         top_p=float(top_p) if top_p is not None else 1.0,
-        max_tokens=resolved_max_tokens,
+        max_tokens=cast(int, max_tokens),
         stop=_extract_stop_sequences(stop),
     )
 
@@ -377,21 +390,22 @@ async def _engine_loop() -> None:
             continue
 
         if engine.has_pending_requests():
+            if _decode_watchdog is not None:
+                _decode_watchdog.activate()
             _ = engine.step()
+            if _decode_watchdog is not None:
+                _decode_watchdog.feed()
             await asyncio.sleep(0)
             continue
 
+        if _decode_watchdog is not None:
+            _decode_watchdog.deactivate()
         await asyncio.sleep(0.005)
 
 
-@app.on_event("startup")
-async def startup_event() -> None:
+def _ensure_engine_loop_running() -> None:
     global _engine_task
     global _engine_shutdown_event
-    global stream_manager
-
-    if stream_manager is None:
-        stream_manager = StreamManager()
 
     if engine is None:
         return
@@ -403,9 +417,121 @@ async def startup_event() -> None:
         _engine_task = asyncio.create_task(_engine_loop())
 
 
+async def _initialize_model() -> None:
+    global engine
+    global _health_state
+    global runtime_max_seq_length
+    global stream_manager
+    global tokenizer
+    global model_name_global
+    global _startup_watchdog
+    global _decode_watchdog
+    global _watchdog_config
+
+    args = _startup_args
+    if args is None or engine is not None:
+        return
+
+    _health_state.set_starting()
+    _startup_watchdog = None
+    _decode_watchdog = None
+    _watchdog_config = None
+
+    startup_timeout = getattr(args, "startup_timeout", None)
+    decode_step_timeout = getattr(args, "decode_step_timeout", None)
+    if startup_timeout is not None or decode_step_timeout is not None:
+        _watchdog_config = watchdog_module.WatchdogConfig(
+            startup_timeout=startup_timeout,
+            decode_step_timeout=decode_step_timeout,
+            enable_pyspy_dump=getattr(args, "enable_pyspy_dump", False),
+        )
+        _startup_watchdog = watchdog_module.start_startup_watchdog(
+            _health_state,
+            _watchdog_config,
+            is_ready=lambda: engine is not None,
+        )
+
+    try:
+        from transformers import AutoTokenizer
+
+        model_name_global = args.model
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model,
+            trust_remote_code=True,
+        )
+
+        moe_config = {
+            "offload_path": os.path.join(args.offload_dir, args.model),
+            "device_memory_ratio": args.device_memory_ratio,
+        }
+        if args.enable_prefix_caching:
+            moe_config["enable_prefix_caching"] = True
+
+        moe_module = importlib.import_module("moe_infinity")
+        moe_ctor = getattr(moe_module, "MoE", None)
+        if moe_ctor is None:
+            raise RuntimeError("MoE is unavailable in this environment")
+
+        moe_model = moe_ctor(args.model, moe_config)
+        engine_config = _build_engine_config(args=args, model=moe_model.model)
+
+        initialized_engine = ContinuousBatchingEngine(
+            model=moe_model.model,
+            engine=moe_model.engine,
+            config=engine_config,
+            tokenizer=tokenizer,
+        )
+        if stream_manager is None:
+            stream_manager = StreamManager()
+
+        engine = initialized_engine
+        configured_max_seq_length = engine_config.get("max_seq_length")
+        if isinstance(configured_max_seq_length, int):
+            runtime_max_seq_length = configured_max_seq_length
+
+        if _watchdog_config is not None:
+            _decode_watchdog = watchdog_module.start_decode_watchdog(
+                _health_state,
+                _watchdog_config,
+            )
+
+        _ensure_engine_loop_running()
+    finally:
+        if _startup_watchdog is not None:
+            _startup_watchdog.cancel()
+
+    _health_state.set_healthy()
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    global _model_init_task
+    global _engine_task
+    global stream_manager
+
+    if stream_manager is None:
+        stream_manager = StreamManager()
+
+    if _startup_args is not None and engine is None:
+        if _model_init_task is None or _model_init_task.done():
+            _model_init_task = asyncio.create_task(_initialize_model())
+        return
+
+    _ensure_engine_loop_running()
+
+
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     global _engine_task
+    global _model_init_task
+    global _decode_watchdog
+
+    if _model_init_task is not None:
+        if not _model_init_task.done():
+            _model_init_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _model_init_task
+        _model_init_task = None
 
     if _engine_shutdown_event is not None:
         _engine_shutdown_event.set()
@@ -413,6 +539,12 @@ async def shutdown_event() -> None:
     if _engine_task is not None:
         await _engine_task
         _engine_task = None
+
+    if _decode_watchdog is not None:
+        _decode_watchdog.deactivate()
+        _decode_watchdog.stop()
+        _decode_watchdog.join(timeout=1.0)
+        _decode_watchdog = None
 
     if engine is not None:
         shutdown_fn = getattr(engine, "shutdown", None)
@@ -422,16 +554,52 @@ async def shutdown_event() -> None:
 
 @app.get("/health")
 async def health() -> Response:
-    return Response(status_code=200)
+    status_dict = _health_state.get_status_dict()
+    is_healthy = _health_state.is_healthy()
+    status_code = 200 if is_healthy else 503
+    return JSONResponse(content=status_dict, status_code=status_code)
 
 
 @app.post("/v1/completions")
 async def completion(request: CompletionRequest, raw_request: Request):
+    if engine is None:
+        return create_error_response(
+            status_code=503,
+            message="Service is starting. Please retry shortly.",
+            error_type="server_error",
+            code="service_starting",
+        )
+
     runtime_engine, runtime_stream_manager = _ensure_runtime_ready()
     created_time = int(time.monotonic())
     model_name = request.model or model_name_global or "unknown"
 
-    prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
+    try:
+        validate_required_params(request.max_tokens)
+        validate_sampling_params(
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=request.max_tokens,
+        )
+    except InvalidRequestError as exc:
+        return create_error_response(
+            status_code=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            param=exc.param,
+        )
+
+    try:
+        prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
+    except ValueError as exc:
+        return create_error_response(
+            status_code=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
     sampling_params = _build_sampling_params(
         temperature=request.temperature,
         top_p=request.top_p,
@@ -441,11 +609,11 @@ async def completion(request: CompletionRequest, raw_request: Request):
 
     if request.stream:
         if len(prompts) != 1:
-            return JSONResponse(
+            return create_error_response(
                 status_code=400,
-                content={
-                    "error": "streaming completion only supports a single prompt"
-                },
+                message="streaming completion only supports a single prompt",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
             )
 
         request_id = random_uuid()
@@ -454,6 +622,20 @@ async def completion(request: CompletionRequest, raw_request: Request):
             prompt_token_ids = [int(token_id) for token_id in prompt]
         else:
             prompt_token_ids = _tokenize_text(str(prompt))
+
+        try:
+            validate_context_length(
+                len(prompt_token_ids),
+                cast(int, request.max_tokens),
+                runtime_max_seq_length,
+            )
+        except ContextLengthExceededError as exc:
+            return create_error_response(
+                status_code=400,
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="context_length_exceeded",
+            )
 
         stream = runtime_stream_manager.create_stream(
             request_id=request_id,
@@ -497,6 +679,20 @@ async def completion(request: CompletionRequest, raw_request: Request):
         else:
             prompt_token_ids = _tokenize_text(str(prompt))
 
+        try:
+            validate_context_length(
+                len(prompt_token_ids),
+                cast(int, request.max_tokens),
+                runtime_max_seq_length,
+            )
+        except ContextLengthExceededError as exc:
+            return create_error_response(
+                status_code=400,
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="context_length_exceeded",
+            )
+
         output_text, usage = await _wait_non_stream_result(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
@@ -530,10 +726,34 @@ async def completion(request: CompletionRequest, raw_request: Request):
 
 @app.post("/v1/chat/completions")
 async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
+    if engine is None:
+        return create_error_response(
+            status_code=503,
+            message="Service is starting. Please retry shortly.",
+            error_type="server_error",
+            code="service_starting",
+        )
+
     runtime_engine, runtime_stream_manager = _ensure_runtime_ready()
     created_time = int(time.monotonic())
     model_name = request.model or model_name_global or "unknown"
     request_id = random_uuid()
+
+    try:
+        validate_required_params(request.max_tokens)
+        validate_sampling_params(
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=request.max_tokens,
+        )
+    except InvalidRequestError as exc:
+        return create_error_response(
+            status_code=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            param=exc.param,
+        )
 
     sampling_params = _build_sampling_params(
         temperature=request.temperature,
@@ -542,6 +762,20 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
         stop=request.stop,
     )
     prompt_token_ids = _chat_prompt_to_token_ids(request)
+
+    try:
+        validate_context_length(
+            len(prompt_token_ids),
+            cast(int, request.max_tokens),
+            runtime_max_seq_length,
+        )
+    except ContextLengthExceededError as exc:
+        return create_error_response(
+            status_code=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="context_length_exceeded",
+        )
 
     if request.stream:
         stream = runtime_stream_manager.create_stream(
@@ -645,6 +879,14 @@ def _build_engine_config(
         "n_head_kv",
     )
     hidden_size = _resolve_int_attr(model_config, "hidden_size", "n_embd")
+    max_seq_length = _resolve_int_attr(
+        model_config,
+        "max_position_embeddings",
+        "max_seq_len",
+        "max_sequence_length",
+        "n_positions",
+        "model_max_length",
+    )
     head_dim = _resolve_int_attr(model_config, "head_dim")
 
     if num_layers is None:
@@ -675,6 +917,7 @@ def _build_engine_config(
         "kv_cache_ratio": args.kv_cache_ratio,
         "max_batch_size": args.max_batch_size,
         "max_tokens_per_step": 2048,
+        "max_seq_length": max_seq_length or 4096,
         "block_size": 16,
         "num_layers": num_layers,
         "num_kv_heads": num_kv_heads,
@@ -700,42 +943,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kv-cache-ratio", type=float, default=0.25)
     parser.add_argument("--max-batch-size", type=int, default=32)
     parser.add_argument("--enable-prefix-caching", action="store_true")
+    parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        default=None,
+        help="Startup watchdog timeout in seconds (disabled by default)",
+    )
+    parser.add_argument(
+        "--decode-step-timeout",
+        type=float,
+        default=None,
+        help="Decode step watchdog timeout in seconds (disabled by default)",
+    )
+    parser.add_argument(
+        "--enable-pyspy-dump",
+        action="store_true",
+        help="Enable py-spy stack dump on watchdog timeout (requires py-spy installed)",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    from transformers import AutoTokenizer
-
     args = parse_args()
-
-    model_name_global = args.model
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model,
-        trust_remote_code=True,
-    )
-
-    moe_config = {
-        "offload_path": os.path.join(args.offload_dir, args.model),
-        "device_memory_ratio": args.device_memory_ratio,
-    }
-    if args.enable_prefix_caching:
-        moe_config["enable_prefix_caching"] = True
-
-    moe_module = importlib.import_module("moe_infinity")
-    moe_ctor = getattr(moe_module, "MoE", None)
-    if moe_ctor is None:
-        raise RuntimeError("MoE is unavailable in this environment")
-
-    moe_model = moe_ctor(args.model, moe_config)
-    engine_config = _build_engine_config(args=args, model=moe_model.model)
-
-    engine = ContinuousBatchingEngine(
-        model=moe_model.model,
-        engine=moe_model.engine,
-        config=engine_config,
-        tokenizer=tokenizer,
-    )
-    stream_manager = StreamManager()
+    _startup_args = args
 
     uvicorn.run(
         app,
