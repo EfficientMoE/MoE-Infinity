@@ -19,13 +19,21 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchmarks.contextpilot.benchmark_utils import compute_percentiles
+from benchmarks.contextpilot.http_benchmark import (
+    check_server_health,
+    run_workload_benchmark,
+    set_contextpilot_enabled,
+)
+
+DEFAULT_MODEL = "default"
+DEFAULT_MAX_TOKENS = 64
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Phase C benchmark: compare baseline vs Phase A (sidecar) vs "
-            "Phase B (middleware) vs Phase C (scheduler fusion). Dry-run only."
+            "Phase B (middleware) vs Phase C (scheduler fusion)."
         )
     )
     parser.add_argument(
@@ -42,6 +50,17 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Generate deterministic mock Phase C improvements from existing results.",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Model identifier sent in OpenAI-compatible request payload.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help="max_tokens value sent in benchmark requests.",
     )
     return parser.parse_args()
 
@@ -367,10 +386,102 @@ def build_payload(
 def main() -> int:
     args = parse_args()
 
+    if args.max_tokens <= 0:
+        raise ValueError("--max-tokens must be > 0")
+
     if not args.dry_run:
-        raise RuntimeError(
-            "This environment supports dry-run only. Re-run with --dry-run."
+        if not check_server_health(args.backend_url):
+            print(
+                f"Server not reachable at {args.backend_url}. Start MoE-Infinity first."
+            )
+            return 1
+
+        if not set_contextpilot_enabled(args.backend_url, True):
+            print(
+                f"Failed to enable ContextPilot at {args.backend_url}. Ensure server was started with --enable-contextpilot."
+            )
+            return 1
+
+        phase_c = run_workload_benchmark(
+            server_url=args.backend_url,
+            model=args.model,
+            max_tokens=args.max_tokens,
         )
+
+        if not set_contextpilot_enabled(args.backend_url, False):
+            print(
+                f"Failed to disable ContextPilot at {args.backend_url} for baseline comparison."
+            )
+            return 1
+
+        baseline = run_workload_benchmark(
+            server_url=args.backend_url,
+            model=args.model,
+            max_tokens=args.max_tokens,
+        )
+
+        _ = set_contextpilot_enabled(args.backend_url, True)
+
+        phase_a_path = Path(DEFAULT_PHASE_A)
+        if phase_a_path.exists():
+            try:
+                phase_a = load_phase(
+                    phase_a_path,
+                    key="phase_a",
+                    display_name="Phase A",
+                )
+            except Exception:
+                phase_a = baseline
+        else:
+            phase_a = baseline
+
+        phase_b_path = Path(DEFAULT_PHASE_B)
+        if phase_b_path.exists():
+            try:
+                phase_b = load_phase(
+                    phase_b_path,
+                    key="phase_b",
+                    display_name="Phase B",
+                )
+            except Exception:
+                phase_b = baseline
+        else:
+            phase_b = baseline
+
+        payload = build_payload(
+            backend_url=args.backend_url,
+            baseline=baseline,
+            phase_a=phase_a,
+            phase_b=phase_b,
+            phase_c=phase_c,
+        )
+        payload["mode"] = "real"
+        payload["model"] = args.model
+        payload["max_tokens"] = args.max_tokens
+        payload["phase_c_note"] = (
+            "Phase C scheduler ordering is active when ContextPilot is enabled."
+        )
+
+        output_path = Path(args.output)
+        write_json(output_path, payload)
+
+        print(
+            f"Phase C real benchmark complete. Results written to {output_path}"
+        )
+        print(
+            "TTFT delta p50 (c_vs_baseline):",
+            compute_percentiles(
+                [
+                    item["ttft_pct"]
+                    for item in payload["delta_pct"]["c_vs_baseline"].values()
+                    if "ttft_pct" in item
+                ]
+            )["p50"],
+            "%",
+        )
+        print("GO/NO-GO:", payload["go_no_go"])
+        print(payload["phase_c_note"])
+        return 0
 
     baseline = load_baseline(Path(DEFAULT_BASELINE))
     phase_a = load_phase(

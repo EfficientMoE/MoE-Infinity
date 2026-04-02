@@ -17,12 +17,20 @@ DEFAULT_BACKEND_URL = "http://localhost:8000"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from benchmarks.contextpilot.http_benchmark import (
+    check_server_health,
+    run_workload_benchmark,
+)
+
+DEFAULT_MODEL = "default"
+DEFAULT_MAX_TOKENS = 64
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Phase A benchmark: compare baseline vs ContextPilot sidecar "
-            "(dry-run supported, no model/server required)."
+            "(supports dry-run and real HTTP measurement)."
         )
     )
     parser.add_argument(
@@ -50,6 +58,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Generate mock sidecar improvements from baseline without live servers.",
     )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Model identifier sent in OpenAI-compatible request payload.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help="max_tokens value sent in benchmark requests.",
+    )
     return parser.parse_args()
 
 
@@ -70,6 +89,59 @@ def _to_float(value: object) -> float | None:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def _relative_change_pct(
+    before: float, after: float, *, lower_is_better: bool
+) -> float:
+    if before <= 0.0:
+        return 0.0
+    if lower_is_better:
+        return ((before - after) / before) * 100.0
+    return ((after - before) / before) * 100.0
+
+
+def _compute_delta(
+    before: dict[str, dict[str, float]],
+    after: dict[str, dict[str, float]],
+) -> dict[str, dict[str, float]]:
+    delta: dict[str, dict[str, float]] = {}
+    for workload_name, before_metrics in before.items():
+        after_metrics = after.get(workload_name, before_metrics)
+        ttft_reduction_pct = _relative_change_pct(
+            before_metrics["ttft_p50"],
+            after_metrics["ttft_p50"],
+            lower_is_better=True,
+        )
+        e2e_reduction_pct = _relative_change_pct(
+            before_metrics["e2e_latency_p50"],
+            after_metrics["e2e_latency_p50"],
+            lower_is_better=True,
+        )
+        delta[workload_name] = {
+            "token_savings_pct": after_metrics["token_savings_pct"]
+            - before_metrics["token_savings_pct"],
+            "kv_cache_hit_rate_pct": (
+                after_metrics["kv_cache_hit_rate"]
+                - before_metrics["kv_cache_hit_rate"]
+            )
+            * 100.0,
+            "ttft_pct": ttft_reduction_pct,
+            "ttft_phase_change_pct": -ttft_reduction_pct,
+            "e2e_latency_pct": e2e_reduction_pct,
+            "e2e_latency_phase_change_pct": -e2e_reduction_pct,
+            "prefill_throughput_pct": _relative_change_pct(
+                before_metrics["prefill_throughput"],
+                after_metrics["prefill_throughput"],
+                lower_is_better=False,
+            ),
+            "expert_cache_hit_rate_pct": (
+                after_metrics["expert_cache_hit_rate"]
+                - before_metrics["expert_cache_hit_rate"]
+            )
+            * 100.0,
+        }
+    return delta
 
 
 WORKLOAD_FALLBACKS: dict[str, dict[str, float]] = {
@@ -243,10 +315,73 @@ def main() -> int:
     output_path = Path(args.output)
     baseline_path = Path(args.baseline)
 
+    if args.max_tokens <= 0:
+        raise ValueError("--max-tokens must be > 0")
+
     if not args.dry_run:
-        raise RuntimeError(
-            "This environment supports dry-run only. Re-run with --dry-run."
+        if not check_server_health(args.sidecar_url):
+            print(
+                f"Server not reachable at {args.sidecar_url}. Start MoE-Infinity first."
+            )
+            return 1
+        if not check_server_health(args.backend_url):
+            print(
+                f"Server not reachable at {args.backend_url}. Start MoE-Infinity first."
+            )
+            return 1
+
+        backend_results = run_workload_benchmark(
+            server_url=args.backend_url,
+            model=args.model,
+            max_tokens=args.max_tokens,
         )
+        sidecar_results = run_workload_benchmark(
+            server_url=args.sidecar_url,
+            model=args.model,
+            max_tokens=args.max_tokens,
+        )
+        delta_pct = _compute_delta(backend_results, sidecar_results)
+
+        ttft_delta = delta_pct.get("shared_prefix_rag", {}).get("ttft_pct", 0.0)
+        payload: dict[str, Any] = {
+            "mode": "real",
+            "baseline_source": str(baseline_path),
+            "backend_url": args.backend_url,
+            "sidecar_url": args.sidecar_url,
+            "model": args.model,
+            "max_tokens": args.max_tokens,
+            "baseline": backend_results,
+            "phase_a": sidecar_results,
+            "delta_pct": delta_pct,
+            "go_no_go": bool(ttft_delta > -5.0),
+        }
+
+        if baseline_path.exists():
+            try:
+                baseline_reference = load_baseline_workloads(baseline_path)
+                payload["baseline_reference"] = baseline_reference
+                payload["delta_pct_reference"] = {
+                    "phase_a_vs_reference": _compute_delta(
+                        baseline_reference, sidecar_results
+                    ),
+                    "backend_vs_reference": _compute_delta(
+                        baseline_reference, backend_results
+                    ),
+                }
+            except Exception:
+                pass
+
+        write_json(output_path, payload)
+        print(
+            f"Phase A real benchmark complete. Results written to {output_path}"
+        )
+        print(
+            "TTFT delta (shared_prefix_rag):",
+            payload["delta_pct"].get("shared_prefix_rag", {}).get("ttft_pct"),
+            "%",
+        )
+        print("GO/NO-GO:", payload.get("go_no_go"))
+        return 0
 
     baseline = load_baseline_workloads(baseline_path)
     phase_a, delta_pct = simulate_phase_a(baseline)
