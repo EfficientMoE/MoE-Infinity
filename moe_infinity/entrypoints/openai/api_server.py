@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import importlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -58,6 +59,12 @@ except Exception:
 
             return _decorator
 
+        def middleware(self, *_args: Any, **_kwargs: Any) -> Any:
+            def _decorator(func: Any) -> Any:
+                return func
+
+            return _decorator
+
         def get(self, *_args: Any, **_kwargs: Any) -> Any:
             def _decorator(func: Any) -> Any:
                 return func
@@ -97,9 +104,21 @@ from .protocol import (
     random_uuid,
 )
 
+logging.warning(
+    "MoE-Infinity v1 API (api_server.py) is deprecated. Please migrate to v2 (api_server_v2.py). This server will be removed in a future release."
+)
+
 TIMEOUT_KEEP_ALIVE = 5
 
 app = fastapi.FastAPI()
+
+
+@app.middleware("http")
+async def add_deprecation_header(request: Request, call_next: Any) -> Response:
+    response = await call_next(request)
+    response.headers["Deprecation"] = "true"
+    return response
+
 
 model_name: Optional[str] = None
 model: Optional[object] = None
