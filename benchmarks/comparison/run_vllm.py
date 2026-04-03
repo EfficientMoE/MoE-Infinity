@@ -13,7 +13,9 @@ from typing import Optional
 import torch
 
 sys.path.insert(0, "/workspace")
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+_parents = Path(__file__).resolve().parents
+if len(_parents) > 2:
+    sys.path.insert(0, str(_parents[2]))
 from common import (
     MODEL_CONFIGS,
     PROMPT_DATASET,
