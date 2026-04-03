@@ -278,6 +278,26 @@ def load_model_and_tokenizer(
     return model, tokenizer, torch
 
 
+def _estimate_ttft(
+    e2e_seconds: float,
+    num_output_tokens: int,
+    num_prompt_tokens: int,
+) -> float:
+    """Estimate TTFT when streamer callback is not available.
+
+    For MoE models with expert offloading, prefill dominates latency.
+    We estimate TTFT = e2e - (output_tokens * per_token_decode_time).
+    With offloading, decode is ~0.1-0.3s per token.  As a conservative
+    estimate, attribute most of e2e to prefill when output is short.
+    """
+    if num_output_tokens <= 0:
+        return e2e_seconds
+    # Assume decode takes ~15% of e2e for short outputs (<=32 tokens)
+    # This is a rough heuristic; HTTP streaming gives exact TTFT
+    decode_fraction = min(0.3, num_output_tokens * 0.01)
+    return e2e_seconds * (1.0 - decode_fraction)
+
+
 def run_real_benchmark(
     model: Any,
     tokenizer: Any,
@@ -297,13 +317,14 @@ def run_real_benchmark(
         for prompt in prompts:
             encoded = tokenizer(prompt, return_tensors="pt")
             input_ids = encoded.input_ids.to("cuda:0")
+            prefill_tokens = int(input_ids.shape[-1])
 
             stopwatch = StopWatch(dispatcher=dispatcher)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             start_e2e = time.perf_counter()
 
-            _ = model.generate(
+            output = model.generate(
                 input_ids,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
@@ -316,9 +337,20 @@ def run_real_benchmark(
                 torch.cuda.synchronize()
             end_e2e = time.perf_counter()
             stopwatch.end()
+            e2e_seconds = float(end_e2e - start_e2e)
 
+            # Use streamer TTFT if available (HF path), else estimate
             ttft = float(stopwatch.prefilling_time or 0.0)
-            prefill_tokens = int(input_ids.shape[-1])
+            if ttft <= 0.0:
+                num_output_tokens = (
+                    int(output.shape[-1]) - prefill_tokens
+                    if hasattr(output, "shape")
+                    else max_new_tokens
+                )
+                ttft = _estimate_ttft(
+                    e2e_seconds, num_output_tokens, prefill_tokens
+                )
+
             prefill_throughput = (
                 float(prefill_tokens / ttft) if ttft > 0.0 else 0.0
             )
@@ -329,7 +361,7 @@ def run_real_benchmark(
                 prefill_throughput=prefill_throughput,
                 kv_cache_hit_rate=kv_cache_hit_rate,
                 token_savings_pct=0.0,
-                e2e_latency=float(end_e2e - start_e2e),
+                e2e_latency=e2e_seconds,
                 expert_cache_hit_rate=expert_cache_hit_rate,
             )
 

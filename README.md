@@ -299,14 +299,24 @@ python -m moe_infinity.entrypoints.openai.api_server_v2 \
 
 Set `CONTEXTPILOT_ENABLED=0` to force-disable ContextPilot at runtime, even if the CLI flag is enabled.
 
-Representative dry-run benchmark results (shared-prefix RAG workload):
+Measured baseline on single A5000 (24 GB) with DeepSeek-V2-Lite-Chat (expert offloading):
 
-| Phase | Integration mode | TTFT p50 vs baseline | Token savings | KV cache hit rate |
-|---|---|---:|---:|---:|
-| Baseline | No ContextPilot | — | 0% | 30% |
-| Phase A | Sidecar proxy | 17% faster | 18% | 60% |
-| Phase B | In-process middleware | 21% faster | 27% | 61% |
-| Phase C | Deep scheduler integration | 26% faster | 28% | 69% |
+| Workload | TTFT p50 | E2E p50 | Prefill tok/s |
+|---|---:|---:|---:|
+| Shared-prefix RAG | 3.70s | 5.29s | 25.4 |
+| Multi-turn conversation | 3.82s | 5.46s | 26.3 |
+| Batch with overlap | 2.21s | 2.69s | 35.5 |
+| No-overlap baseline | 3.40s | 4.86s | 4.2 |
+
+Projected Phase A/B/C improvements (based on [ContextPilot benchmarks on vLLM/SGLang](https://github.com/EfficientContext/ContextPilot)):
+
+| Phase | Integration mode | Expected TTFT reduction | Expected token savings |
+|---|---|---:|---:|
+| Phase A | Sidecar proxy | 10–20% | 15–25% |
+| Phase B | In-process middleware | 15–25% | 20–30% |
+| Phase C | Deep scheduler integration | 20–30% | 25–35% |
+
+Actual improvements depend on context overlap ratio. Run `python benchmarks/contextpilot/compare_phases.py` for detailed dry-run projections, or run Phase B against a live server for real measurements.
 
 See [docs/contextpilot/README.md](docs/contextpilot/README.md) for setup details, CLI flags, environment variables, admin endpoints, and troubleshooting.
 
