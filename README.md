@@ -48,7 +48,6 @@ Note that: The open-sourced MoE-Infinity has been redesigned for making it Huggi
 Single GPU A5000 (24GB Memory), per-token-latency (seconds) for generation with a mixed dataset that includes [LongBench](https://huggingface.co/datasets/THUDM/LongBench), [GSM8K](https://huggingface.co/datasets/openai/gsm8k),  [FLAN](https://huggingface.co/datasets/Muennighoff/flan), [BIG-Bench](https://huggingface.co/datasets/bigbench) and [MMLU](https://huggingface.co/datasets/lukaemon/mmlu) datasets.
 Lower per-token-latency is preferable.
 
-<!-- MoE-Infinity (FP16) -->
 |  | DeepSeek-V2-Lite-Chat | Mixtral-8x7b | Qwen3-30B-A3B | gpt-oss-20b |
 | :---: | :---: | :---: | :---: | :---: |
 | <ins>MoE-Infinity</ins> (FP16) | <ins>*0.100*</ins> | <ins>*0.735*</ins> | <ins>*0.150*</ins> | <ins>*—*</ins> |
@@ -73,6 +72,7 @@ Lower per-token-latency is preferable.
 | vLLM (v0.8.5) | X | 2.137 | 0.149 | 0.205 |
 
 </details>
+
 ## Installation
 
 We recommend installing MoE-Infinity in a virtual environment. To install MoE-Infinity, you can either install it from PyPI or build it from source.
