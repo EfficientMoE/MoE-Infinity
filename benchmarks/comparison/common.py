@@ -6,7 +6,7 @@ import os
 import pathlib
 import subprocess
 from dataclasses import dataclass
-from typing import cast
+from typing import List, Optional, cast
 
 # TTFT = Time from submitting a prompt until the first generated token is produced.
 # ITL = Average time between consecutive generated tokens during the decode phase.
@@ -103,30 +103,28 @@ def save_result(result: BenchmarkResult, output_dir: str) -> pathlib.Path:
     return file_path
 
 
-def load_results(results_dir: str) -> list[BenchmarkResult]:
+def load_results(results_dir: str) -> List[BenchmarkResult]:
     path = pathlib.Path(os.fspath(results_dir))
     if not path.exists():
         return []
 
-    results: list[BenchmarkResult] = []
+    results: List[BenchmarkResult] = []
     for file_path in sorted(path.glob("*.json")):
         try:
             with file_path.open("r", encoding="utf-8") as f:
-                payload = cast(dict[str, object], json.load(f))
+                payload: dict = json.load(f)
             results.append(
                 BenchmarkResult(
-                    model=cast(str, payload["model"]),
-                    framework=cast(str, payload["framework"]),
-                    precision=cast(str, payload["precision"]),
-                    per_token_latency_s=cast(
-                        float | None, payload["per_token_latency_s"]
-                    ),
-                    ttft_s=cast(float | None, payload["ttft_s"]),
-                    peak_gpu_mb=cast(float | None, payload["peak_gpu_mb"]),
-                    num_iterations=cast(int, payload["num_iterations"]),
-                    timestamp=cast(str, payload["timestamp"]),
-                    gpu_name=cast(str, payload["gpu_name"]),
-                    notes=cast(str, payload.get("notes", "")),
+                    model=str(payload["model"]),
+                    framework=str(payload["framework"]),
+                    precision=str(payload["precision"]),
+                    per_token_latency_s=payload.get("per_token_latency_s"),
+                    ttft_s=payload.get("ttft_s"),
+                    peak_gpu_mb=payload.get("peak_gpu_mb"),
+                    num_iterations=int(payload["num_iterations"]),
+                    timestamp=str(payload["timestamp"]),
+                    gpu_name=str(payload["gpu_name"]),
+                    notes=str(payload.get("notes", "")),
                 )
             )
         except Exception as exc:
