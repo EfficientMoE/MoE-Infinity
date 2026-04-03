@@ -1,0 +1,347 @@
+    {
+      "metadata": {
+        "name": "multi_turn_conversation",
+        "overlap_ratio": 0.8,
+        "request_count": 10,
+        "description":
+            "Synthetic 10-turn conversation where each request contains full assistant history plus a new user turn."
+      },
+      "requests":
+          [
+            {
+              "messages": [
+                {
+                  "role": "user",
+                  "content":
+                      "Turn 1: We are launching a reliability program for our analytics platform. Start with objectives and a first milestone."
+                }
+              ],
+              "expected_token_count": 65,
+              "context_overlap_with_prev": 0.0
+            },
+            {
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 1: Primary objectives are to reduce incident frequency, improve detection speed, and tighten post-incident learning loops. Milestone 1 is baseline instrumentation and alert quality audit in the first month."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Turn 2: Add owners and expected deliverables for the first milestone."
+                }
+              ],
+              "expected_token_count": 115,
+              "context_overlap_with_prev": 0.8
+            },
+            {
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 1: Primary objectives are to reduce incident frequency, improve detection speed, and tighten post-incident learning loops. Milestone 1 is baseline instrumentation and alert quality audit in the first month."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 2: Platform lead owns alert audit, service owners own runbook updates, and operations coordinator owns weekly risk review. Deliverables are alert inventory, runbook gap list, and action tracker with due dates."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Turn 3: Provide a compact risk register template and explain how often we should review it."
+                }
+              ],
+              "expected_token_count": 180,
+              "context_overlap_with_prev": 0.8
+            },
+            {
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 1: Primary objectives are to reduce incident frequency, improve detection speed, and tighten post-incident learning loops. Milestone 1 is baseline instrumentation and alert quality audit in the first month."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 2: Platform lead owns alert audit, service owners own runbook updates, and operations coordinator owns weekly risk review. Deliverables are alert inventory, runbook gap list, and action tracker with due dates."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 3: Risk register fields include risk statement, trigger, probability, impact, owner, mitigation plan, target date, and status. Review weekly for operational risks and monthly for strategic risks."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Turn 4: Draft a communication plan for engineering, support, and leadership."
+                }
+              ],
+              "expected_token_count": 260,
+              "context_overlap_with_prev": 0.8
+            },
+            {
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 1: Primary objectives are to reduce incident frequency, improve detection speed, and tighten post-incident learning loops. Milestone 1 is baseline instrumentation and alert quality audit in the first month."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 2: Platform lead owns alert audit, service owners own runbook updates, and operations coordinator owns weekly risk review. Deliverables are alert inventory, runbook gap list, and action tracker with due dates."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 3: Risk register fields include risk statement, trigger, probability, impact, owner, mitigation plan, target date, and status. Review weekly for operational risks and monthly for strategic risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 4: Communication plan is weekly engineering notes for implementation progress, biweekly support briefing for known issues and mitigations, and monthly leadership summary with trend metrics and unresolved risks."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Turn 5: Add rollback criteria and escalation path for severe regressions."
+                }
+              ],
+              "expected_token_count": 350,
+              "context_overlap_with_prev": 0.8
+            },
+            {
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 1: Primary objectives are to reduce incident frequency, improve detection speed, and tighten post-incident learning loops. Milestone 1 is baseline instrumentation and alert quality audit in the first month."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 2: Platform lead owns alert audit, service owners own runbook updates, and operations coordinator owns weekly risk review. Deliverables are alert inventory, runbook gap list, and action tracker with due dates."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 3: Risk register fields include risk statement, trigger, probability, impact, owner, mitigation plan, target date, and status. Review weekly for operational risks and monthly for strategic risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 4: Communication plan is weekly engineering notes for implementation progress, biweekly support briefing for known issues and mitigations, and monthly leadership summary with trend metrics and unresolved risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 5: Rollback is required if error budget burn exceeds threshold for two consecutive windows, p95 latency regresses above agreed guardrail, or customer-impact incidents rise beyond tolerance. Escalation path is duty engineer to incident commander to executive sponsor."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Turn 6: Include instrumentation requirements and how to attribute improvements to release trains."
+                }
+              ],
+              "expected_token_count": 460,
+              "context_overlap_with_prev": 0.8
+            },
+            {
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 1: Primary objectives are to reduce incident frequency, improve detection speed, and tighten post-incident learning loops. Milestone 1 is baseline instrumentation and alert quality audit in the first month."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 2: Platform lead owns alert audit, service owners own runbook updates, and operations coordinator owns weekly risk review. Deliverables are alert inventory, runbook gap list, and action tracker with due dates."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 3: Risk register fields include risk statement, trigger, probability, impact, owner, mitigation plan, target date, and status. Review weekly for operational risks and monthly for strategic risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 4: Communication plan is weekly engineering notes for implementation progress, biweekly support briefing for known issues and mitigations, and monthly leadership summary with trend metrics and unresolved risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 5: Rollback is required if error budget burn exceeds threshold for two consecutive windows, p95 latency regresses above agreed guardrail, or customer-impact incidents rise beyond tolerance. Escalation path is duty engineer to incident commander to executive sponsor."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 6: Instrumentation should include per-component SLO burn, deployment annotations, synthetic checks, and incident linkage tags so reliability changes can be attributed to each release train and compared over time."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Turn 7: Recommend a lightweight governance cadence that still enforces accountability."
+                }
+              ],
+              "expected_token_count": 575,
+              "context_overlap_with_prev": 0.8
+            },
+            {
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 1: Primary objectives are to reduce incident frequency, improve detection speed, and tighten post-incident learning loops. Milestone 1 is baseline instrumentation and alert quality audit in the first month."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 2: Platform lead owns alert audit, service owners own runbook updates, and operations coordinator owns weekly risk review. Deliverables are alert inventory, runbook gap list, and action tracker with due dates."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 3: Risk register fields include risk statement, trigger, probability, impact, owner, mitigation plan, target date, and status. Review weekly for operational risks and monthly for strategic risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 4: Communication plan is weekly engineering notes for implementation progress, biweekly support briefing for known issues and mitigations, and monthly leadership summary with trend metrics and unresolved risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 5: Rollback is required if error budget burn exceeds threshold for two consecutive windows, p95 latency regresses above agreed guardrail, or customer-impact incidents rise beyond tolerance. Escalation path is duty engineer to incident commander to executive sponsor."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 6: Instrumentation should include per-component SLO burn, deployment annotations, synthetic checks, and incident linkage tags so reliability changes can be attributed to each release train and compared over time."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 7: Governance cadence is a weekly 30-minute action review, a monthly cross-functional risk checkpoint, and a single accountability board with owner, due date, and aging flags."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Turn 8: Produce a scorecard with leading and lagging indicators we can track monthly."
+                }
+              ],
+              "expected_token_count": 690,
+              "context_overlap_with_prev": 0.8
+            },
+            {
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 1: Primary objectives are to reduce incident frequency, improve detection speed, and tighten post-incident learning loops. Milestone 1 is baseline instrumentation and alert quality audit in the first month."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 2: Platform lead owns alert audit, service owners own runbook updates, and operations coordinator owns weekly risk review. Deliverables are alert inventory, runbook gap list, and action tracker with due dates."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 3: Risk register fields include risk statement, trigger, probability, impact, owner, mitigation plan, target date, and status. Review weekly for operational risks and monthly for strategic risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 4: Communication plan is weekly engineering notes for implementation progress, biweekly support briefing for known issues and mitigations, and monthly leadership summary with trend metrics and unresolved risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 5: Rollback is required if error budget burn exceeds threshold for two consecutive windows, p95 latency regresses above agreed guardrail, or customer-impact incidents rise beyond tolerance. Escalation path is duty engineer to incident commander to executive sponsor."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 6: Instrumentation should include per-component SLO burn, deployment annotations, synthetic checks, and incident linkage tags so reliability changes can be attributed to each release train and compared over time."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 7: Governance cadence is a weekly 30-minute action review, a monthly cross-functional risk checkpoint, and a single accountability board with owner, due date, and aging flags."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 8: Leading indicators are alert precision, runbook freshness, and test pass rate on critical paths; lagging indicators are incident count, customer impact hours, and mean time to recovery."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Turn 9: Add assumptions and open questions to validate before executive sign-off."
+                }
+              ],
+              "expected_token_count": 810,
+              "context_overlap_with_prev": 0.8
+            },
+            {
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 1: Primary objectives are to reduce incident frequency, improve detection speed, and tighten post-incident learning loops. Milestone 1 is baseline instrumentation and alert quality audit in the first month."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 2: Platform lead owns alert audit, service owners own runbook updates, and operations coordinator owns weekly risk review. Deliverables are alert inventory, runbook gap list, and action tracker with due dates."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 3: Risk register fields include risk statement, trigger, probability, impact, owner, mitigation plan, target date, and status. Review weekly for operational risks and monthly for strategic risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 4: Communication plan is weekly engineering notes for implementation progress, biweekly support briefing for known issues and mitigations, and monthly leadership summary with trend metrics and unresolved risks."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 5: Rollback is required if error budget burn exceeds threshold for two consecutive windows, p95 latency regresses above agreed guardrail, or customer-impact incidents rise beyond tolerance. Escalation path is duty engineer to incident commander to executive sponsor."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 6: Instrumentation should include per-component SLO burn, deployment annotations, synthetic checks, and incident linkage tags so reliability changes can be attributed to each release train and compared over time."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 7: Governance cadence is a weekly 30-minute action review, a monthly cross-functional risk checkpoint, and a single accountability board with owner, due date, and aging flags."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 8: Leading indicators are alert precision, runbook freshness, and test pass rate on critical paths; lagging indicators are incident count, customer impact hours, and mean time to recovery."
+                },
+                {
+                  "role": "assistant",
+                  "content":
+                      "Assistant turn 9: Assumptions include stable staffing, approval of monitoring budget, and timely dependency support. Open questions include seasonal traffic spikes, vendor SLA constraints, and planned freeze windows."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Turn 10: Produce a final one-page implementation narrative combining milestones, governance, scorecard metrics, risks, assumptions, and open questions."
+                }
+              ],
+              "expected_token_count": 960,
+              "context_overlap_with_prev": 0.8
+            }
+          ]
+    }

@@ -3,12 +3,21 @@ from __future__ import annotations
 import heapq
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from math import ceil
 from typing import Protocol, cast
 
 import torch
 
 from moe_infinity.runtime import flashinfer_utils
+
+
+class CPAwareKVManager(Protocol):
+    def notify_blocks_allocated(
+        self, seq_id: int, block_hashes: list[int]
+    ) -> None: ...
+
+    def notify_blocks_freed(
+        self, seq_id: int, block_hashes: list[int]
+    ) -> None: ...
 
 
 class _FlashinferPrefillWrapperLike(Protocol):
@@ -124,6 +133,9 @@ class BlockTable:
         self._block_ids = []
         self._num_tokens = 0
 
+    def release_blocks_only(self) -> None:
+        self._block_ids = []
+
 
 @dataclass
 class PagedKVCache:
@@ -154,6 +166,7 @@ class PagedKVCache:
     _fi_decode: _FlashinferDecodeWrapperLike | None = field(
         init=False, default=None
     )
+    _cp_kv_manager: CPAwareKVManager | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         if self.num_layers <= 0:
@@ -223,6 +236,16 @@ class PagedKVCache:
             block_table.append_token()
         self._sequence_tables[seq_id] = block_table
 
+        if self._cp_kv_manager is not None:
+            try:
+                block_hashes = block_table.get_block_ids()
+                self._cp_kv_manager.notify_blocks_allocated(
+                    seq_id,
+                    block_hashes,
+                )
+            except Exception:
+                pass
+
     def append_tokens(self, seq_id: int, num_new_tokens: int) -> None:
         if num_new_tokens < 0:
             raise ValueError(
@@ -237,19 +260,30 @@ class PagedKVCache:
         if block_table is None:
             return
 
+        if self._cp_kv_manager is not None:
+            try:
+                block_hashes = block_table.get_block_ids()
+                self._cp_kv_manager.notify_blocks_freed(seq_id, block_hashes)
+            except Exception:
+                pass
+
         block_table.release()
         _ = self._swapped_cpu_buffers.pop(seq_id, None)
         _ = self._swapped_num_tokens.pop(seq_id, None)
         self._swapped_out_sequences.discard(seq_id)
+
+    def set_cp_kv_manager(self, manager: CPAwareKVManager) -> None:
+        self._cp_kv_manager = manager
 
     def free_gpu_blocks(self, seq_id: int) -> None:
         block_table = self._sequence_tables.get(seq_id)
         if block_table is None:
             return
 
-        if block_table._block_ids:
-            self.block_allocator.free(block_table._block_ids)
-            block_table._block_ids = []
+        block_ids = block_table.get_block_ids()
+        if block_ids:
+            self.block_allocator.free(block_ids)
+            block_table.release_blocks_only()
 
     def get_block_table(self, seq_id: int) -> list[int]:
         block_table = self._require_sequence(seq_id)

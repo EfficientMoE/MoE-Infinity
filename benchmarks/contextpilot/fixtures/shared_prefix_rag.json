@@ -1,0 +1,152 @@
+    {
+      "metadata": {
+        "name": "shared_prefix_rag",
+        "overlap_ratio": 0.6,
+        "request_count": 5,
+        "description":
+            "Synthetic RAG workload with one shared policy prefix and unique retrieved passages per request."
+      },
+      "requests":
+          [
+            {
+              "messages": [
+                {
+                  "role": "system",
+                  "content":
+                      "Shared Corporate Policy Document v3.2: This policy document outlines standards for data handling, customer communication, incident response, audit logging, and exception approvals. Teams must classify records, avoid personal data in ad-hoc tools, record decision owners, and escalate unresolved compliance risks within one business day."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document A1] The procurement onboarding checklist requires vendor risk scoring before contract signature. Security review includes network exposure mapping, backup retention guarantees, and documented breach notification timing. Approved vendors must accept quarterly control attestations and emergency revocation terms."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document A2] Finance operations policy states that invoice exceptions over 5,000 USD need dual approval by budget owner and controller. Payment corrections must retain original invoice identifiers, rationale text, and final settlement timestamps so auditors can reconstruct the workflow sequence."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Using the policy and retrieved notes, summarize the mandatory controls for onboarding a new software vendor and handling invoice exceptions."
+                }
+              ],
+              "expected_token_count": 280,
+              "context_overlap_with_prev": 0.0
+            },
+            {
+              "messages": [
+                {
+                  "role": "system",
+                  "content":
+                      "Shared Corporate Policy Document v3.2: This policy document outlines standards for data handling, customer communication, incident response, audit logging, and exception approvals. Teams must classify records, avoid personal data in ad-hoc tools, record decision owners, and escalate unresolved compliance risks within one business day."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document B1] Customer support escalation runbook defines severity levels and response windows. Severity-1 incidents require immediate paging of on-call engineering and legal contact if data confidentiality could be impacted. Post-incident summaries are due in 48 hours with corrective ownership assignments."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document B2] Regional communication guideline instructs teams to issue status updates every 30 minutes during major incidents. Messages should include affected services, current mitigation, known workarounds, and the next update timestamp, while avoiding speculative root-cause statements."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document B3] Compliance office memo clarifies that unresolved regulatory risk during active incidents must be escalated to the duty executive within one business day, with a documented recommendation and explicit acceptance or rejection decision in the incident log."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Create a concise incident communication checklist that aligns with policy requirements and the retrieved escalation guidance."
+                }
+              ],
+              "expected_token_count": 340,
+              "context_overlap_with_prev": 0.62
+            },
+            {
+              "messages": [
+                {
+                  "role": "system",
+                  "content":
+                      "Shared Corporate Policy Document v3.2: This policy document outlines standards for data handling, customer communication, incident response, audit logging, and exception approvals. Teams must classify records, avoid personal data in ad-hoc tools, record decision owners, and escalate unresolved compliance risks within one business day."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document C1] Engineering design review template requires an architecture decision record for each material change. The record captures alternatives considered, quantified tradeoffs, rollback criteria, and named approvers. Missing approval signatures block production rollout requests."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document C2] Data retention annex specifies that operational logs containing customer identifiers must be encrypted at rest, retained for 180 days, and access-audited. Any retention exception requires security approval plus a documented expiration date."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Draft policy-aligned rollout prerequisites for a new architecture change that touches customer logs and needs a temporary retention exception."
+                }
+              ],
+              "expected_token_count": 290,
+              "context_overlap_with_prev": 0.58
+            },
+            {
+              "messages": [
+                {
+                  "role": "system",
+                  "content":
+                      "Shared Corporate Policy Document v3.2: This policy document outlines standards for data handling, customer communication, incident response, audit logging, and exception approvals. Teams must classify records, avoid personal data in ad-hoc tools, record decision owners, and escalate unresolved compliance risks within one business day."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document D1] Internal training compliance guide requires quarterly certification for all staff handling restricted records. Certification logs must include participant identity, completion timestamp, assessment score, and manager acknowledgment for non-completion follow-up."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document D2] Access governance standard mandates least-privilege role mapping with semiannual review. Any emergency privilege grant expires in 24 hours unless renewed by both service owner and security representative with written business justification."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document D3] Audit sampling procedure requests monthly extraction of change events, approval records, and exception tickets. Samples must preserve immutable IDs to verify end-to-end traceability across identity management and service deployment systems."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Provide an audit-readiness checklist for access governance and training compliance using the shared policy plus retrieved references."
+                }
+              ],
+              "expected_token_count": 350,
+              "context_overlap_with_prev": 0.63
+            },
+            {
+              "messages": [
+                {
+                  "role": "system",
+                  "content":
+                      "Shared Corporate Policy Document v3.2: This policy document outlines standards for data handling, customer communication, incident response, audit logging, and exception approvals. Teams must classify records, avoid personal data in ad-hoc tools, record decision owners, and escalate unresolved compliance risks within one business day."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document E1] Product release governance note requires explicit customer impact assessment before enabling default-on features. Teams must document rollout cohorts, opt-out process, and support escalation owner. Any unresolved legal risk blocks global rollout authorization."
+                },
+                {
+                  "role": "system",
+                  "content":
+                      "[Retrieved Document E2] Support analytics digest shows complaint spikes when release notes omit migration deadlines. Recommended communication includes timeline milestones, compatibility caveats, and rollback availability to reduce confusion during phased adoption."
+                },
+                {
+                  "role": "user",
+                  "content":
+                      "Write a short launch plan that satisfies policy controls while minimizing customer confusion during a phased feature rollout."
+                }
+              ],
+              "expected_token_count": 285,
+              "context_overlap_with_prev": 0.59
+            }
+          ]
+    }

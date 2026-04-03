@@ -277,6 +277,49 @@ python tests/python/integration/test_oai_completions.py
 python tests/python/integration/test_oai_chat_completions.py
 ```
 
+## ContextPilot Integration (Optional)
+
+ContextPilot is an optional overlap-aware prompt optimization layer for shared-prefix and multi-turn workloads. You can run it as a sidecar proxy in front of the OpenAI-compatible server, or enable it inside the server before tokenization. Phase C extends the same signals into KV allocation and scheduling for deeper reuse gains.
+
+Phase A quick start, sidecar proxy:
+
+```bash
+# Start ContextPilot sidecar proxy
+bash scripts/contextpilot_sidecar.sh --backend-url http://localhost:8000
+```
+
+Phase B quick start, in-process middleware:
+
+```bash
+python -m moe_infinity.entrypoints.openai.api_server_v2 \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir ./offload_dir \
+    --enable-contextpilot
+```
+
+Set `CONTEXTPILOT_ENABLED=0` to force-disable ContextPilot at runtime, even if the CLI flag is enabled.
+
+Measured baseline on single A5000 (24 GB) with DeepSeek-V2-Lite-Chat (expert offloading):
+
+| Workload | TTFT p50 | E2E p50 | Prefill tok/s |
+|---|---:|---:|---:|
+| Shared-prefix RAG | 3.70s | 5.29s | 25.4 |
+| Multi-turn conversation | 3.82s | 5.46s | 26.3 |
+| Batch with overlap | 2.21s | 2.69s | 35.5 |
+| No-overlap baseline | 3.40s | 4.86s | 4.2 |
+
+Projected Phase A/B/C improvements (based on [ContextPilot benchmarks on vLLM/SGLang](https://github.com/EfficientContext/ContextPilot)):
+
+| Phase | Integration mode | Expected TTFT reduction | Expected token savings |
+|---|---|---:|---:|
+| Phase A | Sidecar proxy | 10–20% | 15–25% |
+| Phase B | In-process middleware | 15–25% | 20–30% |
+| Phase C | Deep scheduler integration | 20–30% | 25–35% |
+
+Actual improvements depend on context overlap ratio. Run `python benchmarks/contextpilot/compare_phases.py` for detailed dry-run projections, or run Phase B against a live server for real measurements.
+
+See [docs/contextpilot/README.md](docs/contextpilot/README.md) for setup details, CLI flags, environment variables, admin endpoints, and troubleshooting.
+
 ## Release Plan
 
 Recent releases and near-term roadmap:

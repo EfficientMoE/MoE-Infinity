@@ -1,0 +1,5 @@
+port: 8765
+backend_url: http://localhost:8000
+reorder_enabled: true
+dedup_enabled: true
+max_index_memory_mb: 2048
