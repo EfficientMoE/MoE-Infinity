@@ -6,6 +6,7 @@ from __future__ import annotations
 # pyright: reportAny=false, reportExplicitAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportMissingTypeStubs=false, reportPrivateLocalImportUsage=false, reportUnannotatedClassAttribute=false, reportUnusedCallResult=false, reportUnusedParameter=false, reportAttributeAccessIssue=false, reportImplicitStringConcatenation=false, reportImplicitOverride=false, reportDeprecated=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportImplicitRelativeImport=false
 import argparse
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -225,8 +226,8 @@ def _terminate_server(server_proc: subprocess.Popen[Any]) -> None:
         server_proc.kill()
         try:
             server_proc.wait(timeout=5)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Server cleanup warning: {e}", file=sys.stderr)
 
 
 def run_single_model(
@@ -276,8 +277,11 @@ def run_single_model(
         for _ in range(5):
             try:
                 _completion_request("Hello", 8)
-            except Exception:
-                pass
+            except Exception as e:
+                print(
+                    f"Warmup request failed (non-fatal): {e}",
+                    file=sys.stderr,
+                )
 
         ttft_values: List[float] = []
         per_token_values: List[float] = []
