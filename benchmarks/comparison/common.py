@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import List, Optional, cast
 
@@ -76,8 +77,8 @@ def get_gpu_name() -> str:
 
         if torch.cuda.is_available():
             return torch.cuda.get_device_name(0)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"GPU name detection (torch) failed: {e}", file=sys.stderr)
 
     try:
         output = subprocess.check_output(
@@ -87,8 +88,8 @@ def get_gpu_name() -> str:
         ).strip()
         if output:
             return output.splitlines()[0].strip()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"GPU name detection (nvidia-smi) failed: {e}", file=sys.stderr)
 
     return "Unknown"
 
