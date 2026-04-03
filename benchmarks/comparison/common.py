@@ -7,7 +7,7 @@ import pathlib
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import List, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 
 # TTFT = Time from submitting a prompt until the first generated token is produced.
 # ITL = Average time between consecutive generated tokens during the decode phase.
@@ -113,7 +113,7 @@ def load_results(results_dir: str) -> List[BenchmarkResult]:
     for file_path in sorted(path.glob("*.json")):
         try:
             with file_path.open("r", encoding="utf-8") as f:
-                payload: dict = json.load(f)
+                payload: Dict[str, Any] = json.load(f)
             results.append(
                 BenchmarkResult(
                     model=str(payload["model"]),
