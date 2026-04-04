@@ -6,7 +6,7 @@
 import io
 import os
 import sys
-from typing import Any
+from typing import Any, Optional
 
 from setuptools import find_packages, setup
 
@@ -66,10 +66,78 @@ def read_readme() -> str:
         return ""
 
 
+def _find_cuda_home() -> str:
+    cuda_version = (
+        torch.version.cuda if torch_available and torch.version.cuda else ""
+    )
+    cuda_major = cuda_version.split(".")[0] if cuda_version else ""
+    if cuda_major == "12":
+        candidates = [
+            "/usr/local/cuda-12.6",
+            "/usr/local/cuda-12.2",
+            os.environ.get("CUDA_HOME"),
+            "/usr/local/cuda",
+            "/usr/local/cuda-13.2",
+            "/usr/local/cuda-13",
+        ]
+    elif cuda_major == "13":
+        candidates = [
+            "/usr/local/cuda-13.2",
+            "/usr/local/cuda-13",
+            os.environ.get("CUDA_HOME"),
+            "/usr/local/cuda",
+            "/usr/local/cuda-12.6",
+            "/usr/local/cuda-12.2",
+        ]
+    else:
+        candidates = [
+            os.environ.get("CUDA_HOME"),
+            "/usr/local/cuda",
+            "/usr/local/cuda-13.2",
+            "/usr/local/cuda-13",
+            "/usr/local/cuda-12.6",
+            "/usr/local/cuda-12.2",
+        ]
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = os.path.expanduser(candidate)
+        if os.path.isfile(os.path.join(candidate, "bin", "nvcc")):
+            return candidate
+
+    return os.path.expanduser(os.environ.get("CUDA_HOME", "/usr/local/cuda"))
+
+
 install_requires = fetch_requirements("requirements.txt")
 
 # Get CUTLASS_DIR from environment or default to ~/cutlass
 CUTLASS_DIR = os.path.expanduser(os.environ.get("CUTLASS_DIR", "~/cutlass"))
+
+CUDA_HOME = _find_cuda_home()
+os.environ["CUDA_HOME"] = CUDA_HOME
+cpp_extension.CUDA_HOME = CUDA_HOME
+
+
+def _find_nvtx_include_dir() -> Optional[str]:
+    cuda_roots = [
+        CUDA_HOME,
+        "/usr/local/cuda",
+        "/usr/local/cuda-13.2",
+        "/usr/local/cuda-13",
+        "/usr/local/cuda-12.6",
+        "/usr/local/cuda-12.2",
+    ]
+    for root in cuda_roots:
+        nvtx_header = os.path.join(
+            os.path.expanduser(root), "include", "nvtx3", "nvtx3.hpp"
+        )
+        if os.path.isfile(nvtx_header):
+            return os.path.dirname(os.path.dirname(nvtx_header))
+    return None
+
+
+COMMON_NVTX_INCLUDE_DIR = _find_nvtx_include_dir()
 
 # Common include paths
 COMMON_INCLUDE_PATHS = [
@@ -78,6 +146,8 @@ COMMON_INCLUDE_PATHS = [
     os.path.join(CUTLASS_DIR, "include"),
     os.path.join(CUTLASS_DIR, "tools/util/include"),
 ]
+if COMMON_NVTX_INCLUDE_DIR is not None:
+    COMMON_INCLUDE_PATHS.append(COMMON_NVTX_INCLUDE_DIR)
 
 # Common compile args
 COMMON_NVCC_ARGS = [
@@ -96,6 +166,10 @@ COMMON_CXX_ARGS = [
     "-fPIC",
     "-fopenmp",
 ]
+
+if os.environ.get("NVTX_DISABLE", "0") == "1":
+    COMMON_CXX_ARGS.append("-DNVTX_DISABLE")
+    COMMON_NVCC_ARGS.append("-DNVTX_DISABLE")
 
 # _store extension: IO/checkpoint and prefetch functionality
 # Includes AIO, prefetch handle, tensor index, memory pools, model topology
