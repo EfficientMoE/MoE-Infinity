@@ -14,6 +14,10 @@
 #include <unordered_map>
 #include <vector>
 
+#ifndef NVTX_DISABLE
+  #include <nvtx3/nvtx3.hpp>
+#endif
+
 #include "common/sync.h"
 #include "base/noncopyable.h"
 #include "base/thread.h"
