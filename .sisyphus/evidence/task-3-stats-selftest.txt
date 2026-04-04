@@ -1,0 +1,1 @@
+PASS: all stats fields present and sane

@@ -1,0 +1,1 @@
+PASS: bandwidth=1073.7 GB/s
