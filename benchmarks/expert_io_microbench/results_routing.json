@@ -1,0 +1,49 @@
+{
+  "status": "PASS",
+  "environment": {
+    "torch_version": "2.9.1+cu128",
+    "torch_cuda_version": "12.8",
+    "cuda_available": true,
+    "cuda_device_count": 1,
+    "cuda_device_names": [
+      "NVIDIA RTX A5000"
+    ]
+  },
+  "requested_model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+  "offload_dir": "/tmp/moe_bench_offload",
+  "warmup": 1,
+  "iters": 3,
+  "routing": {
+    "min_ns": 73242,
+    "max_ns": 254294,
+    "mean_ns": 113655.2435897436,
+    "p50_ns": 115042.0,
+    "p95_ns": 150645.65,
+    "p99_ns": 208833.20000000024,
+    "count": 78
+  },
+  "cache_lookup": {
+    "min_ns": null,
+    "max_ns": null,
+    "mean_ns": null,
+    "p50_ns": null,
+    "p95_ns": null,
+    "p99_ns": null,
+    "count": 0
+  },
+  "cache": {
+    "hit_rate": null,
+    "hit_count": 0,
+    "miss_count_estimated": 0,
+    "mean_lookup_ns": null,
+    "min_lookup_ns": null,
+    "max_lookup_ns": null,
+    "p50_lookup_ns": null,
+    "p95_lookup_ns": null,
+    "p99_lookup_ns": null,
+    "count": 0,
+    "note":
+        "hit_rate is estimated from transfer events (disk_to_cpu/cpu_to_gpu) because IOProfiler cache_lookup stage does not emit explicit hit/miss."
+  },
+  "io_profiler_events": 234
+}
