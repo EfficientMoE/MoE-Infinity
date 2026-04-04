@@ -4,6 +4,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from typing import Callable, Optional
 
 from typing_extensions import override
@@ -13,6 +14,20 @@ from moe_infinity.engine.transfer_types import (
     TransferResult,
     TransferType,
 )
+
+try:
+    import nvtx  # type: ignore[reportMissingTypeStubs]
+except ImportError:
+    nvtx = None
+
+HAS_NVTX = nvtx is not None
+
+try:
+    from moe_infinity.profiling.io_profiler import (  # pyright: ignore[reportMissingImports]
+        IOProfiler,
+    )
+except Exception:
+    IOProfiler = None
 
 
 class TransferScheduler(ABC):
@@ -83,30 +98,42 @@ class UnifiedTransferScheduler(TransferScheduler):
 
     @override
     def enqueue(self, request: TransferRequest) -> str:
-        transfer_id = request.transfer_id or str(uuid.uuid4())
-        normalized_request = TransferRequest(
-            transfer_id=transfer_id,
-            transfer_type=request.transfer_type,
-            priority=request.priority,
-            source_device=request.source_device,
-            target_device=request.target_device,
-            tensor_id=request.tensor_id,
-            block_ids=list(request.block_ids),
+        profiler = IOProfiler.instance() if IOProfiler is not None else None
+        nvtx_cm = nullcontext()
+        if HAS_NVTX and nvtx is not None:
+            nvtx_cm = nvtx.annotate("transfer_schedule", color="yellow")
+        profiler_cm = (
+            profiler.time("transfer_schedule")
+            if profiler is not None
+            else nullcontext()
         )
-        event = threading.Event()
-        with self._condition:
-            self._pending[transfer_id] = event
-            self._seq_counter += 1
-            heapq.heappush(
-                self._queue,
-                (
-                    normalized_request.priority.value,
-                    self._seq_counter,
-                    normalized_request,
-                ),
-            )
-            self._condition.notify()
-        return transfer_id
+
+        with profiler_cm:
+            with nvtx_cm:
+                transfer_id = request.transfer_id or str(uuid.uuid4())
+                normalized_request = TransferRequest(
+                    transfer_id=transfer_id,
+                    transfer_type=request.transfer_type,
+                    priority=request.priority,
+                    source_device=request.source_device,
+                    target_device=request.target_device,
+                    tensor_id=request.tensor_id,
+                    block_ids=list(request.block_ids),
+                )
+                event = threading.Event()
+                with self._condition:
+                    self._pending[transfer_id] = event
+                    self._seq_counter += 1
+                    heapq.heappush(
+                        self._queue,
+                        (
+                            normalized_request.priority.value,
+                            self._seq_counter,
+                            normalized_request,
+                        ),
+                    )
+                    self._condition.notify()
+                return transfer_id
 
     @override
     def cancel(self, transfer_id: str) -> bool:
@@ -166,29 +193,41 @@ class UnifiedTransferScheduler(TransferScheduler):
         self._executor.shutdown(wait=wait)
 
     def _run_request(self, request: TransferRequest, start_time: float) -> None:
-        transfer_id = request.transfer_id
-        try:
-            handler = self._handlers.get(request.transfer_type)
-            if handler is not None:
-                handler(request)
-            status = "COMPLETED"
-        except Exception:
-            status = "FAILED"
+        profiler = IOProfiler.instance() if IOProfiler is not None else None
+        nvtx_cm = nullcontext()
+        if HAS_NVTX and nvtx is not None:
+            nvtx_cm = nvtx.annotate("transfer_schedule", color="yellow")
+        profiler_cm = (
+            profiler.time("transfer_schedule")
+            if profiler is not None
+            else nullcontext()
+        )
 
-        duration_ms = (time.monotonic() - start_time) * 1000.0
-        with self._lock:
-            self._results[transfer_id] = TransferResult(
-                transfer_id=transfer_id,
-                status=status,
-                duration_ms=duration_ms,
-            )
-            self._metrics[request.transfer_type]["count"] += 1
-            self._metrics[request.transfer_type]["bytes"] += len(
-                request.block_ids
-            )
-            event = self._pending.pop(transfer_id, None)
-            if event:
-                event.set()
+        with profiler_cm:
+            with nvtx_cm:
+                transfer_id = request.transfer_id
+                try:
+                    handler = self._handlers.get(request.transfer_type)
+                    if handler is not None:
+                        handler(request)
+                    status = "COMPLETED"
+                except Exception:
+                    status = "FAILED"
+
+                duration_ms = (time.monotonic() - start_time) * 1000.0
+                with self._lock:
+                    self._results[transfer_id] = TransferResult(
+                        transfer_id=transfer_id,
+                        status=status,
+                        duration_ms=duration_ms,
+                    )
+                    self._metrics[request.transfer_type]["count"] += 1
+                    self._metrics[request.transfer_type]["bytes"] += len(
+                        request.block_ids
+                    )
+                    event = self._pending.pop(transfer_id, None)
+                    if event:
+                        event.set()
 
     def _worker_loop(self) -> None:
         while self._running:
