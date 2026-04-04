@@ -1,0 +1,17 @@
+Task 10 build verification
+Date: 2026-04-04
+Worktree: /home/xly/MoE-Infinity-expert-io-microbench
+
+Command:
+  pip install -e . --no-deps
+
+Result:
+  SUCCESS
+  - Editable wheel built: moe_infinity-0.0.1-0.editable-cp39-cp39-linux_x86_64.whl
+  - Package installed: moe_infinity-0.0.1
+
+Notes:
+  - A plain `pip install -e .` in this environment fails dependency resolution for
+    `sglang-kernel>=0.4.0` from configured package indexes.
+  - `--no-deps` allows full C++ extension compilation/installation verification for
+    this instrumentation-only change.
