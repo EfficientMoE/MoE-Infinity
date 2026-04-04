@@ -142,6 +142,7 @@ COMMON_NVTX_INCLUDE_DIR = _find_nvtx_include_dir()
 # Common include paths
 COMMON_INCLUDE_PATHS = [
     get_path("core"),
+    get_path("core", "include"),
     get_path("extensions"),
     os.path.join(CUTLASS_DIR, "include"),
     os.path.join(CUTLASS_DIR, "tools/util/include"),
