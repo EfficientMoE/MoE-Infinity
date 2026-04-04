@@ -4,12 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -80,7 +81,91 @@ def parse_args() -> argparse.Namespace:
             "If omitted, runner tries to read from CUDA device properties."
         ),
     )
+    parser.add_argument(
+        "--host-only",
+        action="store_true",
+        help=(
+            "Copy offload weights to /dev/shm (tmpfs) once in run_all and pass "
+            "that tmpfs path to all scenarios to eliminate disk I/O. "
+            "Requires sufficient /dev/shm space (use Docker --shm-size=32g)."
+        ),
+    )
     return parser.parse_args()
+
+
+def _directory_size_bytes(root: str) -> int:
+    total = 0
+    for dirpath, _, filenames in os.walk(root):
+        for filename in filenames:
+            file_path = os.path.join(dirpath, filename)
+            try:
+                total += os.path.getsize(file_path)
+            except OSError:
+                continue
+    return total
+
+
+def _is_under_dev_shm(path: str) -> bool:
+    try:
+        resolved = os.path.realpath(path)
+        return os.path.commonpath([resolved, "/dev/shm"]) == "/dev/shm"
+    except (OSError, ValueError):
+        return False
+
+
+def setup_offload_dir(
+    *, offload_dir: str, host_only: bool
+) -> tuple[str, str, Callable[[], None]]:
+    if not host_only:
+        return offload_dir, "disk", lambda: None
+
+    if not os.path.exists(offload_dir):
+        print(
+            f"WARNING: offload dir does not exist: {offload_dir}",
+            file=sys.stderr,
+        )
+        print(
+            "Hint: provide a valid --offload-dir before enabling --host-only",
+            file=sys.stderr,
+        )
+        raise RuntimeError(f"offload dir does not exist: {offload_dir}")
+
+    if _is_under_dev_shm(offload_dir):
+        print(
+            f"Using existing tmpfs offload dir: {offload_dir}",
+            file=sys.stderr,
+        )
+        return offload_dir, "host-only", lambda: None
+
+    src_size = _directory_size_bytes(offload_dir)
+    shm_stat = shutil.disk_usage("/dev/shm")
+    required_bytes = int(src_size * 1.1)
+    if shm_stat.free < required_bytes:
+        free_gb = shm_stat.free / 1e9
+        src_gb = src_size / 1e9
+        print(
+            f"WARNING: /dev/shm has {free_gb:.1f}GB free but offload needs {src_gb:.1f}GB",
+            file=sys.stderr,
+        )
+        print(
+            "Hint: docker run --shm-size=<size>g or increase host shm",
+            file=sys.stderr,
+        )
+        raise RuntimeError("insufficient /dev/shm space for host-only mode")
+
+    dst = tempfile.mkdtemp(dir="/dev/shm", prefix="moe_hostonly_")
+    print(
+        f"Copying {src_size / 1e9:.1f}GB offload -> {dst} (tmpfs)...",
+        file=sys.stderr,
+        flush=True,
+    )
+    shutil.copytree(offload_dir, dst, dirs_exist_ok=True)
+    print("Copy done. Running in host-only (RAM) mode.", file=sys.stderr)
+
+    def cleanup() -> None:
+        shutil.rmtree(dst, ignore_errors=True)
+
+    return dst, "host-only", cleanup
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -383,6 +468,7 @@ def run_one_script(
     warmup: int,
     iters: int,
     device_memory_ratio: float,
+    host_only: bool,
 ) -> dict[str, Any]:
     script_name = SCRIPT_BY_SCENARIO[scenario]
     script_path = Path(__file__).resolve().parent / script_name
@@ -410,7 +496,8 @@ def run_one_script(
                     str(device_memory_ratio),
                 ]
             )
-
+        if host_only:
+            cmd.append("--host-only")
         result = subprocess.run(
             cmd,
             check=False,
@@ -535,42 +622,59 @@ def main() -> int:
     selected = scenario_list(args.scenario)
     scenarios: dict[str, Any] = {}
 
-    for scenario in selected:
-        try:
-            scenarios[scenario] = run_one_script(
-                scenario=scenario,
-                model=args.model,
-                offload_dir=args.offload_dir,
-                warmup=args.warmup,
-                iters=args.iters,
-                device_memory_ratio=args.device_memory_ratio,
-            )
-        except Exception as exc:
-            scenarios[scenario] = {
-                "error": f"{type(exc).__name__}: {exc}",
-                "traceback": traceback.format_exc(),
-            }
+    try:
+        actual_offload_dir, mode, cleanup = setup_offload_dir(
+            offload_dir=args.offload_dir,
+            host_only=args.host_only,
+        )
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
 
-    payload: dict[str, Any] = {
-        "status": "PASS",
-        "requested_model": args.model,
-        "offload_dir": args.offload_dir,
-        "device_memory_ratio": args.device_memory_ratio,
-        "warmup": args.warmup,
-        "iters": args.iters,
-        "scenario": args.scenario,
-        "scenarios": scenarios,
-    }
+    try:
+        for scenario in selected:
+            try:
+                scenarios[scenario] = run_one_script(
+                    scenario=scenario,
+                    model=args.model,
+                    offload_dir=actual_offload_dir,
+                    warmup=args.warmup,
+                    iters=args.iters,
+                    device_memory_ratio=args.device_memory_ratio,
+                    host_only=(mode == "host-only"),
+                )
+            except Exception as exc:
+                scenarios[scenario] = {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "traceback": traceback.format_exc(),
+                }
 
-    payload["bandwidth_analysis"] = build_bandwidth_analysis(
-        scenarios,
-        args.theoretical_pcie_gbps,
-    )
-    payload["executive_summary"] = build_executive_summary(scenarios)
+        payload: dict[str, Any] = {
+            "status": "PASS",
+            "requested_model": args.model,
+            "offload_dir": actual_offload_dir,
+            "source_offload_dir": args.offload_dir,
+            "mode": mode,
+            "io_mode": mode,
+            "host_only": mode == "host-only",
+            "device_memory_ratio": args.device_memory_ratio,
+            "warmup": args.warmup,
+            "iters": args.iters,
+            "scenario": args.scenario,
+            "scenarios": scenarios,
+        }
 
-    write_json(Path(args.output_json), payload)
-    print_human_summary(payload)
-    return 0
+        payload["bandwidth_analysis"] = build_bandwidth_analysis(
+            scenarios,
+            args.theoretical_pcie_gbps,
+        )
+        payload["executive_summary"] = build_executive_summary(scenarios)
+
+        write_json(Path(args.output_json), payload)
+        print_human_summary(payload)
+        return 0
+    finally:
+        cleanup()
 
 
 if __name__ == "__main__":
