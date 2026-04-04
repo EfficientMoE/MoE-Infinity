@@ -113,22 +113,37 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
       std::int64_t param_offset = 0;
       for (const auto& tensor_id : tensor_ids) {
         // Read tensor from disk into host buffer
-        kArcherTensorHandle->ReadTensor(
-            tensor_id, static_cast<char*>(host_memory_ptr) + param_offset,
-            on_demand);
+        {
+#ifndef NVTX_DISABLE
+          nvtx3::scoped_range r_disk_cpu("disk_to_cpu");
+#endif
+          kArcherTensorHandle->ReadTensor(
+              tensor_id, static_cast<char*>(host_memory_ptr) + param_offset,
+              on_demand);
+        }
 
         auto it = kTensorIndex->find(tensor_id);
         std::int64_t size_aligned =
             (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
 
         // Async copy this tensor's data to GPU (overlaps with next disk read)
-        CudaMemcpyAsync(static_cast<char*>(device_memory_ptr) + param_offset,
-                        static_cast<char*>(host_memory_ptr) + param_offset,
-                        size_aligned, cudaMemcpyHostToDevice, h2d_stream);
+        {
+#ifndef NVTX_DISABLE
+          nvtx3::scoped_range r_h2d("cpu_to_gpu");
+#endif
+          CudaMemcpyAsync(static_cast<char*>(device_memory_ptr) + param_offset,
+                          static_cast<char*>(host_memory_ptr) + param_offset,
+                          size_aligned, cudaMemcpyHostToDevice, h2d_stream);
+        }
 
         param_offset += size_aligned;
       }
-      cudaStreamSynchronize(h2d_stream);
+      {
+#ifndef NVTX_DISABLE
+        nvtx3::scoped_range r_sync("cuda_stream_sync");
+#endif
+        cudaStreamSynchronize(h2d_stream);
+      }
       if (own_stream) {
         cudaStreamDestroy(h2d_stream);
       }
@@ -145,7 +160,12 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
       assert(host_memory_ptr != nullptr);
 
       auto start_time = MCIROSECONDS_SINCE_EPOCH;
-      SetModuleMemoryFromDisk(tensor_ids, host_memory_ptr, on_demand);
+      {
+#ifndef NVTX_DISABLE
+        nvtx3::scoped_range r_disk_cpu("disk_to_cpu");
+#endif
+        SetModuleMemoryFromDisk(tensor_ids, host_memory_ptr, on_demand);
+      }
       auto end_time = MCIROSECONDS_SINCE_EPOCH;
       DLOG_TRACE("SetModuleMemoryFromDisk time: {} us", end_time - start_time);
     }
@@ -162,9 +182,19 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
         CudaMemcpy(device_memory_ptr, host_memory_ptr, byte_size,
                    cudaMemcpyHostToDevice);
       } else {
-        CudaMemcpyAsync(device_memory_ptr, host_memory_ptr, byte_size,
-                        cudaMemcpyHostToDevice, stream);
-        cudaStreamSynchronize(stream);
+        {
+#ifndef NVTX_DISABLE
+          nvtx3::scoped_range r_h2d("cpu_to_gpu");
+#endif
+          CudaMemcpyAsync(device_memory_ptr, host_memory_ptr, byte_size,
+                          cudaMemcpyHostToDevice, stream);
+        }
+        {
+#ifndef NVTX_DISABLE
+          nvtx3::scoped_range r_sync("cuda_stream_sync");
+#endif
+          cudaStreamSynchronize(stream);
+        }
       }
       SetModuleCudaMemoryFromCPU(tensor_ids, device_memory_ptr, target_device);
       auto end_time = MCIROSECONDS_SINCE_EPOCH;
@@ -175,9 +205,14 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
     if (target_device.is_cpu() && device.is_cuda()) {
       assert(host_memory_ptr != nullptr);
       auto start_time = MCIROSECONDS_SINCE_EPOCH;
-      SetModuleMemoryFromCuda(tensor_ids, host_memory_ptr);
-      kDeviceMemoryPool->FreeMemory(id, device_memory_ptr, byte_size, device);
-      device_memory_ptr = nullptr;
+      {
+#ifndef NVTX_DISABLE
+        nvtx3::scoped_range r_d2h("gpu_to_cpu");
+#endif
+        SetModuleMemoryFromCuda(tensor_ids, host_memory_ptr);
+        kDeviceMemoryPool->FreeMemory(id, device_memory_ptr, byte_size, device);
+        device_memory_ptr = nullptr;
+      }
       auto end_time = MCIROSECONDS_SINCE_EPOCH;
       DLOG_TRACE("SetModuleMemoryFromCuda time: {} us", end_time - start_time);
     }

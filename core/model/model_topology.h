@@ -12,6 +12,10 @@
 #include <memory>
 #include <vector>
 
+#ifndef NVTX_DISABLE
+  #include <nvtx3/nvtx3.hpp>
+#endif
+
 #include "base/noncopyable.h"
 #include "common/pytorch.h"
 #include "common/types.h"
