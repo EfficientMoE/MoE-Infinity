@@ -3,12 +3,49 @@
 
 # EfficientMoE Team
 
+from contextlib import nullcontext
+from typing import Any
+
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.rpc as rpc
 
 from moe_infinity.utils import ArcherConfig
+
+try:
+    import nvtx  # pyright: ignore[reportMissingTypeStubs]
+except Exception:
+    nvtx = None
+
+try:
+    from moe_infinity.profiling.io_profiler import (  # pyright: ignore[reportMissingImports]
+        IOProfiler,
+    )
+except Exception:
+    IOProfiler = None
+
+
+def _nvtx_ctx(name: str):
+    if nvtx is None:
+        return nullcontext()
+
+    annotate = getattr(nvtx, "annotate", None)
+    if annotate is None:
+        return nullcontext()
+
+    return annotate(name, color="green")
+
+
+def _profiler_instance():
+    if IOProfiler is None:
+        return None
+
+    instance = getattr(IOProfiler, "instance", None)
+    if instance is None:
+        return None
+
+    return instance()
 
 
 def _call_expert_dispatcher(method, *args, **kwargs):
@@ -20,6 +57,8 @@ def _call_expert_dispatcher(method, *args, **kwargs):
 class DistributedExpertExecutor:
     def __init__(self, archer_config: ArcherConfig):
         self.archer_config = archer_config
+        self.expert_dispatcher: Any = None
+        self.device_map_manager: Any = None
 
     def set_expert_dispatcher(self, expert_dispatcher):
         global _expert_dispatcher
@@ -32,34 +71,61 @@ class DistributedExpertExecutor:
     def dispatch_local(
         self, layer_id, hidden_states, router_mask, router_weights
     ):
-        num_expert = router_mask.shape[-1]
-        expert_count = (
-            torch.sum(router_mask.view((-1, num_expert)), dim=0)
-            .cpu()
-            .numpy()
-            .flatten()
-        )
+        profiler = _profiler_instance()
 
-        expert_list = (
-            np.arange(num_expert).astype(int)[expert_count > 0].tolist()
+        routing_nvtx_ctx = _nvtx_ctx("moe_routing")
+        routing_profiler_ctx = (
+            profiler.time("routing", layer=layer_id, expert=-1)
+            if profiler is not None
+            else nullcontext()
         )
-        expected_wait_cnt = len(expert_list)
+        with routing_nvtx_ctx:
+            with routing_profiler_ctx:
+                num_expert = router_mask.shape[-1]
+                expert_count = (
+                    torch.sum(router_mask.view((-1, num_expert)), dim=0)
+                    .cpu()
+                    .numpy()
+                    .flatten()
+                )
+
+                expert_list = (
+                    np.arange(num_expert).astype(int)[expert_count > 0].tolist()
+                )
+                expected_wait_cnt = len(expert_list)
 
         self.expert_dispatcher.set_inputs(
             hidden_states, router_mask.bool(), router_weights
         )
         self.expert_dispatcher.set_expected_queue(expected_wait_cnt)
 
-        total_gpus = torch.cuda.device_count()
-        for expert_id in expert_list:
-            gpu_id = expert_id % total_gpus
-            self.expert_dispatcher.enqueue_expert(
-                layer_id, expert_id, gpu_id, False
-            )
+        dispatch_nvtx_ctx = _nvtx_ctx("expert_dispatch")
+        dispatch_profiler_ctx = (
+            profiler.time("expert_dispatch", layer=layer_id, expert=-1)
+            if profiler is not None
+            else nullcontext()
+        )
+        with dispatch_nvtx_ctx:
+            with dispatch_profiler_ctx:
+                total_gpus = torch.cuda.device_count()
+                for expert_id in expert_list:
+                    gpu_id = expert_id % total_gpus
+                    self.expert_dispatcher.enqueue_expert(
+                        layer_id, expert_id, gpu_id, False
+                    )
         self.expert_dispatcher.notify_fetch_start()
 
     def wait_dispatch_local(self):
-        result = self.expert_dispatcher.wait_expert()
+        profiler = _profiler_instance()
+        wait_nvtx_ctx = _nvtx_ctx("expert_wait_barrier")
+        wait_profiler_ctx = (
+            profiler.time("sync_wait", expert=-1)
+            if profiler is not None
+            else nullcontext()
+        )
+        with wait_nvtx_ctx:
+            with wait_profiler_ctx:
+                result = self.expert_dispatcher.wait_expert()
 
         return result
 
