@@ -118,6 +118,9 @@ void ExpertDispatcher::EnqueueExpert(int layer_idx, int expert_idx, int gpu_id,
 }
 
 void ExpertDispatcher::Enqueue(CallArgs& args) {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("expert_enqueue");
+#endif
   // std::unique_lock<std::mutex> lock(mutexes_[MUTEX_TYPE::INPUT_MUTEX]);
   int layer_idx = args.layer_idx;
   int expert_idx = args.expert_idx;
@@ -251,6 +254,9 @@ ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id) {
 }
 
 void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("gpu_fetch");
+#endif
   cudaSetDevice(gpu_id);
   cudaStream_t stream = fetch_streams_[gpu_id];
 
@@ -495,7 +501,13 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
           c10::cuda::getStreamFromExternal(stream, gpu_id);
       c10::cuda::CUDAStreamGuard guard(torch_stream);
 
-      auto output = modules_[thread_idx]->forward(input, stream);
+      torch::Tensor output;
+      {
+#ifndef NVTX_DISABLE
+        nvtx3::scoped_range r("expert_compute");
+#endif
+        output = modules_[thread_idx]->forward(input, stream);
+      }
       OutputFunc(args, output, token_mask, gpu_id);
     } catch (const std::exception& e) {
       DLOG_WARN("GPUExecFunc: expert forward failed: ", e.what(),
@@ -575,6 +587,9 @@ std::vector<ExpertDispatcher::CallResult> ExpertDispatcher::Wait() {
 }
 
 torch::Tensor ExpertDispatcher::WaitHiddenStates() {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("expert_wait_barrier");
+#endif
   std::unique_lock<std::mutex> lock(pending_mutex_);
   pending_cv_.wait(lock, [&] { return pending_.load() == 0; });
   num_enqueued_.store(0);
