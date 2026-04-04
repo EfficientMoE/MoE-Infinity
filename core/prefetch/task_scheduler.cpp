@@ -6,6 +6,9 @@
 #include <sstream>
 
 #include <c10/cuda/CUDACachingAllocator.h>
+#ifndef NVTX_DISABLE
+  #include <nvtx3/nvtx3.hpp>
+#endif
 
 #include "common/time.h"
 #include "memory/memory_pool.h"
@@ -80,6 +83,10 @@ void ArcherTaskPool::FetchExec(const std::uint64_t& request_id,
 }
 
 void ArcherTaskPool::EnqueueTask(const TaskPtr& task) {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("task_queue_push");
+#endif
+
   DLOG_TRACE("EnqueueTask: {}", task->DebugString());
 
   {
@@ -459,6 +466,10 @@ bool ArcherTaskPool::RemoveCachedDenseNode(const NodePtr& node) {
 
 void ArcherTaskPool::GPUThreadFunc(int gpu_id, int thread_id) {
   while (!main_thread_stop_flag_.load()) {
+#ifndef NVTX_DISABLE
+    nvtx3::scoped_range r("task_queue_pop");
+#endif
+
     std::uint32_t max_priority = 1000;
     std::unique_lock<std::mutex> lock(unified_mutex_);
     for (std::uint32_t i = 0; i < NUM_PRIORITY; ++i) {
@@ -512,7 +523,13 @@ void ArcherTaskPool::GPUThreadFunc(int gpu_id, int thread_id) {
         continue;
       }
     }
-    SetNodeDevice(task);
+
+    {
+#ifndef NVTX_DISABLE
+      nvtx3::scoped_range r("task_execute");
+#endif
+      SetNodeDevice(task);
+    }
 
     if (task->on_demand) {
       node->state = 0;

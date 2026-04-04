@@ -1,0 +1,23 @@
+Task 10 NVTX evidence
+Date: 2026-04-04
+Worktree: /home/xly/MoE-Infinity-expert-io-microbench
+
+Verified target ranges in source:
+
+core/prefetch/task_scheduler.cpp
+  - task_queue_push at ArcherTaskPool::EnqueueTask() entry
+  - task_queue_pop at ArcherTaskPool::GPUThreadFunc() dequeue loop entry
+  - task_execute around SetNodeDevice(task) execution callback
+
+core/aio/archer_prio_aio_handle.cpp
+  - aio_read_submit at ArcherPrioAioHandle::Read() method entry
+  - aio_write_submit at ArcherPrioAioHandle::Write() method entry
+  - aio_wait at ArcherPrioAioHandle::Wait() method entry
+
+Guarding:
+  - All nvtx3 includes and scoped_range usage are under #ifndef NVTX_DISABLE.
+
+Scope constraints satisfied:
+  - No AIO buffer alignment/O_DIRECT logic changes.
+  - No NVTX added inside AIO completion callback/event loop internals.
+  - No queue ordering or thread pool behavior changes.
