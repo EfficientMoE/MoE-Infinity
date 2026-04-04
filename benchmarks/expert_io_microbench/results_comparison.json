@@ -1,0 +1,30 @@
+{
+  "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+  "hardware": "NVIDIA RTX A5000 24GB",
+  "disk_mode": {
+    "bubble_ratio": 0.8829,
+    "step_total_ms": 1017.9,
+    "expert_wait_ms": 898.7,
+    "non_wait_compute_ms": 119.2
+  },
+  "host_only_mode": {
+    "bubble_ratio": 0.8676,
+    "step_total_ms": 1028.6,
+    "expert_wait_ms": 892.4,
+    "non_wait_compute_ms": 136.1
+  },
+  "delta": {
+    "bubble_ratio_reduction": 0.0153,
+    "wait_time_reduction_ms": 6.3,
+    "step_speedup_ms": -10.6
+  },
+  "key_finding":
+      "Disk I/O contributes only ~1.5% to bubble ratio. The dominant bottleneck (86.8% in host-only) is synchronization overhead (cudaStreamSynchronize + pending_cv_.wait), NOT disk reads. The existing prefetcher already hides most disk latency. Optimization priority: Phase 1 (event-based sync) > Phase 2 (hit/miss dispatch) >> Phase 3 (prefetch).",
+  "optimization_implication": {
+    "phase_1_event_sync": "HIGH IMPACT \u2014 targets 86.8% sync-bound bubble",
+    "phase_2_hit_miss_split":
+        "HIGH IMPACT \u2014 reduces serialization in dispatch pipeline",
+    "phase_3_prefetch":
+        "LOW-MEDIUM IMPACT \u2014 disk already hidden; mainly helps cold-cache scenarios"
+  }
+}
