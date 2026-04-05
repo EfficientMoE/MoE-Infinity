@@ -7,6 +7,7 @@
 #include "aio/archer_tensor_index.h"
 #include "common/pytorch.h"
 #include "common/time.h"
+#include "memory/event_pool.h"
 #include "prefetch/task_scheduler.h"
 #include "prefetch/task_thread.h"
 #include "utils/cuda_utils.h"
@@ -408,6 +409,12 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
 
     if (args.expert_node == nullptr) {
       continue;
+    }
+
+    if (args.transfer_event != nullptr) {
+      cudaStreamWaitEvent(stream, args.transfer_event, 0);
+      kCudaEventPool->Release(args.transfer_event);
+      args.transfer_event = nullptr;
     }
 
     try {
