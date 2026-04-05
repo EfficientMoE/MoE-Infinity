@@ -1,0 +1,18 @@
+{
+  "phase": 1,
+  "baseline_bubble_ratio": 0.8715,
+  "target_bubble_ratio_lt": 0.87,
+  "bench_bubble_py_exists": false,
+  "gpu_available": false,
+  "offload_dir": null,
+  "cuda_error": null,
+  "status": "SKIP",
+  "reason":
+      "No GPU or no offload directory; benchmark not runnable in this environment",
+  "phase1_bubble_ratio": null,
+  "improvement_vs_baseline_pct_points": null,
+  "comparison_vs_baseline": "SKIP",
+  "meets_target": "SKIP",
+  "note":
+      "Run on CUDA-enabled host with downloaded offload weights to measure bubble ratio."
+}
