@@ -56,7 +56,7 @@ Node::Node()
       default_device(DEFAULT_CUDA_DEVICE) {}
 
 void Node::SetDevice(const torch::Device& target_device, bool on_demand,
-                     cudaStream_t stream) {
+                     cudaStream_t stream, cudaEvent_t* transfer_event) {
   DLOG_TRACE("SetDevice: " + str() + " to " + target_device.str());
   if (device == target_device) {
     DLOG_TRACE("SetDevice: " + str() + " to " + target_device.str() +
@@ -138,11 +138,15 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
 
         param_offset += size_aligned;
       }
-      {
+      if (transfer_event != nullptr) {
+        cudaEventRecord(*transfer_event, h2d_stream);
+      } else {
+        {
 #ifndef NVTX_DISABLE
-        nvtx3::scoped_range r_sync("cuda_stream_sync");
+          nvtx3::scoped_range r_sync("cuda_stream_sync");
 #endif
-        cudaStreamSynchronize(h2d_stream);
+          cudaStreamSynchronize(h2d_stream);
+        }
       }
       if (own_stream) {
         cudaStreamDestroy(h2d_stream);
@@ -181,6 +185,9 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
       if (stream == nullptr) {
         CudaMemcpy(device_memory_ptr, host_memory_ptr, byte_size,
                    cudaMemcpyHostToDevice);
+        if (transfer_event != nullptr) {
+          cudaEventRecord(*transfer_event, nullptr);
+        }
       } else {
         {
 #ifndef NVTX_DISABLE
@@ -189,11 +196,15 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
           CudaMemcpyAsync(device_memory_ptr, host_memory_ptr, byte_size,
                           cudaMemcpyHostToDevice, stream);
         }
-        {
+        if (transfer_event != nullptr) {
+          cudaEventRecord(*transfer_event, stream);
+        } else {
+          {
 #ifndef NVTX_DISABLE
-          nvtx3::scoped_range r_sync("cuda_stream_sync");
+            nvtx3::scoped_range r_sync("cuda_stream_sync");
 #endif
-          cudaStreamSynchronize(stream);
+            cudaStreamSynchronize(stream);
+          }
         }
       }
       SetModuleCudaMemoryFromCPU(tensor_ids, device_memory_ptr, target_device);

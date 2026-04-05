@@ -31,6 +31,9 @@ enum MUTEX_TYPE {
   PENDING_MUTEX = 3
 };
 
+struct CUevent_st;
+using cudaEvent_t = CUevent_st*;
+
 class ExpertDispatcher : public base::noncopyable {
  public:
   typedef struct {
@@ -47,6 +50,7 @@ class ExpertDispatcher : public base::noncopyable {
     torch::ScalarType out_dtype = torch::kFloat32;
     bool evict = false;
     bool hit = false;
+    cudaEvent_t transfer_event = nullptr;
   } ExecArgs;
   typedef std::tuple<torch::Tensor, int, int, int> CallResult;
 

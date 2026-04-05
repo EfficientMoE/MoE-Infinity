@@ -66,7 +66,8 @@ struct Node {
   explicit Node();
   const std::string str();
   void SetDevice(const torch::Device& target_device, bool ondemand = false,
-                 cudaStream_t stream = nullptr);
+                 cudaStream_t stream = nullptr,
+                 cudaEvent_t* transfer_event = nullptr);
 };
 
 typedef std::shared_ptr<Node> NodePtr;

@@ -369,7 +369,13 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       cached_experts_[gpu_id].insert(key);
     }
 
-    expert_node->node->SetDevice(device, true, stream);
+    cudaEvent_t transfer_done = nullptr;
+    if (!cache_hit) {
+      cudaEventCreateWithFlags(&transfer_done, cudaEventDisableTiming);
+    }
+    expert_node->node->SetDevice(
+        device, true, stream,
+        (transfer_done != nullptr) ? &transfer_done : nullptr);
     expert_node->node->incache_visit_count += 1;
     expert_node->SetTensorsFromBlob(device);
     // module_->SetTensorsFromIds(expert_node->node->tensor_ids);
@@ -392,6 +398,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
       exec_args.evict = gpu_overload_[gpu_id].load(std::memory_order_acquire);
       exec_args.hit = cache_hit;
+      exec_args.transfer_event = transfer_done;
       // std::lock_guard<std::mutex> lock(exec_mutex_[gpu_id]);
       // exec_queue_[gpu_id].emplace_back(std::move(exec_args));
       exec_queue_[gpu_id].Push(exec_args);
@@ -415,6 +422,12 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
     }
 
     try {
+      if (args.transfer_event != nullptr) {
+        cudaStreamWaitEvent(stream, args.transfer_event, 0);
+        cudaEventDestroy(args.transfer_event);
+        args.transfer_event = nullptr;
+      }
+
       int64_t batch_size = hidden_states_.size(0);
       auto device = CUDA_DEVICE(gpu_id);
       auto expert_idx = args.expert_node->expert_idx;
@@ -440,6 +453,10 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       }
       OutputFunc(args, output, token_mask, gpu_id);
     } catch (const std::exception& e) {
+      if (args.transfer_event != nullptr) {
+        cudaEventDestroy(args.transfer_event);
+        args.transfer_event = nullptr;
+      }
       DLOG_WARN("GPUExecFunc: expert forward failed: ", e.what(),
                 " (expert_idx=", args.expert_node->expert_idx,
                 " layer_idx=", args.expert_node->layer_idx, ")");
