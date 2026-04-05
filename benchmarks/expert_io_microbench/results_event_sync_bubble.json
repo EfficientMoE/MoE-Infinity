@@ -1,0 +1,58 @@
+{
+  "status": "PASS",
+  "environment": {
+    "torch_version": "2.9.1+cu128",
+    "torch_cuda_version": "12.8",
+    "cuda_available": true,
+    "cuda_device_count": 1,
+    "cuda_device_names": [
+      "NVIDIA RTX A5000"
+    ]
+  },
+  "requested_model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+  "offload_dir": "/tmp/moe_bench_offload",
+  "source_offload_dir": "/tmp/moe_bench_offload",
+  "mode": "disk",
+  "io_mode": "disk",
+  "warmup": 2,
+  "iters": 5,
+  "measurement_mode": "max_new_tokens=1",
+  "overall_bubble_ratio": 0.8025481388122346,
+  "per_layer_bubble": null,
+  "step_decomposition_mean": {
+    "step_total_ns": 840460994.4,
+    "expert_wait_ns": 674510406.8,
+    "non_wait_ns": 165950587.6,
+    "bubble_ratio": 0.8029813733293458,
+    "step_total_p50_ns": 874595239.0,
+    "step_total_p95_ns": 890047706.6,
+    "step_total_p99_ns": 891479037.32,
+    "expert_wait_p50_ns": 701195717.0,
+    "expert_wait_p95_ns": 716068909.4,
+    "expert_wait_p99_ns": 718106678.68,
+    "bubble_ratio_p50": 0.801737404,
+    "bubble_ratio_p95": 0.818942034,
+    "bubble_ratio_p99": 0.821576278
+  },
+  "step_decomposition_percentiles": {
+    "step_total_ns": {
+      "p50": 874595239.0,
+      "p95": 890047706.6,
+      "p99": 891479037.32
+    },
+    "expert_wait_ns": {
+      "p50": 701195717.0,
+      "p95": 716068909.4,
+      "p99": 718106678.68
+    },
+    "bubble_ratio": {
+      "p50": 0.801737404,
+      "p95": 0.818942034,
+      "p99": 0.821576278
+    }
+  },
+  "io_profiler_events": {
+    "mean_events_per_step": 78.0,
+    "mean_sync_wait_events_per_step": 26.0
+  }
+}
