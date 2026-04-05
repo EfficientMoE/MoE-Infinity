@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cuda_runtime_api.h>
 #include <torch/extension.h>
 #include <atomic>
 #include <cstdint>
@@ -43,6 +44,7 @@ class ExpertDispatcher : public base::noncopyable {
     torch::ScalarType out_dtype = torch::kFloat32;
     bool evict = false;
     bool hit = false;
+    cudaEvent_t transfer_event = nullptr;
   } ExecArgs;
   typedef std::tuple<torch::Tensor, int, int, int> CallResult;
 
