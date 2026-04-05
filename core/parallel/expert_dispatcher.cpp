@@ -127,7 +127,11 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   expert_node->node->last_access_time = MCIROSECONDS_SINCE_EPOCH;
 
   if (expert_node->node->device.is_cuda()) {
+    // Cache-hit path: expert already on GPU, skip fetch queue entirely.
+    // transfer_event stays nullptr — GPUExecFunc will skip cudaStreamWaitEvent.
     args.gpu_id = expert_node->node->device.index();
+    DLOG_DEBUG("cache_hit_immediate: expert_idx ", args.expert_idx,
+               " layer_idx ", args.layer_idx, " gpu_id ", args.gpu_id);
 
     auto original_device = (args.remote) ? CPU_DEVICE : hidden_states_.device();
 
@@ -139,6 +143,7 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
     exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
     exec_args.evict = false;
     exec_args.hit = true;
+    // transfer_event = nullptr: expert is already on GPU, no H2D wait needed
 
     // module_->SetTensorsFromIds(expert_node->node->tensor_ids);
 
