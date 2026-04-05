@@ -702,6 +702,8 @@ class OffloadEngine(object):
                 self.expert_executor.set_expert_dispatcher(
                     self.expert_dispatcher
                 )
+                if self.archer_config.speculative_prefetch:
+                    self.expert_executor.set_prefetcher(self.expert_prefetcher)
 
                 module_idx = 0
                 self.expert_layer_modules = []

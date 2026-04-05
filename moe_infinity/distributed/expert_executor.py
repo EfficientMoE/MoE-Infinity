@@ -3,6 +3,8 @@
 
 # EfficientMoE Team
 
+from typing import Any, cast
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -20,6 +22,9 @@ def _call_expert_dispatcher(method, *args, **kwargs):
 class DistributedExpertExecutor:
     def __init__(self, archer_config: ArcherConfig):
         self.archer_config = archer_config
+        self.expert_dispatcher = cast(Any, None)
+        self.device_map_manager = cast(Any, None)
+        self.prefetcher = None
 
     def set_expert_dispatcher(self, expert_dispatcher):
         global _expert_dispatcher
@@ -29,8 +34,21 @@ class DistributedExpertExecutor:
     def set_device_map_manager(self, device_map_manager):
         self.device_map_manager = device_map_manager
 
+    def set_prefetcher(self, prefetcher):
+        self.prefetcher = prefetcher
+
+    def trigger_speculative_prefetch(self, layer_id, router_logits):
+        if self.prefetcher is not None:
+            self.prefetcher.speculative_prefetch(layer_id, router_logits)
+
     def dispatch_local(
-        self, layer_id, hidden_states, router_mask, router_weights
+        self,
+        layer_id,
+        hidden_states,
+        router_mask,
+        router_weights,
+        router_logits=None,
+        prefetcher=None,
     ):
         num_expert = router_mask.shape[-1]
         expert_count = (
@@ -57,6 +75,15 @@ class DistributedExpertExecutor:
                 layer_id, expert_id, gpu_id, False
             )
         self.expert_dispatcher.notify_fetch_start()
+
+        if prefetcher is None:
+            prefetcher = self.prefetcher
+
+        if prefetcher is not None:
+            prefetcher.correct_prefetch(layer_id + 1, expert_list)
+
+        if router_logits is not None:
+            self.trigger_speculative_prefetch(layer_id, router_logits)
 
     def wait_dispatch_local(self):
         result = self.expert_dispatcher.wait_expert()

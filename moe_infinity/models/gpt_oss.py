@@ -102,7 +102,11 @@ class SyncGptOssMLP(nn.Module):
 
         if self.expert_executor is not None:
             self.expert_executor.dispatch_local(
-                self.layer_id, hidden_flat, router_mask, routing_weights_mask
+                self.layer_id,
+                hidden_flat,
+                router_mask,
+                routing_weights_mask,
+                router_logits=router_logits,
             )
             final_hidden = self.expert_executor.wait_dispatch_local()
         else:

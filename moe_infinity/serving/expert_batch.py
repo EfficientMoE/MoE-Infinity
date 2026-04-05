@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +17,7 @@ class _ExpertExecutorLike(Protocol):
         hidden_states: torch.Tensor,
         router_mask: torch.Tensor,
         router_weights: torch.Tensor,
+        router_logits: Optional[torch.Tensor] = None,
     ) -> None: ...
 
     def wait_dispatch_local(self) -> torch.Tensor: ...
@@ -69,6 +70,7 @@ class BatchedExpertDispatch:
             hidden_states,
             router_mask,
             router_weights,
+            router_logits=router_logits,
         )
         output = expert_executor.wait_dispatch_local()
 

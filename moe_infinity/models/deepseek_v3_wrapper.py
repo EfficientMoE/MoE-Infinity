@@ -63,19 +63,23 @@ class SyncDeepseekV3MoEBlock(nn.Module):
         )
         routing_weights_mask.scatter_add_(1, selected_experts, routing_weights)
 
-        return router_mask, routing_weights_mask
+        return router_mask, routing_weights_mask, router_logits
 
     @nvtx.annotate(message="DeepseekMoEBlock", color="blue")
     def forward(self, hidden_states):
         identity = hidden_states
-        routing_mask, routing_weight = self.__prepare_expert_route(
-            hidden_states
+        routing_mask, routing_weight, router_logits = (
+            self.__prepare_expert_route(hidden_states)
         )
         batch_size, sequence_length, hidden_dim = identity.shape
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
         self.expert_executor.dispatch_local(
-            self.layer_id, hidden_states, routing_mask, routing_weight
+            self.layer_id,
+            hidden_states,
+            routing_mask,
+            routing_weight,
+            router_logits=router_logits,
         )
         final_hidden_states = self.expert_executor.wait_dispatch_local()
 
