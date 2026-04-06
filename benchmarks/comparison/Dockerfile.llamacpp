@@ -1,0 +1,14 @@
+FROM python:3.12-slim AS python-runtime
+RUN pip install --no-cache-dir requests huggingface_hub
+
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda
+COPY --from=python-runtime /usr/local /usr/local
+ENV PATH="/usr/local/bin:${PATH}"
+RUN ln -sf /app/llama-server /llama-server
+ENTRYPOINT []
+
+WORKDIR /workspace
+COPY benchmarks/comparison/common.py /workspace/common.py
+COPY benchmarks/comparison/run_llamacpp.py /workspace/run_llamacpp.py
+
+CMD ["python3", "/workspace/run_llamacpp.py"]
