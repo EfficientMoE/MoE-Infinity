@@ -35,6 +35,7 @@ class ExpertDispatcher : public base::noncopyable {
     int expert_idx = -1;
     int gpu_id = -1;
     bool remote = false;
+    bool wait_for_prefetch = false;
   } CallArgs;
   typedef struct {
     torch::Tensor hidden_states =

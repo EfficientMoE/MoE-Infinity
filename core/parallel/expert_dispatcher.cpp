@@ -119,9 +119,16 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   auto expert_node = experts_[expert_idx][layer_idx];
 
   if (!expert_node->node->mutex.try_lock()) {
-    // NOTE: try lock must success, if there is no prefetching
+    if (expert_node->node->is_prefetching.load(std::memory_order_acquire)) {
+      expert_node->node->pending_dispatches.fetch_add(
+          1, std::memory_order_acq_rel);
+      args.wait_for_prefetch = true;
+      args.gpu_id = expert_node->node->default_device.index();
+      input_queue_[args.gpu_id].Push(args);
+      return;
+    }
     DLOG_FATAL("ExpertDispatcher::Enqueue: mutex try_lock failed (expert_idx ",
-               expert_idx, " layer_idx ", layer_idx, "node ",
+               expert_idx, " layer_idx ", layer_idx, " node ",
                expert_node->node->str(), ")");
   }
   expert_node->node->last_access_time = MCIROSECONDS_SINCE_EPOCH;
@@ -223,6 +230,7 @@ ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id) {
     auto node = experts_[expert_idx][layer_idx]->node;
     if (node == nullptr) continue;
     if (node->device.is_cuda() && node->incache_visit_count < min_visit_count &&
+        node->pending_dispatches.load(std::memory_order_acquire) == 0 &&
         node->mutex.try_lock()) {
       evict_expert_node = experts_[expert_idx][layer_idx];
       min_visit_count = node->incache_visit_count;
@@ -269,6 +277,26 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
     int64_t batch_size = hidden_states_.size(0);
 
     auto expert_node = experts_[expert_idx][layer_idx];
+
+    if (args.wait_for_prefetch) {
+      expert_node->node->mutex.lock();
+      expert_node->node->pending_dispatches.fetch_sub(
+          1, std::memory_order_acq_rel);
+      if (expert_node->node->device.is_cuda()) {
+        expert_node->node->incache_visit_count += 1;
+        expert_node->SetTensorsFromBlob(expert_node->node->device);
+        ExecArgs exec_args;
+        exec_args.expert_node = expert_node;
+        exec_args.out_gpu_id = original_device.index();
+        exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
+        exec_args.evict = false;
+        exec_args.hit = true;
+        exec_args.transfer_event = nullptr;
+        exec_queue_[gpu_id].Push(exec_args);
+        continue;
+      }
+    }
+
     bool cache_hit = expert_node->node->device.is_cuda();
 
     // std::cerr << "ExpertDispatcher::GPUFetchFunc: gpu_id " << gpu_id

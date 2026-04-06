@@ -522,12 +522,16 @@ void ArcherTaskPool::SetNodeDevice(const TaskPtr& task) {
       DLOG_TRACE("SetNodeDevice: task: {}, mutex locked", task->DebugString());
       return;
     }
+    node->is_prefetching.store(true, std::memory_order_release);
   }
 
   if (node->device.type() == task->dst_device.type()) {
     DLOG_TRACE("SetNodeDevice: task: {}, skip same device",
                task->DebugString());
-    if (!task->on_demand) node->mutex.unlock();
+    if (!task->on_demand) {
+      node->mutex.unlock();
+      node->is_prefetching.store(false, std::memory_order_release);
+    }
     return;
   }
 
@@ -544,8 +548,10 @@ void ArcherTaskPool::SetNodeDevice(const TaskPtr& task) {
   DLOG_TRACE("SetNodeDevice: task: {}, emplace time {} us", task->DebugString(),
              end_time - start_time);
 
-  // do not unlock if node in exec queue, leave this to the release of node
-  if (!task->on_demand) node->mutex.unlock();
+  if (!task->on_demand) {
+    node->mutex.unlock();
+    node->is_prefetching.store(false, std::memory_order_release);
+  }
 
   node->io_state = NODE_STATE_CACHED;
 

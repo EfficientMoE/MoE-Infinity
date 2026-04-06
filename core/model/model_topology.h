@@ -44,6 +44,8 @@ struct Node {
   std::atomic_uint8_t state{0};  // 0 for ready, 1 for moving
 
   std::mutex mutex;
+  std::atomic<bool> is_prefetching{false};
+  std::atomic<int> pending_dispatches{0};
   std::condition_variable cv;
 
   float cache_priority = 0.0;
