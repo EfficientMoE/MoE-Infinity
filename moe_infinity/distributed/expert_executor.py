@@ -79,14 +79,24 @@ class DistributedExpertExecutor:
         if prefetcher is None:
             prefetcher = self.prefetcher
 
-        if prefetcher is not None:
-            prefetcher.correct_prefetch(layer_id + 1, expert_list)
-
-        if router_logits is not None:
-            self.trigger_speculative_prefetch(layer_id, router_logits)
+        self._pending_prefetch = (
+            prefetcher,
+            layer_id,
+            expert_list,
+            router_logits,
+        )
 
     def wait_dispatch_local(self):
         result = self.expert_dispatcher.wait_expert()
+
+        pending = getattr(self, "_pending_prefetch", None)
+        if pending is not None:
+            prefetcher, layer_id, expert_list, router_logits = pending
+            self._pending_prefetch = None
+            if prefetcher is not None:
+                prefetcher.correct_prefetch(layer_id + 1, expert_list)
+            if router_logits is not None:
+                self.trigger_speculative_prefetch(layer_id, router_logits)
 
         return result
 
