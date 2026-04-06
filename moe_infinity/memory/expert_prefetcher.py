@@ -98,7 +98,6 @@ class ExpertPrefetcher(object):
                 ::-1
             ].tolist()
 
-        self.fetch_experts_lock_cache(next_layer, topk_indices)
         self._last_speculative_prediction = set(topk_indices)
 
     def correct_prefetch(
@@ -116,7 +115,6 @@ class ExpertPrefetcher(object):
             predicted = getattr(self, "_last_speculative_prediction", set())
 
         missed = [e for e in actual_expert_ids if e not in predicted]
-        if missed:
-            self.prefetch_experts_list(layer_idx, missed)
+        self._last_correction_misses = missed
 
         self._last_speculative_prediction = set()
