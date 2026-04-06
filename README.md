@@ -48,16 +48,30 @@ Note that: The open-sourced MoE-Infinity has been redesigned for making it Huggi
 Single GPU A5000 (24GB Memory), per-token-latency (seconds) for generation with a mixed dataset that includes [LongBench](https://huggingface.co/datasets/THUDM/LongBench), [GSM8K](https://huggingface.co/datasets/openai/gsm8k),  [FLAN](https://huggingface.co/datasets/Muennighoff/flan), [BIG-Bench](https://huggingface.co/datasets/bigbench) and [MMLU](https://huggingface.co/datasets/lukaemon/mmlu) datasets.
 Lower per-token-latency is preferable.
 
+|  | DeepSeek-V2-Lite-Chat | Mixtral-8x7b | Qwen3-30B-A3B | gpt-oss-20b |
+| :---: | :---: | :---: | :---: | :---: |
+| <ins>MoE-Infinity</ins> (FP16) | <ins>*0.100*</ins> | <ins>*0.735*</ins> | <ins>*0.150*</ins> | <ins>*—*</ins> |
+| vLLM v0.18.1 (FP8) | — | — | — | — |
+| llama.cpp b8640 (Q4_K_M) | — | — | — | — |
+
+> **—** = Not yet measured. Run [`benchmarks/comparison/run_all.sh`](benchmarks/comparison/run_all.sh) to populate.
+> **X** = Model cannot run on this framework with a single 24GB GPU.
+> Precision: MoE-Infinity uses FP16 with expert offloading (full quality). vLLM uses FP8 quantization. llama.cpp uses Q4_K_M GGUF quantization.
+> See [Benchmark Reproduction Guide](docs/benchmark_reproduction.md) to reproduce these numbers.
+
+<details>
+<summary>Legacy comparison (Accelerate, DeepSpeed, Mixtral Offloading, Ollama, vLLM v0.8.5)</summary>
+
 |  | NLLB-MoE-54B | Mixtral-8x7b | DeepSeek-V2-Lite-Chat | Qwen3-30B-A3B |
 | :---: | :---: | :---: | :---: | :---: |
 | <ins>MoE-Infinity</ins> | <ins>*0.119*</ins> | <ins>*0.735*</ins> | <ins>*0.100*</ins> | <ins>*0.150*</ins> |
-| Accelerate | 3.071 | 6.633 |  1.743  | |
-|DeepSpeed (0.16.2) | 8.381 | 2.486 | 0.737 | 7.857 |
-|Mixtral Offloading| X | 1.752 | X |X|
-|Ollama | X | 0.903 | 1.250 ||
-|vLLM (v0.8.5)| X | 2.137 | 0.149 | 0.205 |
+| Accelerate | 3.071 | 6.633 | 1.743 | |
+| DeepSpeed (0.16.2) | 8.381 | 2.486 | 0.737 | 7.857 |
+| Mixtral Offloading | X | 1.752 | X | X |
+| Ollama | X | 0.903 | 1.250 | |
+| vLLM (v0.8.5) | X | 2.137 | 0.149 | 0.205 |
 
-
+</details>
 
 ## Installation
 
