@@ -68,9 +68,9 @@ class ExpertDispatcher : public base::noncopyable {
     for (int i = 0; i < static_cast<int>(exec_queue_.size()); ++i) {
       exec_queue_[i].NotifyAll();
     }
-    for (auto& thread : threads_) {
-      thread->join();
-    }
+    // Threads auto-detach via ~Thread() if not joined.
+    // Don't join here — background threads may be in spin-waits
+    // that only terminate after exec_state is forced to IDLE above.
     for (auto& stream : exec_streams_) {
       cudaStreamDestroy(stream);
     }

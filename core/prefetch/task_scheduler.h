@@ -86,7 +86,7 @@ class ArcherTaskPool : public base::noncopyable {
     main_thread_stop_flag_.store(true, std::memory_order_release);
     for (auto& thread_list : exec_threads_) {
       for (auto& thread : thread_list) {
-        if (thread.joinable()) thread.join();
+        if (thread.joinable()) thread.detach();
       }
     }
   }
