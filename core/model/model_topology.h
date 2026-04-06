@@ -24,6 +24,12 @@ enum NodeState {
   NODE_STATE_VISITED = 0x4,
 };
 
+enum class NodeExecState : uint8_t {
+  IDLE = 0,
+  FETCHING = 1,
+  EXECUTING = 2,
+};
+
 // extern cudaStream_t kCudaStreamH2D;
 
 struct Node {
@@ -43,7 +49,9 @@ struct Node {
 
   std::atomic_uint8_t state{0};  // 0 for ready, 1 for moving
 
-  std::mutex mutex;
+  std::mutex
+      mutex;  // DEPRECATED: use exec_state for dispatch/prefetch coordination
+  std::atomic<NodeExecState> exec_state{NodeExecState::IDLE};
   std::atomic<bool> is_prefetching{false};
   std::atomic<int> pending_dispatches{0};
   std::condition_variable cv;

@@ -118,18 +118,23 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   int expert_idx = args.expert_idx;
   auto expert_node = experts_[expert_idx][layer_idx];
 
-  if (!expert_node->node->mutex.try_lock()) {
-    if (expert_node->node->is_prefetching.load(std::memory_order_acquire)) {
-      expert_node->node->pending_dispatches.fetch_add(
-          1, std::memory_order_acq_rel);
-      args.wait_for_prefetch = true;
-      args.gpu_id = expert_node->node->default_device.index();
-      input_queue_[args.gpu_id].Push(args);
-      return;
+  {
+    auto expected = NodeExecState::IDLE;
+    if (!expert_node->node->exec_state.compare_exchange_strong(
+            expected, NodeExecState::FETCHING, std::memory_order_acq_rel)) {
+      if (expert_node->node->is_prefetching.load(std::memory_order_acquire)) {
+        expert_node->node->pending_dispatches.fetch_add(
+            1, std::memory_order_acq_rel);
+        args.wait_for_prefetch = true;
+        args.gpu_id = expert_node->node->default_device.index();
+        input_queue_[args.gpu_id].Push(args);
+        return;
+      }
+      DLOG_FATAL(
+          "ExpertDispatcher::Enqueue: exec_state CAS failed (expert_idx ",
+          expert_idx, " layer_idx ", layer_idx, " node ",
+          expert_node->node->str(), " state=", static_cast<int>(expected), ")");
     }
-    DLOG_FATAL("ExpertDispatcher::Enqueue: mutex try_lock failed (expert_idx ",
-               expert_idx, " layer_idx ", layer_idx, " node ",
-               expert_node->node->str(), ")");
   }
   expert_node->node->last_access_time = MCIROSECONDS_SINCE_EPOCH;
 
@@ -231,10 +236,10 @@ ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id) {
     if (node == nullptr) continue;
     if (node->device.is_cuda() && node->incache_visit_count < min_visit_count &&
         node->pending_dispatches.load(std::memory_order_acquire) == 0 &&
-        node->mutex.try_lock()) {
+        node->exec_state.load(std::memory_order_acquire) ==
+            NodeExecState::IDLE) {
       evict_expert_node = experts_[expert_idx][layer_idx];
       min_visit_count = node->incache_visit_count;
-      node->mutex.unlock();
     }
   }
   return evict_expert_node;
@@ -279,7 +284,15 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
     auto expert_node = experts_[expert_idx][layer_idx];
 
     if (args.wait_for_prefetch) {
-      expert_node->node->mutex.lock();
+      while (expert_node->node->exec_state.load(std::memory_order_acquire) !=
+             NodeExecState::IDLE) {
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
+      }
+      {
+        auto expected = NodeExecState::IDLE;
+        expert_node->node->exec_state.compare_exchange_strong(
+            expected, NodeExecState::FETCHING, std::memory_order_acq_rel);
+      }
       expert_node->node->pending_dispatches.fetch_sub(
           1, std::memory_order_acq_rel);
       if (expert_node->node->device.is_cuda()) {
@@ -481,7 +494,8 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       DLOG_WARN("GPUExecFunc: expert forward failed: ", e.what(),
                 " (expert_idx=", args.expert_node->expert_idx,
                 " layer_idx=", args.expert_node->layer_idx, ")");
-      args.expert_node->node->mutex.unlock();
+      args.expert_node->node->exec_state.store(NodeExecState::IDLE,
+                                               std::memory_order_release);
       pending_.fetch_sub(1);
       if (pending_.load() == 0) {
         pending_cv_.notify_all();
@@ -505,7 +519,8 @@ void ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
   int64_t layer_idx = args.expert_node->layer_idx;
   int64_t batch_size = hidden_states_.size(0);
 
-  args.expert_node->node->mutex.unlock();
+  args.expert_node->node->exec_state.store(NodeExecState::IDLE,
+                                           std::memory_order_release);
   if (args.evict) {
     args.expert_node->node->SetDevice(args.expert_node->node->default_host,
                                       true, nullptr);
