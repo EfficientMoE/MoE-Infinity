@@ -53,7 +53,15 @@ class ExpertDispatcher : public base::noncopyable {
   explicit ExpertDispatcher(int num_experts, int num_layers, int dtype,
                             int expert_type, int num_threads = 1);
   ~ExpertDispatcher() {
-    main_thread_stop_flag_.store(true);
+    main_thread_stop_flag_.store(true, std::memory_order_release);
+    for (auto& expert_list : experts_) {
+      for (auto& expert_node : expert_list) {
+        if (expert_node && expert_node->node) {
+          expert_node->node->exec_state.store(NodeExecState::IDLE,
+                                              std::memory_order_release);
+        }
+      }
+    }
     for (int i = 0; i < static_cast<int>(input_queue_.size()); ++i) {
       input_queue_[i].NotifyAll();
     }

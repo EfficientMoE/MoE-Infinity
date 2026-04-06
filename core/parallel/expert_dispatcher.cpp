@@ -285,9 +285,11 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
 
     if (args.wait_for_prefetch) {
       while (expert_node->node->exec_state.load(std::memory_order_acquire) !=
-             NodeExecState::IDLE) {
+                 NodeExecState::IDLE &&
+             !main_thread_stop_flag_.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::microseconds(10));
       }
+      if (main_thread_stop_flag_.load(std::memory_order_acquire)) break;
       {
         auto expected = NodeExecState::IDLE;
         expert_node->node->exec_state.compare_exchange_strong(
@@ -375,11 +377,14 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
         //   }
         // }
         if (evict_expert_node == nullptr) {
-          for (int retry = 0; retry < 100 && evict_expert_node == nullptr;
+          for (int retry = 0;
+               retry < 100 && evict_expert_node == nullptr &&
+               !main_thread_stop_flag_.load(std::memory_order_acquire);
                ++retry) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             evict_expert_node = FindExpertEvict(gpu_id);
           }
+          if (main_thread_stop_flag_.load(std::memory_order_acquire)) break;
           DLOG_FATAL_IF(
               evict_expert_node == nullptr,
               "ExpertDispatcher::GPUFetchFunc: evict_node is nullptr after "
