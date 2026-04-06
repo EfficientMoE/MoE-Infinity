@@ -44,6 +44,11 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
   }
 
   for (int i = 0; i < kNumDevices(); ++i) {
+    cudaSetDevice(i);
+    cudaStream_t fetch_stream;
+    cudaStreamCreateWithFlags(&fetch_stream, cudaStreamNonBlocking);
+    fetch_streams_.emplace_back(fetch_stream);
+
     auto thread_func = std::bind(&ExpertDispatcher::GPUFetchFunc, this, i);
     std::string thread_name = "GPUFetchFunc" + std::to_string(i);
     threads_.emplace_back(new base::Thread(thread_func, thread_name));
@@ -247,8 +252,7 @@ ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id) {
 
 void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
   cudaSetDevice(gpu_id);
-  cudaStream_t stream;
-  cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+  cudaStream_t stream = fetch_streams_[gpu_id];
 
   while (!main_thread_stop_flag_.load()) {
     // std::unique_lock<std::mutex> lock(mutexes_[MUTEX_TYPE::INPUT_MUTEX]);
@@ -454,8 +458,6 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
     }
     // exec_cv_[gpu_id].notify_all();
   }
-
-  cudaStreamDestroy(stream);
 }
 
 void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {

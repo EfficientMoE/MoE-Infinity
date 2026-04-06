@@ -74,6 +74,9 @@ class ExpertDispatcher : public base::noncopyable {
     for (auto& stream : exec_streams_) {
       cudaStreamDestroy(stream);
     }
+    for (auto& stream : fetch_streams_) {
+      cudaStreamDestroy(stream);
+    }
     for (auto* m : modules_) {
       delete m;
     }
@@ -146,6 +149,7 @@ class ExpertDispatcher : public base::noncopyable {
   std::mutex accum_mutex_;
 
   std::vector<cudaStream_t> exec_streams_;
+  std::vector<cudaStream_t> fetch_streams_;
 
   std::unique_ptr<std::atomic<bool>[]> gpu_overload_;
 
