@@ -109,14 +109,7 @@ RUN pip install --no-cache-dir pytest
 # ---------------------------------------------------------------
 # E2E Stage 1: verify CUDA extension imports with real CUDA
 # ---------------------------------------------------------------
-RUN python -c "\
-    import torch; \
-    print(f'CUDA available: {torch.cuda.is_available()}'); \
-    import moe_infinity; \
-    print('OK: import moe_infinity'); \
-    import moe_infinity._store; \
-    print(f'OK: _store from {moe_infinity._store.__file__}'); \
-    "
+RUN python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); import moe_infinity; print('OK: import moe_infinity'); import moe_infinity._store; print(f'OK: _store from {moe_infinity._store.__file__}')"
 
 # ---------------------------------------------------------------
 # E2E Stage 2: example smoke tests (--help exits 0)

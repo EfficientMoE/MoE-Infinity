@@ -98,7 +98,7 @@ class ExpertPrefetcher(object):
                 ::-1
             ].tolist()
 
-        self.prefetch_experts_list(next_layer, topk_indices)
+        self.fetch_experts_lock_cache(next_layer, topk_indices)
         self._last_speculative_prediction = set(topk_indices)
 
     def correct_prefetch(
