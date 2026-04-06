@@ -78,7 +78,7 @@ class ExpertPrefetcher(object):
         if router_logits is None:
             return
 
-        num_experts_to_prefetch = min(8, self.num_experts)
+        num_experts_to_prefetch = min(2, self.num_experts)
         if hasattr(router_logits, "topk"):
             import torch
 

@@ -361,11 +361,19 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
         // }
         //   }
         // }
-        DLOG_FATAL_IF(
-            evict_expert_node == nullptr,
-            "ExpertDispatcher::GPUFetchFunc: evict_node is nullptr, gpu_id",
-            gpu_id, "cache size", cache_sizes_[gpu_id], "in cache count",
-            cached_experts_[gpu_id].size());
+        if (evict_expert_node == nullptr) {
+          for (int retry = 0; retry < 100 && evict_expert_node == nullptr;
+               ++retry) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            evict_expert_node = FindExpertEvict(gpu_id);
+          }
+          DLOG_FATAL_IF(
+              evict_expert_node == nullptr,
+              "ExpertDispatcher::GPUFetchFunc: evict_node is nullptr after "
+              "retries, gpu_id",
+              gpu_id, "cache size", cache_sizes_[gpu_id], "in cache count",
+              cached_experts_[gpu_id].size());
+        }
 
         DLOG_DEBUG("evicting expert: gpu_id ", gpu_id, " cache size ",
                    cache_sizes_[gpu_id], " incache count ",
