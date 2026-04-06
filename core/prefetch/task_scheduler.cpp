@@ -527,14 +527,15 @@ void ArcherTaskPool::SetNodeDevice(const TaskPtr& task) {
   DLOG_TRACE("SetNodeDevice: task: {}, node: {}", task->DebugString(),
              node->str());
   if (!task->on_demand) {
+    node->is_prefetching.store(true, std::memory_order_release);
     auto expected = NodeExecState::IDLE;
     if (!node->exec_state.compare_exchange_strong(
             expected, NodeExecState::FETCHING, std::memory_order_acq_rel)) {
+      node->is_prefetching.store(false, std::memory_order_release);
       DLOG_TRACE("SetNodeDevice: task: {}, exec_state not IDLE",
                  task->DebugString());
       return;
     }
-    node->is_prefetching.store(true, std::memory_order_release);
   }
 
   if (node->device.type() == task->dst_device.type()) {
