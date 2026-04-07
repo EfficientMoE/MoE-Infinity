@@ -72,6 +72,7 @@ from moe_infinity.utils.async_transfer import (
     wait_transfer,
 )
 from moe_infinity.utils.device import get_default_device, get_device
+from moe_infinity.utils.gptq import is_gptq_packed_tensor, is_gptq_quantized
 from moe_infinity.utils.mxfp4 import identify_mxfp4_pairs, is_mxfp4_quantized
 
 _prefetch_lib = None
@@ -552,8 +553,12 @@ class OffloadEngine(object):
                         else:
                             state_dict = torch.load(ckpt)
 
-                        # convert all tensors in state_dict to self.dtype_cls
+                        is_gptq_ckpt = is_gptq_quantized(self.config)
+
                         for k, v in state_dict.items():
+                            if is_gptq_ckpt and is_gptq_packed_tensor(k):
+                                state_dict[k] = v.to("cpu")
+                                continue
                             try:
                                 state_dict[k] = v.to(self.dtype_cls).to("cpu")
                             except (RuntimeError, TypeError) as e:
@@ -732,6 +737,7 @@ class OffloadEngine(object):
                     ):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
+                        module.is_gptq = is_gptq_quantized(self.config)
                         self.expert_modules.append(module)
 
                         if not isinstance(module, SyncGptOssMLP):
@@ -983,12 +989,13 @@ class OffloadEngine(object):
                         )
                     )
 
-                    self.expert_dispatcher.register_expert(
-                        expert_layer_id,
-                        expert_idx,
-                        expert_tensors,
-                        os.path.join(self.checkpoint, f"expert.pt"),
-                    )
+                    if not is_gptq_quantized(self.config):
+                        self.expert_dispatcher.register_expert(
+                            expert_layer_id,
+                            expert_idx,
+                            expert_tensors,
+                            os.path.join(self.checkpoint, f"expert.pt"),
+                        )
                 expert_layer_id += 1
             else:
                 input_device_index = self.archer_engine.get_node_default_device(
