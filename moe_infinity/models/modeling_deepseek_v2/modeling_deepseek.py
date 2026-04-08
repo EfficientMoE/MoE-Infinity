@@ -1382,6 +1382,10 @@ class DeepseekV2PagedAttention(DeepseekV2Attention):
                     "with a layer index."
                 )
             kv_seq_len += past_key_value.get_seq_length(self.layer_idx)
+        elif attention_metadata is not None:
+            meta_max = getattr(attention_metadata, "max_seq_len", None)
+            if meta_max is not None and int(meta_max) > kv_seq_len:
+                kv_seq_len = int(meta_max)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
