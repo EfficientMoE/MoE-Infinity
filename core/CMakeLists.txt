@@ -62,6 +62,7 @@ target_include_directories(archer_core PUBLIC
   ${CUTLASS_DIR}/tools/util/include
   ${TORCH_INCLUDE_DIRS}
   ${Python3_INCLUDE_DIRS}
+  /usr/local/cuda/include
 )
 
 target_compile_options(archer_core PRIVATE

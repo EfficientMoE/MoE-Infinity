@@ -83,7 +83,11 @@ def _make_result(
 
 def _is_oom_error(exc: Exception) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
-    return "cuda out of memory" in text or "out of memory" in text
+    return (
+        "cuda out of memory" in text
+        or "out of memory" in text
+        or "engine core initialization failed" in text
+    )
 
 
 def _is_not_supported_error(exc: Exception) -> bool:

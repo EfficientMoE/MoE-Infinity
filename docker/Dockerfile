@@ -57,6 +57,11 @@ RUN --mount=type=cache,target=/ccache \
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     && cmake --build ${CUTLASS_DIR}/build --target cutlass_library -j$(nproc)
 
+RUN git clone --branch v3.2.2 --depth 1 https://github.com/NVIDIA/NVTX.git /tmp/nvtx \
+    && cp -a /tmp/nvtx/c/include/nvtx3/. /usr/local/cuda/include/nvtx3/ \
+    && rm -rf /tmp/nvtx \
+    && test -f /usr/local/cuda/include/nvtx3/nvtx3.hpp
+
 WORKDIR /workspace/MoE-Infinity
 
 # Copy source code
