@@ -1,4 +1,9 @@
-from contextpilot import ContextPilot
+import pytest
+
+contextpilot = pytest.importorskip(
+    "contextpilot", reason="contextpilot package not installed"
+)
+ContextPilot = contextpilot.ContextPilot
 
 
 def _make_cp():

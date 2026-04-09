@@ -3,9 +3,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
-from contextpilot import ContextPilot
+try:
+    from contextpilot import ContextPilot
+except ImportError:
+    ContextPilot = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +17,7 @@ class ContextPilotMiddleware:
     _enabled: bool
     _reorder_enabled: bool
     _dedup_enabled: bool
-    _cp: ContextPilot
+    _cp: Any
     _lock: threading.Lock
     token_savings_total: int
     _requests_processed: int
@@ -33,10 +36,20 @@ class ContextPilotMiddleware:
         dedup_enabled: bool = True,
         reorder_enabled: bool = True,
     ):
-        self._enabled = bool(enabled)
-        self._reorder_enabled = bool(reorder_enabled)
-        self._dedup_enabled = bool(dedup_enabled)
-        self._cp = ContextPilot(use_gpu=use_gpu)
+        if ContextPilot is None:
+            logger.warning(
+                "contextpilot package not installed; ContextPilot features disabled. "
+                "Install with: pip install contextpilot>=0.4.0 (requires Python 3.10+)"
+            )
+            self._enabled = False
+            self._reorder_enabled = False
+            self._dedup_enabled = False
+            self._cp = None
+        else:
+            self._enabled = bool(enabled)
+            self._reorder_enabled = bool(reorder_enabled)
+            self._dedup_enabled = bool(dedup_enabled)
+            self._cp = ContextPilot(use_gpu=use_gpu)
         self._lock = threading.Lock()
         self.token_savings_total = 0
         self._requests_processed = 0

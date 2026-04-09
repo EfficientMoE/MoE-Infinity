@@ -2,7 +2,7 @@
 
 ## Overview
 
-ContextPilot is an optional optimization layer for prompt-heavy workloads with overlap, such as shared-prefix RAG, repeated system prompts, and multi-turn chat. In MoE-Infinity it can run outside the server as a sidecar proxy, inside the OpenAI-compatible server as middleware, or deeper in the scheduling and KV stack.
+ContextPilot is an optional optimization layer for prompt-heavy workloads with overlap, such as shared-prefix RAG, repeated system prompts, and multi-turn chat. In MoE-Infinity it can run inside the OpenAI-compatible server as middleware, or deeper in the scheduling and KV stack.
 
 ## What is ContextPilot
 
@@ -10,19 +10,14 @@ ContextPilot reorders prompt context and removes repeated content so the model d
 
 ## Architecture
 
-MoE-Infinity supports three integration phases:
+MoE-Infinity supports two integration phases:
 
-1. **Phase A, Sidecar Proxy**
-   - Runs ContextPilot as a separate HTTP service.
-   - Best when your MoE-Infinity runtime stays on Python 3.9 but real ContextPilot needs Python 3.10+.
-   - Lowest coupling, easiest to turn on and off.
-
-2. **Phase B, In-Process Middleware**
+1. **Phase B, In-Process Middleware**
    - Runs ContextPilot logic inside `api_server_v2.py` before tokenization.
    - Best when you want lower proxy overhead and direct runtime toggles.
    - Includes runtime enable/disable control and fault injection for testing.
 
-3. **Phase C, Deep Scheduler Integration**
+2. **Phase C, Deep Scheduler Integration**
    - Extends ContextPilot signals into KV allocation and request ordering.
    - Uses the CP-aware KV interface plus eviction sync hooks so terminal frees stay in sync with ContextPilot state.
    - Best gains, highest integration depth.
@@ -43,49 +38,13 @@ pip install moe-infinity[contextpilot]
 Notes:
 
 - Real ContextPilot requires Python 3.10+.
-- The current MoE-Infinity environment used in this branch is Python 3.9, so Phase A is the safe path in this repo environment.
-- The sidecar launcher uses `/usr/bin/python3.10` explicitly.
-
-## Phase A: Sidecar Proxy
-
-### When to use it
-
-Use Phase A when you want the safest rollout, or when MoE-Infinity and ContextPilot need different Python versions. It keeps ContextPilot outside the main server process and is the recommended starting point for existing Python 3.9 deployments.
-
-### Start the sidecar
-
-```bash
-bash scripts/contextpilot_sidecar.sh --backend-url http://localhost:8000
-```
-
-The script checks that the backend URL is reachable, exports the sidecar feature env vars, and starts:
-
-```bash
-PYTHONPATH=/tmp/ContextPilot /usr/bin/python3.10 -m contextpilot.server.http_server
-```
-
-### Sidecar CLI flags
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `--port` | `8765` | HTTP port for the ContextPilot sidecar |
-| `--backend-url` | `http://localhost:8000` | Base URL for the MoE-Infinity backend |
-| `--no-reorder` | off | Disable reorder behavior in the sidecar |
-| `--no-dedup` | off | Disable dedup behavior in the sidecar |
-| `--help` | off | Show sidecar help text |
-
-### Sidecar env vars
-
-| Env var | Default | Notes |
-|---|---|---|
-| `CONTEXTPILOT_REORDER_ENABLED` | `1` | Exported by the script, set to `0` when `--no-reorder` is used |
-| `CONTEXTPILOT_DEDUP_ENABLED` | `1` | Exported by the script, set to `0` when `--no-dedup` is used |
+- The middleware gracefully disables itself when the package is unavailable.
 
 ## Phase B: In-Process Middleware
 
 ### When to use it
 
-Use Phase B when you want ContextPilot inside the OpenAI-compatible server process, with fewer moving parts and direct runtime controls. This is the right fit once your runtime is on Python 3.10+ or you are using the local shim only for tests.
+Use Phase B when you want ContextPilot inside the OpenAI-compatible server process, with fewer moving parts and direct runtime controls. This is the right fit once your runtime is on Python 3.10+.
 
 ### Start the server
 
@@ -151,7 +110,6 @@ Representative dry-run gains versus baseline:
 
 | Phase | TTFT p50 | Token savings |
 |---|---:|---:|
-| Phase A | 17% faster | 18% |
 | Phase B | 21% faster | 27% |
 | Phase C | 26% faster | 28% |
 
@@ -194,9 +152,9 @@ curl http://localhost:8000/contextpilot/status
 
 ## Troubleshooting
 
-### Python 3.9 and real ContextPilot do not mix
+### Python 3.8/3.9 auto-disable ContextPilot
 
-Real ContextPilot needs Python 3.10+. If your MoE-Infinity runtime is still Python 3.9, use the Phase A sidecar with `/usr/bin/python3.10`. This repo also includes a local shim for Python 3.9 tests, but that shim only validates the integration surface.
+Real ContextPilot needs Python 3.10+. On Python 3.8/3.9, the middleware auto-disables with a warning. Install the package in a Python 3.10+ environment to enable ContextPilot features.
 
 ### `pip install contextpilot` may pull the wrong package
 
