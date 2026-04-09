@@ -254,7 +254,18 @@ class ContextPilotMiddleware:
             contexts.append(str(content))
 
         with self._lock:
-            optimized = self._cp.optimize(contexts=contexts, query=query)
+            try:
+                optimized = self._cp.optimize(contexts, query)
+            except TypeError:
+                optimized = self._cp.optimize(docs=contexts, query=query)
+            except (ValueError, IndexError) as exc:
+                logger.debug(
+                    "ContextPilot.optimize raised %s; preserving original order",
+                    exc,
+                )
+                return [dict(message) for message in messages]
+        if not isinstance(optimized, list):
+            return [dict(message) for message in messages]
         return [dict(message) for message in optimized]
 
     def _deduplicate_messages(
@@ -262,33 +273,38 @@ class ContextPilotMiddleware:
     ) -> tuple[list[dict[str, str]], int, float]:
         with self._lock:
             deduplicate_fn = getattr(self._cp, "deduplicate", None)
+            deduped: object = None
             if callable(deduplicate_fn):
-                deduped = deduplicate_fn(messages)
-                if isinstance(deduped, list):
-                    normalized: list[dict[str, str]] = []
-                    deduped_list = cast(list[object], deduped)
-                    for candidate in deduped_list:
-                        if not isinstance(candidate, dict):
-                            continue
-                        message_dict = cast(dict[object, object], candidate)
-                        role_obj = message_dict.get("role")
-                        content_obj = message_dict.get("content")
-                        normalized.append(
-                            {
-                                "role": (
-                                    "" if role_obj is None else str(role_obj)
-                                ),
-                                "content": (
-                                    ""
-                                    if content_obj is None
-                                    else str(content_obj)
-                                ),
-                            }
-                        )
-                    tokens_saved, pct = self._estimate_tokens_saved(
-                        messages, normalized
+                try:
+                    deduped = deduplicate_fn(messages)
+                except (TypeError, ValueError, IndexError) as exc:
+                    logger.debug(
+                        "ContextPilot.deduplicate signature mismatch (%s); "
+                        "using internal fallback dedup",
+                        exc,
                     )
-                    return normalized, tokens_saved, pct
+                    deduped = None
+            if isinstance(deduped, list):
+                normalized: list[dict[str, str]] = []
+                deduped_list = cast(list[object], deduped)
+                for candidate in deduped_list:
+                    if not isinstance(candidate, dict):
+                        continue
+                    message_dict = cast(dict[object, object], candidate)
+                    role_obj = message_dict.get("role")
+                    content_obj = message_dict.get("content")
+                    normalized.append(
+                        {
+                            "role": ("" if role_obj is None else str(role_obj)),
+                            "content": (
+                                "" if content_obj is None else str(content_obj)
+                            ),
+                        }
+                    )
+                tokens_saved, pct = self._estimate_tokens_saved(
+                    messages, normalized
+                )
+                return normalized, tokens_saved, pct
 
         return self._fallback_deduplicate(messages)
 
