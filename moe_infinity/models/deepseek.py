@@ -48,15 +48,25 @@ class DeepseekMoEBlock(nn.Module):
         self.num_expert = config.n_routed_experts
 
         if self.config.model_type == "deepseek_v2":
-            from .modeling_deepseek_v2 import DeepseekV2MLP, MoEGate
+            from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+                DeepseekV2MLP,
+                DeepseekV2MoEGate,
+            )
 
             self.mlp_cls = DeepseekV2MLP
-            self.gate_cls = MoEGate
+            self.gate_cls = DeepseekV2MoEGate
         if self.config.model_type == "deepseek_v3":
-            from .modeling_deepseek_v3 import DeepseekV3MLP, MoEGate
+            from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
+                DeepseekV3MLP,
+            )
 
             self.mlp_cls = DeepseekV3MLP
-            self.gate_cls = MoEGate
+            # V3 upstream has no standalone gate; use V2 gate (same interface)
+            from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+                DeepseekV2MoEGate,
+            )
+
+            self.gate_cls = DeepseekV2MoEGate
 
         self.experts = nn.ModuleList(
             [

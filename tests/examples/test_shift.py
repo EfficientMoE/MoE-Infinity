@@ -75,7 +75,7 @@ def load_dataset_parallel(dataset, names, split, key, limit=50):
         delayed(load_single_dataset)(dataset, name, split)
         for name in tqdm(names)
     )
-    dataset_list = [d for d in dataset_list if d is not None]
+    dataset_list = [d for d in (dataset_list or []) if d is not None]
 
     trimmed_datasets = []
     for k, d in enumerate(dataset_list):
@@ -169,10 +169,7 @@ elif (
     or "snowflake" in args.model_name_or_path.lower()
 ):
     custom_kwargs = {"pad_token_id": tokenizer.eos_token_id}
-elif (
-    "grok" in args.model_name_or_path.lower()
-    or "deepseek" in args.model_name_or_path.lower()
-):
+elif "deepseek" in args.model_name_or_path.lower():
     custom_kwargs = {}
 else:
     raise ValueError(f"Model {args.model_name_or_path} not supported")
@@ -240,9 +237,10 @@ for i, input_text in enumerate(all_inputs):
             **custom_kwargs,
         )
         end_time = time.time()
-        tpot = (
-            end_time - streamer.start_decoding
-        ) / streamer.decoding_iterations
+        decoding_start = streamer.start_decoding or start_time
+        tpot = (end_time - decoding_start) / max(
+            streamer.decoding_iterations, 1
+        )
         print(f"Time taken: {end_time - start_time} seconds")
         print(f"Prefilling time: {streamer.prefilling_time} seconds")
         print(f"Decoding time: {streamer.decoding_time} seconds")
