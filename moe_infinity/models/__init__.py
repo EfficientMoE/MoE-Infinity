@@ -19,3 +19,20 @@ from .nllb_moe import SyncNllbMoeSparseMLP
 from .olmoe import SyncOlmoeMoEBlock
 from .qwen import Qwen3MoEBlock
 from .qwen3_paged_attention import Qwen3PagedAttention
+
+__all__ = [
+    "DeepseekMoEBlock",
+    "Qwen3MoEBlock",
+    "Qwen3PagedAttention",
+    "SyncDbrxFFNBlock",
+    "SyncDeepseekV2MoEBlock",
+    "SyncDeepseekV3MoEBlock",
+    "SyncGptOssMLP",
+    "SyncJambaMoEBlock",
+    "SyncMixtralSparseMoeBlock",
+    "SyncNllbMoeSparseMLP",
+    "SyncOlmoeMoEBlock",
+    "apply_rotary_pos_emb",
+    "apply_rotary_pos_emb_deepseek",
+    "rotate_half",
+]
