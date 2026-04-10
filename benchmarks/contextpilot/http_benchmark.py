@@ -191,7 +191,7 @@ def measure_request_streaming(
     }
 
     start = time.perf_counter()
-    response = requests.post(url, json=payload, stream=True, timeout=(10, 300))
+    response = requests.post(url, json=payload, stream=True, timeout=(30, 900))
     response.raise_for_status()
 
     ttft: float | None = None
@@ -261,17 +261,45 @@ def fetch_cp_status(base_url: str) -> dict[str, object]:
     return {}
 
 
+def warmup_server(
+    server_url: str,
+    model: str,
+    max_tokens: int = 8,
+) -> bool:
+    base_url = server_url.rstrip("/")
+    request_url = f"{base_url}/v1/chat/completions"
+    warmup_messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Say hi."},
+    ]
+    try:
+        _ = measure_request_streaming(
+            url=request_url,
+            messages=warmup_messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=0.0,
+        )
+        return True
+    except Exception:
+        return False
+
+
 def run_workload_benchmark(
     server_url: str,
     model: str,
     max_tokens: int = 64,
     workload_names: Optional[list[str]] = None,
+    warmup: bool = True,
 ) -> dict[str, dict[str, float]]:
     base_url = server_url.rstrip("/")
     request_url = f"{base_url}/v1/chat/completions"
     names = (
         workload_names if workload_names is not None else get_workload_names()
     )
+
+    if warmup:
+        _ = warmup_server(server_url=base_url, model=model)
 
     results: dict[str, dict[str, float]] = {}
 
