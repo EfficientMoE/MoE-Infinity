@@ -1,22 +1,14 @@
 import os
 
 import torch
+from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MLP
+from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3MLP
 from transformers.models.mixtral.modeling_mixtral import (
     MixtralBlockSparseTop2MLP,
 )
-from transformers.models.nllb_moe.modeling_nllb_moe import (
-    NllbMoeDenseActDense,
-)
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP
 
-# from moe_infinity.models.modeling_grok import MoeMLP as GrokMoeMLP
-from moe_infinity.models.modeling_arctic import ArcticMLP
-from moe_infinity.models.modeling_deepseek_v2 import DeepseekV2MLP
-from moe_infinity.models.modeling_deepseek_v3 import DeepseekV3MLP
-
 EXPERT_CLS = {
-    # "grok": GrokMoeMLP,
-    "arctic": ArcticMLP,
     "deepseek_v2": DeepseekV2MLP,
     "deepseek_v3": DeepseekV3MLP,
     "mixtral": MixtralBlockSparseTop2MLP,

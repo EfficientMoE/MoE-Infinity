@@ -43,12 +43,10 @@ from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
 from moe_infinity.models import (
     Qwen3MoEBlock,
     Qwen3PagedAttention,
-    SyncArcticMoeBlock,
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
     SyncGptOssMLP,
-    SyncGrokMoeBlock,
     SyncJambaMoEBlock,
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
@@ -452,20 +450,6 @@ class OffloadEngine(object):
             SyncJambaMoEBlock
         )
 
-        moe_infinity.models.modeling_grok.modeling_grok1._old_sparse_mlp = (
-            moe_infinity.models.modeling_grok.MoeBlock
-        )
-        moe_infinity.models.modeling_grok.modeling_grok1.MoeBlock = (
-            SyncGrokMoeBlock
-        )
-
-        moe_infinity.models.modeling_arctic._old_sparse_mlp = (
-            moe_infinity.models.modeling_arctic.ArcticMoE
-        )
-        moe_infinity.models.modeling_arctic.modeling_arctic.ArcticMoE = (
-            SyncArcticMoeBlock
-        )
-
         transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe = transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE
         transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
         transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = (
@@ -725,8 +709,6 @@ class OffloadEngine(object):
                     if (
                         isinstance(module, SyncNllbMoeSparseMLP)
                         or isinstance(module, SyncMixtralSparseMoeBlock)
-                        or isinstance(module, SyncGrokMoeBlock)
-                        or isinstance(module, SyncArcticMoeBlock)
                         or isinstance(module, SyncDeepseekV2MoEBlock)
                         or isinstance(module, SyncDeepseekV3MoEBlock)
                         or isinstance(module, Qwen3MoEBlock)
@@ -977,8 +959,6 @@ class OffloadEngine(object):
                     expert_key = (
                         f"{key}.expert_{expert_idx}"
                         if self.config.model_type != "mixtral"
-                        and self.config.model_type != "grok-1"
-                        and self.config.model_type != "arctic"
                         and self.config.model_type != "deepseek_v2"
                         and self.config.model_type != "deepseek_v3"
                         else f"{key}.{expert_idx}"
@@ -1313,14 +1293,6 @@ class OffloadEngine(object):
 
         transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock = (
             transformers.models.jamba.modeling_jamba._old_jamba_moe
-        )
-
-        moe_infinity.models.modeling_grok.modeling_grok1.MoeBlock = (
-            moe_infinity.modeling_grok.modeling_grok1._old_sparse_mlp
-        )
-
-        moe_infinity.models.modeling_arctic.modeling_arctic.ArcticMoE = (
-            moe_infinity.models.modeling_arctic._old_sparse_mlp
         )
 
         transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe

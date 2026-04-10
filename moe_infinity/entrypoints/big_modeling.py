@@ -58,7 +58,6 @@ class MoE:
             ) from exc
 
         from moe_infinity.common.constants import MODEL_MAPPING_NAMES
-        from moe_infinity.models.modeling_arctic import ArcticConfig
         from moe_infinity.runtime import OffloadEngine
         from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
         from moe_infinity.utils.hf_config import ensure_config_compat
@@ -83,14 +82,9 @@ class MoE:
 
         from transformers import AutoConfig
 
-        if "arctic" in model_name_or_path:
-            model_config = ArcticConfig.from_pretrained(
-                model_name_or_path, trust_remote_code=True
-            )
-        else:
-            model_config = AutoConfig.from_pretrained(
-                model_name_or_path, trust_remote_code=True
-            )
+        model_config = AutoConfig.from_pretrained(
+            model_name_or_path, trust_remote_code=True
+        )
         model_config = ensure_config_compat(model_config)
         architectures = getattr(model_config, "architectures", None)
         if not architectures or not isinstance(architectures, list):
@@ -539,31 +533,12 @@ class MoE:
 
         from moe_infinity.models import (
             apply_rotary_pos_emb,
-            apply_rotary_pos_emb_deepseek,
         )
 
         if self.arch == "mixtral":
             import moe_infinity.models.modeling_mixtral
 
             transformers.models.mixtral.modeling_mixtral.apply_rotary_pos_emb = apply_rotary_pos_emb
-
-        if self.arch == "grok":
-            import moe_infinity.models.modeling_grok.modeling_grok1
-
-            moe_infinity.models.modeling_grok.modeling_grok1.apply_rotary_pos_emb = apply_rotary_pos_emb
-
-        if self.arch == "arctic":
-            import moe_infinity.models.modeling_arctic.modeling_arctic
-
-            moe_infinity.models.modeling_arctic.modeling_arctic.apply_rotary_pos_emb = apply_rotary_pos_emb
-
-        if self.arch == "deepseek" or self.arch == "deepseek_v3":
-            import moe_infinity.models.modeling_deepseek_v2.modeling_deepseek
-            import moe_infinity.models.modeling_deepseek_v3.modeling_deepseek
-
-            moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.apply_rotary_pos_emb = apply_rotary_pos_emb_deepseek
-            moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.apply_rotary_pos_emb = apply_rotary_pos_emb_deepseek
-            # apply_rotary_pos_emb is defined in deepseek and differs from this version.
 
         batch_size = input_ids.shape[0]
         self.seq_id_list = [

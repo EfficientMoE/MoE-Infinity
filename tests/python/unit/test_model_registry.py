@@ -14,8 +14,6 @@ def test_all_models_registered():
         "nllb",
         "mixtral",
         "opt",
-        "grok",
-        "arctic",
         "deepseek",
         "deepseek_v3",
         "gptoss",
@@ -83,22 +81,3 @@ def test_deepseek_uses_hf_classes():
         "deepseek_v3 should use HF class, "
         f"got module: {deepseek_v3_cls.__module__}"
     )
-
-
-def test_deprecation_warnings_fire():
-    from moe_infinity.common.constants import parse_expert_type
-
-    for arch in ["Grok1ModelForCausalLM", "ArcticForCausalLM"]:
-        config = SimpleNamespace(architectures=[arch])
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            try:
-                parse_expert_type(cast(Any, config))
-            except RuntimeError:
-                pass
-            dep_warnings = [
-                x for x in w if issubclass(x.category, DeprecationWarning)
-            ]
-            assert (
-                len(dep_warnings) >= 1
-            ), f"Expected DeprecationWarning for {arch}, got none"
