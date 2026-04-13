@@ -288,27 +288,27 @@ class ContextPilotMiddleware:
                         exc,
                     )
                     deduped = None
-        if isinstance(deduped, list):
-            normalized: list[dict[str, str]] = []
-            deduped_list = cast(list[object], deduped)
-            for candidate in deduped_list:
-                if not isinstance(candidate, dict):
-                    continue
-                message_dict = cast(dict[object, object], candidate)
-                role_obj = message_dict.get("role")
-                content_obj = message_dict.get("content")
-                normalized.append(
-                    {
-                        "role": ("" if role_obj is None else str(role_obj)),
-                        "content": (
-                            "" if content_obj is None else str(content_obj)
-                        ),
-                    }
+            if isinstance(deduped, list):
+                normalized: list[dict[str, str]] = []
+                deduped_list = cast(list[object], deduped)
+                for candidate in deduped_list:
+                    if not isinstance(candidate, dict):
+                        continue
+                    message_dict = cast(dict[object, object], candidate)
+                    role_obj = message_dict.get("role")
+                    content_obj = message_dict.get("content")
+                    normalized.append(
+                        {
+                            "role": ("" if role_obj is None else str(role_obj)),
+                            "content": (
+                                "" if content_obj is None else str(content_obj)
+                            ),
+                        }
+                    )
+                tokens_saved, pct = self._estimate_tokens_saved(
+                    messages, normalized
                 )
-            tokens_saved, pct = self._estimate_tokens_saved(
-                messages, normalized
-            )
-            return normalized, tokens_saved, pct
+                return normalized, tokens_saved, pct
 
         return self._fallback_deduplicate(messages)
 
