@@ -273,6 +273,8 @@ if cuda_available:
     _cuda_arch_flags = ["-gencode=arch=compute_80,code=sm_80"]
     if os.environ.get("MOE_ENABLE_SM90", "1") == "1":
         _cuda_arch_flags.append("-gencode=arch=compute_90,code=sm_90")
+    if os.environ.get("MOE_ENABLE_SM120", "0") == "1":
+        _cuda_arch_flags.append("-gencode=arch=compute_120,code=sm_120")
 
     # _store extension: IO and prefetch
     ext_modules.append(
