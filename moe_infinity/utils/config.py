@@ -53,7 +53,10 @@ class ArcherConfig:
         metadata={"help": "Ratio of device memory to use"},
     )
     num_threads: int = field(
-        default=1, metadata={"help": "Number of threads for each GPU exec"}
+        default=4,
+        metadata={
+            "help": "Number of parallel expert compute threads per GPU. Higher values overlap expert forward passes on separate CUDA streams, reducing pipeline bubbles."
+        },
     )
     host_memory_ratio: float = field(
         default=0.9,

@@ -485,6 +485,12 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
     }
 
     try {
+      if (args.transfer_event != nullptr) {
+        cudaStreamWaitEvent(stream, args.transfer_event, 0);
+        cudaEventDestroy(args.transfer_event);
+        args.transfer_event = nullptr;
+      }
+
       int64_t batch_size = hidden_states_.size(0);
       auto device = CUDA_DEVICE(gpu_id);
       auto expert_idx = args.expert_node->expert_idx;
@@ -510,6 +516,10 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       }
       OutputFunc(args, output, token_mask, gpu_id);
     } catch (const std::exception& e) {
+      if (args.transfer_event != nullptr) {
+        cudaEventDestroy(args.transfer_event);
+        args.transfer_event = nullptr;
+      }
       DLOG_WARN("GPUExecFunc: expert forward failed: ", e.what(),
                 " (expert_idx=", args.expert_node->expert_idx,
                 " layer_idx=", args.expert_node->layer_idx, ")");

@@ -32,6 +32,9 @@ enum MUTEX_TYPE {
   PENDING_MUTEX = 3
 };
 
+struct CUevent_st;
+using cudaEvent_t = CUevent_st*;
+
 class ExpertDispatcher : public base::noncopyable {
  public:
   typedef struct {

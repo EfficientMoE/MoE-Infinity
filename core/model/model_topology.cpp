@@ -57,9 +57,9 @@ Node::Node()
       default_device(DEFAULT_CUDA_DEVICE) {}
 
 void Node::SetDevice(const torch::Device& target_device, bool on_demand,
-                     cudaStream_t stream, cudaEvent_t* out_event) {
-  if (out_event != nullptr) {
-    *out_event = nullptr;
+                     cudaStream_t stream, cudaEvent_t* transfer_event) {
+  if (transfer_event != nullptr) {
+    *transfer_event = nullptr;
   }
   auto sync_stream_with_event = [](cudaStream_t sync_stream) {
     cudaEvent_t sync_event = kCudaEventPool->Acquire();
@@ -152,9 +152,9 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
 #ifndef NVTX_DISABLE
         nvtx3::scoped_range r_sync("cuda_stream_sync");
 #endif
-        if (out_event != nullptr && !own_stream) {
-          *out_event = kCudaEventPool->Acquire();
-          cudaEventRecord(*out_event, h2d_stream);
+        if (transfer_event != nullptr && !own_stream) {
+          *transfer_event = kCudaEventPool->Acquire();
+          cudaEventRecord(*transfer_event, h2d_stream);
         } else {
           sync_stream_with_event(h2d_stream);
         }
@@ -208,9 +208,9 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
 #ifndef NVTX_DISABLE
           nvtx3::scoped_range r_sync("cuda_stream_sync");
 #endif
-          if (out_event != nullptr) {
-            *out_event = kCudaEventPool->Acquire();
-            cudaEventRecord(*out_event, stream);
+          if (transfer_event != nullptr) {
+            *transfer_event = kCudaEventPool->Acquire();
+            cudaEventRecord(*transfer_event, stream);
           } else {
             sync_stream_with_event(stream);
           }
