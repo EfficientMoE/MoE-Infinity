@@ -515,6 +515,7 @@ class OffloadEngine(object):
                         smoothing=0,
                     ):
                         state_dict = {}
+                        is_mxfp4_ckpt = False
                         if "safetensors" in ckpt:
                             with safe_open(
                                 ckpt, framework="pt", device="cpu"
@@ -531,8 +532,6 @@ class OffloadEngine(object):
                                         is_mxfp4_ckpt = False
 
                                 for k in weight_keys:
-                                    if is_mxfp4_ckpt and k.endswith("_scales"):
-                                        continue
                                     state_dict[k] = f.get_tensor(k)
                         else:
                             state_dict = torch.load(ckpt)
@@ -543,10 +542,17 @@ class OffloadEngine(object):
                             if is_gptq_ckpt and is_gptq_packed_tensor(k):
                                 state_dict[k] = v.to("cpu")
                                 continue
+                            if is_mxfp4_ckpt and (
+                                k.endswith("_blocks") or k.endswith("_scales")
+                            ):
+                                state_dict[k] = v.to("cpu")
+                                continue
                             try:
                                 state_dict[k] = v.to(self.dtype_cls).to("cpu")
                             except (RuntimeError, TypeError) as e:
-                                if k.endswith("_blocks"):
+                                if k.endswith("_blocks") or k.endswith(
+                                    "_scales"
+                                ):
                                     warnings.warn(
                                         f"Could not convert tensor {k} (dtype={v.dtype}) "
                                         f"to {self.dtype_cls}: {e}. Keeping original dtype.",
@@ -566,6 +572,53 @@ class OffloadEngine(object):
                                     flush=True,
                                 )
                                 raise
+
+                        if (
+                            is_mxfp4_ckpt
+                            and os.environ.get("MOE_INFINITY_MXFP4_DEQUANT", "")
+                            == "1"
+                        ):
+                            from moe_infinity.kernel.mxfp4_gemm import (
+                                mxfp4_dequantize,
+                            )
+
+                            dequant_pairs = identify_mxfp4_pairs(
+                                list(state_dict.keys())
+                            )
+                            for blocks_key, scales_key in dequant_pairs:
+                                base = blocks_key[: -len("_blocks")]
+                                if (
+                                    blocks_key not in state_dict
+                                    or scales_key not in state_dict
+                                ):
+                                    continue
+                                blocks = state_dict[blocks_key]
+                                scales = state_dict[scales_key]
+                                if blocks.numel() == 0 or scales.numel() == 0:
+                                    continue
+                                if blocks.dim() == 4:
+                                    E, R, G, B = blocks.shape
+                                    blocks = blocks.reshape(E, R, G * B)
+                                flat_b = blocks.reshape(-1, blocks.shape[-1])
+                                flat_s = scales.reshape(-1, scales.shape[-1])
+                                unpacked_k = flat_b.shape[-1] * 2
+                                bs = unpacked_k // max(flat_s.shape[-1], 1)
+                                bf16 = mxfp4_dequantize(
+                                    flat_b,
+                                    flat_s,
+                                    dtype=self.dtype_cls,
+                                    block_size=bs,
+                                )
+                                E_dim = blocks.shape[0]
+                                N_dim = blocks.shape[1]
+                                K_dim = bf16.shape[-1]
+                                bf16_3d = bf16.reshape(E_dim, N_dim, K_dim)
+                                # Checkpoint: [E, N, K]. Model expects [E, K, N].
+                                state_dict[base] = bf16_3d.transpose(
+                                    1, 2
+                                ).contiguous()
+                                del state_dict[blocks_key]
+                                del state_dict[scales_key]
 
                         self._offload_state_dict(state_dict, empty_state_dict)
 
@@ -897,7 +950,15 @@ class OffloadEngine(object):
             self.offload_set.add(buffer.data.data_ptr())
 
         topo = self.get_topology(model)
+        sparse_count = sum(
+            1 for _, t in topo if isinstance(t, list) and len(t) > 1
+        )
+        print(
+            f"TOPO: {len(topo)} stages, {sparse_count} sparse",
+            flush=True,
+        )
         self.archer_engine.set_topology(topo)
+        print("TOPO: set_topology done", flush=True)
 
         @torch.no_grad()
         def _pre_forward_input_hook(module, input, kwargs, device, tensors):
