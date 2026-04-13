@@ -110,9 +110,14 @@ void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
       node_body->gpu_hit_cnt++;
     }
 
-    // always lock node, wait for previous prefetch task to finish
-    node->mutex.lock();
-    std::unique_lock<std::mutex> lock(node->mutex, std::adopt_lock);
+    while (true) {
+      auto expected = NodeExecState::IDLE;
+      if (node->exec_state.compare_exchange_strong(
+              expected, NodeExecState::FETCHING, std::memory_order_acq_rel)) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+    }
 
     if (node->is_sparse) {
       bool success = kTaskPool->RemoveCachedSparseNode(node);
@@ -121,7 +126,9 @@ void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
       kTaskPool->RemoveCachedDenseNode(node);
     }
     kTaskPool->StartExec(request_id, node);
-    node->cv.wait(lock, [node] { return node->state == 0; });
+    while (node->state.load() != 0) {
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+    }
   }
 
   kArcherTensorHandle->SetTensor(tensor_id, buffer);
@@ -157,7 +164,8 @@ void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
     node_id_to_tensor_ids_[last_node_->id].clear();
     kTaskPool->StopExec(request_id,
                         last_node_);  // evict last node to cpu or disk
-    last_node_->mutex.unlock();
+    last_node_->exec_state.store(NodeExecState::IDLE,
+                                 std::memory_order_release);
   }
   last_layer_id_ = current_layer_id;
   last_node_ = node;
@@ -171,7 +179,7 @@ void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
     kTaskPool->StopExec(request_id,
                         node);  // FIXME: change api to add request id
     // always unlock node here since, exec queue do not unlock automatically
-    node->mutex.unlock();
+    node->exec_state.store(NodeExecState::IDLE, std::memory_order_release);
   }
 
   if (kTopologyHandle->IsLastNode(node)) {
@@ -205,7 +213,11 @@ void ArcherPrefetchHandle::ReplaceCacheCandidates(
   std::vector<NodePtr> candidates;
   for (std::uint32_t tensor_id : tensor_ids) {
     auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
-    node->mutex.try_lock();
+    {
+      auto expected = NodeExecState::IDLE;
+      node->exec_state.compare_exchange_strong(
+          expected, NodeExecState::FETCHING, std::memory_order_acq_rel);
+    }
     candidates.push_back(node);
   }
 

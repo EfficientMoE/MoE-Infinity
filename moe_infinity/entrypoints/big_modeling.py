@@ -58,7 +58,6 @@ class MoE:
             ) from exc
 
         from moe_infinity.common.constants import MODEL_MAPPING_NAMES
-        from moe_infinity.models.modeling_arctic import ArcticConfig
         from moe_infinity.runtime import OffloadEngine
         from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
         from moe_infinity.utils.hf_config import ensure_config_compat
@@ -83,14 +82,9 @@ class MoE:
 
         from transformers import AutoConfig
 
-        if "arctic" in model_name_or_path:
-            model_config = ArcticConfig.from_pretrained(
-                model_name_or_path, trust_remote_code=True
-            )
-        else:
-            model_config = AutoConfig.from_pretrained(
-                model_name_or_path, trust_remote_code=True
-            )
+        model_config = AutoConfig.from_pretrained(
+            model_name_or_path, trust_remote_code=True
+        )
         model_config = ensure_config_compat(model_config)
         architectures = getattr(model_config, "architectures", None)
         if not architectures or not isinstance(architectures, list):
@@ -439,6 +433,10 @@ class MoE:
             ) and model_device.type not in ("meta", "cpu"):
                 input_tensor = input_tensor.to(model_device)
 
+        is_prefill = True
+        if _attention_metadata is not None:
+            is_prefill = bool(getattr(_attention_metadata, "is_prefill", True))
+
         paged_attention_classes = self._get_paged_attention_classes()
         use_paged_context = bool(
             paged_attention_classes
@@ -446,18 +444,49 @@ class MoE:
             and getattr(self, "_native_attention_backend", None) is not None
         )
 
+        extra_kwargs: dict = {}
+
+        if not use_paged_context:
+            # Non-paged path: use HF's KV cache for autoregressive decode.
+            # During prefill, use_cache=True captures past_key_values for
+            # subsequent decode steps.  During decode, the cached KV provides
+            # context from all prior tokens and lets HF auto-compute correct
+            # position_ids.
+            extra_kwargs["use_cache"] = True
+            if not is_prefill:
+                cached_kv = getattr(self, "_cached_past_key_values", None)
+                if cached_kv is not None:
+                    extra_kwargs["past_key_values"] = cached_kv
+        else:
+            # Paged path: the paged attention backend manages its own KV
+            # cache, but the model still needs correct position_ids for
+            # rotary embeddings during decode steps.
+            if not is_prefill and _attention_metadata is not None:
+                seq_lens = getattr(_attention_metadata, "seq_lens", None)
+                if seq_lens is not None and seq_lens.numel() > 0:
+                    current_pos = int(seq_lens[0].item()) - 1
+                    extra_kwargs["position_ids"] = torch.tensor(
+                        [[current_pos]], device=input_tensor.device
+                    )
+
         with torch.no_grad():
             if not use_paged_context:
-                outputs = self.model(input_tensor)
+                outputs = self.model(input_tensor, **extra_kwargs)
             else:
                 backend = self._native_attention_backend
                 for attn_cls in paged_attention_classes:
                     attn_cls.set_paged_context(backend, _attention_metadata)
                 try:
-                    outputs = self.model(input_tensor)
+                    outputs = self.model(input_tensor, **extra_kwargs)
                 finally:
                     for attn_cls in paged_attention_classes:
                         attn_cls.clear_paged_context()
+
+        # Capture HF KV cache for next decode step (non-paged path only).
+        if not use_paged_context:
+            past_kv = getattr(outputs, "past_key_values", None)
+            if past_kv is not None:
+                self._cached_past_key_values = past_kv
 
         logits = getattr(outputs, "logits", None)
         if logits is None and isinstance(outputs, tuple) and outputs:
@@ -504,31 +533,12 @@ class MoE:
 
         from moe_infinity.models import (
             apply_rotary_pos_emb,
-            apply_rotary_pos_emb_deepseek,
         )
 
         if self.arch == "mixtral":
             import moe_infinity.models.modeling_mixtral
 
             transformers.models.mixtral.modeling_mixtral.apply_rotary_pos_emb = apply_rotary_pos_emb
-
-        if self.arch == "grok":
-            import moe_infinity.models.modeling_grok.modeling_grok1
-
-            moe_infinity.models.modeling_grok.modeling_grok1.apply_rotary_pos_emb = apply_rotary_pos_emb
-
-        if self.arch == "arctic":
-            import moe_infinity.models.modeling_arctic.modeling_arctic
-
-            moe_infinity.models.modeling_arctic.modeling_arctic.apply_rotary_pos_emb = apply_rotary_pos_emb
-
-        if self.arch == "deepseek" or self.arch == "deepseek_v3":
-            import moe_infinity.models.modeling_deepseek_v2.modeling_deepseek
-            import moe_infinity.models.modeling_deepseek_v3.modeling_deepseek
-
-            moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.apply_rotary_pos_emb = apply_rotary_pos_emb_deepseek
-            moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.apply_rotary_pos_emb = apply_rotary_pos_emb_deepseek
-            # apply_rotary_pos_emb is defined in deepseek and differs from this version.
 
         batch_size = input_ids.shape[0]
         self.seq_id_list = [
@@ -576,6 +586,10 @@ class MoE:
 
         from moe_infinity.engine.types import SamplingParams
 
+        self._configure_hook(input_ids)
+        self._cached_past_key_values = None
+        self.model.eval()
+
         prompt_token_ids = [int(token) for token in input_ids[0].tolist()]
         if len(prompt_token_ids) > self.max_seq_length:
             raise ValueError(
@@ -589,10 +603,14 @@ class MoE:
             top_k=int(kwargs.get("top_k", 0)),
             max_tokens=int(max_tokens) if max_tokens is not None else 256,
         )
-        result = self._native_generation_engine.generate(
-            prompt_token_ids=prompt_token_ids,
-            sampling_params=sampling_params,
-        )
+        try:
+            result = self._native_generation_engine.generate(
+                prompt_token_ids=prompt_token_ids,
+                sampling_params=sampling_params,
+            )
+        finally:
+            self._cached_past_key_values = None
+
         output_ids = prompt_token_ids + result.output_token_ids
         return torch.tensor(
             [output_ids],

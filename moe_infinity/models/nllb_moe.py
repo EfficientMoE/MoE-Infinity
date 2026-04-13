@@ -59,7 +59,11 @@ class SyncNllbMoeSparseMLP(nn.Module):
         top_1_expert_index = torch.argmax(top_1_mask, dim=-1)
 
         self.expert_executor.dispatch_local(
-            self.layer_id, hidden_states, router_mask, combining_weights
+            self.layer_id,
+            hidden_states,
+            router_mask,
+            combining_weights,
+            router_logits=None,
         )
         next_states = self.expert_executor.wait_dispatch_local()
 

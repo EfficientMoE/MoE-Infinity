@@ -57,6 +57,11 @@ RUN --mount=type=cache,target=/ccache \
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     && cmake --build ${CUTLASS_DIR}/build --target cutlass_library -j$(nproc)
 
+RUN git clone --branch v3.2.2 --depth 1 https://github.com/NVIDIA/NVTX.git /tmp/nvtx \
+    && cp -a /tmp/nvtx/c/include/nvtx3/. /usr/local/cuda/include/nvtx3/ \
+    && rm -rf /tmp/nvtx \
+    && test -f /usr/local/cuda/include/nvtx3/nvtx3.hpp
+
 WORKDIR /workspace/MoE-Infinity
 
 # Copy source code
@@ -109,14 +114,7 @@ RUN pip install --no-cache-dir pytest
 # ---------------------------------------------------------------
 # E2E Stage 1: verify CUDA extension imports with real CUDA
 # ---------------------------------------------------------------
-RUN python -c "\
-    import torch; \
-    print(f'CUDA available: {torch.cuda.is_available()}'); \
-    import moe_infinity; \
-    print('OK: import moe_infinity'); \
-    import moe_infinity._store; \
-    print(f'OK: _store from {moe_infinity._store.__file__}'); \
-    "
+RUN python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); import moe_infinity; print('OK: import moe_infinity'); import moe_infinity._store; print(f'OK: _store from {moe_infinity._store.__file__}')"
 
 # ---------------------------------------------------------------
 # E2E Stage 2: example smoke tests (--help exits 0)

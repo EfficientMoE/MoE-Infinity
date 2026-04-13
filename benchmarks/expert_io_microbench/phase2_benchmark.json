@@ -1,0 +1,12 @@
+{
+  "status": "SKIP",
+  "phase": 2,
+  "description": "Phase 2 bubble ratio benchmark: hit/miss split dispatch",
+  "reason": "No CUDA device available in this environment (driver stub)",
+  "gpu_available": false,
+  "baseline_bubble_ratio": 0.8715,
+  "phase2_bubble_ratio": "not_measured",
+  "improvement_vs_baseline": "not_measured",
+  "note":
+      "Run on GPU-enabled host with DeepSeek-V2-Lite offload weights for measurement"
+}

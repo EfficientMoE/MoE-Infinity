@@ -51,7 +51,11 @@ class SyncJambaMoEBlock(nn.Module):
         routing_weights_mask = torch.sum(routing_weights_mask, dim=-1)
 
         self.expert_executor.dispatch_local(
-            self.layer_id, hidden_states, router_mask, routing_weights_mask
+            self.layer_id,
+            hidden_states,
+            router_mask,
+            routing_weights_mask,
+            router_logits=router_logits,
         )
         final_hidden_states = self.expert_executor.wait_dispatch_local()
 

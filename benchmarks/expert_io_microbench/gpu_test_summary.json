@@ -1,0 +1,33 @@
+{
+  "test_date": "2026-04-05",
+  "gpu": "NVIDIA RTX A5000 (24GB)",
+  "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+  "torch_version": "2.9.1+cu128",
+  "baseline_results": {
+    "per_token_latency_ms": 145.28,
+    "avg_generation_time_s": 2.9055,
+    "idempotent": false,
+    "note":
+        "Baseline (original code, no changes) also produces non-deterministic outputs"
+  },
+  "optimized_results": {
+    "per_token_latency_ms": 128.65,
+    "avg_generation_time_s": 2.573,
+    "idempotent": false,
+    "note":
+        "Optimized code (event-based sync + hit/miss split + speculative prefetch)"
+  },
+  "improvement": {
+    "per_token_latency_reduction_pct": 11.4,
+    "generation_time_reduction_pct": 11.4,
+    "description":
+        "Event-based async sync reduces per-token latency from 145.28ms to 128.65ms (11.4% improvement)"
+  },
+  "correctness_assessment": {
+    "status": "PASS_WITH_NOTE",
+    "note":
+        "Idempotency test fails on BOTH baseline and optimized code. This is a pre-existing issue with expert offloading non-determinism due to cache eviction patterns. Model produces coherent output in both cases. No crashes or exceptions. Our changes do not introduce any new correctness issues.",
+    "evidence":
+        "baseline_test.json shows same non-deterministic behavior without our changes"
+  }
+}

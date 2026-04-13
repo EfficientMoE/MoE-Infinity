@@ -8,10 +8,10 @@ This module verifies:
 """
 
 import pytest
-
-from moe_infinity.models.modeling_deepseek_v2.modeling_deepseek import (
+from transformers.models.deepseek_v2.modeling_deepseek_v2 import (  # pyright: ignore[reportAttributeAccessIssue]
     AddAuxiliaryLoss,
 )
+
 from tests.python.ops.conftest import (
     BF16_ATOL,
     BF16_RTOL,

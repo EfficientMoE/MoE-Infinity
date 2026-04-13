@@ -16,6 +16,7 @@
 #include "aio/archer_tensor_index.h"
 #include "common/time.h"
 #include "common/types.h"
+#include "memory/event_pool.h"
 #include "memory/memory_pool.h"
 #include "memory/stream_pool.h"
 #include "parallel/expert_dispatcher.h"
@@ -57,6 +58,15 @@ Node::Node()
 
 void Node::SetDevice(const torch::Device& target_device, bool on_demand,
                      cudaStream_t stream, cudaEvent_t* transfer_event) {
+  if (transfer_event != nullptr) {
+    *transfer_event = nullptr;
+  }
+  auto sync_stream_with_event = [](cudaStream_t sync_stream) {
+    cudaEvent_t sync_event = kCudaEventPool->Acquire();
+    cudaEventRecord(sync_event, sync_stream);
+    cudaEventSynchronize(sync_event);
+    kCudaEventPool->Release(sync_event);
+  };
   DLOG_TRACE("SetDevice: " + str() + " to " + target_device.str());
   if (device == target_device) {
     DLOG_TRACE("SetDevice: " + str() + " to " + target_device.str() +
@@ -138,14 +148,15 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
 
         param_offset += size_aligned;
       }
-      if (transfer_event != nullptr) {
-        cudaEventRecord(*transfer_event, h2d_stream);
-      } else {
-        {
+      {
 #ifndef NVTX_DISABLE
-          nvtx3::scoped_range r_sync("cuda_stream_sync");
+        nvtx3::scoped_range r_sync("cuda_stream_sync");
 #endif
-          cudaStreamSynchronize(h2d_stream);
+        if (transfer_event != nullptr && !own_stream) {
+          *transfer_event = kCudaEventPool->Acquire();
+          cudaEventRecord(*transfer_event, h2d_stream);
+        } else {
+          sync_stream_with_event(h2d_stream);
         }
       }
       if (own_stream) {
@@ -185,9 +196,6 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
       if (stream == nullptr) {
         CudaMemcpy(device_memory_ptr, host_memory_ptr, byte_size,
                    cudaMemcpyHostToDevice);
-        if (transfer_event != nullptr) {
-          cudaEventRecord(*transfer_event, nullptr);
-        }
       } else {
         {
 #ifndef NVTX_DISABLE
@@ -196,14 +204,15 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
           CudaMemcpyAsync(device_memory_ptr, host_memory_ptr, byte_size,
                           cudaMemcpyHostToDevice, stream);
         }
-        if (transfer_event != nullptr) {
-          cudaEventRecord(*transfer_event, stream);
-        } else {
-          {
+        {
 #ifndef NVTX_DISABLE
-            nvtx3::scoped_range r_sync("cuda_stream_sync");
+          nvtx3::scoped_range r_sync("cuda_stream_sync");
 #endif
-            cudaStreamSynchronize(stream);
+          if (transfer_event != nullptr) {
+            *transfer_event = kCudaEventPool->Acquire();
+            cudaEventRecord(*transfer_event, stream);
+          } else {
+            sync_stream_with_event(stream);
           }
         }
       }

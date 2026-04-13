@@ -51,39 +51,27 @@ MoEMLP::MoEMLP(int dtype, int expert_type) {
 }
 
 void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
-  std::vector<std::tuple<void*, int64_t>> tensor_ptrs;
-  std::vector<std::vector<int64_t>> tensor_shapes;
-  std::vector<std::vector<int64_t>> data_shapes;
   int device = at::cuda::current_device();
   auto options = torch::TensorOptions()
                      .dtype(dtype_to_torch(dtype_))
                      .device(CUDA_DEVICE(device));
-  for (auto& id : tensor_ids) {
-    auto tensor = kTensorIndex->find(id)->second.tensor;
-    auto tensor_shape = tensor.sizes().vec();
-    auto tensor_ptr = tensor.data_ptr();
-    auto tensor_size = torch_shape_size(tensor_shape, dtype_);
-    tensor_ptrs.push_back(std::make_tuple(tensor_ptr, tensor_size));
-    tensor_shapes.push_back(tensor_shape);
-  }
-  if (!param_init_) {
-    // auto allocator = CudaDeviceCachingAllocator::instance(device);
-    auto allocator = c10::DeviceCachingAllocator::get(device);
-    for (size_t i = 0; i < tensor_ptrs.size(); i++) {
-      auto [ptr, tensor_size] = tensor_ptrs[i];
-      auto tensor_shape = tensor_shapes[i];
-      void* param_ptr = allocator->allocate(tensor_size);
-      param_[i].set_data(torch::from_blob(param_ptr, tensor_shape,
-                                          DoNothingDeleter<void>{}, options));
-      DLOG_DEBUG("MoEMLP::SetTensorsFromBlob: tensor_ids", tensor_ids[i],
-                 "tensor_shape", tensor_shape, "tensor_size", tensor_size,
-                 "param_", param_[i].sizes().vec(), "device",
-                 param_[i].device().str());
-    }
 
-    // MLP tensor shape is transposed
+  // Safety: exec_state is FETCHING/EXECUTING throughout forward(), so the
+  // expert's GPU memory cannot be evicted until OutputFunc resets to IDLE.
+  std::vector<std::vector<int64_t>> tensor_shapes;
+  for (size_t i = 0; i < tensor_ids.size(); i++) {
+    auto& tensor = kTensorIndex->find(tensor_ids[i])->second.tensor;
+    tensor_shapes.push_back(tensor.sizes().vec());
+    param_[i].set_data(tensor);
+  }
+
+  if (!param_init_) {
+    auto allocator = c10::DeviceCachingAllocator::get(device);
+
     int64_t hdim = tensor_shapes[0][1];
     int64_t idim = tensor_shapes[0][0];
+
+    std::vector<std::vector<int64_t>> data_shapes;
     data_shapes.push_back({kMaxTokens, hdim});
     data_shapes.push_back({kMaxTokens, hdim});
 
@@ -91,16 +79,44 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
       data_shapes.push_back({kMaxTokens, idim});
     }
 
-    // auto allocator = CudaDeviceCachingAllocator::instance(device);
-    // auto allocator = c10::DeviceCachingAllocator::get(device);
-    // auto data_size = torch_shape_size({1024, hdim}, dtype_);
     for (size_t i = 0; i < data_shapes.size(); i++) {
       auto data_shape = data_shapes[i];
       auto data_size = torch_shape_size(data_shape, dtype_);
       void* buffer_ptr = allocator->allocate(data_size);
       buffer_[i].set_data(torch::from_blob(buffer_ptr, data_shape,
                                            DoNothingDeleter<void>{}, options));
-      DLOG_TRACE("MoEMLP::SetTensorsFromBlob: buffer_ tensor", i, "data_shape",
+      DLOG_TRACE("MoEMLP::SetTensorsFromIds: buffer_ tensor", i, "data_shape",
+                 data_shape, "data_size", data_size, "device",
+                 buffer_[i].device().str());
+    }
+    param_init_ = true;
+  }
+
+  if (!param_init_) {
+    // Allocate computation buffers (input, output, intermediates) once.
+    // These are reused across expert invocations.
+    auto allocator = c10::DeviceCachingAllocator::get(device);
+
+    // MLP tensor shape: weight is [intermediate, hidden], so
+    //   hdim = tensor_shapes[0][1], idim = tensor_shapes[0][0]
+    int64_t hdim = tensor_shapes[0][1];
+    int64_t idim = tensor_shapes[0][0];
+
+    std::vector<std::vector<int64_t>> data_shapes;
+    data_shapes.push_back({kMaxTokens, hdim});  // input buffer
+    data_shapes.push_back({kMaxTokens, hdim});  // output buffer
+
+    for (size_t i = 0; i < tensor_shapes.size(); i++) {
+      data_shapes.push_back({kMaxTokens, idim});  // intermediate buffers
+    }
+
+    for (size_t i = 0; i < data_shapes.size(); i++) {
+      auto data_shape = data_shapes[i];
+      auto data_size = torch_shape_size(data_shape, dtype_);
+      void* buffer_ptr = allocator->allocate(data_size);
+      buffer_[i].set_data(torch::from_blob(buffer_ptr, data_shape,
+                                           DoNothingDeleter<void>{}, options));
+      DLOG_TRACE("MoEMLP::SetTensorsFromIds: buffer_ tensor", i, "data_shape",
                  data_shape, "data_size", data_size, "device",
                  buffer_[i].device().str());
     }
@@ -109,20 +125,7 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
 
   assert(param_init_ == true);
   assert(param_set_ == false);
-
-  cudaStream_t current_stream;
-  cudaStreamCreate(&current_stream);
-  for (size_t i = 0; i < tensor_ptrs.size(); i++) {
-    auto [ptr, tensor_size] = tensor_ptrs[i];
-    CUDA_CHECK(cudaMemcpyAsync(param_[i].data_ptr(), ptr, tensor_size,
-                               cudaMemcpyDeviceToDevice, current_stream));
-  }
-  cudaStreamSynchronize(current_stream);
-  cudaStreamDestroy(current_stream);
   param_set_ = true;
-  // DLOG_FATAL(
-  //     "MoEMLP::SetTensorsFromBlob: tensor_ids.size() should be 2,3,4, but got
-  //     {}", tensor_ids.size());
 }
 
 torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,

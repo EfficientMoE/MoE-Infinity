@@ -47,6 +47,7 @@ class MockExpertExecutor:
         self.last_hidden_states: Optional[torch.Tensor] = None
         self.last_router_mask: Optional[torch.Tensor] = None
         self.last_router_weights: Optional[torch.Tensor] = None
+        self.last_router_logits: Optional[torch.Tensor] = None
 
     def dispatch_local(
         self,
@@ -54,11 +55,13 @@ class MockExpertExecutor:
         hidden_states: torch.Tensor,
         router_mask: torch.Tensor,
         router_weights: torch.Tensor,
+        router_logits: Optional[torch.Tensor] = None,
     ) -> None:
         _ = layer_id
         self.last_hidden_states = hidden_states
         self.last_router_mask = router_mask
         self.last_router_weights = router_weights
+        self.last_router_logits = router_logits
 
     def wait_dispatch_local(self) -> torch.Tensor:
         assert self.last_hidden_states is not None

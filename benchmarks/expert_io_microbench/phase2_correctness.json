@@ -1,0 +1,14 @@
+{
+  "status": "SKIP",
+  "phase": 2,
+  "description":
+      "Phase 2 correctness gate: hit/miss split dispatch + per-expert events",
+  "reason": "No CUDA device available in this environment (driver stub)",
+  "gpu_available": false,
+  "assert_close_result": "SKIP",
+  "prompts": 3,
+  "tokens": 20,
+  "baseline_bubble_ratio": 0.8715,
+  "note":
+      "Run on GPU-enabled host with DeepSeek-V2-Lite offload weights to produce PASS/FAIL"
+}

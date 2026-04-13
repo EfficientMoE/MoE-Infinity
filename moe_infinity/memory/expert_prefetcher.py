@@ -5,7 +5,7 @@
 
 
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from transformers import PretrainedConfig
@@ -28,7 +28,7 @@ except Exception:
 
 
 class ExpertPrefetcher(object):
-    cache_file_rd = None
+    cache_file_rd: Optional[Any] = None
     first_k_dense_replace: int = 0
     archer_engine: Any
     expert_tensor_map: dict[tuple[int, int], int]
@@ -38,15 +38,18 @@ class ExpertPrefetcher(object):
         self.num_layers, self.num_experts, self.num_encoder_layers = (
             parse_moe_param(config)
         )
-        self.archer_engine = None
-        self.expert_tensor_map = {}
+        self.archer_engine: Optional[Any] = None
+        self.expert_tensor_map: Dict[Tuple[int, int], int] = {}
+        self._last_speculative_prediction: Set[int] = set()
 
-    def set_archer_engine(self, archer_engine):
+    def set_archer_engine(self, archer_engine: Any):
         global _expert_prefetcher
         _expert_prefetcher = archer_engine
         self.archer_engine = archer_engine
 
-    def prefetch_experts_list(self, layer_id, expert_list):
+    def prefetch_experts_list(self, layer_id: int, expert_list: List[int]):
+        if self.archer_engine is None:
+            return
         tensor_ids = []
         for j in expert_list:
             tensor_ids.append(self.expert_tensor_map[(layer_id, j)])
@@ -54,13 +57,17 @@ class ExpertPrefetcher(object):
             gpu_id = self.archer_engine.get_node_default_device([tensor_id])
             self.archer_engine.enqueue_prefetch(tensor_id, gpu_id)
 
-    def fetch_experts_lock_cache(self, layer_id, expert_list):
+    def fetch_experts_lock_cache(self, layer_id: int, expert_list: List[int]):
+        if self.archer_engine is None:
+            return
         tensor_ids = []
         for j in expert_list:
             tensor_ids.append(self.expert_tensor_map[(layer_id, j)])
         self.archer_engine.replace_cache_candidates(tensor_ids)
 
-    def prefetch_experts(self, layer_id, expert_matrix):
+    def prefetch_experts(self, layer_id: int, expert_matrix):
+        if self.archer_engine is None:
+            return
         profiler = IOProfiler.instance() if IOProfiler is not None else None
         nvtx_cm = nullcontext()
         if HAS_NVTX and nvtx is not None:
@@ -95,3 +102,55 @@ class ExpertPrefetcher(object):
                         [tensor_id]
                     )
                     self.archer_engine.enqueue_prefetch(tensor_id, gpu_id)
+
+    def speculative_prefetch(
+        self, layer_idx: int, router_logits: Optional[Any] = None
+    ):
+        next_layer = layer_idx + 1
+        if next_layer >= self.num_layers:
+            return
+        if router_logits is None:
+            return
+
+        num_experts_to_prefetch = min(2, self.num_experts)
+        if hasattr(router_logits, "topk"):
+            import torch
+
+            topk_indices: List[int] = (
+                torch.topk(
+                    router_logits.float().view(-1, self.num_experts).mean(0),
+                    num_experts_to_prefetch,
+                )
+                .indices.cpu()
+                .tolist()
+            )
+        else:
+            logits_np = (
+                np.array(router_logits).reshape(-1, self.num_experts).mean(0)
+            )
+            topk_indices = np.argsort(logits_np)[-num_experts_to_prefetch:][
+                ::-1
+            ].tolist()
+
+        self.prefetch_experts_list(next_layer, topk_indices)
+        self._last_speculative_prediction = set(topk_indices)
+
+    def correct_prefetch(
+        self,
+        layer_idx: int,
+        actual_expert_ids: List[int],
+        predicted_expert_ids: Optional[Set[int]] = None,
+    ):
+        if layer_idx >= self.num_layers:
+            self._last_speculative_prediction = set()
+            return
+
+        predicted = predicted_expert_ids
+        if predicted is None:
+            predicted = getattr(self, "_last_speculative_prediction", set())
+
+        missed = [e for e in actual_expert_ids if e not in predicted]
+        if missed:
+            self.prefetch_experts_list(layer_idx, missed)
+
+        self._last_speculative_prediction = set()

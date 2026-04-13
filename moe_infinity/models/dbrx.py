@@ -68,7 +68,11 @@ class SyncDbrxFFNBlock(nn.Module):
         )
 
         self.expert_executor.dispatch_local(
-            self.layer_id, hidden_states_flat, router_mask, routing_weights_mask
+            self.layer_id,
+            hidden_states_flat,
+            router_mask,
+            routing_weights_mask,
+            router_logits=weights,
         )
         final_hidden_states = self.expert_executor.wait_dispatch_local()
 

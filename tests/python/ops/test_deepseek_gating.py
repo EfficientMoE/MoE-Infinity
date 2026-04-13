@@ -1,12 +1,10 @@
 import torch  # pyright: ignore[reportMissingImports]
 import torch.nn.functional as F  # pyright: ignore[reportMissingImports]
+from transformers import DeepseekV3Config
+from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+    DeepseekV2MoEGate,
+)
 
-from moe_infinity.models.modeling_deepseek_v3.configuration_deepseek import (
-    DeepseekV3Config,
-)
-from moe_infinity.models.modeling_deepseek_v3.modeling_deepseek import (
-    MoEGate,
-)
 from tests.python.ops.conftest import (
     BF16_ATOL,
     BF16_RTOL,
@@ -78,7 +76,7 @@ def _sort_idx_and_weight(topk_idx, topk_weight):
 @requires_cuda
 def test_deepseek_gate_grouped_topk_matches_reference(seed_everything):
     config = _build_config(topk_group=3, routed_scaling_factor=2.5)
-    gate = MoEGate(config).cuda().bfloat16().eval()
+    gate = DeepseekV2MoEGate(config).cuda().bfloat16().eval()  # pyright: ignore[reportArgumentType]
 
     with torch.no_grad():
         gate.weight.copy_(torch.randn_like(gate.weight))
@@ -120,7 +118,7 @@ def test_deepseek_gate_grouped_topk_matches_reference(seed_everything):
 @requires_cuda
 def test_deepseek_gate_bias_correction_matches_reference(seed_everything):
     config = _build_config(topk_group=1, routed_scaling_factor=2.5)
-    gate = MoEGate(config).cuda().bfloat16().eval()
+    gate = DeepseekV2MoEGate(config).cuda().bfloat16().eval()  # pyright: ignore[reportArgumentType]
 
     experts_per_group = config.n_routed_experts // config.n_group
     bias = torch.full(
@@ -169,7 +167,7 @@ def test_deepseek_gate_bias_correction_matches_reference(seed_everything):
 @requires_cuda
 def test_deepseek_gate_scaling_and_epsilon_matches_reference(seed_everything):
     config = _build_config(topk_group=3, routed_scaling_factor=2.5)
-    gate = MoEGate(config).cuda().bfloat16().eval()
+    gate = DeepseekV2MoEGate(config).cuda().bfloat16().eval()  # pyright: ignore[reportArgumentType]
 
     with torch.no_grad():
         gate.weight.copy_(torch.randn_like(gate.weight))

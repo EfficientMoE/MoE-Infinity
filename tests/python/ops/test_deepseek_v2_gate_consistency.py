@@ -1,15 +1,15 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from transformers import DeepseekV2Config
+from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+    DeepseekV2MoE,
+)
+from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+    DeepseekV2MoEGate as MoEGate,
+)
 
 from moe_infinity.models.deepseek import DeepseekMoEBlock, DeepseekMoEGate
-from moe_infinity.models.modeling_deepseek_v2.configuration_deepseek import (
-    DeepseekV2Config,
-)
-from moe_infinity.models.modeling_deepseek_v2.modeling_deepseek import (
-    DeepseekV2MoE,
-    MoEGate,
-)
 from tests.python.ops.conftest import BF16_ATOL, BF16_RTOL, requires_cuda
 
 

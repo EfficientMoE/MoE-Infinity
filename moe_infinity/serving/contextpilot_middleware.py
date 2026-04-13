@@ -3,9 +3,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
-from contextpilot import ContextPilot
+try:
+    from contextpilot import ContextPilot
+except ImportError:
+    ContextPilot = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +17,7 @@ class ContextPilotMiddleware:
     _enabled: bool
     _reorder_enabled: bool
     _dedup_enabled: bool
-    _cp: ContextPilot
+    _cp: Any
     _lock: threading.Lock
     token_savings_total: int
     _requests_processed: int
@@ -33,10 +36,20 @@ class ContextPilotMiddleware:
         dedup_enabled: bool = True,
         reorder_enabled: bool = True,
     ):
-        self._enabled = bool(enabled)
-        self._reorder_enabled = bool(reorder_enabled)
-        self._dedup_enabled = bool(dedup_enabled)
-        self._cp = ContextPilot(use_gpu=use_gpu)
+        if ContextPilot is None:
+            logger.warning(
+                "contextpilot package not installed; ContextPilot features disabled. "
+                "Install with: pip install contextpilot>=0.4.0 (requires Python 3.10+)"
+            )
+            self._enabled = False
+            self._reorder_enabled = False
+            self._dedup_enabled = False
+            self._cp = None
+        else:
+            self._enabled = bool(enabled)
+            self._reorder_enabled = bool(reorder_enabled)
+            self._dedup_enabled = bool(dedup_enabled)
+            self._cp = ContextPilot(use_gpu=use_gpu)
         self._lock = threading.Lock()
         self.token_savings_total = 0
         self._requests_processed = 0
@@ -241,7 +254,18 @@ class ContextPilotMiddleware:
             contexts.append(str(content))
 
         with self._lock:
-            optimized = self._cp.optimize(contexts=contexts, query=query)
+            try:
+                optimized = self._cp.optimize(contexts, query)
+            except TypeError:
+                optimized = self._cp.optimize(docs=contexts, query=query)
+            except (ValueError, IndexError) as exc:
+                logger.debug(
+                    "ContextPilot.optimize raised %s; preserving original order",
+                    exc,
+                )
+                return [dict(message) for message in messages]
+        if not isinstance(optimized, list):
+            return [dict(message) for message in messages]
         return [dict(message) for message in optimized]
 
     def _deduplicate_messages(
@@ -249,33 +273,38 @@ class ContextPilotMiddleware:
     ) -> tuple[list[dict[str, str]], int, float]:
         with self._lock:
             deduplicate_fn = getattr(self._cp, "deduplicate", None)
+            deduped: object = None
             if callable(deduplicate_fn):
-                deduped = deduplicate_fn(messages)
-                if isinstance(deduped, list):
-                    normalized: list[dict[str, str]] = []
-                    deduped_list = cast(list[object], deduped)
-                    for candidate in deduped_list:
-                        if not isinstance(candidate, dict):
-                            continue
-                        message_dict = cast(dict[object, object], candidate)
-                        role_obj = message_dict.get("role")
-                        content_obj = message_dict.get("content")
-                        normalized.append(
-                            {
-                                "role": (
-                                    "" if role_obj is None else str(role_obj)
-                                ),
-                                "content": (
-                                    ""
-                                    if content_obj is None
-                                    else str(content_obj)
-                                ),
-                            }
-                        )
-                    tokens_saved, pct = self._estimate_tokens_saved(
-                        messages, normalized
+                try:
+                    deduped = deduplicate_fn(messages)
+                except (TypeError, ValueError, IndexError) as exc:
+                    logger.debug(
+                        "ContextPilot.deduplicate signature mismatch (%s); "
+                        "using internal fallback dedup",
+                        exc,
                     )
-                    return normalized, tokens_saved, pct
+                    deduped = None
+            if isinstance(deduped, list):
+                normalized: list[dict[str, str]] = []
+                deduped_list = cast(list[object], deduped)
+                for candidate in deduped_list:
+                    if not isinstance(candidate, dict):
+                        continue
+                    message_dict = cast(dict[object, object], candidate)
+                    role_obj = message_dict.get("role")
+                    content_obj = message_dict.get("content")
+                    normalized.append(
+                        {
+                            "role": ("" if role_obj is None else str(role_obj)),
+                            "content": (
+                                "" if content_obj is None else str(content_obj)
+                            ),
+                        }
+                    )
+                tokens_saved, pct = self._estimate_tokens_saved(
+                    messages, normalized
+                )
+                return normalized, tokens_saved, pct
 
         return self._fallback_deduplicate(messages)
 

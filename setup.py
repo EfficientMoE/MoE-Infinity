@@ -190,6 +190,7 @@ _STORE_SOURCES = [
     "core/memory/memory_pool.cpp",
     "core/memory/pinned_memory_pool.cpp",
     "core/memory/stream_pool.cpp",
+    "core/memory/event_pool.cpp",
     "core/memory/host_caching_allocator.cpp",
     "core/memory/device_caching_allocator.cpp",
     # parallel

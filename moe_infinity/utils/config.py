@@ -42,6 +42,12 @@ class ArcherConfig:
     prefetch: bool = field(
         default=False, metadata={"help": "Enable prefetching"}
     )
+    speculative_prefetch: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable speculative expert prefetching using router logits from layer L to predict L+1 experts."
+        },
+    )
     device_memory_ratio: float = field(
         default=0.9,
         metadata={"help": "Ratio of device memory to use"},

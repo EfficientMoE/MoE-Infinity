@@ -67,16 +67,18 @@ def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
     arch = (config.architectures or [""])[0].lower()
 
     if "nllb" in arch:
-        num_encoder_layers = config.encoder_layers // config.encoder_sparse_step
-        num_decoder_layers = config.decoder_layers // config.decoder_sparse_step
+        encoder_sparse_step = int(config.encoder_sparse_step)
+        decoder_sparse_step = int(config.decoder_sparse_step)
+        num_encoder_layers = config.encoder_layers // encoder_sparse_step
+        num_decoder_layers = config.decoder_layers // decoder_sparse_step
         num_layers = num_encoder_layers + num_decoder_layers
         num_experts = config.num_experts
-    elif "mixtral" in arch or "arctic" in arch:
+    elif "mixtral" in arch:
         num_encoder_layers = 0
         num_decoder_layers = config.num_hidden_layers
         num_layers = config.num_hidden_layers
         num_experts = config.num_local_experts
-    elif "grok" in arch or "qwen3" in arch:
+    elif "qwen3" in arch:
         num_encoder_layers = 0
         num_decoder_layers = config.num_hidden_layers
         num_layers = config.num_hidden_layers
@@ -111,8 +113,8 @@ def parse_expert_id(
 
     if "nllb" in arch:
         # example "decoder.block.1.layer.2.mlp.experts.expert_100.wi.weight"
-        encoder_sparse_step = config.encoder_sparse_step
-        decoder_sparse_step = config.decoder_sparse_step
+        encoder_sparse_step = int(config.encoder_sparse_step)
+        decoder_sparse_step = int(config.decoder_sparse_step)
 
         result = re.findall(
             r"(encoder|decoder)\.[a-z]+\.(\d+).*expert_(\d+)", param_name
@@ -123,8 +125,7 @@ def parse_expert_id(
             layer_id = int(layer_id)
             expert_id = int(expert_id)
 
-    elif "mixtral" in arch or "arctic" in arch:
-        encoder_sparse_step = None
+    elif "mixtral" in arch:
         decoder_sparse_step = 1
         layer_type = "decoder"
 
@@ -136,22 +137,7 @@ def parse_expert_id(
             layer_id, expert_id = result[0]
             layer_id = int(layer_id)
             expert_id = int(expert_id)
-    elif "grok" in arch:
-        encoder_sparse_step = None
-        decoder_sparse_step = 1
-        layer_type = "decoder"
-
-        # example "model.layers.0.moe_block.experts.0.linear_1.weight"
-        result = re.findall(
-            r"layers\.(\d+)\.moe_block\.experts\.(\d+)\.", param_name
-        )
-        if result:
-            layer_id, expert_id = result[0]
-            # print(f"layer_id: {layer_id}, expert_id: {expert_id}")
-            layer_id = int(layer_id)
-            expert_id = int(expert_id)
     elif "deepseek" in arch or "qwen3" in arch:
-        encoder_sparse_step = None
         decoder_sparse_step = 1
         layer_type = "decoder"
 

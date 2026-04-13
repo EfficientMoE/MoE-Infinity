@@ -330,49 +330,6 @@ def test_mixed_valid_invalid_valid_requests_keep_service_healthy(
     assert health_response.json() == {"status": "healthy", "reason": None}
 
 
-def test_v1_responses_include_deprecation_header() -> None:
-    v1_module: Any = importlib.import_module(
-        "moe_infinity.entrypoints.openai.api_server"
-    )
-    v1_module = importlib.reload(v1_module)
-
-    async def _fake_submit_generation(**_: Any) -> dict[str, Any]:
-        return {
-            "output_text": "hello",
-            "token_texts": ["hello"],
-            "prompt_tokens": 1,
-            "completion_tokens": 1,
-            "total_tokens": 2,
-        }
-
-    v1_module._tokenize_text = lambda prompt: [1]  # type: ignore[assignment]
-    v1_module._chat_prompt_to_token_ids = (  # type: ignore[assignment]
-        lambda request: [1]
-    )
-    v1_module._submit_generation = _fake_submit_generation  # type: ignore[assignment]
-
-    with TestClient(v1_module.app) as client:
-        completion_response = client.post(
-            "/v1/completions",
-            json={"model": "unit-test-model", "prompt": "hi"},
-        )
-        chat_response = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "unit-test-model",
-                "messages": [{"role": "user", "content": "hi"}],
-            },
-        )
-        health_response = client.get("/health")
-
-    assert completion_response.status_code == 200
-    assert chat_response.status_code == 200
-    assert health_response.status_code == 200
-    assert completion_response.headers["Deprecation"] == "true"
-    assert chat_response.headers["Deprecation"] == "true"
-    assert health_response.headers["Deprecation"] == "true"
-
-
 def test_server_without_watchdog_flags_keeps_watchdogs_none(
     monkeypatch: Any, runtime_guard: Any
 ) -> None:

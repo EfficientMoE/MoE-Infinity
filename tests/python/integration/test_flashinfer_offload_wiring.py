@@ -62,7 +62,7 @@ def test_native_model_forward_uses_attention_metadata() -> None:
 
 def test_native_model_forward_ignores_metadata_for_non_paged_models() -> None:
     class MockModel(torch.nn.Module):
-        def forward(self, input_ids: torch.Tensor) -> object:
+        def forward(self, input_ids: torch.Tensor, **kwargs: Any) -> object:
             batch, seq_len = input_ids.shape
             logits = torch.zeros(batch, seq_len, 8, dtype=torch.float32)
             return types.SimpleNamespace(logits=logits)

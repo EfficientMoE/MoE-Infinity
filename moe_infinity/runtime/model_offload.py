@@ -43,12 +43,10 @@ from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
 from moe_infinity.models import (
     Qwen3MoEBlock,
     Qwen3PagedAttention,
-    SyncArcticMoeBlock,
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
     SyncGptOssMLP,
-    SyncGrokMoeBlock,
     SyncJambaMoEBlock,
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
@@ -72,6 +70,7 @@ from moe_infinity.utils.async_transfer import (
     wait_transfer,
 )
 from moe_infinity.utils.device import get_default_device, get_device
+from moe_infinity.utils.gptq import is_gptq_packed_tensor, is_gptq_quantized
 from moe_infinity.utils.mxfp4 import identify_mxfp4_pairs, is_mxfp4_quantized
 
 _prefetch_lib = None
@@ -451,20 +450,6 @@ class OffloadEngine(object):
             SyncJambaMoEBlock
         )
 
-        moe_infinity.models.modeling_grok.modeling_grok1._old_sparse_mlp = (
-            moe_infinity.models.modeling_grok.MoeBlock
-        )
-        moe_infinity.models.modeling_grok.modeling_grok1.MoeBlock = (
-            SyncGrokMoeBlock
-        )
-
-        moe_infinity.models.modeling_arctic._old_sparse_mlp = (
-            moe_infinity.models.modeling_arctic.ArcticMoE
-        )
-        moe_infinity.models.modeling_arctic.modeling_arctic.ArcticMoE = (
-            SyncArcticMoeBlock
-        )
-
         transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe = transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE
         transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
         transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = (
@@ -552,8 +537,12 @@ class OffloadEngine(object):
                         else:
                             state_dict = torch.load(ckpt)
 
-                        # convert all tensors in state_dict to self.dtype_cls
+                        is_gptq_ckpt = is_gptq_quantized(self.config)
+
                         for k, v in state_dict.items():
+                            if is_gptq_ckpt and is_gptq_packed_tensor(k):
+                                state_dict[k] = v.to("cpu")
+                                continue
                             try:
                                 state_dict[k] = v.to(self.dtype_cls).to("cpu")
                             except (RuntimeError, TypeError) as e:
@@ -702,6 +691,8 @@ class OffloadEngine(object):
                 self.expert_executor.set_expert_dispatcher(
                     self.expert_dispatcher
                 )
+                if self.archer_config.speculative_prefetch:
+                    self.expert_executor.set_prefetcher(self.expert_prefetcher)
 
                 module_idx = 0
                 self.expert_layer_modules = []
@@ -718,8 +709,6 @@ class OffloadEngine(object):
                     if (
                         isinstance(module, SyncNllbMoeSparseMLP)
                         or isinstance(module, SyncMixtralSparseMoeBlock)
-                        or isinstance(module, SyncGrokMoeBlock)
-                        or isinstance(module, SyncArcticMoeBlock)
                         or isinstance(module, SyncDeepseekV2MoEBlock)
                         or isinstance(module, SyncDeepseekV3MoEBlock)
                         or isinstance(module, Qwen3MoEBlock)
@@ -730,6 +719,7 @@ class OffloadEngine(object):
                     ):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
+                        module.is_gptq = is_gptq_quantized(self.config)
                         self.expert_modules.append(module)
 
                         if not isinstance(module, SyncGptOssMLP):
@@ -969,8 +959,6 @@ class OffloadEngine(object):
                     expert_key = (
                         f"{key}.expert_{expert_idx}"
                         if self.config.model_type != "mixtral"
-                        and self.config.model_type != "grok-1"
-                        and self.config.model_type != "arctic"
                         and self.config.model_type != "deepseek_v2"
                         and self.config.model_type != "deepseek_v3"
                         else f"{key}.{expert_idx}"
@@ -981,12 +969,13 @@ class OffloadEngine(object):
                         )
                     )
 
-                    self.expert_dispatcher.register_expert(
-                        expert_layer_id,
-                        expert_idx,
-                        expert_tensors,
-                        os.path.join(self.checkpoint, f"expert.pt"),
-                    )
+                    if not is_gptq_quantized(self.config):
+                        self.expert_dispatcher.register_expert(
+                            expert_layer_id,
+                            expert_idx,
+                            expert_tensors,
+                            os.path.join(self.checkpoint, f"expert.pt"),
+                        )
                 expert_layer_id += 1
             else:
                 input_device_index = self.archer_engine.get_node_default_device(
@@ -1304,14 +1293,6 @@ class OffloadEngine(object):
 
         transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock = (
             transformers.models.jamba.modeling_jamba._old_jamba_moe
-        )
-
-        moe_infinity.models.modeling_grok.modeling_grok1.MoeBlock = (
-            moe_infinity.modeling_grok.modeling_grok1._old_sparse_mlp
-        )
-
-        moe_infinity.models.modeling_arctic.modeling_arctic.ArcticMoE = (
-            moe_infinity.models.modeling_arctic._old_sparse_mlp
         )
 
         transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe
