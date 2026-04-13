@@ -51,6 +51,7 @@ class ContextPilotMiddleware:
             self._dedup_enabled = bool(dedup_enabled)
             self._cp = ContextPilot(use_gpu=use_gpu)
         self._lock = threading.Lock()
+        self._stats_lock = threading.Lock()
         self.token_savings_total = 0
         self._requests_processed = 0
         self._savings_pct_total = 0.0
@@ -97,7 +98,7 @@ class ContextPilotMiddleware:
                     request_savings_pct,
                 )
 
-            with self._lock:
+            with self._stats_lock:
                 self.token_savings_total += request_tokens_saved
                 self._requests_processed += 1
                 self._savings_pct_total += request_savings_pct
@@ -112,7 +113,7 @@ class ContextPilotMiddleware:
             return optimized_messages
         except Exception as exc:
             logger.warning("ContextPilot optimize failed: %s", exc)
-            with self._lock:
+            with self._stats_lock:
                 self._requests_processed += 1
                 self._last_reorder_latency_ms = 0.0
                 self._last_dedup_latency_ms = 0.0
@@ -127,10 +128,13 @@ class ContextPilotMiddleware:
         try:
             started_at = time.monotonic()
             with self._lock:
-                optimized = self._cp.optimize(contexts=[], query=str(prompt))
+                try:
+                    optimized = self._cp.optimize([], str(prompt))
+                except TypeError:
+                    optimized = self._cp.optimize(docs=[], query=str(prompt))
             reorder_latency_ms = (time.monotonic() - started_at) * 1000
             if not optimized:
-                with self._lock:
+                with self._stats_lock:
                     self._requests_processed += 1
                     self._reorder_count += 1
                     self._last_reorder_latency_ms = reorder_latency_ms
@@ -142,7 +146,7 @@ class ContextPilotMiddleware:
             for message in reversed(optimized):
                 content = message.get("content")
                 if isinstance(content, str):
-                    with self._lock:
+                    with self._stats_lock:
                         self._requests_processed += 1
                         self._reorder_count += 1
                         self._last_reorder_latency_ms = reorder_latency_ms
@@ -150,7 +154,7 @@ class ContextPilotMiddleware:
                         self._last_tokens_saved = 0
                         self._last_savings_pct = 0.0
                     return content
-            with self._lock:
+            with self._stats_lock:
                 self._requests_processed += 1
                 self._reorder_count += 1
                 self._last_reorder_latency_ms = reorder_latency_ms
@@ -160,7 +164,7 @@ class ContextPilotMiddleware:
             return prompt
         except Exception as exc:
             logger.warning("ContextPilot completion optimize failed: %s", exc)
-            with self._lock:
+            with self._stats_lock:
                 self._requests_processed += 1
                 self._last_reorder_latency_ms = 0.0
                 self._last_dedup_latency_ms = 0.0
@@ -204,7 +208,7 @@ class ContextPilotMiddleware:
         }
 
     def get_last_request_metrics(self) -> dict[str, float | int]:
-        with self._lock:
+        with self._stats_lock:
             return {
                 "reorder_latency_ms": float(self._last_reorder_latency_ms),
                 "dedup_latency_ms": float(self._last_dedup_latency_ms),

@@ -129,6 +129,56 @@ def test_thread_safety(monkeypatch: MonkeyPatch) -> None:
     assert cp.max_active == 1
 
 
+def test_status_metrics_nonblocking_during_slow_optimize(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Regression test for /contextpilot/status hang.
+
+    get_last_request_metrics() must not block on the CP-call lock
+    while an in-flight process_chat_request is holding it during a slow
+    optimize(). Uses the stats-only lock introduced to split counter
+    reads from external-call serialization.
+    """
+    optimize_started = threading.Event()
+    optimize_release = threading.Event()
+
+    class SlowCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+
+        def optimize(
+            self, contexts: list[str], query: str
+        ) -> list[dict[str, str]]:
+            optimize_started.set()
+            _ = optimize_release.wait(timeout=5.0)
+            return [{"role": "user", "content": query}]
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", SlowCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+
+    worker = threading.Thread(
+        target=lambda: middleware.process_chat_request(
+            [{"role": "user", "content": "hi"}]
+        )
+    )
+    worker.start()
+    assert optimize_started.wait(timeout=2.0), "worker did not reach optimize"
+
+    metrics_deadline_s = 0.5
+    started = time.monotonic()
+    metrics = middleware.get_last_request_metrics()
+    elapsed = time.monotonic() - started
+
+    optimize_release.set()
+    worker.join(timeout=5.0)
+
+    assert elapsed < metrics_deadline_s, (
+        f"get_last_request_metrics blocked for {elapsed:.3f}s "
+        f"while optimize() was in-flight (budget {metrics_deadline_s}s)"
+    )
+    assert "reorder_latency_ms" in metrics
+
+
 def test_on_request_complete_doesnt_raise() -> None:
     middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
 

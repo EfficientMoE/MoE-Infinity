@@ -25,6 +25,13 @@ class _PackedExperts(nn.Module):
         )
         self.down_proj_bias = nn.Parameter(torch.empty(num_experts, hidden))
 
+        self.gate_up_proj_scales = nn.Parameter(
+            torch.empty(0), requires_grad=False
+        )
+        self.down_proj_scales = nn.Parameter(
+            torch.empty(0), requires_grad=False
+        )
+
 
 class SyncGptOssMLP(nn.Module):
     archer_config: Optional[ArcherConfig] = None
@@ -52,7 +59,17 @@ class SyncGptOssMLP(nn.Module):
         up = up.clamp(-self.swiglu_limit, self.swiglu_limit)
         return (up + 1) * (gate * torch.sigmoid(gate * self.alpha))
 
+    def _is_mxfp4(self) -> bool:
+        return self.experts.gate_up_proj.dtype == torch.uint8
+
     def _expert_forward(
+        self, hidden_states: torch.Tensor, expert_idx: int
+    ) -> torch.Tensor:
+        if self._is_mxfp4():
+            return self._expert_forward_mxfp4(hidden_states, expert_idx)
+        return self._expert_forward_bf16(hidden_states, expert_idx)
+
+    def _expert_forward_bf16(
         self, hidden_states: torch.Tensor, expert_idx: int
     ) -> torch.Tensor:
         device = hidden_states.device
@@ -65,6 +82,42 @@ class SyncGptOssMLP(nn.Module):
         gate, up = gate_up[..., ::2], gate_up[..., 1::2]
         activated = self._swiglu(gate, up)
         return F.linear(activated, down_w.t(), down_b)
+
+    def _expert_forward_mxfp4(
+        self, hidden_states: torch.Tensor, expert_idx: int
+    ) -> torch.Tensor:
+        from moe_infinity.kernel.mxfp4_gemm import fused_mxfp4_gemm
+
+        device = hidden_states.device
+        x = hidden_states.to(torch.bfloat16)
+
+        gate_up_packed = self.experts.gate_up_proj[expert_idx].to(device)
+        gate_up_scales = self.experts.gate_up_proj_scales[expert_idx].to(device)
+        gate_up_b = self.experts.gate_up_proj_bias[expert_idx].to(device)
+
+        down_packed = self.experts.down_proj[expert_idx].to(device)
+        down_scales = self.experts.down_proj_scales[expert_idx].to(device)
+        down_b = self.experts.down_proj_bias[expert_idx].to(device)
+
+        # Checkpoint stores weights as [K, N//2] (input-major packed).
+        # The fused kernel expects [N, K//2] (output-major packed).
+        gate_up_out = fused_mxfp4_gemm(
+            x,
+            gate_up_packed.t().contiguous(),
+            gate_up_scales.t().contiguous(),
+            gate_up_b,
+        )
+
+        gate, up = gate_up_out[..., ::2], gate_up_out[..., 1::2]
+        activated = self._swiglu(gate, up)
+
+        result = fused_mxfp4_gemm(
+            activated.to(torch.bfloat16),
+            down_packed.t().contiguous(),
+            down_scales.t().contiguous(),
+            down_b,
+        )
+        return result
 
     def forward(
         self, hidden_states: torch.Tensor
