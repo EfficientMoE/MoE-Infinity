@@ -58,8 +58,7 @@ def test_top_k_restricts_to_k() -> None:
     params = SamplingParams(temperature=1.0, top_k=2)
 
     sampled = [
-        sampler.sample(logits, [params]).token_ids[0].item()
-        for _ in range(100)
+        sampler.sample(logits, [params]).token_ids[0].item() for _ in range(100)
     ]
 
     assert set(sampled).issubset({0, 1})
@@ -111,8 +110,7 @@ def test_nucleus_sampling() -> None:
     params = SamplingParams(temperature=1.0, top_p=0.7)
 
     sampled = [
-        sampler.sample(logits, [params]).token_ids[0].item()
-        for _ in range(100)
+        sampler.sample(logits, [params]).token_ids[0].item() for _ in range(100)
     ]
 
     assert set(sampled).issubset({0, 1})

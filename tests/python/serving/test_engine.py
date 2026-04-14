@@ -360,7 +360,8 @@ def test_engine_n_finished_when_all_complete() -> None:
     first_step_outputs = engine.step()
 
     assert any(
-        output.request_id == "req-n" and output.finished for output in first_step_outputs
+        output.request_id == "req-n" and output.finished
+        for output in first_step_outputs
     )
     assert engine.has_pending_requests() is True
     assert "req-n" not in engine._completed_request_ids

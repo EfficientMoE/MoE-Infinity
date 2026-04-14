@@ -274,11 +274,15 @@ def test_rate_limit_rejects_excess(
     _configure_auth_state(monkeypatch, api_keys="test-key-1", rate_limit=2)
     headers = {"Authorization": "Bearer test-key-1"}
 
-    first = client.post("/v1/completions", json=_completion_payload(), headers=headers)
+    first = client.post(
+        "/v1/completions", json=_completion_payload(), headers=headers
+    )
     second = client.post(
         "/v1/completions", json=_completion_payload(), headers=headers
     )
-    third = client.post("/v1/completions", json=_completion_payload(), headers=headers)
+    third = client.post(
+        "/v1/completions", json=_completion_payload(), headers=headers
+    )
 
     assert first.status_code != 429
     assert second.status_code != 429

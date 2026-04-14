@@ -224,7 +224,9 @@ def _check_auth(request: Any) -> Any:
     window_start = now - 60.0
     with _rate_limit_lock:
         bucket = _rate_limit_buckets.setdefault(token, [])
-        bucket[:] = [timestamp for timestamp in bucket if timestamp >= window_start]
+        bucket[:] = [
+            timestamp for timestamp in bucket if timestamp >= window_start
+        ]
         if len(bucket) >= _rate_limit_rpm:
             return create_error_response(
                 status_code=429,
@@ -1832,7 +1834,9 @@ if __name__ == "__main__":
     args = parse_args()
     _max_waiting_requests = max(0, int(args.max_waiting_requests))
     _max_n = max(1, int(args.max_n))
-    _configure_auth(args.api_key or os.environ.get("MOE_API_KEYS"), args.rate_limit)
+    _configure_auth(
+        args.api_key or os.environ.get("MOE_API_KEYS"), args.rate_limit
+    )
     with _contextpilot_state_lock:
         _contextpilot_enabled = _resolve_contextpilot_enabled(
             args.enable_contextpilot

@@ -40,7 +40,9 @@ class Sampler:
             dtype=torch.long,
             device=logits.device,
         )
-        requested_logprobs = any(params.logprobs > 0 for params in sampling_params)
+        requested_logprobs = any(
+            params.logprobs > 0 for params in sampling_params
+        )
         token_logprobs: list[float | None] | None = None
         top_logprobs: list[dict[int, float] | None] | None = None
         if requested_logprobs:
@@ -63,7 +65,9 @@ class Sampler:
                 filtered = self._apply_top_p(filtered, params.top_p)
 
                 probs = torch.softmax(filtered, dim=-1)
-                sampled[idx] = torch.multinomial(probs, num_samples=1).squeeze(0)
+                sampled[idx] = torch.multinomial(probs, num_samples=1).squeeze(
+                    0
+                )
 
             if not requested_logprobs or params.logprobs <= 0:
                 continue
