@@ -132,12 +132,22 @@ def test_completion_uses_contextpilot_before_tokenization(
 
     async def _fake_wait_non_stream_result(
         **_: Any,
-    ) -> tuple[str, dict[str, int], str]:
-        return (
-            "ok",
-            {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
-            "stop",
-        )
+    ) -> list[Any]:
+        return [
+            server_module._FinalSequenceResult(
+                seq_id=0,
+                text="ok",
+                usage={
+                    "prompt_tokens": 2,
+                    "completion_tokens": 1,
+                    "total_tokens": 3,
+                },
+                finish_reason="stop",
+                logprobs=None,
+                cumulative_logprob=0.0,
+                token_count=1,
+            )
+        ]
 
     def _fake_tokenize(prompt: str) -> list[int]:
         captured["tokenized_prompt"] = prompt
@@ -189,12 +199,22 @@ def test_chat_middleware_failure_falls_back_to_original_messages(
 
     async def _fake_wait_non_stream_result(
         **_: Any,
-    ) -> tuple[str, dict[str, int], str]:
-        return (
-            "ok",
-            {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
-            "stop",
-        )
+    ) -> list[Any]:
+        return [
+            server_module._FinalSequenceResult(
+                seq_id=0,
+                text="ok",
+                usage={
+                    "prompt_tokens": 2,
+                    "completion_tokens": 1,
+                    "total_tokens": 3,
+                },
+                finish_reason="stop",
+                logprobs=None,
+                cumulative_logprob=0.0,
+                token_count=1,
+            )
+        ]
 
     def _fake_chat_prompt_to_token_ids(request: Any) -> list[int]:
         captured["messages"] = request.messages
