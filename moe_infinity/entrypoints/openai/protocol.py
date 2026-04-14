@@ -127,6 +127,10 @@ class UsageInfo(BaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class ResponseFormat(BaseModel):
+    type: str = "text"
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: Union[str, List[Dict[str, str]]]
@@ -136,6 +140,9 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    logprobs: Optional[bool] = False
+    top_logprobs: Optional[int] = None
+    response_format: Optional[ResponseFormat] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
@@ -171,6 +178,7 @@ class CompletionRequest(BaseModel):
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     best_of: Optional[int] = None
+    response_format: Optional[ResponseFormat] = None
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
 
@@ -202,7 +210,7 @@ class CompletionResponseChoice(BaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "error"]] = None
 
 
 class CompletionResponse(BaseModel):
@@ -218,7 +226,7 @@ class CompletionResponseStreamChoice(BaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "error"]] = None
 
 
 class CompletionStreamResponse(BaseModel):
@@ -238,7 +246,8 @@ class ChatMessage(BaseModel):
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    logprobs: Optional[LogProbs] = None
+    finish_reason: Optional[Literal["stop", "length", "error"]] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -258,7 +267,7 @@ class DeltaMessage(BaseModel):
 class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "error"]] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):
