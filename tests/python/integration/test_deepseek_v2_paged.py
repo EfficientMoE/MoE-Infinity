@@ -5,7 +5,16 @@ import types
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import pytest
 import torch
+
+_repo_root = Path(__file__).resolve().parents[3]
+_v2_dir = _repo_root / "moe_infinity" / "models" / "modeling_deepseek_v2"
+if not _v2_dir.is_dir():
+    pytest.skip(
+        "vendored modeling_deepseek_v2 removed; migrated to upstream transformers",
+        allow_module_level=True,
+    )
 
 from moe_infinity.runtime.attention_types import KVCacheSpec
 
@@ -23,16 +32,14 @@ if (
 
 
 def _load_deepseek_v2_modeling_module() -> ModuleType:
-    repo_root = Path(__file__).resolve().parents[3]
-    models_dir = repo_root / "moe_infinity" / "models"
-    v2_dir = models_dir / "modeling_deepseek_v2"
+    models_dir = _repo_root / "moe_infinity" / "models"
 
     models_pkg = types.ModuleType("moe_infinity.models")
     models_pkg.__path__ = [str(models_dir)]
     sys.modules["moe_infinity.models"] = models_pkg
 
     v2_pkg = types.ModuleType("moe_infinity.models.modeling_deepseek_v2")
-    v2_pkg.__path__ = [str(v2_dir)]
+    v2_pkg.__path__ = [str(_v2_dir)]
     sys.modules["moe_infinity.models.modeling_deepseek_v2"] = v2_pkg
 
     module_name = "moe_infinity.models.modeling_deepseek_v2.modeling_deepseek"
@@ -42,7 +49,7 @@ def _load_deepseek_v2_modeling_module() -> ModuleType:
 
     spec = importlib.util.spec_from_file_location(
         module_name,
-        v2_dir / "modeling_deepseek.py",
+        _v2_dir / "modeling_deepseek.py",
     )
     if spec is None or spec.loader is None:
         raise RuntimeError("failed to load modeling_deepseek module spec")

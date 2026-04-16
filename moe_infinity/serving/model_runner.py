@@ -138,7 +138,9 @@ class ModelRunner:
 
         logits = self._extract_logits(outputs)
         if logits.dim() == 3:
-            token_mask = model_inputs["attention_mask"].to(dtype=torch.bool)
+            token_mask = model_inputs["attention_mask"].to(
+                dtype=torch.bool, device=logits.device
+            )
             logits = logits[token_mask]
         elif logits.dim() != 2:
             raise ValueError(

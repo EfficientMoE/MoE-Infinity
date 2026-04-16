@@ -1,10 +1,34 @@
+import importlib.machinery
+import sys
+import types
+
 import torch  # pyright: ignore[reportMissingImports]
+
+
+def _ensure_flash_attn_stub_has_spec() -> None:
+    flash_attn_module = sys.modules.get("flash_attn")
+    if flash_attn_module is None:
+        flash_attn_module = types.ModuleType("flash_attn")
+        flash_attn_module.__spec__ = importlib.machinery.ModuleSpec(
+            "flash_attn", loader=None
+        )
+        sys.modules["flash_attn"] = flash_attn_module
+    elif getattr(flash_attn_module, "__spec__", None) is None:
+        flash_attn_module.__spec__ = importlib.machinery.ModuleSpec(
+            "flash_attn", loader=None
+        )
+
+
+_ensure_flash_attn_stub_has_spec()
+
 from transformers import DeepseekV2Config, DeepseekV3Config
 from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
     DeepseekV2Attention,
+    DeepseekV2RotaryEmbedding,
 )
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
     DeepseekV3Attention,
+    DeepseekV3RotaryEmbedding,
 )
 
 from tests.python.ops.conftest import (
@@ -30,6 +54,16 @@ def _zero_attention_mask(
     )
 
 
+def _build_v2_position_embeddings(config, hidden_states, position_ids):
+    rotary_emb = DeepseekV2RotaryEmbedding(config)
+    return rotary_emb(hidden_states, position_ids)
+
+
+def _build_v3_position_embeddings(config, hidden_states, position_ids):
+    rotary_emb = DeepseekV3RotaryEmbedding(config)
+    return rotary_emb(hidden_states, position_ids)
+
+
 @requires_cuda
 def test_deepseek_v2_mla_forward_is_finite_and_deterministic(seed_everything):
     config = DeepseekV2Config(
@@ -44,6 +78,7 @@ def test_deepseek_v2_mla_forward_is_finite_and_deterministic(seed_everything):
         v_head_dim=8,
         attention_dropout=0.0,
     )
+    config._attn_implementation = "eager"
     attn = DeepseekV2Attention(config, layer_idx=0).cuda().bfloat16().eval()
 
     hidden_states = torch.randn(
@@ -58,19 +93,20 @@ def test_deepseek_v2_mla_forward_is_finite_and_deterministic(seed_everything):
     position_ids = _zero_position_ids(
         hidden_states.size(0), hidden_states.size(1), hidden_states.device
     )
+    position_embeddings = _build_v2_position_embeddings(
+        config, hidden_states, position_ids
+    )
 
     with torch.no_grad():
-        out_1, _, _ = attn(
+        out_1, _ = attn(
             hidden_states,
             attention_mask=attention_mask,
-            position_ids=position_ids,
-            use_cache=False,
+            position_embeddings=position_embeddings,
         )
-        out_2, _, _ = attn(
+        out_2, _ = attn(
             hidden_states,
             attention_mask=attention_mask,
-            position_ids=position_ids,
-            use_cache=False,
+            position_embeddings=position_embeddings,
         )
 
     assert out_1.shape == hidden_states.shape
@@ -99,6 +135,7 @@ def test_deepseek_v3_attention_forward_is_finite_and_deterministic(
         v_head_dim=8,
         attention_dropout=0.0,
     )
+    config._attn_implementation = "eager"
     attn = DeepseekV3Attention(config, layer_idx=0).cuda().bfloat16().eval()
 
     hidden_states = torch.randn(
@@ -113,19 +150,20 @@ def test_deepseek_v3_attention_forward_is_finite_and_deterministic(
     position_ids = _zero_position_ids(
         hidden_states.size(0), hidden_states.size(1), hidden_states.device
     )
+    position_embeddings = _build_v3_position_embeddings(
+        config, hidden_states, position_ids
+    )
 
     with torch.no_grad():
-        out_1, _, _ = attn(
+        out_1, _ = attn(
             hidden_states,
             attention_mask=attention_mask,
-            position_ids=position_ids,
-            use_cache=False,
+            position_embeddings=position_embeddings,
         )
-        out_2, _, _ = attn(
+        out_2, _ = attn(
             hidden_states,
             attention_mask=attention_mask,
-            position_ids=position_ids,
-            use_cache=False,
+            position_embeddings=position_embeddings,
         )
 
     assert out_1.shape == hidden_states.shape

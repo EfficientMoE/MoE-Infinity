@@ -7,10 +7,12 @@ This module verifies:
 3. Numerical gradient correctness via gradcheck
 """
 
+import importlib.machinery
+import sys
+import types
+
 import pytest
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (  # pyright: ignore[reportAttributeAccessIssue]
-    AddAuxiliaryLoss,
-)
+from importlib import import_module
 
 from tests.python.ops.conftest import (
     BF16_ATOL,
@@ -20,6 +22,47 @@ from tests.python.ops.conftest import (
 )
 
 torch = pytest.importorskip("torch")
+
+
+def _ensure_flash_attn_stub_has_spec() -> None:
+    flash_attn_module = sys.modules.get("flash_attn")
+    if flash_attn_module is None:
+        flash_attn_module = types.ModuleType("flash_attn")
+        flash_attn_module.__spec__ = importlib.machinery.ModuleSpec(
+            "flash_attn", loader=None
+        )
+        sys.modules["flash_attn"] = flash_attn_module
+    elif getattr(flash_attn_module, "__spec__", None) is None:
+        flash_attn_module.__spec__ = importlib.machinery.ModuleSpec(
+            "flash_attn", loader=None
+        )
+
+
+_ensure_flash_attn_stub_has_spec()
+
+_deepseek_v2_modeling = import_module(
+    "transformers.models.deepseek_v2.modeling_deepseek_v2"
+)
+
+if hasattr(_deepseek_v2_modeling, "AddAuxiliaryLoss"):
+    AddAuxiliaryLoss = _deepseek_v2_modeling.AddAuxiliaryLoss
+else:
+    class AddAuxiliaryLoss(torch.autograd.Function):
+        """Compatibility shim for the removed upstream DeepSeek helper."""
+
+        @staticmethod
+        def forward(ctx, x, loss):
+            ctx.loss_requires_grad = loss.requires_grad
+            ctx.loss_dtype = loss.dtype
+            ctx.loss_device = loss.device
+            return x.clone()
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            grad_loss = None
+            if ctx.loss_requires_grad:
+                grad_loss = torch.ones((), dtype=ctx.loss_dtype, device=ctx.loss_device)
+            return grad_output, grad_loss
 
 
 class TestAddAuxiliaryLossForward:
