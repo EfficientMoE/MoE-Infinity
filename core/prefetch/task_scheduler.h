@@ -83,12 +83,10 @@ class ArcherTaskPool : public base::noncopyable {
 
   ArcherTaskPool();
   ~ArcherTaskPool() {
-    std::cout << "ArcherTaskPool destructor" << std::endl;
-    main_thread_stop_flag_.store(true);
-    // wait for all threads to stop
+    main_thread_stop_flag_.store(true, std::memory_order_release);
     for (auto& thread_list : exec_threads_) {
       for (auto& thread : thread_list) {
-        thread.join();
+        if (thread.joinable()) thread.detach();
       }
     }
   }

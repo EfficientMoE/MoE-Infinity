@@ -16,12 +16,18 @@
 #include "aio/archer_tensor_index.h"
 #include "common/time.h"
 #include "common/types.h"
+#include "memory/event_pool.h"
 #include "memory/memory_pool.h"
 #include "memory/stream_pool.h"
 #include "parallel/expert_dispatcher.h"
 #include "prefetch/task_scheduler.h"
 #include "utils/logger.h"
 #include "utils/tqdm.h"
+
+#include <fcntl.h>
+#include <map>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // cudaStream_t kCudaStreamH2D = NULL;
 std::unique_ptr<ArcherTopologyHandle> kTopologyHandle = nullptr;
@@ -51,7 +57,16 @@ Node::Node()
       default_device(DEFAULT_CUDA_DEVICE) {}
 
 void Node::SetDevice(const torch::Device& target_device, bool on_demand,
-                     cudaStream_t stream) {
+                     cudaStream_t stream, cudaEvent_t* transfer_event) {
+  if (transfer_event != nullptr) {
+    *transfer_event = nullptr;
+  }
+  auto sync_stream_with_event = [](cudaStream_t sync_stream) {
+    cudaEvent_t sync_event = kCudaEventPool->Acquire();
+    cudaEventRecord(sync_event, sync_stream);
+    cudaEventSynchronize(sync_event);
+    kCudaEventPool->Release(sync_event);
+  };
   DLOG_TRACE("SetDevice: " + str() + " to " + target_device.str());
   if (device == target_device) {
     DLOG_TRACE("SetDevice: " + str() + " to " + target_device.str() +
@@ -108,22 +123,42 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
       std::int64_t param_offset = 0;
       for (const auto& tensor_id : tensor_ids) {
         // Read tensor from disk into host buffer
-        kArcherTensorHandle->ReadTensor(
-            tensor_id, static_cast<char*>(host_memory_ptr) + param_offset,
-            on_demand);
+        {
+#ifndef NVTX_DISABLE
+          nvtx3::scoped_range r_disk_cpu("disk_to_cpu");
+#endif
+          kArcherTensorHandle->ReadTensor(
+              tensor_id, static_cast<char*>(host_memory_ptr) + param_offset,
+              on_demand);
+        }
 
         auto it = kTensorIndex->find(tensor_id);
         std::int64_t size_aligned =
             (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
 
         // Async copy this tensor's data to GPU (overlaps with next disk read)
-        CudaMemcpyAsync(static_cast<char*>(device_memory_ptr) + param_offset,
-                        static_cast<char*>(host_memory_ptr) + param_offset,
-                        size_aligned, cudaMemcpyHostToDevice, h2d_stream);
+        {
+#ifndef NVTX_DISABLE
+          nvtx3::scoped_range r_h2d("cpu_to_gpu");
+#endif
+          CudaMemcpyAsync(static_cast<char*>(device_memory_ptr) + param_offset,
+                          static_cast<char*>(host_memory_ptr) + param_offset,
+                          size_aligned, cudaMemcpyHostToDevice, h2d_stream);
+        }
 
         param_offset += size_aligned;
       }
-      cudaStreamSynchronize(h2d_stream);
+      {
+#ifndef NVTX_DISABLE
+        nvtx3::scoped_range r_sync("cuda_stream_sync");
+#endif
+        if (transfer_event != nullptr && !own_stream) {
+          *transfer_event = kCudaEventPool->Acquire();
+          cudaEventRecord(*transfer_event, h2d_stream);
+        } else {
+          sync_stream_with_event(h2d_stream);
+        }
+      }
       if (own_stream) {
         cudaStreamDestroy(h2d_stream);
       }
@@ -140,7 +175,12 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
       assert(host_memory_ptr != nullptr);
 
       auto start_time = MCIROSECONDS_SINCE_EPOCH;
-      SetModuleMemoryFromDisk(tensor_ids, host_memory_ptr, on_demand);
+      {
+#ifndef NVTX_DISABLE
+        nvtx3::scoped_range r_disk_cpu("disk_to_cpu");
+#endif
+        SetModuleMemoryFromDisk(tensor_ids, host_memory_ptr, on_demand);
+      }
       auto end_time = MCIROSECONDS_SINCE_EPOCH;
       DLOG_TRACE("SetModuleMemoryFromDisk time: {} us", end_time - start_time);
     }
@@ -157,9 +197,24 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
         CudaMemcpy(device_memory_ptr, host_memory_ptr, byte_size,
                    cudaMemcpyHostToDevice);
       } else {
-        CudaMemcpyAsync(device_memory_ptr, host_memory_ptr, byte_size,
-                        cudaMemcpyHostToDevice, stream);
-        cudaStreamSynchronize(stream);
+        {
+#ifndef NVTX_DISABLE
+          nvtx3::scoped_range r_h2d("cpu_to_gpu");
+#endif
+          CudaMemcpyAsync(device_memory_ptr, host_memory_ptr, byte_size,
+                          cudaMemcpyHostToDevice, stream);
+        }
+        {
+#ifndef NVTX_DISABLE
+          nvtx3::scoped_range r_sync("cuda_stream_sync");
+#endif
+          if (transfer_event != nullptr) {
+            *transfer_event = kCudaEventPool->Acquire();
+            cudaEventRecord(*transfer_event, stream);
+          } else {
+            sync_stream_with_event(stream);
+          }
+        }
       }
       SetModuleCudaMemoryFromCPU(tensor_ids, device_memory_ptr, target_device);
       auto end_time = MCIROSECONDS_SINCE_EPOCH;
@@ -170,9 +225,14 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
     if (target_device.is_cpu() && device.is_cuda()) {
       assert(host_memory_ptr != nullptr);
       auto start_time = MCIROSECONDS_SINCE_EPOCH;
-      SetModuleMemoryFromCuda(tensor_ids, host_memory_ptr);
-      kDeviceMemoryPool->FreeMemory(id, device_memory_ptr, byte_size, device);
-      device_memory_ptr = nullptr;
+      {
+#ifndef NVTX_DISABLE
+        nvtx3::scoped_range r_d2h("gpu_to_cpu");
+#endif
+        SetModuleMemoryFromCuda(tensor_ids, host_memory_ptr);
+        kDeviceMemoryPool->FreeMemory(id, device_memory_ptr, byte_size, device);
+        device_memory_ptr = nullptr;
+      }
       auto end_time = MCIROSECONDS_SINCE_EPOCH;
       DLOG_TRACE("SetModuleMemoryFromCuda time: {} us", end_time - start_time);
     }
@@ -575,10 +635,94 @@ void ArcherTopologyHandle::InitializeTopology(
   dense_nodes.back()->default_device = torch::Device(torch::kCUDA, num_gpu - 1);
 
   DLOG_INFO("Moving sparse parameters to CPU");
-  for (auto& node_ptr : tqdm::tqdm(sparse_nodes)) {
-    node_ptr->default_device = torch::Device(torch::kCUDA, target_device_id);
-    target_device_id = (target_device_id + 1) % num_gpu;
-    node_ptr->SetDevice(CPU_DEVICE, false);
+  if (!sparse_nodes.empty()) {
+    std::map<uint32_t, std::vector<size_t>> nodes_by_partition;
+    for (size_t i = 0; i < sparse_nodes.size(); i++) {
+      auto fid =
+          kTensorIndex->find(sparse_nodes[i]->tensor_ids[0])->second.file_id;
+      nodes_by_partition[fid].push_back(i);
+    }
+
+    auto read_partition =
+        [](const std::string& filename) -> std::pair<void*, int64_t> {
+      struct stat st;
+      if (stat(filename.c_str(), &st) != 0) return {nullptr, 0};
+      int64_t file_size = st.st_size;
+      void* buf = nullptr;
+      if (posix_memalign(&buf, 4096, file_size) != 0) return {nullptr, 0};
+      int fd = open(filename.c_str(), O_RDONLY);
+      if (fd < 0) {
+        free(buf);
+        return {nullptr, 0};
+      }
+      int64_t total = 0;
+      while (total < file_size) {
+        auto n = ::read(fd, static_cast<char*>(buf) + total,
+                        std::min(file_size - total,
+                                 static_cast<int64_t>(256 * 1024 * 1024)));
+        if (n <= 0) break;
+        total += n;
+      }
+      close(fd);
+      return {buf, file_size};
+    };
+
+    std::vector<uint32_t> partition_ids;
+    for (auto& [fid, _] : nodes_by_partition) partition_ids.push_back(fid);
+    std::sort(partition_ids.begin(), partition_ids.end());
+
+    for (size_t pi = 0; pi < partition_ids.size(); pi++) {
+      auto [buf, buf_size] = read_partition(
+          kArcherTensorHandle->GetIndexFileName(partition_ids[pi]));
+      assert(buf != nullptr);
+
+      uint32_t current_fid = partition_ids[pi];
+      DLOG_INFO("Processing partition ", current_fid, " (",
+                buf_size / (1024 * 1024), " MB, ",
+                nodes_by_partition[current_fid].size(), " nodes)");
+
+      for (auto idx : nodes_by_partition[current_fid]) {
+        auto& node_ptr = sparse_nodes[idx];
+        node_ptr->default_device =
+            torch::Device(torch::kCUDA, target_device_id);
+        target_device_id = (target_device_id + 1) % num_gpu;
+
+        node_ptr->host_memory_ptr = kHostMemoryPool->AllocateMemory(
+            node_ptr->id, node_ptr->byte_size, CPU_DEVICE);
+        assert(node_ptr->host_memory_ptr != nullptr);
+
+        int64_t param_offset = 0;
+        bool need_fallback = false;
+        for (auto& tensor_id : node_ptr->tensor_ids) {
+          auto it = kTensorIndex->find(tensor_id);
+          auto& meta = it->second;
+          int64_t size_aligned =
+              (static_cast<int64_t>(meta.size) + kAioAlignment - 1) &
+              ~(kAioAlignment - 1);
+
+          if (meta.file_id == current_fid) {
+            memcpy(static_cast<char*>(node_ptr->host_memory_ptr) + param_offset,
+                   static_cast<char*>(buf) + meta.offset, meta.size);
+          } else {
+            kArcherTensorHandle->ReadTensor(
+                tensor_id,
+                static_cast<char*>(node_ptr->host_memory_ptr) + param_offset,
+                false);
+            need_fallback = true;
+          }
+          param_offset += size_aligned;
+        }
+        if (need_fallback) {
+          DLOG_WARN("Node ", node_ptr->id,
+                    " has cross-partition tensors, used ReadTensor fallback");
+        }
+
+        SetModuleMemoryFromDisk_Views(node_ptr->tensor_ids,
+                                      node_ptr->host_memory_ptr);
+        node_ptr->device = CPU_DEVICE;
+      }
+      free(buf);
+    }
   }
 
   DLOG_TRACE("InitializeTopology pipeline_.stages.size() {}",
@@ -691,11 +835,47 @@ std::mutex kReadMutex;
 // DISK -> CPU
 void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
                              bool on_demand) {
+  if (tensor_ids.empty()) return;
+
+  // Check whether all tensors sit contiguously in the same partition file.
+  // If so, read the whole region in one I/O call instead of per-tensor.
+  bool contiguous = true;
+  auto first_it = kTensorIndex->find(tensor_ids[0]);
+  std::uint32_t file_id = first_it->second.file_id;
+  std::int64_t start_offset = first_it->second.offset;
+  std::int64_t expected_offset = start_offset;
+  std::int64_t total_aligned = 0;
+
+  for (const auto& tensor_id : tensor_ids) {
+    auto it = kTensorIndex->find(tensor_id);
+    std::int64_t sz =
+        (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
+    if (it->second.file_id != file_id || it->second.offset != expected_offset) {
+      contiguous = false;
+      break;
+    }
+    expected_offset += sz;
+    total_aligned += sz;
+  }
+
+  if (contiguous && total_aligned > 0) {
+    auto filename = kArcherTensorHandle->GetIndexFileName(file_id);
+    kArcherTensorHandle->ReadBulk(filename, host_ptr, on_demand, total_aligned,
+                                  start_offset);
+  } else {
+    std::int64_t offset = 0;
+    for (const auto& tensor_id : tensor_ids) {
+      kArcherTensorHandle->ReadTensor(
+          tensor_id, static_cast<char*>(host_ptr) + offset, on_demand);
+      auto it = kTensorIndex->find(tensor_id);
+      std::int64_t sz =
+          (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
+      offset += sz;
+    }
+  }
+
   std::int64_t param_size = 0;
   for (const auto& tensor_id : tensor_ids) {
-    // void* old_ptr = kTensorIndex->find(tensor_id)->second.tensor.data_ptr();
-    kArcherTensorHandle->ReadTensor(
-        tensor_id, (void*)((char*)host_ptr + param_size), on_demand);
     auto it = kTensorIndex->find(tensor_id);
     auto options = torch::TensorOptions()
                        .dtype(it->second.options.dtype())
@@ -706,7 +886,7 @@ void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
 
     DLOG_TRACE("SetModuleMemoryFromDisk tensor {}", it->second.DebugString());
     auto tensor_tmp =
-        torch::from_blob((void*)((char*)host_ptr + param_size),
+        torch::from_blob(static_cast<char*>(host_ptr) + param_size,
                          it->second.shape, DoNothingDeleter<void>{}, options);
     if (!it->second.tensor.defined()) {
       it->second.tensor = torch::zeros({1}, options);

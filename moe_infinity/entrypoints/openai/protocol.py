@@ -1,3 +1,5 @@
+# pyright: reportAny=false, reportAssignmentType=false, reportCallIssue=false, reportDeprecated=false, reportExplicitAny=false, reportImplicitOverride=false, reportMissingParameterType=false, reportMissingTypeArgument=false, reportReturnType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnusedVariable=false
+
 # Copyright 2024 TorchMoE Team
 
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,21 +22,73 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
 import uuid
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, root_validator
 
 
 def random_uuid():
     return str(uuid.uuid4())
 
 
-class ErrorResponse(BaseModel):
-    object: str = "error"
+class ErrorDetail(BaseModel):
     message: str
     type: str
     param: Optional[str] = None
-    code: int
+    code: str
+
+
+class ErrorResponse(BaseModel):
+    error: ErrorDetail
+    request_id: Optional[str] = None
+    debug: Optional[Any] = None
+
+    @root_validator(pre=True)
+    def _normalize_legacy_error_fields(cls, values):
+        if isinstance(values, dict) and "error" not in values:
+            legacy_keys = {
+                key: values[key]
+                for key in ("message", "type", "param", "code")
+                if key in values
+            }
+            if legacy_keys:
+                values = dict(values)
+                for key in legacy_keys:
+                    values.pop(key, None)
+                values["error"] = legacy_keys
+        return values
+
+    def dict(self, *args, **kwargs):
+        data = super().dict(*args, **kwargs)
+        if not kwargs.get("exclude_none"):
+            if self.request_id is None:
+                data.pop("request_id", None)
+            if self.debug is None:
+                data.pop("debug", None)
+        return data
+
+
+def create_error_response(
+    status_code: int,
+    message: str,
+    error_type: str,
+    code: str,
+    param: Optional[str] = None,
+    request_id: Optional[str] = None,
+    debug: Optional[Any] = None,
+) -> JSONResponse:
+    body = ErrorResponse(
+        error=ErrorDetail(
+            message=message,
+            type=error_type,
+            code=code,
+            param=param,
+        ),
+        request_id=request_id,
+        debug=debug,
+    ).dict()
+    return JSONResponse(status_code=status_code, content=body)
 
 
 class ModelPermission(BaseModel):
@@ -49,7 +103,7 @@ class ModelPermission(BaseModel):
     allow_fine_tuning: bool = False
     organization: str = "*"
     group: Optional[str] = None
-    is_blocking: str = False
+    is_blocking: bool = False
 
 
 class ModelCard(BaseModel):
@@ -73,6 +127,10 @@ class UsageInfo(BaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class ResponseFormat(BaseModel):
+    type: str = "text"
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: Union[str, List[Dict[str, str]]]
@@ -82,6 +140,9 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    logprobs: Optional[bool] = False
+    top_logprobs: Optional[int] = None
+    response_format: Optional[ResponseFormat] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
@@ -89,7 +150,10 @@ class ChatCompletionRequest(BaseModel):
 
     def to_hf_params(
         self,
-    ) -> Dict[str, Union[str, int, float, List[int], List[str]]]:
+    ) -> Dict[
+        str,
+        Union[str, int, float, List[int], List[str], Dict[str, float], None],
+    ]:
         return {
             "temperature": self.temperature,
             "top_p": self.top_p,
@@ -103,7 +167,7 @@ class CompletionRequest(BaseModel):
     # a string, array of strings, array of tokens, or array of token arrays
     prompt: Union[List[int], List[List[int]], str, List[str]]
     suffix: Optional[str] = None
-    max_tokens: Optional[int] = 1024
+    max_tokens: Optional[int] = None
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
@@ -114,12 +178,16 @@ class CompletionRequest(BaseModel):
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     best_of: Optional[int] = None
+    response_format: Optional[ResponseFormat] = None
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
 
     def to_hf_params(
         self,
-    ) -> Dict[str, Union[str, int, float, List[int], List[str]]]:
+    ) -> Dict[
+        str,
+        Union[str, int, float, List[int], List[str], Dict[str, float], None],
+    ]:
         echo_without_generation = self.echo and self.max_tokens == 0
 
         return {
@@ -142,7 +210,7 @@ class CompletionResponseChoice(BaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "error"]] = None
 
 
 class CompletionResponse(BaseModel):
@@ -158,7 +226,7 @@ class CompletionResponseStreamChoice(BaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "error"]] = None
 
 
 class CompletionStreamResponse(BaseModel):
@@ -178,7 +246,8 @@ class ChatMessage(BaseModel):
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    logprobs: Optional[LogProbs] = None
+    finish_reason: Optional[Literal["stop", "length", "error"]] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -198,7 +267,7 @@ class DeltaMessage(BaseModel):
 class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "error"]] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):

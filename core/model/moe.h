@@ -121,7 +121,7 @@ class MoELayer : public base::noncopyable {
 
   void* _buffer(BufferType type) { return buffer_[static_cast<int>(type)]; }
 
-  std::tuple<torch::Tensor, torch::Tensor> TopKSoftmax(
+  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> TopKSoftmax(
       torch::Tensor& gating_outputs) {
     // Perform the gating operation on stream_
     c10::cuda::CUDAStream torch_stream =
@@ -169,12 +169,13 @@ class MoELayer : public base::noncopyable {
     topk_softmax(TENSOR_INS(TopKWeights), TENSOR_INS(TopKIndices),
                  TENSOR_INS(TokenExpertIndices),
                  logits);  // [max_tokens, topk]
-    // std::cout << "TopKIndices started on device: "
-    //           << TENSOR_INS(TopKIndices) << std::endl;
+    cudaMemsetAsync(BUFFER_PTR(ExpertRouterMask, void), 0,
+                    num_tokens * num_experts_ * sizeof(uint32_t), stream_);
+    cudaMemsetAsync(BUFFER_PTR(ExpertRouterWeight, void), 0,
+                    num_tokens * num_experts_ * sizeof(float), stream_);
 
     TENSOR_INS(TopKWeights) =
-        TENSOR_INS(TopKWeights) /
-        TENSOR_INS(TopKWeights).sum(1, true);  // Normalize top-k weights
+        TENSOR_INS(TopKWeights) / TENSOR_INS(TopKWeights).sum(1, true);
 
     auto routing_weights = TENSOR_INS(TopKWeights).to(torch::kBFloat16);
 
@@ -185,19 +186,6 @@ class MoELayer : public base::noncopyable {
                                    torch::TensorOptions()
                                        .dtype(torch::kBool)
                                        .device(CUDA_DEVICE(device_id_))));
-    // std::cout << "TokenExpertIndices started on device: "
-    //           << TENSOR_INS(TokenExpertIndices) << std::endl;
-
-    cudaMemsetAsync(BUFFER_PTR(ExpertRouterMask, void), 0,
-                    num_tokens * num_experts_ * sizeof(uint32_t),
-                    stream_);  // Initialize router mask
-    cudaMemsetAsync(BUFFER_PTR(ExpertRouterWeight, void), 0,
-                    num_tokens * num_experts_ * sizeof(float),
-                    stream_);  // Initialize router weights
-
-    TENSOR_INS(ExpertRouterMask)
-        .scatter_(1, TENSOR_INS(TopKIndices),
-                  true);  // Set router mask based on top-k indices
 
     TENSOR_INS(ExpertRouterWeight)
         .set_data(torch::from_blob(BUFFER_PTR(ExpertRouterWeight, void),
@@ -207,15 +195,15 @@ class MoELayer : public base::noncopyable {
                                        .dtype(torch::kBFloat16)
                                        .device(CUDA_DEVICE(device_id_))));
 
-    cudaStreamSynchronize(stream_);  // Ensure all operations are complete
+    cudaStreamSynchronize(stream_);
+
+    TENSOR_INS(ExpertRouterMask).scatter_(1, TENSOR_INS(TopKIndices), true);
 
     TENSOR_INS(ExpertRouterWeight)
-        .scatter_add_(1, TENSOR_INS(TopKIndices),
-                      routing_weights);  // Set routing weights mask
-    // std::cout << "TopKSoftmax completed on device: " <<
-    // TENSOR_INS(ExpertRouterMask)
-    //           << std::endl;
-    return std::make_tuple(TENSOR_INS(ExpertRouterMask),
+        .scatter_add_(1, TENSOR_INS(TopKIndices), routing_weights);
+
+    return std::make_tuple(TENSOR_INS(TopKIndices),
+                           TENSOR_INS(ExpertRouterMask),
                            TENSOR_INS(ExpertRouterWeight));
   }
 
@@ -329,5 +317,5 @@ static std::unique_ptr<MoELayer> moe_layer_ptr = nullptr;
 static std::once_flag moe_layer_init_flag;
 void InitMoELayer(int num_experts, int topk, int max_tokens, int64_t hidden_dim,
                   int64_t intermediate_dim);
-std::tuple<torch::Tensor, torch::Tensor> TopKSoftmax(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> TopKSoftmax(
     torch::Tensor& gating_outputs);

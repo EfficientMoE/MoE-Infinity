@@ -1,0 +1,15 @@
+{
+  "status": "SKIP",
+  "phase": 1,
+  "description": "Event-based sync numerical correctness gate",
+  "reason": "GPU not available or model offload directory not found",
+  "gpu_available": false,
+  "offload_dir": null,
+  "cuda_error": null,
+  "assert_close_result": "SKIP",
+  "prompts": 3,
+  "tokens": 20,
+  "baseline_bubble_ratio": 0.8715,
+  "note":
+      "Run on a CUDA-enabled host with downloaded offload weights to produce PASS/FAIL."
+}

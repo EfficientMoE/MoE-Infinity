@@ -1,0 +1,50 @@
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ccache cmake ninja-build git uuid-dev \
+    libnvtoolsext1 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CCACHE_DIR=/ccache
+ENV CCACHE_MAXSIZE=10G
+ENV PATH=/usr/lib/ccache:${PATH}
+RUN mkdir -p ${CCACHE_DIR}
+
+ARG CUTLASS_REPO=https://github.com/NVIDIA/cutlass.git
+ARG CUTLASS_VERSION=v3.9.2
+ARG CUTLASS_NVCC_ARCHS=86
+ENV CUTLASS_DIR=/root/cutlass
+
+RUN git clone --branch ${CUTLASS_VERSION} --depth 1 ${CUTLASS_REPO} ${CUTLASS_DIR}
+RUN --mount=type=cache,target=/ccache \
+    cmake -B ${CUTLASS_DIR}/build -S ${CUTLASS_DIR} \
+    -DCUTLASS_ENABLE_LIBRARY=ON \
+    -DCUTLASS_NVCC_ARCHS=${CUTLASS_NVCC_ARCHS} \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    && cmake --build ${CUTLASS_DIR}/build --target cutlass_library -j$(nproc)
+
+RUN git clone --branch v3.2.2 --depth 1 https://github.com/NVIDIA/NVTX.git /tmp/nvtx \
+    && cp -a /tmp/nvtx/c/include/nvtx3/. /usr/local/cuda/include/nvtx3/ \
+    && rm -rf /tmp/nvtx
+
+WORKDIR /workspace/MoE-Infinity
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir setuptools>=75 wheel ninja py-cpuinfo
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN --mount=type=cache,target=/ccache \
+    CUTLASS_DIR=${CUTLASS_DIR} pip install --no-cache-dir --no-build-isolation -e .
+
+ENV LD_PRELOAD=/usr/local/cuda/lib64/libnvToolsExt.so
+
+RUN ls -lh moe_infinity/*.so && python -c "import moe_infinity; print('OK')"
+
+ENTRYPOINT ["python", "benchmarks/mxfp4_benchmark.py"]
+CMD ["--model", "openai/gpt-oss-20b", "--mode", "both", "--offload-dir", "/offload", "--num-requests", "10"]

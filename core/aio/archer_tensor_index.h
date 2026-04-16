@@ -49,7 +49,16 @@ class ArcherTensorIndex
   ArcherTensorIndex() = default;
   ~ArcherTensorIndex() = default;
 
- private:
+  int64_t GetOffset(const std::vector<TensorID>& tensor_ids) const {
+    int64_t offset = INT64_MAX;
+    for (const auto& tensor_id : tensor_ids) {
+      auto it = this->find(tensor_id);
+      if (it != this->end()) {
+        offset = std::min(offset, it->second.offset);
+      }
+    }
+    return offset;
+  }
 };
 
 extern std::unique_ptr<ArcherTensorIndex> kTensorIndex;

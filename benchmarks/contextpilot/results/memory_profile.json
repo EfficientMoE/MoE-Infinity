@@ -1,0 +1,8 @@
+{
+  "baseline_rss_mb": 13.457,
+  "after_100_rss_mb": 13.543,
+  "after_500_rss_mb": 13.914,
+  "after_1000_rss_mb": 14.379,
+  "peak_cp_index_mb": 0.926,
+  "within_2gb_cap": true
+}

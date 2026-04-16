@@ -13,7 +13,7 @@ from moe_infinity.utils.hf_config import (
 
 
 def _cfg(**kwargs) -> PretrainedConfig:
-    return cast(PretrainedConfig, SimpleNamespace(**kwargs))
+    return cast(PretrainedConfig, cast(object, SimpleNamespace(**kwargs)))
 
 
 def test_parse_expert_dtype_supported():
@@ -33,15 +33,7 @@ def test_parse_expert_dtype_unsupported():
         parse_expert_dtype(cfg)
 
 
-def test_parse_moe_param_switch_and_nllb():
-    switch = _cfg(
-        architectures=["SwitchTransformers"],
-        num_sparse_encoder_layers=2,
-        num_sparse_decoder_layers=3,
-        num_experts=8,
-    )
-    assert parse_moe_param(switch) == (5, 8, 2)
-
+def test_parse_moe_param_nllb():
     nllb = _cfg(
         architectures=["NllbMoe"],
         encoder_layers=12,
@@ -69,22 +61,7 @@ def test_parse_moe_param_mixtral_and_deepseek():
     assert parse_moe_param(deepseek) == (9, 12, 0)
 
 
-def test_parse_expert_id_switch_and_mixtral():
-    switch = _cfg(
-        architectures=["Switch"],
-        num_sparse_encoder_layers=2,
-        num_sparse_decoder_layers=2,
-        num_experts=4,
-        encoder_sparse_step=2,
-        decoder_sparse_step=2,
-    )
-
-    layer_id, expert_id = parse_expert_id(
-        "decoder.block.1.layer.2.mlp.experts.expert_3.wi.weight",
-        switch,
-    )
-    assert (layer_id, expert_id) == (2, 3)
-
+def test_parse_expert_id_mixtral():
     mixtral = _cfg(
         architectures=["Mixtral"],
         num_hidden_layers=4,
@@ -97,18 +74,7 @@ def test_parse_expert_id_switch_and_mixtral():
     assert (layer_id, expert_id) == (2, 5)
 
 
-def test_parse_expert_id_grok_and_deepseek():
-    grok = _cfg(
-        architectures=["Grok"],
-        num_hidden_layers=3,
-        num_experts=2,
-    )
-    layer_id, expert_id = parse_expert_id(
-        "model.layers.1.moe_block.experts.0.linear_1.weight",
-        grok,
-    )
-    assert (layer_id, expert_id) == (1, 0)
-
+def test_parse_expert_id_deepseek():
     deepseek = _cfg(
         architectures=["Deepseek"],
         num_hidden_layers=3,

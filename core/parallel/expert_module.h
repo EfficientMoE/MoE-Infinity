@@ -11,8 +11,6 @@
 
 // Expert type enum
 enum class ExpertType {
-  SwitchTransformersDenseActDense = 0,
-  SwitchTransformersDenseGatedActDense = 1,
   NllbMoeDenseActDense = 2,
   FSGPTMoeDenseActDense = 3,
   MixtralMoeDenseActDense = 4,
@@ -25,23 +23,6 @@ enum class ActivationType { ReLU, GELU, SiLU, Identity };
 // Base traits for expert architectures
 template <ExpertType T>
 struct ExpertTraits;
-
-template <>
-struct ExpertTraits<ExpertType::SwitchTransformersDenseActDense> {
-  static constexpr size_t num_weights = 2;
-  static constexpr size_t num_biases = 0;
-  static constexpr std::array<const char*, 2> weight_names = {"wi", "wo"};
-  static constexpr std::array<const char*, 0> bias_names = {};
-};
-
-template <>
-struct ExpertTraits<ExpertType::SwitchTransformersDenseGatedActDense> {
-  static constexpr size_t num_weights = 3;
-  static constexpr size_t num_biases = 0;
-  static constexpr std::array<const char*, 3> weight_names = {"wi_0", "wi_1",
-                                                              "wo"};
-  static constexpr std::array<const char*, 0> bias_names = {};
-};
 
 template <>
 struct ExpertTraits<ExpertType::NllbMoeDenseActDense> {
@@ -146,26 +127,6 @@ class Expert : public torch::nn::Module {
 
 // Forward specializations
 template <>
-inline torch::Tensor
-Expert<ExpertType::SwitchTransformersDenseActDense>::forward(
-    torch::Tensor hidden_states, cudaStream_t stream) {
-  return torch::matmul(
-      torch::relu(torch::matmul(hidden_states, weights_[0].transpose(0, 1).to(
-                                                   hidden_states.dtype()))),
-      weights_[1].transpose(0, 1).to(hidden_states.dtype()));
-}
-
-template <>
-inline torch::Tensor
-Expert<ExpertType::SwitchTransformersDenseGatedActDense>::forward(
-    torch::Tensor hidden_states, cudaStream_t stream) {
-  auto gate =
-      torch::gelu(torch::matmul(hidden_states, weights_[0].transpose(0, 1)));
-  auto linear = torch::matmul(hidden_states, weights_[1].transpose(0, 1));
-  return torch::matmul(torch::mul(gate, linear), weights_[2].transpose(0, 1));
-}
-
-template <>
 inline torch::Tensor Expert<ExpertType::NllbMoeDenseActDense>::forward(
     torch::Tensor hidden_states, cudaStream_t stream) {
   return torch::matmul(torch::relu(torch::matmul(hidden_states,
@@ -207,10 +168,6 @@ inline torch::Tensor Expert<ExpertType::DeepSeekMoeDenseActDense>::forward(
 }
 
 // Type aliases for compatibility
-using SwitchTransformersDenseActDense =
-    Expert<ExpertType::SwitchTransformersDenseActDense>;
-using SwitchTransformersDenseGatedActDense =
-    Expert<ExpertType::SwitchTransformersDenseGatedActDense>;
 using NllbMoeDenseActDense = Expert<ExpertType::NllbMoeDenseActDense>;
 using FSGPTMoEDenseActDense = Expert<ExpertType::FSGPTMoeDenseActDense>;
 using MixtralMoEDenseActDense = Expert<ExpertType::MixtralMoeDenseActDense>;
@@ -220,8 +177,6 @@ using DeepSeekMoEDenseActDense = Expert<ExpertType::DeepSeekMoeDenseActDense>;
   #define EXPERT_TYPE 0
 #endif
 
-#define SWITCH_TRANSFORMERS_DENSE_ACT_DENSE 0
-#define SWITCH_TRANSFORMERS_DENSE_GATED_ACT_DENSE 1
 #define NLLB_MOE_DENSE_ACT_DENSE 2
 #define FSGPT_MOE_DENSE_ACT_DENSE 3
 #define MIXTRAL_MOE_DENSE_ACT_DENSE 4

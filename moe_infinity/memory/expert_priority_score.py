@@ -11,40 +11,12 @@ decay_from_last = lambda x, L: 1 / (L + 1) * x
 layer_decay = lambda x, l: (x + 1) / np.abs(l - x + 1)
 
 
-def convert_score_matrix_to_list(score_matrix: np.ndarray):
-    score_list = []
-    for layer_idx, layer in enumerate(score_matrix):
-        for expert_idx, r in enumerate(layer):
-            if r > 0:
-                score_list.append(ExpertCacheEntry(expert_idx, layer_idx, r))
-    return score_list
-
-
 def lru_score(cache_entries: Set[ExpertCacheEntry]):
     lru_score = []
     for entry in cache_entries:
         lru_score.append(
             ExpertCacheEntry(entry.expert_idx, entry.layer_idx, entry.timestamp)
         )
-    return lru_score
-
-
-def lru_score_with_layers(cache_entries: Set[ExpertCacheEntry], current_layer):
-    lru_score = []
-    for entry in cache_entries:
-        if (
-            entry.layer_idx >= current_layer
-            and entry.layer_idx < current_layer + 3
-        ):
-            lru_score.append(
-                ExpertCacheEntry(entry.expert_idx, entry.layer_idx, 1e10)
-            )
-        else:
-            lru_score.append(
-                ExpertCacheEntry(
-                    entry.expert_idx, entry.layer_idx, entry.timestamp
-                )
-            )
     return lru_score
 
 
@@ -62,23 +34,6 @@ def lfu_score(expert_freq: dict):
         lfu_score.append(ExpertCacheEntry(expert_idx, layer_idx, value / sum))
 
     return lfu_score
-
-
-def oracle_score(expert_freq: dict, decoder_entry: ExpertTraceEntry):
-    frequency_score = np.zeros_like(decoder_entry.matrix)
-    frequency_sum = 0
-
-    for key, value in expert_freq.items():
-        frequency_score[key[1], key[0]] = value
-        frequency_sum += value
-
-    if frequency_sum == 0:
-        frequency_sum = 1
-        frequency_score = np.ones_like(frequency_score)
-
-    frequency_score = frequency_score / frequency_sum + 1e-6
-
-    return convert_score_matrix_to_list(frequency_score)
 
 
 def priority_score(
@@ -169,4 +124,9 @@ def priority_score(
     decoder_matrix = decoder_matrix / np.sum(decoder_matrix) + 1e-6
     total_score = topo_expert_score * decoder_matrix * frequency_score
 
-    return convert_score_matrix_to_list(total_score)
+    score_list = []
+    for layer_idx, layer in enumerate(total_score):
+        for expert_idx, r in enumerate(layer):
+            if r > 0:
+                score_list.append(ExpertCacheEntry(expert_idx, layer_idx, r))
+    return score_list

@@ -34,6 +34,18 @@ ignore = [
     "B007"
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "gpu: requires CUDA device",
+    "multi_gpu: requires >= 2 CUDA devices",
+    "slow: long-running test (> 60s)",
+    "integration: cross-module / end-to-end test",
+    "network: requires external network or HuggingFace Hub",
+    "perf: performance benchmark (not part of regression suite)",
+]
+
 [tool.mypy]
 files = ["moe_infinity/utils/hf_config.py", "moe_infinity/utils/config.py"]
 follow_imports = "skip"

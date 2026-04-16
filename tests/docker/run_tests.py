@@ -8,6 +8,7 @@ Test orchestrator for MoE-Infinity I/O integration tests.
 4. Reports summary, exits non-zero on failure.
 """
 
+import os
 import subprocess
 import sys
 
@@ -65,6 +66,20 @@ def main():
     else:
         print("\nCUDA not available — skipping Tier 2 tests")
 
+    # Run Tier 3 if CUDA is available and GPT_OSS_E2E env var is set
+    tier3_ok = True
+    if cuda_available and os.environ.get("GPT_OSS_E2E", "0") == "1":
+        tier3_ok = run_pytest(
+            "tests/docker/test_gpt_oss_e2e.py",
+            "cuda",
+            "Tier 3: GPT-OSS 20b E2E (CUDA + Network)",
+        )
+    else:
+        if not cuda_available:
+            print("\nCUDA not available — skipping Tier 3 (GPT-OSS E2E)")
+        else:
+            print("\nGPT_OSS_E2E=1 not set — skipping Tier 3 (GPT-OSS E2E)")
+
     # Summary
     print(f"\n{'=' * 60}")
     print("  Test Summary")
@@ -75,8 +90,12 @@ def main():
         print(f"  Tier 2 (CUDA):    {'PASSED' if tier2_ok else 'FAILED'}")
     else:
         print("  Tier 2 (CUDA):    SKIPPED")
+    if cuda_available and os.environ.get("GPT_OSS_E2E", "0") == "1":
+        print(f"  Tier 3 (GPT-OSS): {'PASSED' if tier3_ok else 'FAILED'}")
+    else:
+        print("  Tier 3 (GPT-OSS): SKIPPED")
 
-    all_ok = tier1_ok and unit_ok and tier2_ok
+    all_ok = tier1_ok and unit_ok and tier2_ok and tier3_ok
     print(f"\n  Overall: {'PASSED' if all_ok else 'FAILED'}")
     print(f"{'=' * 60}")
     return 0 if all_ok else 1

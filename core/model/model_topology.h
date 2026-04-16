@@ -12,9 +12,14 @@
 #include <memory>
 #include <vector>
 
+#ifndef NVTX_DISABLE
+  #include <nvtx3/nvtx3.hpp>
+#endif
+
 #include "base/noncopyable.h"
 #include "common/pytorch.h"
 #include "common/types.h"
+#include "memory/event_pool.h"
 #include "memory/memory_pool.h"
 
 enum NodeState {
@@ -22,6 +27,12 @@ enum NodeState {
   NODE_STATE_CACHED = 0x1,
   NODE_STATE_PREFETCHED = 0x2,
   NODE_STATE_VISITED = 0x4,
+};
+
+enum class NodeExecState : uint8_t {
+  IDLE = 0,
+  FETCHING = 1,
+  EXECUTING = 2,
 };
 
 // extern cudaStream_t kCudaStreamH2D;
@@ -43,7 +54,11 @@ struct Node {
 
   std::atomic_uint8_t state{0};  // 0 for ready, 1 for moving
 
-  std::mutex mutex;
+  std::mutex
+      mutex;  // DEPRECATED: use exec_state for dispatch/prefetch coordination
+  std::atomic<NodeExecState> exec_state{NodeExecState::IDLE};
+  std::atomic<bool> is_prefetching{false};
+  std::atomic<int> pending_dispatches{0};
   std::condition_variable cv;
 
   float cache_priority = 0.0;
@@ -62,7 +77,8 @@ struct Node {
   explicit Node();
   const std::string str();
   void SetDevice(const torch::Device& target_device, bool ondemand = false,
-                 cudaStream_t stream = nullptr);
+                 cudaStream_t stream = nullptr,
+                 cudaEvent_t* transfer_event = nullptr);
 };
 
 typedef std::shared_ptr<Node> NodePtr;

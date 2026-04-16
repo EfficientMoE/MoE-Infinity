@@ -14,138 +14,47 @@ def softmax_kernel(
     BLOCK_SIZE: tl.constexpr,
     num_stages: tl.constexpr,
 ):
-    # starting row of the program
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
     for row_idx in tl.range(row_start, n_rows, row_step, num_stages=num_stages):
-        # The stride represents how much we need to increase the pointer to advance 1 row
         row_start_ptr = input_ptr + row_idx * input_row_stride
-        # The block size is the next power of two greater than n_cols, so we can fit each
-        # row in a single block
         col_offsets = tl.arange(0, BLOCK_SIZE)
         input_ptrs = row_start_ptr + col_offsets
-        # Load the row into SRAM, using a mask since BLOCK_SIZE may be > than n_cols
         mask = col_offsets < n_cols
         row = tl.load(input_ptrs, mask=mask, other=-float("inf"))
-        # Subtract maximum for numerical stability
         row_minus_max = row - tl.max(row, axis=0)
-        # Note that exponentiation in Triton is fast but approximate (i.e., think __expf in CUDA)
         numerator = tl.exp(row_minus_max)
         denominator = tl.sum(numerator, axis=0)
         softmax_output = numerator / denominator
-        # Write back output to DRAM
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         output_ptrs = output_row_start_ptr + col_offsets
         tl.store(output_ptrs, softmax_output, mask=mask)
 
 
-@triton.jit
-def fused_softmax_topk_kernel(
-    hidden_ptr,  # [B, H]
-    weight_ptr,  # [H, E]
-    bias_ptr,
-    routing_mask_ptr,  # [B, E] (bool)
-    routing_weight_ptr,  # [B, E] (float16)
-    B: tl.constexpr,
-    H: tl.constexpr,
-    E: tl.constexpr,
-    TOPK: tl.constexpr,
-    BLOCK_E: tl.constexpr,
-    normalize_topk: tl.constexpr,
-):
-    batch_id = tl.program_id(0)
-    off_e = tl.arange(0, BLOCK_E)
-
-    # [E] logits init
-    logits = tl.zeros([BLOCK_E], dtype=tl.float32)
-
-    for h in range(0, H):
-        hidden_val = tl.load(hidden_ptr + batch_id * H + h)
-        weight_row = weight_ptr + h * E + off_e
-        w = tl.load(weight_row, mask=off_e < E, other=0.0)
-        logits += hidden_val * w
-
-    logits += tl.load(bias_ptr + off_e, mask=off_e < E, other=0.0)
-    logits = tl.where(off_e < E, logits, -float("inf"))
-
-    # Compute softmax
-    max_logit = tl.max(logits, axis=0)
-    logits = logits - max_logit
-    exp_logits = tl.exp(logits)
-    sum_exp = tl.sum(exp_logits, axis=0)
-    probs = exp_logits / sum_exp
-
-    # Top-k selection (insertion sort)
-    top_vals = tl.full([TOPK], -float("inf"), dtype=tl.float32)
-    top_idxs = tl.full([TOPK], -1, dtype=tl.int32)
-
-    for i in range(BLOCK_E):
-        p = probs[i]
-        idx = i
-
-        # insert into sorted list
-        for j in range(TOPK):
-            if p > top_vals[j]:
-                for k in range(TOPK - 1, j, -1):
-                    top_vals[k] = top_vals[k - 1]
-                    top_idxs[k] = top_idxs[k - 1]
-                top_vals[j] = p
-                top_idxs[j] = idx
-                break
-
-    # normalize
-    if normalize_topk:
-        sum_top = tl.sum(top_vals)
-        top_vals = top_vals / sum_top
-
-    for i in range(TOPK):
-        expert_idx = top_idxs[i]
-        expert_val = top_vals[i]
-        if expert_idx >= 0:
-            tl.store(routing_mask_ptr + batch_id * E + expert_idx, True)
-            tl.store(
-                routing_weight_ptr + batch_id * E + expert_idx,
-                expert_val.to(tl.float16),
-            )
-
-
-def launch_fused_softmax_topk(hidden_states, weight, bias, top_k):
-    B, H = hidden_states.shape
-    E = weight.shape[1]
-    dtype = hidden_states.dtype
-
-    routing_mask = torch.zeros(
-        (B, E), dtype=torch.bool, device=hidden_states.device
+def launch_softmax(input_tensor):
+    n_rows, n_cols = input_tensor.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols)
+    num_stages = 4 if BLOCK_SIZE <= 2048 else 2
+    output = torch.empty_like(input_tensor)
+    softmax_kernel[(n_rows,)](
+        output,
+        input_tensor,
+        input_tensor.stride(0),
+        output.stride(0),
+        n_rows,
+        n_cols,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_stages=num_stages,
     )
-    routing_weight = torch.zeros(
-        (B, E), dtype=dtype, device=hidden_states.device
-    )
-
-    BLOCK_E = triton.next_power_of_2(E)
-
-    fused_softmax_topk_kernel[(B,)](
-        hidden_states,
-        weight,
-        bias,
-        routing_mask,
-        routing_weight,
-        B=B,
-        H=H,
-        E=E,
-        TOPK=top_k,
-        BLOCK_E=BLOCK_E,
-        normalize_topk=True,
-    )
-
-    return routing_mask, routing_weight
+    return output
 
 
 @triton.jit
 def fused_softmax_topk_kernel_nobias(
-    hidden_ptr,  # [B, H]
-    weight_ptr,  # [E, H]
-    routing_mask_ptr,  # [B, E]
-    routing_weight_ptr,  # [B, E]
+    hidden_ptr,
+    weight_ptr,
+    routing_mask_ptr,
+    routing_weight_ptr,
     B: tl.constexpr,
     H: tl.constexpr,
     E: tl.constexpr,
@@ -167,43 +76,34 @@ def fused_softmax_topk_kernel_nobias(
 
     logits = tl.where(off_e < E, logits, -float("inf"))
 
-    # Softmax
     max_logit = tl.max(logits, axis=0)
     logits = logits - max_logit
     exp_logits = tl.exp(logits)
     sum_exp = tl.sum(exp_logits, axis=0)
     probs = exp_logits / sum_exp
 
-    # Top-k (insertion sort)
-    top_vals = tl.full([TOPK], -float("inf"), dtype=tl.float32)
-    top_idxs = tl.full([TOPK], -1, dtype=tl.int32)
+    remaining = tl.where(off_e < E, probs, -float("inf"))
+    top_mask = tl.zeros([BLOCK_E], dtype=tl.int1)
 
-    for i in range(BLOCK_E):
-        if i < E:
-            p = probs[i]
-            idx = i
+    for _k in range(TOPK):
+        cur_max = tl.max(remaining, axis=0)
+        is_max = remaining == cur_max
+        first = is_max & (tl.cumsum(is_max.to(tl.int32), axis=0) == 1)
+        top_mask = top_mask | first
+        remaining = tl.where(first, -float("inf"), remaining)
 
-            for j in range(TOPK):
-                if p > top_vals[j]:
-                    for k in range(TOPK - 1, j, -1):
-                        top_vals[k] = top_vals[k - 1]
-                        top_idxs[k] = top_idxs[k - 1]
-                    top_vals[j] = p
-                    top_idxs[j] = idx
-                    break
+    top_probs = tl.where(top_mask, probs, tl.zeros([BLOCK_E], dtype=tl.float32))
 
     if normalize_topk:
-        sum_top = tl.sum(top_vals)
-        top_vals = top_vals / sum_top
+        top_sum = tl.sum(top_probs, axis=0)
+        top_probs = top_probs / top_sum
 
-    for i in range(TOPK):
-        idx = top_idxs[i]
-        val = top_vals[i]
-        if idx >= 0:
-            tl.store(routing_mask_ptr + batch_id * E + idx, True)
-            tl.store(
-                routing_weight_ptr + batch_id * E + idx, val.to(tl.float16)
-            )
+    tl.store(routing_mask_ptr + batch_id * E + off_e, top_mask, mask=off_e < E)
+    tl.store(
+        routing_weight_ptr + batch_id * E + off_e,
+        top_probs.to(tl.bfloat16),
+        mask=off_e < E,
+    )
 
 
 def launch_fused_softmax_topk_nobias(

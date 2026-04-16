@@ -1,4 +1,5 @@
 # Copyright 2022 The HuggingFace Team. All rights reserved.
+# pyright: reportMissingImports=false, reportConstantRedefinition=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportMissingTypeArgument=false, reportImplicitStringConcatenation=false, reportAny=false
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +17,11 @@ import json
 import os
 from typing import Union
 
-from accelerate.utils.constants import SAFE_WEIGHTS_NAME, WEIGHTS_NAME
+try:
+    from accelerate.utils.constants import SAFE_WEIGHTS_NAME, WEIGHTS_NAME
+except Exception:
+    WEIGHTS_NAME = "pytorch_model.bin"
+    SAFE_WEIGHTS_NAME = "model.safetensors"
 
 
 def get_checkpoint_paths(checkpoint: Union[str, os.PathLike]):

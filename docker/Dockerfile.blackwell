@@ -1,0 +1,60 @@
+# MoE-Infinity Blackwell (SM120) Full Build + MXFP4 Benchmark
+#
+# Usage:
+#   DOCKER_BUILDKIT=1 docker build -t moe-infinity-blackwell -f docker/Dockerfile.blackwell .
+#   docker run --gpus '"device=0"' --ipc=host --ulimit memlock=-1 moe-infinity-blackwell
+
+FROM nvcr.io/nvidia/pytorch:25.11-py3
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ccache cmake ninja-build git uuid-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CCACHE_DIR=/ccache
+ENV CCACHE_MAXSIZE=10G
+ENV PATH=/usr/lib/ccache:${PATH}
+RUN mkdir -p ${CCACHE_DIR}
+
+# CUDA 13.0 moved nvToolsExt.h into nvtx3/ subdirectory.
+# The vendored nvtx3.hpp does #include "nvToolsExt.h" expecting it at include root.
+RUN ln -sf /usr/local/cuda/include/nvtx3/nvToolsExt.h /usr/local/cuda/include/nvToolsExt.h 2>/dev/null || true
+
+ARG CUTLASS_REPO=https://github.com/NVIDIA/cutlass.git
+ARG CUTLASS_VERSION=v4.4.0
+ARG CUTLASS_NVCC_ARCHS=120
+ENV CUTLASS_DIR=/root/cutlass
+
+RUN git clone --branch ${CUTLASS_VERSION} --depth 1 ${CUTLASS_REPO} ${CUTLASS_DIR}
+RUN --mount=type=cache,target=/ccache \
+    cmake -B ${CUTLASS_DIR}/build -S ${CUTLASS_DIR} \
+    -DCUTLASS_ENABLE_LIBRARY=ON \
+    -DCUTLASS_NVCC_ARCHS=${CUTLASS_NVCC_ARCHS} \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    && cmake --build ${CUTLASS_DIR}/build --target cutlass_library -j$(nproc)
+
+RUN git clone --branch v3.2.2 --depth 1 https://github.com/NVIDIA/NVTX.git /tmp/nvtx \
+    && cp -a /tmp/nvtx/c/include/nvtx3/. /usr/local/cuda/include/nvtx3/ \
+    && rm -rf /tmp/nvtx \
+    && test -f /usr/local/cuda/include/nvtx3/nvtx3.hpp
+
+WORKDIR /workspace/MoE-Infinity
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir setuptools>=75 wheel ninja py-cpuinfo pytest pytest-timeout
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --no-deps contextpilot && \
+    pip install --no-cache-dir elasticsearch ujson
+
+COPY . .
+
+RUN --mount=type=cache,target=/ccache \
+    MOE_ENABLE_SM120=1 MOE_ENABLE_SM90=0 NVTX_DISABLE=1 CUTLASS_DIR=${CUTLASS_DIR} \
+    pip install --no-cache-dir --no-build-isolation -e .
+
+RUN ls -lh moe_infinity/*.so && python -c "import moe_infinity; print('OK: moe_infinity imported')"
+
+CMD ["pytest", "-xvs", "tests/test_mxfp4_kernel.py"]

@@ -1,6 +1,7 @@
 import argparse
 import os
 
+import torch
 from transformers import AutoTokenizer
 
 from moe_infinity import MoE
@@ -18,9 +19,17 @@ parser.add_argument(
     default=os.path.join(os.path.expanduser("~"), "moe-infinity"),
     help="Directory for offloading expert weights",
 )
+parser.add_argument(
+    "--max_new_tokens",
+    type=int,
+    default=64,
+    help="Maximum tokens to generate",
+)
 args = parser.parse_args()
 
-tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, trust_remote=True)
+tokenizer = AutoTokenizer.from_pretrained(
+    args.checkpoint, trust_remote_code=True
+)
 
 config = {
     "offload_path": args.offload_dir,
@@ -29,10 +38,20 @@ config = {
 
 model = MoE(args.checkpoint, config)
 
-input_text = "translate English to German: How old are you?"
-input_ids = tokenizer(input_text, return_tensors="pt").input_ids.to("cuda:0")
+prompt = tokenizer.apply_chat_template(
+    [{"role": "user", "content": "What is 2+3? Answer briefly."}],
+    tokenize=False,
+    add_generation_prompt=True,
+)
+input_ids = tokenizer.encode(prompt, return_tensors="pt").to("cuda:0")
 
-output_ids = model.generate(input_ids)
+with torch.no_grad():
+    output_ids = model.generate(
+        input_ids,
+        max_new_tokens=args.max_new_tokens,
+        do_sample=False,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+
 output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-
 print(output_text)

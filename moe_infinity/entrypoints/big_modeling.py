@@ -1,22 +1,12 @@
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportCallIssue=false, reportUnannotatedClassAttribute=false, reportUninitializedInstanceVariable=false, reportPrivateUsage=false, reportPrivateLocalImportUsage=false, reportUnusedImport=false, reportUnusedCallResult=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportExplicitAny=false, reportAny=false, reportArgumentType=false, reportOperatorIssue=false, reportImplicitStringConcatenation=false, reportUnnecessaryComparison=false, reportUnreachable=false, reportMissingTypeArgument=false, reportDeprecated=false, reportGeneralTypeIssues=false
+
 import os
 import warnings
-from typing import Any, Dict, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 import torch
-import transformers
-from accelerate.utils.versions import is_torch_version
-from huggingface_hub import snapshot_download
-from transformers import AutoConfig
 
 import moe_infinity
-from moe_infinity.common.constants import MODEL_MAPPING_NAMES
-from moe_infinity.models import (
-    apply_rotary_pos_emb,
-    apply_rotary_pos_emb_deepseek,
-)
-from moe_infinity.models.modeling_arctic import ArcticConfig
-from moe_infinity.runtime import OffloadEngine
-from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
 
 warnings.filterwarnings("ignore")
 
@@ -40,7 +30,7 @@ class MoE:
     ```python
     >>> from moe_infinity import MoE
 
-    >>> checkpoint = "google/switch-base-128"
+    >>> checkpoint = "deepseek-ai/DeepSeek-V2-Lite-Chat"
     >>> config = "config.json"
     >>> model = MoE(checkpoint, config)
 
@@ -55,8 +45,25 @@ class MoE:
         model_name_or_path: Union[str, os.PathLike],
         config: Union[str, os.PathLike, Dict] = None,
     ) -> None:
+        try:
+            from accelerate.utils.versions import is_torch_version
+        except Exception:
+            is_torch_version = None
+
+        try:
+            from huggingface_hub import snapshot_download
+        except Exception as exc:
+            raise RuntimeError(
+                "huggingface_hub is required to load model checkpoints"
+            ) from exc
+
+        from moe_infinity.common.constants import MODEL_MAPPING_NAMES
+        from moe_infinity.runtime import OffloadEngine
+        from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
+        from moe_infinity.utils.hf_config import ensure_config_compat
+
         # TODO: remove the torch version check once older versions are supported
-        if not is_torch_version(">=", "2.0"):
+        if is_torch_version is not None and not is_torch_version(">=", "2.0"):
             raise RuntimeError(
                 "The `load_checkpoint_and_dispatch` function requires PyTorch >= 2.0. "
                 "Please update PyTorch."
@@ -72,15 +79,17 @@ class MoE:
                     f"Please provide a configuration file or create a default one at {default_config_path}."
                 )
             config = default_config_path
-        if "arctic" in model_name_or_path:
-            model_config = ArcticConfig.from_pretrained(
-                model_name_or_path, trust_remote_code=True
-            )
-        else:
-            model_config = AutoConfig.from_pretrained(
-                model_name_or_path, trust_remote_code=True
-            )
-        architecture = model_config.architectures[0].lower()
+
+        from transformers import AutoConfig
+
+        model_config = AutoConfig.from_pretrained(
+            model_name_or_path, trust_remote_code=True
+        )
+        model_config = ensure_config_compat(model_config)
+        architectures = getattr(model_config, "architectures", None)
+        if not architectures or not isinstance(architectures, list):
+            raise RuntimeError("Unable to resolve model architecture")
+        architecture = str(architectures[0]).lower()
 
         arch = None
         for supp_arch in MODEL_MAPPING_NAMES:
@@ -119,7 +128,42 @@ class MoE:
         else:
             engine_config = ArcherConfig.load_from_file(config)
 
-        self.engine = OffloadEngine(engine_config.trace_capacity, model_config)
+        self.use_native_engine = bool(
+            getattr(engine_config, "use_native_engine", True)
+        )
+        default_max_seq_length = getattr(
+            model_config, "max_position_embeddings", None
+        )
+        self.max_seq_length = (
+            int(default_max_seq_length)
+            if isinstance(default_max_seq_length, int)
+            else 4096
+        )
+
+        native_components = self._build_native_components(
+            model_config=model_config,
+            engine_config=engine_config,
+        )
+        attention_backend = native_components.get("attention_backend")
+        kv_cache_manager = native_components.get("kv_cache_manager")
+
+        self.engine = OffloadEngine(
+            engine_config.trace_capacity,
+            model_config,
+            attention_backend=attention_backend,
+            enable_attention_offload=attention_backend is not None,
+            kv_cache_manager=kv_cache_manager,
+            enable_kv_cache_offload=(
+                bool(
+                    getattr(
+                        engine_config,
+                        "enable_kv_cache_offload",
+                        False,
+                    )
+                )
+                and kv_cache_manager is not None
+            ),
+        )
         self.engine.ckpt_files = checkpoint_paths
         # self.engine.save(config.offload_path, checkpoint_paths)
         is_flash_attn_available = False
@@ -129,19 +173,20 @@ class MoE:
             is_flash_attn_available = True
 
             if (
-                arch == "switch"
-                or arch == "deepseek"
+                arch == "deepseek"
                 or arch == "deepseek_v3"
                 or arch == "nllb"
+                or arch == "gptoss"
             ):
                 is_flash_attn_available = False
         except ImportError:
             print(
                 "[WARNING] FlashAttention is not available in the current environment. Using default attention."
             )
-        with self.engine.init(cls=model_cls, ar_config=config):
+        with self.engine.init(cls=model_cls, ar_config=engine_config):
             self.model = model_cls.from_pretrained(
                 model_name_or_path,
+                config=model_config,
                 attn_implementation=(
                     "flash_attention_2" if is_flash_attn_available else "eager"
                 ),
@@ -149,20 +194,351 @@ class MoE:
                 trust_remote_code=True,
             )
 
+        self._ensure_generation_mixin()
+        self.engine_config = engine_config
+
+    def _ensure_generation_mixin(self):
+        from transformers import GenerationConfig
+        from transformers.generation.utils import GenerationMixin
+
+        if not hasattr(self.model, "generate"):
+            cls = self.model.__class__
+            self.model.__class__ = type(
+                cls.__name__,
+                (GenerationMixin, cls),
+                {},
+            )
+        if getattr(self.model, "generation_config", None) is None:
+            self.model.generation_config = GenerationConfig.from_model_config(
+                self.model.config
+            )
+
+    @staticmethod
+    def _resolve_model_int_attr(
+        model_config: object, *names: str
+    ) -> Optional[int]:
+        for name in names:
+            value = getattr(model_config, name, None)
+            if isinstance(value, int):
+                return value
+        return None
+
+    @staticmethod
+    def _resolve_torch_dtype(model_config: object) -> torch.dtype:
+        torch_dtype = getattr(model_config, "torch_dtype", None)
+        if isinstance(torch_dtype, torch.dtype):
+            return torch_dtype
+        if isinstance(torch_dtype, str):
+            mapping = {
+                "float16": torch.float16,
+                "half": torch.float16,
+                "float32": torch.float32,
+                "float": torch.float32,
+                "bfloat16": torch.bfloat16,
+            }
+            return mapping.get(torch_dtype.replace("torch.", ""), torch.float16)
+        return torch.float16
+
+    def _build_native_components(
+        self, model_config: object, engine_config: object
+    ) -> dict[str, object]:
+        if not self.use_native_engine:
+            self._native_memory_coordinator = None
+            self._native_kv_cache_manager = None
+            self._native_attention_backend = None
+            self._native_transfer_scheduler = None
+            self._native_scheduler = None
+            self._native_generation_engine = None
+            self._native_kv_offload_coordinator = None
+            return {}
+
+        from moe_infinity.engine.generation_loop import GenerationEngine
+        from moe_infinity.engine.scheduler import Scheduler
+        from moe_infinity.engine.unified_transfer_scheduler import (
+            UnifiedTransferScheduler,
+        )
+        from moe_infinity.memory.kv_cache_manager import KVCacheManager
+        from moe_infinity.memory.memory_coordinator import MemoryCoordinator
+        from moe_infinity.runtime.attention_backend import PagedAttentionBackend
+        from moe_infinity.runtime.attention_types import KVCacheSpec
+
+        model_num_layers = self._resolve_model_int_attr(
+            model_config,
+            "num_hidden_layers",
+            "num_layers",
+            "n_layer",
+        )
+        num_layers = model_num_layers if model_num_layers is not None else 1
+
+        num_attention_heads = self._resolve_model_int_attr(
+            model_config,
+            "num_attention_heads",
+            "n_head",
+        )
+        if num_attention_heads is None:
+            num_attention_heads = 1
+
+        num_kv_heads = self._resolve_model_int_attr(
+            model_config,
+            "num_key_value_heads",
+            "num_kv_heads",
+            "n_head_kv",
+        )
+        if num_kv_heads is None:
+            num_kv_heads = num_attention_heads
+
+        head_dim = self._resolve_model_int_attr(model_config, "head_dim")
+        if head_dim is None:
+            hidden_size = self._resolve_model_int_attr(
+                model_config, "hidden_size", "n_embd"
+            )
+            if hidden_size is None:
+                hidden_size = max(1, num_attention_heads * 128)
+            head_dim = max(1, hidden_size // max(1, num_attention_heads))
+
+        vocab_size = self._resolve_model_int_attr(model_config, "vocab_size")
+        if vocab_size is None:
+            vocab_size = 32000
+
+        eos_token_id = getattr(model_config, "eos_token_id", 2)
+        if isinstance(eos_token_id, list):
+            eos_token_id = eos_token_id[0] if eos_token_id else 2
+        if not isinstance(eos_token_id, int):
+            eos_token_id = 2
+
+        if (
+            self.use_native_engine
+            and getattr(engine_config, "kv_cache_memory_ratio", 0.0) == 0.0
+        ):
+            setattr(engine_config, "kv_cache_memory_ratio", 0.15)
+            warnings.warn(
+                "kv_cache_memory_ratio was 0.0 with use_native_engine=True; auto-set to 0.15.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        memory_coordinator = MemoryCoordinator.from_config(
+            {
+                "device_memory_ratio": float(
+                    getattr(engine_config, "device_memory_ratio", 0.75)
+                ),
+                "kv_cache_memory_ratio": float(
+                    getattr(engine_config, "kv_cache_memory_ratio", 0.15)
+                ),
+                "use_native_engine": True,
+            }
+        )
+
+        kv_spec = KVCacheSpec(
+            num_kv_heads=int(num_kv_heads),
+            head_dim=int(head_dim),
+            dtype=self._resolve_torch_dtype(model_config),
+            block_size=16,
+        )
+
+        block_size_bytes = kv_spec.page_size_bytes * max(1, int(num_layers))
+        num_gpu_blocks = max(
+            1, memory_coordinator.compute_num_kv_blocks(block_size_bytes)
+        )
+        num_cpu_blocks = max(32, num_gpu_blocks * 2)
+
+        kv_cache_manager = KVCacheManager(
+            num_gpu_blocks=num_gpu_blocks,
+            num_cpu_blocks=num_cpu_blocks,
+            block_size=kv_spec.block_size,
+        )
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        try:
+            attention_backend = PagedAttentionBackend(
+                spec=kv_spec,
+                num_gpu_blocks=num_gpu_blocks,
+                device=device,
+            )
+        except Exception:
+            attention_backend = None
+        transfer_scheduler = UnifiedTransferScheduler()
+        kv_offload_coordinator = None
+        if getattr(engine_config, "enable_kv_cache_offload", False):
+            from moe_infinity.engine.kv_cache_offload_coordinator import (
+                KVCacheOffloadCoordinator,
+            )
+
+            # kv_tensors=None: The actual KV tensor storage (PagedAttentionBackend
+            # k_cache/v_cache) is not yet available at coordinator construction time.
+            # Call coordinator.set_kv_tensors(tensors) after model initialisation
+            # to enable real tensor copies. Until then, handlers are registered but
+            # copy operations are no-ops (guarded by `if self._kv_tensors is None`).
+            # This is intentional engine-path scaffolding per the plan scope.
+            kv_offload_coordinator = KVCacheOffloadCoordinator(
+                kv_tensors=None,
+                block_pool=None,
+                config=engine_config,
+            )
+            kv_offload_coordinator.register_with_scheduler(transfer_scheduler)
+
+        scheduler = Scheduler(
+            kv_cache_manager=kv_cache_manager,
+            transfer_scheduler=transfer_scheduler,
+        )
+
+        generation_engine = GenerationEngine(
+            kv_cache_manager=kv_cache_manager,
+            kv_spec=kv_spec,
+            num_layers=int(num_layers),
+            vocab_size=int(vocab_size),
+            model_forward_fn=self._native_model_forward,
+            eos_token_id=int(eos_token_id),
+            max_seq_length=self.max_seq_length,
+        )
+
+        max_seq_length = self._resolve_model_int_attr(
+            model_config,
+            "max_position_embeddings",
+            "n_positions",
+            "max_sequence_length",
+            "seq_length",
+        )
+        if max_seq_length is not None:
+            self.max_seq_length = max_seq_length
+            generation_engine.max_seq_length = max_seq_length
+
+        self._native_memory_coordinator = memory_coordinator
+        self._native_kv_cache_manager = kv_cache_manager
+        self._native_attention_backend = attention_backend
+        self._native_transfer_scheduler = transfer_scheduler
+        self._native_scheduler = scheduler
+        self._native_generation_engine = generation_engine
+        self._native_kv_offload_coordinator = kv_offload_coordinator
+
+        return {
+            "memory_coordinator": memory_coordinator,
+            "kv_cache_manager": kv_cache_manager,
+            "attention_backend": attention_backend,
+            "transfer_scheduler": transfer_scheduler,
+            "kv_offload_coordinator": kv_offload_coordinator,
+            "scheduler": scheduler,
+            "generation_engine": generation_engine,
+        }
+
+    def _native_model_forward(
+        self, token_ids: list[int], _attention_metadata: object
+    ) -> torch.Tensor:
+        input_tensor = torch.tensor([token_ids], dtype=torch.long)
+        if torch.cuda.is_available():
+            input_tensor = input_tensor.to("cuda:0")
+        else:
+            model_device = getattr(self.model, "device", None)
+            if isinstance(
+                model_device, torch.device
+            ) and model_device.type not in ("meta", "cpu"):
+                input_tensor = input_tensor.to(model_device)
+
+        is_prefill = True
+        if _attention_metadata is not None:
+            is_prefill = bool(getattr(_attention_metadata, "is_prefill", True))
+
+        paged_attention_classes = self._get_paged_attention_classes()
+        use_paged_context = bool(
+            paged_attention_classes
+            and _attention_metadata is not None
+            and getattr(self, "_native_attention_backend", None) is not None
+        )
+
+        extra_kwargs: dict = {}
+
+        if not use_paged_context:
+            # Non-paged path: use HF's KV cache for autoregressive decode.
+            # During prefill, use_cache=True captures past_key_values for
+            # subsequent decode steps.  During decode, the cached KV provides
+            # context from all prior tokens and lets HF auto-compute correct
+            # position_ids.
+            extra_kwargs["use_cache"] = True
+            if not is_prefill:
+                cached_kv = getattr(self, "_cached_past_key_values", None)
+                if cached_kv is not None:
+                    extra_kwargs["past_key_values"] = cached_kv
+        else:
+            # Paged path: the paged attention backend manages its own KV
+            # cache, but the model still needs correct position_ids for
+            # rotary embeddings during decode steps.
+            if not is_prefill and _attention_metadata is not None:
+                seq_lens = getattr(_attention_metadata, "seq_lens", None)
+                if seq_lens is not None and seq_lens.numel() > 0:
+                    current_pos = int(seq_lens[0].item()) - 1
+                    extra_kwargs["position_ids"] = torch.tensor(
+                        [[current_pos]], device=input_tensor.device
+                    )
+
+        with torch.no_grad():
+            if not use_paged_context:
+                outputs = self.model(input_tensor, **extra_kwargs)
+            else:
+                backend = self._native_attention_backend
+                for attn_cls in paged_attention_classes:
+                    attn_cls.set_paged_context(backend, _attention_metadata)
+                try:
+                    outputs = self.model(input_tensor, **extra_kwargs)
+                finally:
+                    for attn_cls in paged_attention_classes:
+                        attn_cls.clear_paged_context()
+
+        # Capture HF KV cache for next decode step (non-paged path only).
+        if not use_paged_context:
+            past_kv = getattr(outputs, "past_key_values", None)
+            if past_kv is not None:
+                self._cached_past_key_values = past_kv
+
+        logits = getattr(outputs, "logits", None)
+        if logits is None and isinstance(outputs, tuple) and outputs:
+            logits = outputs[0]
+        if logits is None:
+            raise RuntimeError("model forward did not return logits")
+        if not isinstance(logits, torch.Tensor):
+            raise RuntimeError("model logits must be a torch.Tensor")
+        if logits.ndim == 3:
+            return logits[0, -len(token_ids) :, :].detach().to("cpu")
+        if logits.ndim == 2:
+            return logits.detach().to("cpu")
+        raise RuntimeError(f"unexpected logits shape: {tuple(logits.shape)}")
+
+    def _get_paged_attention_classes(self) -> list[type[Any]]:
+        paged_class_names = {
+            "DeepseekV2PagedAttention",
+            "DeepseekV3PagedAttention",
+        }
+        classes: list[type[Any]] = []
+        seen: set[type[Any]] = set()
+
+        modules_fn = getattr(self.model, "modules", None)
+        if not callable(modules_fn):
+            return classes
+
+        for module in modules_fn():
+            cls = module.__class__
+            if cls in seen:
+                continue
+            if cls.__name__ not in paged_class_names:
+                continue
+            if not hasattr(cls, "set_paged_context") or not hasattr(
+                cls, "clear_paged_context"
+            ):
+                continue
+            seen.add(cls)
+            classes.append(cls)
+
+        return classes
+
     def _configure_hook(self, input_ids: torch.LongTensor):
+        import transformers
+
+        from moe_infinity.models import (
+            apply_rotary_pos_emb,
+        )
+
         if self.arch == "mixtral":
+            import moe_infinity.models.modeling_mixtral
+
             transformers.models.mixtral.modeling_mixtral.apply_rotary_pos_emb = apply_rotary_pos_emb
-
-        if self.arch == "grok":
-            moe_infinity.models.modeling_grok.modeling_grok1.apply_rotary_pos_emb = apply_rotary_pos_emb
-
-        if self.arch == "arctic":
-            moe_infinity.models.modeling_arctic.modeling_arctic.apply_rotary_pos_emb = apply_rotary_pos_emb
-
-        if self.arch == "deepseek" or self.arch == "deepseek_v3":
-            moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.apply_rotary_pos_emb = apply_rotary_pos_emb_deepseek
-            moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.apply_rotary_pos_emb = apply_rotary_pos_emb_deepseek
-            # apply_rotary_pos_emb is defined in deepseek and differs from this version.
 
         batch_size = input_ids.shape[0]
         self.seq_id_list = [
@@ -188,12 +564,109 @@ class MoE:
                 The generated sequences. Sequences shorter than `min_length` are padded with `pad_token_id`.
         """
 
-        self._configure_hook(input_ids)
+        with warnings.catch_warnings():
+            warnings.simplefilter("default", DeprecationWarning)
+            warnings.warn(
+                "MoE.generate() is deprecated. Use MoE.serve() for continuous batching "
+                "with higher throughput. MoE.generate() will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
+        if (
+            not self.use_native_engine
+            or self._native_generation_engine is None
+            or input_ids.ndim != 2
+            or input_ids.shape[0] != 1
+        ):
+            self._configure_hook(input_ids)
+            self.model.eval()
+            with torch.no_grad():
+                return self.model.generate(input_ids, **kwargs)
+
+        from moe_infinity.engine.types import SamplingParams
+
+        self._configure_hook(input_ids)
+        self._cached_past_key_values = None
         self.model.eval()
-        with torch.no_grad():
-            return self.model.generate(input_ids, **kwargs)
-        self.engine.expert_dispatcher.clear_expert_cache_counts()
+
+        prompt_token_ids = [int(token) for token in input_ids[0].tolist()]
+        if len(prompt_token_ids) > self.max_seq_length:
+            raise ValueError(
+                f"prompt length {len(prompt_token_ids)} exceeds max_seq_length {self.max_seq_length}"
+            )
+
+        max_tokens = kwargs.get("max_new_tokens", kwargs.get("max_tokens", 256))
+        sampling_params = SamplingParams(
+            temperature=float(kwargs.get("temperature", 1.0)),
+            top_p=float(kwargs.get("top_p", 1.0)),
+            top_k=int(kwargs.get("top_k", 0)),
+            max_tokens=int(max_tokens) if max_tokens is not None else 256,
+        )
+        try:
+            result = self._native_generation_engine.generate(
+                prompt_token_ids=prompt_token_ids,
+                sampling_params=sampling_params,
+            )
+        finally:
+            self._cached_past_key_values = None
+
+        output_ids = prompt_token_ids + result.output_token_ids
+        return torch.tensor(
+            [output_ids],
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
+
+    def serve(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8000,
+        device_memory_ratio: float = 0.75,
+        kv_cache_ratio: float = 0.25,
+        max_batch_size: int = 32,
+        enable_prefix_caching: bool = False,
+        offload_dir: Optional[str] = None,
+    ) -> None:
+        """
+        Start the OpenAI-compatible continuous batching server.
+
+        This is the recommended entry point for production serving.
+        Replaces the deprecated MoE.generate() for serving use cases.
+
+        Args:
+            host: Server host (default: 0.0.0.0)
+            port: Server port (default: 8000)
+            device_memory_ratio: GPU memory fraction for caching (default: 0.75)
+            kv_cache_ratio: Fraction of device_memory_ratio for KV cache (default: 0.25)
+            max_batch_size: Maximum concurrent sequences (default: 32)
+            enable_prefix_caching: Enable hash-based prefix caching (default: False)
+            offload_dir: Path to offload directory (required)
+        """
+
+        if offload_dir is None:
+            raise ValueError("offload_dir is required for MoE.serve()")
+
+        import importlib
+
+        from moe_infinity.entrypoints.openai import api_server_v2
+
+        model_name = getattr(
+            getattr(self.model, "config", None), "_name_or_path", None
+        )
+        api_server_v2.initialize_with_model(
+            moe_model=self,
+            model_name=model_name,
+            tok=getattr(self, "tokenizer", None),
+            max_seq_length=self.max_seq_length,
+            device_memory_ratio=device_memory_ratio,
+            kv_cache_ratio=kv_cache_ratio,
+            max_batch_size=max_batch_size,
+            enable_prefix_caching=enable_prefix_caching,
+        )
+
+        uvicorn = importlib.import_module("uvicorn")
+        uvicorn.run(api_server_v2.app, host=host, port=port)
 
     def forward(self, input_ids: torch.LongTensor, *args, **kwargs) -> Any:
         """

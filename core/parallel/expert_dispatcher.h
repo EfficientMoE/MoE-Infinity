@@ -5,13 +5,19 @@
 
 #pragma once
 
+#include <cuda_runtime_api.h>
 #include <torch/extension.h>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#ifndef NVTX_DISABLE
+  #include <nvtx3/nvtx3.hpp>
+#endif
 
 #include "common/sync.h"
 #include "base/noncopyable.h"
@@ -26,6 +32,9 @@ enum MUTEX_TYPE {
   PENDING_MUTEX = 3
 };
 
+struct CUevent_st;
+using cudaEvent_t = CUevent_st*;
+
 class ExpertDispatcher : public base::noncopyable {
  public:
   typedef struct {
@@ -33,6 +42,7 @@ class ExpertDispatcher : public base::noncopyable {
     int expert_idx = -1;
     int gpu_id = -1;
     bool remote = false;
+    bool wait_for_prefetch = false;
   } CallArgs;
   typedef struct {
     torch::Tensor hidden_states =
@@ -42,6 +52,7 @@ class ExpertDispatcher : public base::noncopyable {
     torch::ScalarType out_dtype = torch::kFloat32;
     bool evict = false;
     bool hit = false;
+    cudaEvent_t transfer_event = nullptr;
   } ExecArgs;
   typedef std::tuple<torch::Tensor, int, int, int> CallResult;
 
@@ -49,20 +60,33 @@ class ExpertDispatcher : public base::noncopyable {
   explicit ExpertDispatcher(int num_experts, int num_layers, int dtype,
                             int expert_type, int num_threads = 1);
   ~ExpertDispatcher() {
-    main_thread_stop_flag_.store(true);
-    for (auto& thread : threads_) {
-      thread->join();
+    main_thread_stop_flag_.store(true, std::memory_order_release);
+    for (auto& expert_list : experts_) {
+      for (auto& expert_node : expert_list) {
+        if (expert_node && expert_node->node) {
+          expert_node->node->exec_state.store(NodeExecState::IDLE,
+                                              std::memory_order_release);
+        }
+      }
     }
-
-    // for (auto& stream : fetch_streams_) {
-    //   cudaStreamDestroy(stream);
-    // }
+    for (int i = 0; i < static_cast<int>(input_queue_.size()); ++i) {
+      input_queue_[i].NotifyAll();
+    }
+    for (int i = 0; i < static_cast<int>(exec_queue_.size()); ++i) {
+      exec_queue_[i].NotifyAll();
+    }
+    // Threads auto-detach via ~Thread() if not joined.
+    // Don't join here — background threads may be in spin-waits
+    // that only terminate after exec_state is forced to IDLE above.
     for (auto& stream : exec_streams_) {
       cudaStreamDestroy(stream);
     }
-    // for (auto& stream : out_streams_) {
-    //   cudaStreamDestroy(stream);
-    // }
+    for (auto& stream : fetch_streams_) {
+      cudaStreamDestroy(stream);
+    }
+    for (auto* m : modules_) {
+      delete m;
+    }
   }
 
   void SetInputs(const torch::Tensor& hidden_states,
@@ -90,7 +114,7 @@ class ExpertDispatcher : public base::noncopyable {
   void Start() { start_ = true; }
 
   void GPUFetchFunc(int gpu_id);
-  void GPUExecFunc(int gpu_id);
+  void GPUExecFunc(int gpu_id, int thread_idx);
 
   // void GPUThreadFunc(int gpu_id);
 
@@ -129,12 +153,12 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<std::condition_variable> cache_cv_;
 
   std::mutex output_mutex_;
-  // std::mutex exec_mutex_;
-  // std::mutex gpu_overload_mutex_;
+  std::mutex accum_mutex_;
 
   std::vector<cudaStream_t> exec_streams_;
+  std::vector<cudaStream_t> fetch_streams_;
 
-  std::vector<bool> gpu_overload_;
+  std::unique_ptr<std::atomic<bool>[]> gpu_overload_;
 
   torch::Tensor hidden_states_;
   torch::Tensor final_hidden_states_;
@@ -145,6 +169,7 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<std::unordered_set<uint64_t>> cached_experts_;
 
   int cache_capacity_ = 0;
+  int num_threads_ = 1;
 
   std::vector<MoEMLP*> modules_;
 };

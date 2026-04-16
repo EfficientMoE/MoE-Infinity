@@ -1,0 +1,27 @@
+NVTX baseline summary — task 1
+
+Checked wrappers:
+- moe_infinity/models/deepseek_v2_wrapper.py has `@nvtx.annotate("DeepSeekPrepare", color="blue")` and `@nvtx.annotate(message="DeepseekMoEBlock", color="blue")`
+- moe_infinity/models/deepseek_v3_wrapper.py has the same two NVTX decorators
+
+nvtx import check:
+- `nvtx` is installed
+- `hasattr(nvtx, "annotate") == True`
+
+nsys baseline inspection:
+- report1.nsys-rep -> nvtx_sum shows one range only: `:DeepseekMoEBlock`
+- report2.nsys-rep -> nvtx_sum shows one range only: `:DeepseekMoEBlock`
+- Style: PushPop
+- Reported time is fully attributed to the MoE block range in both profiles
+
+What exists:
+- `DeepseekMoEBlock` is the active NVTX naming baseline in current profiles
+
+What is missing:
+- No visible `DeepSeekPrepare` range in the inspected profiles
+- No additional nested/alternate NVTX ranges appear in the summary output
+
+Baseline profile shape:
+- Single dominant range per profile
+- Similar instance counts across reports (~3.1k / ~3.4k)
+- The trace is currently coarse-grained, centered on the MoE block path
