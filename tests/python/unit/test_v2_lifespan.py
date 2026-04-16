@@ -45,6 +45,9 @@ class _Output:
     def __init__(self) -> None:
         self.token_id = 1
         self.token_text = "ok"
+        self.seq_id = 0
+        self.token_logprob = None
+        self.top_logprobs = None
         self.usage = {
             "prompt_tokens": 1,
             "completion_tokens": 1,
