@@ -10,9 +10,9 @@ This module verifies:
 import importlib.machinery
 import sys
 import types
+from importlib import import_module
 
 import pytest
-from importlib import import_module
 
 from tests.python.ops.conftest import (
     BF16_ATOL,
@@ -47,6 +47,7 @@ _deepseek_v2_modeling = import_module(
 if hasattr(_deepseek_v2_modeling, "AddAuxiliaryLoss"):
     AddAuxiliaryLoss = _deepseek_v2_modeling.AddAuxiliaryLoss
 else:
+
     class AddAuxiliaryLoss(torch.autograd.Function):
         """Compatibility shim for the removed upstream DeepSeek helper."""
 
@@ -61,7 +62,9 @@ else:
         def backward(ctx, grad_output):
             grad_loss = None
             if ctx.loss_requires_grad:
-                grad_loss = torch.ones((), dtype=ctx.loss_dtype, device=ctx.loss_device)
+                grad_loss = torch.ones(
+                    (), dtype=ctx.loss_dtype, device=ctx.loss_device
+                )
             return grad_output, grad_loss
 
 
@@ -147,9 +150,9 @@ class TestAddAuxiliaryLossBackward:
         # x should still have gradient
         assert x.grad is not None, "x should have gradient"
         # loss should not have gradient
-        assert (
-            loss.grad is None
-        ), "loss should have no gradient when requires_grad=False"
+        assert loss.grad is None, (
+            "loss should have no gradient when requires_grad=False"
+        )
 
     @requires_cuda
     def test_backward_cuda(self, seed_everything):

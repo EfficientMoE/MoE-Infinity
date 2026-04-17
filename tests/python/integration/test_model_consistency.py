@@ -206,9 +206,9 @@ def test_forward_consistency(consistency_outputs: Dict[str, Any]) -> None:
         f"[{model_name}] Logits shape: hf={hf_logits.shape}, moe={moe_logits.shape}"
     )
 
-    assert (
-        hf_logits.shape == moe_logits.shape
-    ), f"Shape mismatch: {hf_logits.shape} vs {moe_logits.shape}"
+    assert hf_logits.shape == moe_logits.shape, (
+        f"Shape mismatch: {hf_logits.shape} vs {moe_logits.shape}"
+    )
     assert torch.equal(hf_top, moe_top), (
         f"[{model_name}] Argmax mismatch at positions: "
         f"{(hf_top != moe_top).nonzero(as_tuple=True)}"

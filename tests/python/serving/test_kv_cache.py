@@ -58,12 +58,10 @@ class PagedKVCacheProtocol(Protocol):
     def swap_in(self, seq_id: int) -> None: ...
 
 
-def _load_classes() -> (
-    tuple[
-        type[BlockAllocatorProtocol],
-        type[PagedKVCacheProtocol],
-    ]
-):
+def _load_classes() -> tuple[
+    type[BlockAllocatorProtocol],
+    type[PagedKVCacheProtocol],
+]:
     module_name = "task4_kv_cache"
     spec = importlib.util.spec_from_file_location(module_name, KV_CACHE_PATH)
     if spec is None or spec.loader is None:

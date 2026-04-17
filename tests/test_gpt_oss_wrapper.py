@@ -47,12 +47,12 @@ def test_sync_gpt_oss_mlp_instantiation():
     assert hasattr(mlp, "layer_id"), "Must have layer_id"
 
     assert hasattr(mlp, "experts"), "Must have experts submodule"
-    assert hasattr(
-        mlp.experts, "gate_up_proj"
-    ), "Must have experts.gate_up_proj parameter"
-    assert hasattr(
-        mlp.experts, "down_proj"
-    ), "Must have experts.down_proj parameter"
+    assert hasattr(mlp.experts, "gate_up_proj"), (
+        "Must have experts.gate_up_proj parameter"
+    )
+    assert hasattr(mlp.experts, "down_proj"), (
+        "Must have experts.down_proj parameter"
+    )
     assert hasattr(mlp, "router"), "Must have router"
 
     E, H, I = 4, 64, 64
@@ -85,9 +85,9 @@ def test_sync_gpt_oss_mlp_swiglu_activation():
     )
 
     result = mlp._swiglu(gate, up)
-    assert torch.allclose(
-        result, expected, atol=1e-6
-    ), f"SwiGLU mismatch: {result} vs {expected}"
+    assert torch.allclose(result, expected, atol=1e-6), (
+        f"SwiGLU mismatch: {result} vs {expected}"
+    )
 
     assert gate_clamped[1] == 7.0, "Gate must be clamped to 7.0"
     assert up_clamped[1] == -7.0, "Up must be clamped to -7.0"
@@ -101,6 +101,6 @@ def test_sync_gpt_oss_mlp_router_has_bias():
 
     assert hasattr(mlp.router, "bias"), "Router must have bias attribute"
     assert mlp.router.bias is not None, "Router bias must not be None"
-    assert mlp.router.bias.shape == (
-        config.num_local_experts,
-    ), f"Router bias shape must be ({config.num_local_experts},)"
+    assert mlp.router.bias.shape == (config.num_local_experts,), (
+        f"Router bias shape must be ({config.num_local_experts},)"
+    )

@@ -85,9 +85,9 @@ def test_fused_softmax_topk_router_matches_torch_reference(
         normalize_topk=normalize_topk,
     )
 
-    assert (
-        routing_mask.sum(dim=1).eq(top_k).all()
-    ), f"Expected {top_k} experts per token"
+    assert routing_mask.sum(dim=1).eq(top_k).all(), (
+        f"Expected {top_k} experts per token"
+    )
 
     custom_weight_sums = routing_weight.sum(dim=1)
     ref_weight_sums = ref_weight.sum(dim=1)

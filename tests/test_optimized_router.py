@@ -521,6 +521,6 @@ if __name__ == "__main__":
         pytorch_time = time.time() - start
 
         print(
-            f"Optimized: {opt_time/n_iters*1000:.3f} ms, PyTorch: {pytorch_time/n_iters*1000:.3f} ms"
+            f"Optimized: {opt_time / n_iters * 1000:.3f} ms, PyTorch: {pytorch_time / n_iters * 1000:.3f} ms"
         )
-        print(f"Speedup: {pytorch_time/opt_time:.2f}x")
+        print(f"Speedup: {pytorch_time / opt_time:.2f}x")

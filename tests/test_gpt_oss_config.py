@@ -84,18 +84,18 @@ def test_gpt_oss_model_mapping():
     MODEL_MAPPING_NAMES = import_constants_module().MODEL_MAPPING_NAMES
     from transformers import GptOssForCausalLM
 
-    assert (
-        "gptoss" in MODEL_MAPPING_NAMES
-    ), "gptoss key missing from MODEL_MAPPING_NAMES"
+    assert "gptoss" in MODEL_MAPPING_NAMES, (
+        "gptoss key missing from MODEL_MAPPING_NAMES"
+    )
     assert MODEL_MAPPING_NAMES["gptoss"] is GptOssForCausalLM
 
 
 def test_gpt_oss_model_type():
     MODEL_MAPPING_TYPES = import_constants_module().MODEL_MAPPING_TYPES
 
-    assert (
-        "gptoss" in MODEL_MAPPING_TYPES
-    ), "gptoss key missing from MODEL_MAPPING_TYPES"
+    assert "gptoss" in MODEL_MAPPING_TYPES, (
+        "gptoss key missing from MODEL_MAPPING_TYPES"
+    )
     assert MODEL_MAPPING_TYPES["gptoss"] == 4
 
 
@@ -130,6 +130,6 @@ def test_gpt_oss_flash_attn_excluded_in_big_modeling():
         r"arch\s*==\s*\"gptoss\"[\s\S]*\):\s*"
         r"is_flash_attn_available\s*=\s*False"
     )
-    assert re.search(
-        exclusion_pattern, content
-    ), "big_modeling.py must exclude gptoss from flash attention"
+    assert re.search(exclusion_pattern, content), (
+        "big_modeling.py must exclude gptoss from flash attention"
+    )

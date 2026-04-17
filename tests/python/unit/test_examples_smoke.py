@@ -24,9 +24,9 @@ def test_interface_example_help():
         or "No module named 'nvtx'" in result.stderr
     ):
         pytest.skip("moe_infinity compiled extensions not available")
-    assert (
-        result.returncode == 0
-    ), f"--help exited {result.returncode}\n{result.stderr}"
+    assert result.returncode == 0, (
+        f"--help exited {result.returncode}\n{result.stderr}"
+    )
 
 
 def test_readme_example_help():
@@ -47,9 +47,9 @@ def test_readme_example_help():
         or "No module named 'nvtx'" in result.stderr
     ):
         pytest.skip("moe_infinity compiled extensions not available")
-    assert (
-        result.returncode == 0
-    ), f"--help exited {result.returncode}\n{result.stderr}"
+    assert result.returncode == 0, (
+        f"--help exited {result.returncode}\n{result.stderr}"
+    )
 
 
 def test_example_imports_available():
@@ -64,9 +64,9 @@ def test_example_imports_available():
             capture_output=True,
             text=True,
         )
-        assert (
-            result.returncode == 0
-        ), f"Cannot import '{pkg}': {result.stderr.strip()}"
+        assert result.returncode == 0, (
+            f"Cannot import '{pkg}': {result.stderr.strip()}"
+        )
     # moe_infinity is optional - skip test if compiled extensions unavailable
     for pkg in optional:
         result = subprocess.run(

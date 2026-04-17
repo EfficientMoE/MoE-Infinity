@@ -156,15 +156,15 @@ class TestTier2PrefetchHandle:
         handle.offload(tensor, tensor_id)
 
         # Verify is_tensor_offloaded
-        assert handle.is_tensor_offloaded(
-            tensor_id
-        ), "is_tensor_offloaded() returned False"
+        assert handle.is_tensor_offloaded(tensor_id), (
+            "is_tensor_offloaded() returned False"
+        )
 
         # Verify parameter file exists
         param_file = os.path.join(workspace_tmpdir, "archer_param_0")
-        assert os.path.exists(
-            param_file
-        ), f"Parameter file not found: {param_file}"
+        assert os.path.exists(param_file), (
+            f"Parameter file not found: {param_file}"
+        )
 
         # Verify raw bytes match tensor data
         nbytes = tensor.numel() * tensor.element_size()
@@ -187,12 +187,12 @@ class TestTier2PrefetchHandle:
 
         # Create second handle on same directory
         handle2 = prefetch_op.prefetch_handle(workspace_tmpdir, 0.75)
-        assert (
-            handle2.is_tensor_index_initialized()
-        ), "Index not loaded from disk"
-        assert handle2.is_tensor_offloaded(
-            tensor_id
-        ), f"Tensor {tensor_id} not found after index reload"
+        assert handle2.is_tensor_index_initialized(), (
+            "Index not loaded from disk"
+        )
+        assert handle2.is_tensor_offloaded(tensor_id), (
+            f"Tensor {tensor_id} not found after index reload"
+        )
         del handle2
 
     def test_prefetch_concurrent_offload(self, workspace_tmpdir):
@@ -226,8 +226,8 @@ class TestTier2PrefetchHandle:
         # Verify all 150 tensors are offloaded
         total = n_threads * n_per_thread
         for tid in range(total):
-            assert handle.is_tensor_offloaded(
-                tid
-            ), f"Tensor {tid} not offloaded"
+            assert handle.is_tensor_offloaded(tid), (
+                f"Tensor {tid} not offloaded"
+            )
 
         del handle

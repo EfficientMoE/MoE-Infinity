@@ -34,12 +34,10 @@ class PrefixCacheProtocol(Protocol):
     def hit_rate(self) -> float: ...
 
 
-def _load_prefix_cache_objects() -> (
-    tuple[
-        type[PrefixCacheProtocol],
-        Callable[[list[int]], str],
-    ]
-):
+def _load_prefix_cache_objects() -> tuple[
+    type[PrefixCacheProtocol],
+    Callable[[list[int]], str],
+]:
     module_name = "task14_prefix_cache"
     spec = importlib.util.spec_from_file_location(
         module_name, PREFIX_CACHE_PATH

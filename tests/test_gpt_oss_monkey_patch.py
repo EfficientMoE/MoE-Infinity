@@ -32,9 +32,9 @@ def test_sync_gpt_oss_mlp_is_different_from_original():
 
     from moe_infinity.models.gpt_oss import SyncGptOssMLP
 
-    assert (
-        mod.GptOssMLP is not SyncGptOssMLP
-    ), "SyncGptOssMLP must be different from GptOssMLP (before patching)"
+    assert mod.GptOssMLP is not SyncGptOssMLP, (
+        "SyncGptOssMLP must be different from GptOssMLP (before patching)"
+    )
 
 
 def test_monkey_patch_mechanism():
@@ -51,21 +51,21 @@ def test_monkey_patch_mechanism():
     mod.GptOssMLP = SyncGptOssMLP
 
     try:
-        assert (
-            mod.GptOssMLP is SyncGptOssMLP
-        ), "After patch: GptOssMLP should be SyncGptOssMLP"
-        assert (
-            getattr(mod, "_old_gpt_oss_mlp") is original
-        ), "Saved original must match"
+        assert mod.GptOssMLP is SyncGptOssMLP, (
+            "After patch: GptOssMLP should be SyncGptOssMLP"
+        )
+        assert getattr(mod, "_old_gpt_oss_mlp") is original, (
+            "Saved original must match"
+        )
     finally:
         # Simulate restore
         mod.GptOssMLP = getattr(mod, "_old_gpt_oss_mlp")
         delattr(mod, "_old_gpt_oss_mlp")
 
     # After restore
-    assert (
-        mod.GptOssMLP is original
-    ), "After restore: GptOssMLP should be original"
-    assert not hasattr(
-        mod, "_old_gpt_oss_mlp"
-    ), "Backup should be deleted after restore"
+    assert mod.GptOssMLP is original, (
+        "After restore: GptOssMLP should be original"
+    )
+    assert not hasattr(mod, "_old_gpt_oss_mlp"), (
+        "Backup should be deleted after restore"
+    )
