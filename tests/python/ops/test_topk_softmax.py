@@ -85,6 +85,6 @@ def test_topk_softmax_matches_torch_reference(
         custom_cpu = topk_indices.to(torch.int64).cpu()
         ref_cpu = ref_indices.to(torch.int64).cpu()
         for t in range(num_tokens):
-            assert set(custom_cpu[t].tolist()) == set(ref_cpu[t].tolist()), (
-                f"Token {t}: custom={custom_cpu[t].tolist()} ref={ref_cpu[t].tolist()}"
-            )
+            assert (
+                set(custom_cpu[t].tolist()) == set(ref_cpu[t].tolist())
+            ), f"Token {t}: custom={custom_cpu[t].tolist()} ref={ref_cpu[t].tolist()}"

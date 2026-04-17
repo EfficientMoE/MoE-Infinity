@@ -1,7 +1,8 @@
 import time
 
-import moe_infinity._engine as engine
 import torch
+
+import moe_infinity._engine as engine
 
 torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 torch.backends.cudnn.deterministic = True

@@ -131,6 +131,6 @@ def test_gpt_oss_20b_forward_parity():
     with torch.no_grad():
         moe_out = model.model(**inputs).logits.cpu()
 
-    assert torch.allclose(ref_out, moe_out, atol=1e-2), (
-        f"Parity check failed. Max diff: {(ref_out - moe_out).abs().max():.4f}"
-    )
+    assert torch.allclose(
+        ref_out, moe_out, atol=1e-2
+    ), f"Parity check failed. Max diff: {(ref_out - moe_out).abs().max():.4f}"

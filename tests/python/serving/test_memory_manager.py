@@ -64,10 +64,12 @@ class MemoryManagerProtocol(Protocol):
     def report(self) -> dict[str, Union[str, int, float]]: ...
 
 
-def _load_classes() -> tuple[
-    type[MemoryBudgetProtocol],
-    type[MemoryManagerProtocol],
-]:
+def _load_classes() -> (
+    tuple[
+        type[MemoryBudgetProtocol],
+        type[MemoryManagerProtocol],
+    ]
+):
     module_name = "task7_memory_manager"
     spec = importlib.util.spec_from_file_location(
         module_name, MEMORY_MANAGER_PATH

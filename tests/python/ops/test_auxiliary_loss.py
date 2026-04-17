@@ -150,9 +150,9 @@ class TestAddAuxiliaryLossBackward:
         # x should still have gradient
         assert x.grad is not None, "x should have gradient"
         # loss should not have gradient
-        assert loss.grad is None, (
-            "loss should have no gradient when requires_grad=False"
-        )
+        assert (
+            loss.grad is None
+        ), "loss should have no gradient when requires_grad=False"
 
     @requires_cuda
     def test_backward_cuda(self, seed_everything):

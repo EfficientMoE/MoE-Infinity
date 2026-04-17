@@ -233,12 +233,12 @@ def fused_mxfp4_gemm(
     weight_scales = weight_scales.contiguous()
 
     N = weight_packed.shape[0]
-    assert K == weight_packed.shape[1] * 2, (
-        f"K mismatch: activations K={K}, packed weight implies K={weight_packed.shape[1] * 2}"
-    )
-    assert x_2d.dtype == torch.bfloat16, (
-        f"Activations must be bf16, got {x_2d.dtype}"
-    )
+    assert (
+        K == weight_packed.shape[1] * 2
+    ), f"K mismatch: activations K={K}, packed weight implies K={weight_packed.shape[1] * 2}"
+    assert (
+        x_2d.dtype == torch.bfloat16
+    ), f"Activations must be bf16, got {x_2d.dtype}"
     assert weight_packed.dtype == torch.uint8
     assert weight_scales.dtype == torch.uint8
 

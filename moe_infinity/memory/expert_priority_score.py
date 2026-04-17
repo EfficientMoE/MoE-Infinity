@@ -59,9 +59,9 @@ def priority_score(
         frequency_score[:num_encoder_layers] = 1
 
     frequency_score = frequency_score / np.sum(frequency_score) + 1e-6
-    assert np.sum(frequency_score) > 0, (
-        f"frequency_score = {frequency_score}, frequency_sum = {frequency_sum}"
-    )
+    assert (
+        np.sum(frequency_score) > 0
+    ), f"frequency_score = {frequency_score}, frequency_sum = {frequency_sum}"
     # print("frequency_score", np.sum(frequency_score), np.max(frequency_score), np.min(frequency_score), frequency_score.shape)
 
     topo_expert_score = np.zeros_like(decoder_entry.matrix)

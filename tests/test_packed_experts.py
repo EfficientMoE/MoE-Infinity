@@ -74,6 +74,6 @@ def test_sync_gpt_oss_mlp_isinstance_detection():
 def test_sync_gpt_oss_mlp_in_model_offload_imports():
     import moe_infinity.models.gpt_oss as gpt_oss_mod
 
-    assert hasattr(gpt_oss_mod, "SyncGptOssMLP"), (
-        "SyncGptOssMLP must exist in module"
-    )
+    assert hasattr(
+        gpt_oss_mod, "SyncGptOssMLP"
+    ), "SyncGptOssMLP must exist in module"
