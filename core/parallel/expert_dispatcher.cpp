@@ -260,7 +260,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
   cudaSetDevice(gpu_id);
   cudaStream_t stream = fetch_streams_[gpu_id];
 
-  while (!main_thread_stop_flag_.load()) {
+  while (!main_thread_stop_flag_.load(std::memory_order_acquire)) {
     // std::unique_lock<std::mutex> lock(mutexes_[MUTEX_TYPE::INPUT_MUTEX]);
     // if (cache_ == nullptr) {
     //   auto cache_limit =
@@ -283,7 +283,9 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
 
     // lock.unlock();
     CallArgs args;
-    input_queue_[gpu_id].Pop(args);
+    if (!input_queue_[gpu_id].Pop(args)) {
+      break;
+    }
 
     auto device = CUDA_DEVICE(gpu_id);
     auto original_device = (args.remote) ? CPU_DEVICE : hidden_states_.device();
@@ -341,8 +343,12 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
                    cache_sizes_[gpu_id], " incache count ",
                    cached_experts_[gpu_id].size(), " layer_idx ", layer_idx,
                    " expert_idx ", expert_idx);
-        while (gpu_overload_[gpu_id].load(std::memory_order_acquire)) {
+        while (gpu_overload_[gpu_id].load(std::memory_order_acquire) &&
+               !main_thread_stop_flag_.load(std::memory_order_acquire)) {
           std::this_thread::sleep_for(std::chrono::microseconds(1));
+        }
+        if (main_thread_stop_flag_.load(std::memory_order_acquire)) {
+          break;
         }
         gpu_overload_[gpu_id].store(true, std::memory_order_release);
       } else {
@@ -358,8 +364,12 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
               " expert_idx ", expert_idx);
           {
             std::unique_lock<std::mutex> lock(cache_mutex_[gpu_id]);
-            cache_cv_[gpu_id].wait(lock);
+            cache_cv_[gpu_id].wait(lock, [&] {
+              return main_thread_stop_flag_.load(std::memory_order_acquire) ||
+                     FindExpertEvict(gpu_id) != nullptr;
+            });
           }
+          if (main_thread_stop_flag_.load(std::memory_order_acquire)) break;
           evict_expert_node = FindExpertEvict(gpu_id);
         }
         // auto num_layers = experts_[0].size();
@@ -470,9 +480,11 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
   cudaSetDevice(gpu_id);
   cudaStream_t stream = exec_streams_[thread_idx];
 
-  while (!main_thread_stop_flag_.load()) {
+  while (!main_thread_stop_flag_.load(std::memory_order_acquire)) {
     ExecArgs args;
-    exec_queue_[gpu_id].Pop(args);
+    if (!exec_queue_[gpu_id].Pop(args)) {
+      break;
+    }
 
     if (args.expert_node == nullptr) {
       continue;
