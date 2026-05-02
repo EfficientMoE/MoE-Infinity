@@ -237,3 +237,4 @@ AGENTS.md
 /tests/cuda/build/
 /tests/queues/build/
 .hf_cache/
+*.sqlite

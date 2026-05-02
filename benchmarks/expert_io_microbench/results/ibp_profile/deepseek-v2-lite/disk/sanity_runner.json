@@ -1,0 +1,21 @@
+{
+  "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+  "mode": "disk",
+  "hardware_tag": "a5000",
+  "offload_dir": "/tmp/seed_offload",
+  "max_new_tokens": 4,
+  "warmup_tokens": 8,
+  "iters": 1,
+  "device_memory_ratio": 0.5,
+  "decode_step_times_ns": [
+    1888594126
+  ],
+  "decode_step_total_ns": 1888594126,
+  "decode_step_count": 4,
+  "pcie_link_width_observed": 16,
+  "pcie_link_gen_observed": 4,
+  "pcie_link_width_pre": 16,
+  "pcie_link_gen_pre": 4,
+  "pcie_link_width_post": 16,
+  "pcie_link_gen_post": 4
+}

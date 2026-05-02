@@ -218,6 +218,7 @@ def summarise(
     rep_path: str,
     step_count: int,
     hw: dict[str, Any],
+    real_total_ns: int | None = None,
 ) -> dict[str, Any]:
     report = parse_nsys_report(rep_path)
     ranges = report["ranges"]
@@ -245,7 +246,10 @@ def summarise(
     duration_ns = report["duration_ns"]
     if step_count <= 0:
         step_count = 1
-    t_step = max(int(duration_ns / step_count), 1)
+    if real_total_ns is not None and real_total_ns > 0:
+        t_step = max(int(real_total_ns / step_count), 1)
+    else:
+        t_step = max(int(duration_ns / step_count), 1)
     t_transfer = t_h2d + t_disk + t_d2h + t_d2d
     t_compute_useful = max(t_step - t_expert_wait, 0)
     bytes_h2d_per_step = h2d_bytes / step_count
@@ -307,7 +311,7 @@ def summarise(
 def _cli() -> int:
     if len(sys.argv) < 2:
         print(
-            "usage: nsys_parser.py <rep.nsys-rep> [--steps N] [--link-width W] [--link-gen G]",
+            "usage: nsys_parser.py <rep.nsys-rep> [--steps N] [--link-width W] [--link-gen G] [--real-total-ns N]",
             file=sys.stderr,
         )
         return 2
@@ -315,6 +319,7 @@ def _cli() -> int:
     steps = 1
     width = 16
     gen = 4
+    real_total_ns: int | None = None
     args = sys.argv[2:]
     i = 0
     while i < len(args):
@@ -328,9 +333,14 @@ def _cli() -> int:
         elif a == "--link-gen":
             gen = int(args[i + 1])
             i += 2
+        elif a == "--real-total-ns":
+            real_total_ns = int(args[i + 1])
+            i += 2
         else:
             i += 1
-    out = summarise(rep, steps, {"link_width": width, "link_gen": gen})
+    out = summarise(
+        rep, steps, {"link_width": width, "link_gen": gen}, real_total_ns
+    )
     json.dump(out, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
