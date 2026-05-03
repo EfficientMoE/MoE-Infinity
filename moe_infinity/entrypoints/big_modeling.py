@@ -597,8 +597,13 @@ class MoE:
             )
 
         max_tokens = kwargs.get("max_new_tokens", kwargs.get("max_tokens", 256))
+        do_sample = kwargs.get("do_sample", None)
+        if do_sample is False:
+            sampling_temperature = 0.0
+        else:
+            sampling_temperature = float(kwargs.get("temperature", 1.0))
         sampling_params = SamplingParams(
-            temperature=float(kwargs.get("temperature", 1.0)),
+            temperature=sampling_temperature,
             top_p=float(kwargs.get("top_p", 1.0)),
             top_k=int(kwargs.get("top_k", 0)),
             max_tokens=int(max_tokens) if max_tokens is not None else 256,
