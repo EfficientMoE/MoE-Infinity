@@ -31,6 +31,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warmup-tokens", type=int, default=8)
     p.add_argument("--iters", type=int, default=3)
     p.add_argument("--device-memory-ratio", type=float, default=0.5)
+    p.add_argument("--speculative-prefetch", action="store_true")
+    p.add_argument("--speculative-prefetch-overlap", action="store_true")
+    p.add_argument("--num-threads", type=int, default=1)
     p.add_argument("--output-json", required=True)
     return p.parse_args()
 
@@ -82,6 +85,9 @@ def main() -> int:
         {
             "offload_path": args.offload_dir,
             "device_memory_ratio": args.device_memory_ratio,
+            "speculative_prefetch": args.speculative_prefetch,
+            "speculative_prefetch_overlap": args.speculative_prefetch_overlap,
+            "num_threads": args.num_threads,
         },
     )
     print(f"[{time.time() - t0:.1f}s] model loaded", flush=True)
@@ -157,6 +163,9 @@ def main() -> int:
         "warmup_tokens": args.warmup_tokens,
         "iters": args.iters,
         "device_memory_ratio": args.device_memory_ratio,
+        "speculative_prefetch": args.speculative_prefetch,
+        "speculative_prefetch_overlap": args.speculative_prefetch_overlap,
+        "num_threads": args.num_threads,
         "decode_step_times_ns": decode_step_times_ns,
         "decode_step_total_ns": sum(decode_step_times_ns),
         "decode_step_count": args.iters * args.max_new_tokens,
