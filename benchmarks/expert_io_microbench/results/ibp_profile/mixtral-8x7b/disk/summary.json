@@ -1,0 +1,64 @@
+{
+  "T_step_ns": 63701344,
+  "T_h2d_ns": 103456,
+  "T_disk_ns": 0,
+  "T_d2h_ns": 12299584,
+  "T_d2d_ns": 9998880,
+  "T_sync_ns": 0,
+  "T_expert_wait_ns": 4258253536,
+  "T_expert_compute_ns": 0,
+  "T_compute_useful_ns": 0,
+  "bytes_h2d_per_step": 85.19375,
+  "bytes_d2d_total": 255636537,
+  "BW_h2d_observed_GBps": 0.13175649551500154,
+  "BW_d2d_observed_GBps": 25.56651714992079,
+  "BW_pcie_theoretical_GBps": 63.008,
+  "Util_pcie": 0.0020911074072340265,
+  "Util_pcie_d2d": 0.40576620667091146,
+  "verdict": "NO_GO",
+  "ranges": {
+    "expert_wait_barrier": {
+      "total_ns": 4258253536.0,
+      "count": 5120,
+      "mean_ns": 831690.1,
+      "p50_ns": 271568.5
+    },
+    "moe_routing": {
+      "total_ns": 364954602.0,
+      "count": 5120,
+      "mean_ns": 71280.2,
+      "p50_ns": 62923.5
+    },
+    "expert_dispatch": {
+      "total_ns": 48407567.0,
+      "count": 5120,
+      "mean_ns": 9454.6,
+      "p50_ns": 8262.0
+    },
+    "CCCL:cub::DeviceSelect::Flagged": {
+      "total_ns": 4414503.0,
+      "count": 330,
+      "mean_ns": 13377.3,
+      "p50_ns": 13000.0
+    },
+    "CCCL:cub::DeviceReduce::Sum": {
+      "total_ns": 2824430.0,
+      "count": 330,
+      "mean_ns": 8558.9,
+      "p50_ns": 6810.5
+    }
+  },
+  "memcpy": {
+    "h2d_bytes": 13631,
+    "h2d_count": 325,
+    "d2h_bytes": 53701771,
+    "d2h_count": 5615,
+    "d2d_bytes": 255636537,
+    "d2d_count": 10250
+  },
+  "step_count": 160,
+  "hw": {
+    "link_width": 16,
+    "link_gen": 5
+  }
+}

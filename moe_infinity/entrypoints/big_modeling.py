@@ -536,9 +536,7 @@ class MoE:
         )
 
         if self.arch == "mixtral":
-            import moe_infinity.models.modeling_mixtral
-
-            transformers.models.mixtral.modeling_mixtral.apply_rotary_pos_emb = apply_rotary_pos_emb
+            import moe_infinity.models.mixtral  # noqa: F401
 
         batch_size = input_ids.shape[0]
         self.seq_id_list = [
