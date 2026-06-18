@@ -3,10 +3,11 @@
 
 // EfficientMoE Team
 //
-// FP4 (E2M1) packed weight -> BF16 dequant for DeepSeek-V4-Flash routed experts.
-// Weight: [N, K/2] uint8, two E2M1 values per byte packed along K (low nibble
-// is the even-K element). Scale: [N, K/32] ue8m0 (one scale per 32 K-elements).
-// Matches the reference dequant_fp4_e2m1 (E2M1 lookup table x 2^(e-127)).
+// FP4 (E2M1) packed weight -> BF16 dequant for DeepSeek-V4-Flash routed
+// experts. Weight: [N, K/2] uint8, two E2M1 values per byte packed along K (low
+// nibble is the even-K element). Scale: [N, K/32] ue8m0 (one scale per 32
+// K-elements). Matches the reference dequant_fp4_e2m1 (E2M1 lookup table x
+// 2^(e-127)).
 
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
@@ -15,8 +16,8 @@
 namespace {
 // E2M1 value table (index = 4-bit code).
 __constant__ float kE2M1[16] = {0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,
-                                 4.0f,  6.0f,  -0.0f, -0.5f, -1.0f, -1.5f,
-                                 -2.0f, -3.0f, -4.0f, -6.0f};
+                                4.0f,  6.0f,  -0.0f, -0.5f, -1.0f, -1.5f,
+                                -2.0f, -3.0f, -4.0f, -6.0f};
 
 __global__ void fp4_dequant_kernel(const uint8_t* __restrict__ packed,
                                    const uint8_t* __restrict__ scale_e8m0,

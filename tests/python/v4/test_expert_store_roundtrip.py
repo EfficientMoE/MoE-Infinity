@@ -71,12 +71,12 @@ def test_offload_persists_int8_and_f8e8m0_bytes_exactly(
     assert param_files, "offload did not produce a param file"
     raw = b"".join(open(f, "rb").read() for f in param_files)
 
-    assert _raw_bytes(weight) in raw, (
-        "int8 FP4-packed bytes not persisted verbatim"
-    )
-    assert _raw_bytes(scale) in raw, (
-        "f8_e8m0 scale bytes not persisted verbatim"
-    )
+    assert (
+        _raw_bytes(weight) in raw
+    ), "int8 FP4-packed bytes not persisted verbatim"
+    assert (
+        _raw_bytes(scale) in raw
+    ), "f8_e8m0 scale bytes not persisted verbatim"
 
 
 def test_index_serialized_and_reopen_recovers_offloaded_state(

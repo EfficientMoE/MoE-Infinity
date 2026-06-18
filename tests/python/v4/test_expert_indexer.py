@@ -45,12 +45,12 @@ def test_bundle_has_six_tensors_with_expected_shapes(indexer):
         ],
     ):
         ref = bundle.part(proj, part)
-        assert ref.dtype == exp_dtype, (
-            f"{proj}.{part}: {ref.dtype} != {exp_dtype}"
-        )
-        assert ref.shape == exp_shape, (
-            f"{proj}.{part}: {ref.shape} != {exp_shape}"
-        )
+        assert (
+            ref.dtype == exp_dtype
+        ), f"{proj}.{part}: {ref.dtype} != {exp_dtype}"
+        assert (
+            ref.shape == exp_shape
+        ), f"{proj}.{part}: {ref.shape} != {exp_shape}"
 
 
 def test_bundle_keys_follow_native_contract(indexer):

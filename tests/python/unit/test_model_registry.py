@@ -16,6 +16,7 @@ def test_all_models_registered():
         "opt",
         "deepseek",
         "deepseek_v3",
+        "deepseekv4",
         "gptoss",
         "qwen3",
         "dbrx",

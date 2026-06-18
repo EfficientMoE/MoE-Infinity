@@ -99,12 +99,16 @@ pre-commit install --install-hooks
 pre-commit run --all-files
 ```
 
+`pre-commit install` registers both the **pre-commit** and **pre-push** hooks (configured via `default_install_hook_types`). The formatters therefore run again at `git push` time, so any drift that slipped past a commit is caught locally before it reaches CI.
+
 Current lint/format stack includes:
 
 - `ruff` + `ruff-format`
 - `mypy` (configured via `pyproject.toml`)
 - `clang-format` (for C++/CUDA sources)
 - `codespell`
+
+The pinned tool versions in `.pre-commit-config.yaml` are the source of truth — CI runs the exact same versions. Always run formatting through `pre-commit` (which installs those pinned versions in isolated environments) rather than a system-wide `ruff`/`clang-format`, whose version may differ and produce mismatched formatting.
 
 Please run formatting/lint checks before opening a PR.
 

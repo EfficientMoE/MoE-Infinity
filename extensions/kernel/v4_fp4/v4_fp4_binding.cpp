@@ -15,17 +15,16 @@ torch::Tensor fp4_dequant(torch::Tensor packed, torch::Tensor scale,
                           int64_t K) {
   TORCH_CHECK(packed.is_cuda(), "packed must be CUDA");
   int N = packed.size(0);
-  auto out = torch::empty({N, K}, torch::TensorOptions()
-                                      .dtype(torch::kBFloat16)
-                                      .device(packed.device()));
+  auto out = torch::empty(
+      {N, K},
+      torch::TensorOptions().dtype(torch::kBFloat16).device(packed.device()));
   auto stream = at::cuda::getCurrentCUDAStream(packed.device().index());
   auto packed_u8 = packed.view(torch::kUInt8).contiguous();
   auto scale_u8 = scale.view(torch::kUInt8).contiguous();
-  fp4_dequant_to_bf16(packed_u8.data_ptr(), scale_u8.data_ptr(),
-                      out.data_ptr(), N, (int)K, stream);
+  fp4_dequant_to_bf16(packed_u8.data_ptr(), scale_u8.data_ptr(), out.data_ptr(),
+                      N, (int)K, stream);
   return out;
 }
-
 
 // Full routed-expert forward: dequant FP4 w1/w2/w3 -> BF16, then SwiGLU MLP.
 //   gate = x @ w1^T ; up = x @ w3^T ; h = silu(clamp(gate)) * clamp(up)
@@ -37,9 +36,9 @@ torch::Tensor v4_expert_forward(torch::Tensor x, torch::Tensor w1,
                                 torch::Tensor s3, double swiglu_limit) {
   int64_t hidden = x.size(1);
   int64_t inter = w1.size(0);
-  auto dw1 = fp4_dequant(w1, s1, hidden);       // [inter, hidden]
-  auto dw3 = fp4_dequant(w3, s3, hidden);       // [inter, hidden]
-  auto dw2 = fp4_dequant(w2, s2, inter);        // [hidden, inter]
+  auto dw1 = fp4_dequant(w1, s1, hidden);  // [inter, hidden]
+  auto dw3 = fp4_dequant(w3, s3, hidden);  // [inter, hidden]
+  auto dw2 = fp4_dequant(w2, s2, inter);   // [hidden, inter]
   auto gate = torch::matmul(x, dw1.transpose(0, 1)).to(torch::kFloat32);
   auto up = torch::matmul(x, dw3.transpose(0, 1)).to(torch::kFloat32);
   if (swiglu_limit > 0) {
@@ -52,5 +51,6 @@ torch::Tensor v4_expert_forward(torch::Tensor x, torch::Tensor w1,
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp4_dequant", &fp4_dequant, "FP4 E2M1 packed -> BF16 dequant");
-  m.def("v4_expert_forward", &v4_expert_forward, "V4 FP4 routed-expert SwiGLU forward");
+  m.def("v4_expert_forward", &v4_expert_forward,
+        "V4 FP4 routed-expert SwiGLU forward");
 }
