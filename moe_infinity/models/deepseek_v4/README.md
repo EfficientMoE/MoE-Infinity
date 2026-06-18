@@ -156,3 +156,23 @@ Observations:
   native additionally is numerically exact to the reference.
 - TTFT (prefill) ~0.45-0.75 s; warm host expert cache removes first-token
   streaming stalls.
+
+### FP4 expert-kernel A/B (single RTX PRO 6000, layer-5 expert weights)
+
+Full routed-expert forward (3 GEMMs + SwiGLU), microbenchmark in microseconds.
+All three paths are numerically equivalent (native vs fused-Triton max abs
+error 0.0).
+
+| M (tokens)   | native (CUDA dequant+GEMM) | tilelang `fp4_gemm` | fused Triton MXFP4 |
+|--------------|---------------------------:|--------------------:|-------------------:|
+| 1 (decode)   |                     123 us |              391 us |             310 us |
+| 8            |                     137 us |              219 us |             324 us |
+| 64           |                     148 us |              210 us |             397 us |
+| 512 (prefill)|                     213 us |              323 us |             772 us |
+
+The native path (dequant once -> cuBLAS BF16 GEMM) is **1.5-3.2x faster than
+tilelang** (the `use_native=False` default) and **2.3-3.6x faster** than a fused
+Triton MXFP4 GEMM, because cuBLAS/cuBLASLt BF16 GEMM outperforms hand-written
+Triton GEMM and the dequant overhead is small. Recommendation: prefer
+`use_native=True`. (A fused FP4 MMA would beat dequant+GEMM on memory traffic,
+but the CUTLASS SM120 `mx_float4_t` atom is currently unusable, see above.)
