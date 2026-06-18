@@ -1,3 +1,7 @@
+# Vendored third-party kernel (Marlin, Apache-2.0, IST-DASLab) is excluded from
+# style/spelling hooks so we keep it byte-for-byte upstream.
+exclude: ^moe_infinity/kernel/marlin/
+
 repos:
 -   repo: meta
     hooks:

@@ -43,7 +43,10 @@ def test_deterministic_linear_cpu():
     output = module.deterministic_linear(input, weight, bias)
     expected = F.linear(input, weight, bias)
 
-    assert torch.equal(output, expected)
+    # deterministic_linear computes per-sample GEMV for batch invariance, which
+    # may differ from F.linear's batched GEMM by float32 rounding/BLAS backend;
+    # bitwise equality is not part of the kernel's contract, closeness is.
+    torch.testing.assert_close(output, expected, atol=1e-6, rtol=1e-5)
 
 
 @requires_cuda
