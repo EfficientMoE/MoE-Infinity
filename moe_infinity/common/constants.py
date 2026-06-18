@@ -21,7 +21,6 @@ MODEL_MAPPING_NAMES = {
     "nllb": NllbMoeForConditionalGeneration,
     "mixtral": MixtralForCausalLM,
     "opt": OPTForCausalLM,
-    "deepseekv4": DeepseekV4ForCausalLM,
     "deepseek_v3": DeepseekV3ForCausalLM,
     "deepseek": DeepseekV2ForCausalLM,
     "gptoss": GptOssForCausalLM,
@@ -35,7 +34,6 @@ MODEL_MAPPING_TYPES = {
     "nllb": 2,
     "mixtral": 4,
     "opt": 3,
-    "deepseekv4": 5,
     "deepseek_v3": 5,
     "deepseek": 5,
     "gptoss": 4,
@@ -44,6 +42,13 @@ MODEL_MAPPING_TYPES = {
     "olmoe": 4,
     "jamba": 4,
 }
+
+# DeepSeek-V4 support depends on a transformers build that ships
+# DeepseekV4ForCausalLM. Only register it when the class is importable so the
+# registry never maps an architecture to a None class.
+if DeepseekV4ForCausalLM is not None:
+    MODEL_MAPPING_NAMES["deepseekv4"] = DeepseekV4ForCausalLM
+    MODEL_MAPPING_TYPES["deepseekv4"] = 5
 
 
 def parse_expert_type(config: PretrainedConfig) -> int:

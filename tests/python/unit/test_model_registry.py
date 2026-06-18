@@ -16,13 +16,14 @@ def test_all_models_registered():
         "opt",
         "deepseek",
         "deepseek_v3",
-        "deepseekv4",
         "gptoss",
         "qwen3",
         "dbrx",
         "olmoe",
         "jamba",
     }
+    if "deepseekv4" in MODEL_MAPPING_NAMES:
+        expected_models.add("deepseekv4")
     actual_models = set(MODEL_MAPPING_NAMES.keys())
     assert expected_models == actual_models, (
         f"Missing: {expected_models - actual_models}, "
