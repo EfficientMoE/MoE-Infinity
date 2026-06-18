@@ -88,13 +88,24 @@ for the smoke prompts; ~5-6 GB/GPU resident with experts offloaded.
 
 ## Native C++ FP4 expert execution (single native path)
 
-By default routed experts run via the official tilelang `fp4_gemm`. A native
-CUDA path is also available and selected with `use_native=True`:
+The native CUDA path is the **default on Blackwell (SM120)** whenever the
+`moe_infinity._v4_fp4` extension is available; elsewhere it falls back to the
+tilelang `fp4_gemm`. `use_native` is auto-resolved when left unset:
 
 ```python
+# Auto: native on Blackwell if _v4_fp4 is built, else tilelang.
 model, store = load_offloaded_v4_flash(M, ckpt, cfg, dev, shard,
-                                       max_resident_experts=8, use_native=True)
+                                       max_resident_experts=8)
+
+# Force a path explicitly:
+#   use_native=True  -> always native (requires _v4_fp4)
+#   use_native=False -> always tilelang
+#   MOE_DSV4_FORCE_NATIVE=0 (env) -> disable native auto-selection
 ```
+
+The native path is preferred because it is **1.5-3.2x faster than tilelang**
+and **2.3-3.6x faster than a fused Triton MXFP4 GEMM** (see benchmark below),
+while remaining bit-exact to the reference.
 
 It uses `moe_infinity._v4_fp4`:
 - `v4_fp4_dequant.cu` — FP4 E2M1 (packed uint8) + ue8m0 block-32 scale ->

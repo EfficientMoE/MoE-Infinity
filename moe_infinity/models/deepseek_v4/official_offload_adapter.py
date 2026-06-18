@@ -150,6 +150,30 @@ def _load_native_fp4():
     return _V4_FP4
 
 
+def _is_blackwell(device) -> bool:
+    if not torch.cuda.is_available():
+        return False
+    index = torch.device(device).index if device is not None else None
+    major, _ = torch.cuda.get_device_capability(index)
+    return major >= 12
+
+
+def native_fp4_available() -> bool:
+    try:
+        _load_native_fp4()
+        return True
+    except Exception:
+        return False
+
+
+def resolve_use_native(use_native, device) -> bool:
+    if use_native is not None:
+        return bool(use_native)
+    if os.environ.get("MOE_DSV4_FORCE_NATIVE") == "0":
+        return False
+    return _is_blackwell(device) and native_fp4_available()
+
+
 def _expert_forward(x, bundle, swiglu_limit, official_module):
     linear = official_module.linear
 
@@ -182,7 +206,8 @@ def _expert_forward_native(x, bundle, swiglu_limit):
     )
 
 
-def patch_moe_with_offload(model, store, official_module, use_native=False):
+def patch_moe_with_offload(model, store, official_module, use_native=None):
+    use_native = resolve_use_native(use_native, store.device)
     if use_native:
         _load_native_fp4()
 
@@ -241,7 +266,7 @@ def load_offloaded_v4_flash(
     device: torch.device,
     shard_file: str,
     max_resident_experts: int = 8,
-    use_native: bool = False,
+    use_native: bool = None,
 ):
     import json as _json
 
