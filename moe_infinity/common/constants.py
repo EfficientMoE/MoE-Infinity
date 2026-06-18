@@ -12,12 +12,18 @@ from transformers import (
     Qwen3MoeForCausalLM,
 )
 
+try:
+    from transformers import DeepseekV4ForCausalLM
+except ImportError:
+    DeepseekV4ForCausalLM = None
+
 MODEL_MAPPING_NAMES = {
     "nllb": NllbMoeForConditionalGeneration,
     "mixtral": MixtralForCausalLM,
     "opt": OPTForCausalLM,
-    "deepseek": DeepseekV2ForCausalLM,
+    "deepseekv4": DeepseekV4ForCausalLM,
     "deepseek_v3": DeepseekV3ForCausalLM,
+    "deepseek": DeepseekV2ForCausalLM,
     "gptoss": GptOssForCausalLM,
     "qwen3": Qwen3MoeForCausalLM,
     "dbrx": DbrxForCausalLM,
@@ -29,8 +35,9 @@ MODEL_MAPPING_TYPES = {
     "nllb": 2,
     "mixtral": 4,
     "opt": 3,
-    "deepseek": 5,
+    "deepseekv4": 5,
     "deepseek_v3": 5,
+    "deepseek": 5,
     "gptoss": 4,
     "qwen3": 5,
     "dbrx": 4,
