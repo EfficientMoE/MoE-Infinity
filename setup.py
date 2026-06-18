@@ -265,6 +265,11 @@ _PAGED_ATTN_SOURCES = [
     "extensions/kernel/paged_attention.cu",
 ]
 
+_MARLIN_SOURCES = [
+    "moe_infinity/kernel/marlin/marlin_cuda.cpp",
+    "moe_infinity/kernel/marlin/marlin_cuda_kernel.cu",
+]
+
 # Note: _engine needs CUTLASS for fused_glu_cuda.cu
 
 ext_modules = []
@@ -324,6 +329,17 @@ if cuda_available:
             include_dirs=COMMON_INCLUDE_PATHS,
             extra_compile_args={
                 "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,
+            },
+        )
+    )
+
+    ext_modules.append(
+        cpp_extension.CUDAExtension(
+            name="moe_infinity._marlin",
+            sources=_MARLIN_SOURCES,
+            extra_compile_args={
+                "nvcc": ["-O3", "--use_fast_math", "-std=c++17"]
+                + _cuda_arch_flags,
             },
         )
     )
