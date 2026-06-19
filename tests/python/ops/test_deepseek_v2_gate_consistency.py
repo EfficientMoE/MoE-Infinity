@@ -265,8 +265,8 @@ def test_v2_routing_mask_conversion(seed_everything, norm_topk_prob):
 
     with torch.no_grad():
         topk_idx, topk_weight = block.gate(hidden_states)
-        router_mask, routing_weights_mask, _ = (
-            prepare_expert_route(hidden_states)
+        router_mask, routing_weights_mask, _ = prepare_expert_route(
+            hidden_states
         )
 
     manual_mask = torch.zeros_like(router_mask)
