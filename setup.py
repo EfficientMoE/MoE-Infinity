@@ -333,6 +333,33 @@ if cuda_available:
         )
     )
 
+    _v4fp4_arch_flags = [
+        f
+        for f in _cuda_arch_flags
+        if "compute_80" not in f and "compute_90" not in f
+    ]
+    if not _v4fp4_arch_flags:
+        _v4fp4_arch_flags = ["-gencode=arch=compute_120a,code=sm_120a"]
+    else:
+        _v4fp4_arch_flags = [
+            f.replace("compute_120,code=sm_120", "compute_120a,code=sm_120a")
+            for f in _v4fp4_arch_flags
+        ]
+    ext_modules.append(
+        cpp_extension.CUDAExtension(
+            name="moe_infinity._v4_fp4",
+            sources=[
+                "extensions/kernel/v4_fp4/v4_fp4_binding.cpp",
+                "extensions/kernel/v4_fp4/v4_fp4_dequant.cu",
+            ],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17", "-fPIC"],
+                "nvcc": ["-O3", "--use_fast_math", "-std=c++17"]
+                + _v4fp4_arch_flags,
+            },
+        )
+    )
+
     ext_modules.append(
         cpp_extension.CUDAExtension(
             name="moe_infinity._marlin",
