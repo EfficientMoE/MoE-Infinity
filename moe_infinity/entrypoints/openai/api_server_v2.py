@@ -1684,6 +1684,55 @@ async def list_models():
     return ModelList(data=[card])
 
 
+@app.post("/v1/reload")
+async def reload_modules(payload: dict[str, Any]) -> JSONResponse:
+    modules = payload.get("modules", [])
+    if not isinstance(modules, list) or not all(
+        isinstance(m, str) for m in modules
+    ):
+        raise HTTPException(
+            status_code=400, detail="'modules' must be a list of strings"
+        )
+    reloaded = []
+    errors = []
+    for module_name in modules:
+        try:
+            mod = importlib.import_module(module_name)
+            importlib.reload(mod)
+            reloaded.append(module_name)
+        except Exception as e:
+            errors.append({"module": module_name, "error": str(e)})
+    status = "ok" if not errors else "partial"
+    return JSONResponse(
+        content={"status": status, "reloaded": reloaded, "errors": errors}
+    )
+
+
+@app.get("/v1/config")
+async def get_config() -> JSONResponse:
+    if engine is None:
+        return create_error_response(
+            status_code=503,
+            message="Service starting",
+            error_type="server_error",
+            code="service_starting",
+        )
+    return JSONResponse(content=engine.get_config())
+
+
+@app.post("/v1/config")
+async def update_config(payload: dict[str, Any]) -> JSONResponse:
+    if engine is None:
+        return create_error_response(
+            status_code=503,
+            message="Service starting",
+            error_type="server_error",
+            code="service_starting",
+        )
+    updated = engine.update_config(payload)
+    return JSONResponse(content={"status": "ok", "updated": updated})
+
+
 def _resolve_int_attr(config: object, *names: str) -> Optional[int]:
     for name in names:
         value = getattr(config, name, None)
