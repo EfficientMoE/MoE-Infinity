@@ -7,6 +7,7 @@
 #include "parallel/expert_dispatcher.h"
 #include "prefetch/archer_prefetch_handle.h"
 #include "model/moe.h"
+#include "kernel/ops.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("init_moe_layer", InitMoELayer,
@@ -86,6 +87,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("clean_up_resources", &ArcherPrefetchHandle::CleanUpResources);
   //    .def("set_node_cache_priority",
   //    &ArcherPrefetchHandle::SetNodeCachePriority);
+
+  m.def("silu_and_mul", &silu_and_mul, "Fused SiLU(gate) * up");
+  m.def("gelu_and_mul", &gelu_and_mul, "Fused GeLU(gate) * up");
+  m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul, "Fused GeLU-tanh(gate) * up");
+  m.def("fatrelu_and_mul", &fatrelu_and_mul, "Fused FatReLU(gate) * up");
 
   py::class_<ExpertDispatcher>(m, "expert_dispatcher")
       .def(py::init<int, int, int, int, int>())

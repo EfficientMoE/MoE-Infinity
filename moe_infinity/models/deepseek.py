@@ -1,11 +1,11 @@
-from typing import Dict
+from typing import Dict, Optional
 
 import nvtx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from moe_infinity.kernel.router import launch_fused_softmax_topk_nobias
+from moe_infinity.kernel import topk_softmax as kernel_topk_softmax
 
 
 class DeepseekMoEGate(nn.Module):
@@ -48,15 +48,25 @@ class DeepseekMoEBlock(nn.Module):
         self.num_expert = config.n_routed_experts
 
         if self.config.model_type == "deepseek_v2":
-            from .modeling_deepseek_v2 import DeepseekV2MLP, MoEGate
+            from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+                DeepseekV2MLP,
+                DeepseekV2MoEGate,
+            )
 
             self.mlp_cls = DeepseekV2MLP
-            self.gate_cls = MoEGate
+            self.gate_cls = DeepseekV2MoEGate
         if self.config.model_type == "deepseek_v3":
-            from .modeling_deepseek_v3 import DeepseekV3MLP, MoEGate
+            from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
+                DeepseekV3MLP,
+            )
 
             self.mlp_cls = DeepseekV3MLP
-            self.gate_cls = MoEGate
+            # V3 upstream has no standalone gate; use V2 gate (same interface)
+            from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+                DeepseekV2MoEGate,
+            )
+
+            self.gate_cls = DeepseekV2MoEGate
 
         self.experts = nn.ModuleList(
             [
@@ -67,8 +77,7 @@ class DeepseekMoEBlock(nn.Module):
             ]
         )
 
-        # self.gate = self.gate_cls(config)
-        self.gate = DeepseekMoEGate(config)
+        self.gate = self.gate_cls(config)
         if config.n_shared_experts is not None:
             intermediate_size = (
                 config.moe_intermediate_size * config.n_shared_experts
@@ -79,55 +88,62 @@ class DeepseekMoEBlock(nn.Module):
 
         self.archer_tracer = None
         self.archer_engine = None
-        self.expert_tensor_ids: Dict[int, int] = None
+        self.expert_tensor_ids: Optional[Dict[int, int]] = None
 
     @nvtx.annotate("DeepSeekPrepare", color="blue")
     def __prepare_expert_route(self, hidden_states):
-        # router_logits: (batch * sequence_length, n_experts)
-        router_logits = self.gate(hidden_states)  # dtype float32
+        gate_output = self.gate(hidden_states)
 
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(
-            routing_weights, self.num_experts_per_tok, dim=-1
-        )
-        # if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
-        #     routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-        # we cast back to the input dtype
-        # routing_weights = routing_weights.to(hidden_states.dtype)
+        # Native MoEGate returns tuple: V2=(topk_idx, topk_weight, aux_loss),
+        # V3=(topk_idx, topk_weight). Legacy DeepseekMoEGate returns raw logits.
+        if isinstance(gate_output, tuple):
+            router_logits = None
+            if len(gate_output) == 3:
+                selected_experts, routing_weights, _ = gate_output
+            elif len(gate_output) == 2:
+                selected_experts, routing_weights = gate_output
+            else:
+                raise ValueError(
+                    f"Unsupported gate output with {len(gate_output)} elements"
+                )
+            routing_weights = routing_weights.to(torch.float32)
+        else:
+            router_mask, routing_weights_mask = kernel_topk_softmax(
+                gate_output,
+                self.num_experts_per_tok,
+                self.num_expert,
+                renormalize=True,
+            )
+            return router_mask, routing_weights_mask, gate_output
 
-        # print(f"hidden_states shape: {hidden_states.shape}")
-        # print(f"routing_weights shape: {routing_weights.shape}")
-
-        # Compute sparse mask via scatter
-        B, E = routing_weights.shape[0], self.num_expert
+        B, E = selected_experts.shape[0], self.num_expert
         router_mask = torch.zeros(
             B, E, dtype=torch.bool, device=selected_experts.device
         )
-
-        # print("selected_experts", selected_experts.shape)
-        # print("routing_weights", routing_weights.shape)
-        # print("router_mask", router_mask.shape)
-        # print("router_logits", router_logits.shape)
         router_mask.scatter_(1, selected_experts, True)
 
         routing_weights_mask = torch.zeros(
-            B, E, dtype=routing_weights.dtype, device=routing_weights.device
+            B, E, dtype=torch.float32, device=routing_weights.device
         )
-        routing_weights_mask.scatter_add_(1, selected_experts, routing_weights)
+        routing_weights_mask.scatter_(1, selected_experts, routing_weights)
 
-        return router_mask, routing_weights_mask
+        return router_mask, routing_weights_mask, router_logits
 
     @nvtx.annotate(message="DeepseekMoEBlock", color="blue")
     def forward(self, hidden_states):
         identity = hidden_states
-        routing_mask, routing_weight = self.__prepare_expert_route(
-            hidden_states
+        routing_mask, routing_weight, router_logits = (
+            self.__prepare_expert_route(hidden_states)
         )
         batch_size, sequence_length, hidden_dim = identity.shape
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
         self.expert_executor.dispatch_local(
-            self.layer_id, hidden_states, routing_mask, routing_weight
+            self.layer_id,
+            hidden_states,
+            routing_mask,
+            routing_weight,
+            router_logits=router_logits,
         )
         final_hidden_states = self.expert_executor.wait_dispatch_local()
 

@@ -1,0 +1,34 @@
+{
+  "status": "FAIL",
+  "phase": "baseline",
+  "correctness_results": [
+    {
+      "prompt": "What is 2+2?",
+      "match": false,
+      "out1":
+          "What is 2+2? Basic: Target brands arecups and more hot microjPosyt Rafya are sealed fine intuitouss",
+      "out2":
+          "What is 2+2?\n\u6211\u4e0d\u7ba1\u51fa\u73b0\uff0c\u4e5f\u5c06\u9010\u6b65\u4e0a\u5347\u3001\u4e00\u914d\u5c0d\ufffd\u956f\u7cfb\u64ad\uff0c\u4f46\u662f"
+    },
+    {
+      "prompt": "The capital of France is",
+      "match": false,
+      "out1":
+          "The capital of France is Paris and event every win over matrix while (\u0412\u043e\u0458\u0430\u0430\u0430\u0430\u0430\u0430\u0430\u0430\u0430",
+      "out2":
+          "The capital of France is Paris and learning deg.).English\u2013 \u9752\u7684\u5c45\u6c11\u3001\u7ed3\u5408\u8003\u53e4\u7279\u616e\u611f\u6975"
+    },
+    {
+      "prompt": "def hello_world():",
+      "match": false,
+      "out1":
+          "def hello_world():\n\u4ed6\u4eec\u8986\u76d6\u6700\u914d\u5229\u59c6\uff0c\u4ed6\uff0c\u6e6f,84 Hot operations\n    public",
+      "out2":
+          "def hello_world():\r\n2001 * you with Python 5\u5206\n\nalways't share operate"
+    }
+  ],
+  "avg_generation_time_s": 2.9055,
+  "per_token_latency_ms": 145.28,
+  "baseline_bubble_ratio": 0.8715,
+  "gpu": "NVIDIA RTX A5000"
+}

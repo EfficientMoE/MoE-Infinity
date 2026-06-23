@@ -1,0 +1,15 @@
+{
+  "status": "MEASURED",
+  "phase": "combined_all_phases",
+  "description": "combined_all_phases latency benchmark",
+  "avg_total_time_s": 2.9645,
+  "min_total_time_s": 2.952,
+  "max_total_time_s": 2.9759,
+  "per_token_latency_ms": 148.23,
+  "num_tokens": 20,
+  "num_iters": 5,
+  "baseline_per_step_ms": 947.5,
+  "baseline_bubble_ratio": 0.8715,
+  "gpu": "NVIDIA RTX A5000",
+  "torch_version": "2.9.1+cu128"
+}

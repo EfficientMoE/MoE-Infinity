@@ -315,8 +315,7 @@ def main():
     print(sep)
     print("bench_prefill_decode_collocation.py")
     print(
-        f"Config: decode={N_DEC}×(q=1,kv={L_DEC})  "
-        f"prefill={N_PRE}×(q={L_PRE})"
+        f"Config: decode={N_DEC}×(q=1,kv={L_DEC})  prefill={N_PRE}×(q={L_PRE})"
     )
     print(
         f"        heads={H}  head_dim={D}  dtype=BF16  "
@@ -380,13 +379,13 @@ def main():
     print(
         f"  decode-only  ({N_DEC}×q=1,kv={L_DEC}):  "
         f"{med_dec_only:7.1f}µs  "
-        f"{FLOPS_DEC/(med_dec_only*1e-6)/1e12:.2f} TFLOPS  "
+        f"{FLOPS_DEC / (med_dec_only * 1e-6) / 1e12:.2f} TFLOPS  "
         f"{dec_tps(med_dec_only):,.0f} new-tok/s"
     )
     print(
         f"  prefill-only ({N_PRE}×q={L_PRE}):       "
         f"{med_pre_only:7.1f}µs  "
-        f"{FLOPS_PRE/(med_pre_only*1e-6)/1e12:.2f} TFLOPS  "
+        f"{FLOPS_PRE / (med_pre_only * 1e-6) / 1e12:.2f} TFLOPS  "
         f"{pre_tps(med_pre_only):,.0f} pre-tok/s"
     )
     print(f"  serial-sum (no overlap):      {serial_sum:7.1f}µs")
@@ -570,7 +569,7 @@ def main():
     print(
         f"  Ideal-overlap target: {ideal_parallel:.1f}µs  →  "
         f"{dec_tps(ideal_parallel):,.0f} new-tok/s  "
-        f"(perfect concurrency, {ideal_parallel/serial_sum*100:.0f}% of serial-sum)"
+        f"(perfect concurrency, {ideal_parallel / serial_sum * 100:.0f}% of serial-sum)"
     )
     print()
     print(

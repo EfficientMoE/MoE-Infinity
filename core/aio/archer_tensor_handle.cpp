@@ -213,3 +213,9 @@ void ArcherTensorHandle::ReadTensor(const uint32_t tensor_id, void* memory_ptr,
   prio_aio_handle_.Read(filename, memory_ptr, on_demand, tensor_meta.size,
                         tensor_meta.offset);
 }
+
+void ArcherTensorHandle::ReadBulk(const std::string& filename, void* memory_ptr,
+                                  bool on_demand, std::int64_t num_bytes,
+                                  std::int64_t offset) {
+  prio_aio_handle_.Read(filename, memory_ptr, on_demand, num_bytes, offset);
+}

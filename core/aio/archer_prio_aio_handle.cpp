@@ -10,11 +10,26 @@
 #include <algorithm>
 #include <thread>
 
+#include <cstdlib>
+
+#ifndef NVTX_DISABLE
+  #include <nvtx3/nvtx3.hpp>
+#endif
+
 #include "archer_aio_utils.h"
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
 
-const int kBlockSize = 1024 * 1024;
+static int GetBlockSize() {
+  const char* env = std::getenv("MOE_IO_BLOCK_SIZE_KB");
+  if (env != nullptr) {
+    int kb = std::atoi(env);
+    if (kb >= 256 && kb <= 65536) return kb * 1024;
+  }
+  return 1024 * 1024;
+}
+
+const int kBlockSize = GetBlockSize();
 const int kQueueDepth = 32;
 
 ArcherPrioAioHandle::ArcherPrioAioHandle(const std::string& prefix,
@@ -49,6 +64,10 @@ std::int64_t ArcherPrioAioHandle::Read(const std::string& filename,
                                        void* buffer, const bool high_prio,
                                        const std::int64_t num_bytes,
                                        const std::int64_t offset) {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("aio_read_submit");
+#endif
+
   int fd = -1;
   {
     std::lock_guard<std::mutex> lock(file_set_mutex_);
@@ -63,19 +82,49 @@ std::int64_t ArcherPrioAioHandle::Read(const std::string& filename,
   std::int64_t num_bytes_aligned =
       (num_bytes + kAioAlignment - 1) & ~(kAioAlignment - 1);
 
-  auto callbacks = aio_context_.PrepIocbs(true, buffer, fd, kBlockSize, offset,
-                                          num_bytes_aligned);
+  // O_DIRECT requires 4096-byte aligned buffers. The caller's buffer may only
+  // be 64-byte aligned (c10 allocator). Use pinned-pool bounce buffers that
+  // are guaranteed 4096-aligned, then memcpy to the final destination.
+  const auto n_blocks =
+      num_bytes_aligned / static_cast<std::int64_t>(kBlockSize);
+  const auto last_block_size =
+      num_bytes_aligned % static_cast<std::int64_t>(kBlockSize);
+  const auto n_iocbs = n_blocks + (last_block_size > 0 ? 1 : 0);
+
+  std::vector<AioCallback> callbacks;
+  auto pool = pinned_pool_;
+
+  for (std::int64_t i = 0; i < n_iocbs; ++i) {
+    const std::int64_t shift = i * static_cast<std::int64_t>(kBlockSize);
+    const std::int64_t xfer_offset = offset + shift;
+    auto byte_count = static_cast<std::int64_t>(kBlockSize);
+    if ((shift + byte_count) > num_bytes_aligned) {
+      byte_count = num_bytes_aligned - shift;
+    }
+    std::int64_t copy_count =
+        (shift + byte_count <= num_bytes)
+            ? byte_count
+            : std::max(num_bytes - shift, static_cast<std::int64_t>(0));
+    void* dst_ptr = static_cast<char*>(buffer) + shift;
+
+    callbacks.push_back(
+        [pool, fd, dst_ptr, copy_count, byte_count, xfer_offset]() -> int {
+          void* chunk = pool->Acquire();
+          int ret = ArcherReadFile(fd, chunk, byte_count, xfer_offset);
+          if (copy_count > 0) {
+            memcpy(dst_ptr, chunk, copy_count);
+          }
+          pool->Release(chunk);
+          return ret;
+        });
+  }
+
   auto io_request = std::make_shared<struct AioRequest>();
   io_request->callbacks = std::move(callbacks);
   io_request->pending_callbacks.store(io_request->callbacks.size());
   aio_context_.AcceptRequest(io_request, high_prio);
 
-  {
-    std::unique_lock<std::mutex> lock(io_request->mutex);
-    io_request->cv.wait(lock, [&io_request] {
-      return io_request->pending_callbacks.load() == 0;
-    });
-  }
+  Wait(io_request);
 
   return num_bytes_aligned;
 }
@@ -85,6 +134,10 @@ std::int64_t ArcherPrioAioHandle::Write(const std::string& filename,
                                         const bool high_prio,
                                         const std::int64_t num_bytes,
                                         const std::int64_t offset) {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("aio_write_submit");
+#endif
+
   int fd = -1;
   {
     std::lock_guard<std::mutex> lock(file_set_mutex_);
@@ -149,14 +202,20 @@ std::int64_t ArcherPrioAioHandle::Write(const std::string& filename,
   io_request->pending_callbacks.store(io_request->callbacks.size());
   aio_context_.AcceptRequest(io_request, high_prio);
 
-  {
-    std::unique_lock<std::mutex> lock(io_request->mutex);
-    io_request->cv.wait(lock, [&io_request] {
-      return io_request->pending_callbacks.load() == 0;
-    });
-  }
+  Wait(io_request);
 
   return num_bytes_aligned;
+}
+
+void ArcherPrioAioHandle::Wait(const std::shared_ptr<AioRequest>& io_request) {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("aio_wait");
+#endif
+
+  std::unique_lock<std::mutex> lock(io_request->mutex);
+  io_request->cv.wait(lock, [&io_request] {
+    return io_request->pending_callbacks.load() == 0;
+  });
 }
 
 int ArcherPrioAioContext::GetDefaultNumIoThreads() {
@@ -198,6 +257,7 @@ void ArcherPrioAioContext::Schedule() {
     }
   }
 
+  // Prefer high-priority requests (on-demand expert loads).
   {
     std::lock_guard<std::mutex> lock(io_queue_high_mutex_);
     if (!io_queue_high_.empty()) {
@@ -217,30 +277,30 @@ void ArcherPrioAioContext::Schedule() {
     return;
   }
 
-  AioCallback cb = nullptr;
+  // Low-priority requests (prefetch, FetchExec): batch ALL callbacks to the
+  // thread pool so every I/O thread works in parallel, matching the high-prio
+  // path.  Preemption is maintained between complete requests — if a high-prio
+  // request arrives while a low-prio request is in-flight, it will be served
+  // on the next Schedule() iteration.
   {
     std::lock_guard<std::mutex> lock(io_queue_low_mutex_);
     if (!io_queue_low_.empty()) {
       io_request = io_queue_low_.front();
-      cb = std::move(io_request->callbacks.back());
-      io_request->callbacks.pop_back();
-      if (io_request->callbacks.empty()) {
-        io_queue_low_.pop_front();
-      }
+      io_queue_low_.pop_front();
     }
   }
 
-  if (cb == nullptr) {
+  if (io_request == nullptr) {
     return;
   }
 
-  thread_pool_->Enqueue(cb);
-  thread_pool_->Wait();
-  io_request->pending_callbacks.fetch_sub(1);
-
-  if (io_request->pending_callbacks.load() == 0) {
-    io_request->cv.notify_one();
+  for (auto& cb : io_request->callbacks) {
+    thread_pool_->Enqueue(cb);
   }
+  thread_pool_->Wait();
+  io_request->callbacks.clear();
+  io_request->pending_callbacks.store(0);
+  io_request->cv.notify_one();
 }
 
 void ArcherPrioAioContext::AcceptRequest(

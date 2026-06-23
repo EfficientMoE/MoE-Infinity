@@ -1,0 +1,67 @@
+{
+  "status": "PASS",
+  "mode": "real",
+  "model_requirement":
+      "Real benchmark requires model download and CUDA-capable GPU.",
+  "requested_model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+  "offload_dir": "/tmp/offload_bench",
+  "environment": {
+    "torch_version": "2.9.1+cu128",
+    "torch_cuda_version": "12.8",
+    "cuda_available": true,
+    "cuda_device_count": 1,
+    "cuda_device_names": [
+      "NVIDIA RTX A5000"
+    ]
+  },
+  "workloads": {
+    "shared_prefix_rag": {
+      "ttft_p50": 3.7043645694735456,
+      "ttft_p90": 4.600588709366275,
+      "ttft_p99": 5.113218683205778,
+      "prefill_throughput": 25.365973090686516,
+      "kv_cache_hit_rate": 0.0,
+      "e2e_latency_p50": 5.291949384962209,
+      "e2e_latency_p90": 6.572269584808964,
+      "e2e_latency_p99": 7.304598118865397,
+      "expert_cache_hit_rate": 0.0,
+      "token_savings_pct": 0.0
+    },
+    "multi_turn_conversation": {
+      "ttft_p50": 3.819406303655705,
+      "ttft_p90": 3.8795778507972134,
+      "ttft_p99": 3.916986558072618,
+      "prefill_throughput": 26.279345521000742,
+      "kv_cache_hit_rate": 0.0,
+      "e2e_latency_p50": 5.456294719508151,
+      "e2e_latency_p90": 5.542254072567448,
+      "e2e_latency_p99": 5.595695082960884,
+      "expert_cache_hit_rate": 0.0,
+      "token_savings_pct": 0.0
+    },
+    "batch_with_overlap": {
+      "ttft_p50": 2.2085051030156317,
+      "ttft_p90": 3.7880205787427252,
+      "ttft_p99": 3.8635570485499917,
+      "prefill_throughput": 35.49918799755499,
+      "kv_cache_hit_rate": 0.0,
+      "e2e_latency_p50": 2.6863541320199147,
+      "e2e_latency_p90": 5.411457969632465,
+      "e2e_latency_p99": 5.5193672122142745,
+      "expert_cache_hit_rate": 0.0,
+      "token_savings_pct": 0.0
+    },
+    "no_overlap_baseline": {
+      "ttft_p50": 3.400357687659562,
+      "ttft_p90": 3.465263253599987,
+      "ttft_p99": 3.4998703590295626,
+      "prefill_throughput": 4.225179530832149,
+      "kv_cache_hit_rate": 0.0,
+      "e2e_latency_p50": 4.8576538395136595,
+      "e2e_latency_p90": 4.950376076571411,
+      "e2e_latency_p99": 4.999814798613661,
+      "expert_cache_hit_rate": 0.0,
+      "token_savings_pct": 0.0
+    }
+  }
+}

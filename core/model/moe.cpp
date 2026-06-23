@@ -8,7 +8,7 @@ void InitMoELayer(int num_experts, int topk, int max_tokens, int64_t hidden_dim,
   });
 }
 
-std::tuple<torch::Tensor, torch::Tensor> TopKSoftmax(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> TopKSoftmax(
     torch::Tensor& gating_outputs) {
   if (!moe_layer_ptr) {
     throw std::runtime_error(

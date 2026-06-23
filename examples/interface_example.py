@@ -17,7 +17,6 @@ import torch
 from transformers import AutoTokenizer, LlamaTokenizerFast, TextStreamer
 
 from moe_infinity import MoE
-from moe_infinity.models.modeling_arctic import ArcticTokenizer
 
 
 class StopWatch(TextStreamer):
@@ -46,7 +45,7 @@ class StopWatch(TextStreamer):
             print(f"Decoding time: {self.decoding_time} seconds")
             print(f"Decoding iterations: {self.decoding_iterations}")
             print(
-                f"Decoding time per iteration: {(current_time-self.start_decoding) / self.decoding_iterations} seconds"
+                f"Decoding time per iteration: {(current_time - self.start_decoding) / self.decoding_iterations} seconds"
             )
 
         return super().put(value)
@@ -72,17 +71,9 @@ config = {
 }
 model = MoE(args.model_name_or_path, config)
 
-tokenizer = None
-if "grok" in model_name:
-    tokenizer = LlamaTokenizerFast.from_pretrained(
-        "Xenova/grok-1-tokenizer", trust_remote_code=True
-    )
-elif "arctic" in args.model_name_or_path.lower():
-    tokenizer = ArcticTokenizer.from_pretrained(args.model_name_or_path)
-else:
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name_or_path, trust_remote_code=True, use_fast=False
-    )
+tokenizer = AutoTokenizer.from_pretrained(
+    args.model_name_or_path, trust_remote_code=True, use_fast=False
+)
 
 
 dataset = datasets.load_dataset("openai/gsm8k", "main", split="test")
@@ -108,15 +99,9 @@ all_inputs = dataset["question"]
 # all_inputs = text_list
 
 custom_kwargs = {}
-if "switch" in args.model_name_or_path.lower():
-    custom_kwargs = {"decoder_start_token_id": 0}
-elif "nllb" in args.model_name_or_path.lower():
+if "nllb" in args.model_name_or_path.lower():
     custom_kwargs = {"forced_bos_token_id": 256057}  # translate to French
 elif "mixtral" in args.model_name_or_path.lower():
-    custom_kwargs = {"pad_token_id": tokenizer.eos_token_id}
-elif "grok" in args.model_name_or_path.lower():
-    custom_kwargs = {}
-elif "arctic" in args.model_name_or_path.lower():
     custom_kwargs = {"pad_token_id": tokenizer.eos_token_id}
 elif (
     "deepseek" in args.model_name_or_path.lower()

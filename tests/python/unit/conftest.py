@@ -14,13 +14,8 @@ def _stub_if_missing(name: str) -> None:
         return
     try:
         __import__(name)
-    except ImportError:
+    except (ImportError, OSError):
         sys.modules[name] = MagicMock()
 
 
-# nvtx: optional NVIDIA profiling library used in moe_infinity.models.*
 _stub_if_missing("nvtx")
-
-# Compiled CUDA extensions: may be absent in CPU-only test environments
-_stub_if_missing("moe_infinity._store")
-_stub_if_missing("moe_infinity._engine")

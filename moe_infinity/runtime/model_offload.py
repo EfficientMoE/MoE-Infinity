@@ -5,17 +5,19 @@
 
 import functools
 import gc
+import hashlib
 import importlib
 import json
+import logging
 import os
 import re
+import tempfile
+import warnings
 from typing import Callable, Dict, Type, Union
 
 import torch
 import transformers
 
-# import torch.distributed as dist
-# from torch.distributed import rpc
 try:
     from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear
     from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import (
@@ -39,13 +41,16 @@ from moe_infinity.common import parse_expert_type
 from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
 from moe_infinity.models import (
-    DeepseekMoEBlock,
     Qwen3MoEBlock,
-    SyncArcticMoeBlock,
-    SyncGrokMoeBlock,
+    Qwen3PagedAttention,
+    SyncDbrxFFNBlock,
+    SyncDeepseekV2MoEBlock,
+    SyncDeepseekV3MoEBlock,
+    SyncGptOssMLP,
+    SyncJambaMoEBlock,
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
-    SyncSwitchTransformersSparseMLP,
+    SyncOlmoeMoEBlock,
 )
 from moe_infinity.runtime.compile import script_expert
 from moe_infinity.runtime.hooks import *
@@ -59,10 +64,110 @@ from moe_infinity.utils.arguments import (
     copy_args_to_device,
     copy_kwargs_to_device,
 )
+from moe_infinity.utils.async_transfer import (
+    async_d2h,
+    async_h2d,
+    wait_transfer,
+)
+from moe_infinity.utils.device import get_default_device, get_device
+from moe_infinity.utils.gptq import is_gptq_packed_tensor, is_gptq_quantized
+from moe_infinity.utils.mxfp4 import identify_mxfp4_pairs, is_mxfp4_quantized
 
 _prefetch_lib = None
 # Alias for compatibility
 prefetch_op = None
+
+logger = logging.getLogger(__name__)
+
+
+def _compute_config_fingerprint(config: object) -> str:
+    fields = [
+        "model_type",
+        "architectures",
+        "num_hidden_layers",
+        "hidden_size",
+        "vocab_size",
+        "intermediate_size",
+        "num_local_experts",
+        "num_experts",
+        "n_routed_experts",
+        "num_experts_per_tok",
+        "torch_dtype",
+    ]
+    fingerprint_dict = {}
+    for field in fields:
+        val = getattr(config, field, None)
+        if val is not None:
+            fingerprint_dict[field] = str(val)
+    serialized = json.dumps(fingerprint_dict, sort_keys=True)
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def _write_model_signature(
+    offload_path: str, model_name: str, config: object
+) -> None:
+    signature = {
+        "model_name": model_name,
+        "config_fingerprint": _compute_config_fingerprint(config),
+        "signature_version": 1,
+    }
+    sig_path = os.path.join(offload_path, "model_signature.json")
+    fd, tmp_path = tempfile.mkstemp(dir=offload_path, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(signature, f)
+        os.replace(tmp_path, sig_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    logger.info(
+        "Created model signature for '%s' at %s", model_name, offload_path
+    )
+
+
+def _validate_model_signature(
+    offload_path: str, model_name: str, config: object
+) -> None:
+    sig_path = os.path.join(offload_path, "model_signature.json")
+
+    if not os.path.exists(sig_path):
+        logger.warning(
+            "No model signature found in %s. This appears to be a legacy cache. "
+            "Stamping with current model '%s'.",
+            offload_path,
+            model_name,
+        )
+        _write_model_signature(offload_path, model_name, config)
+        return
+
+    try:
+        with open(sig_path, "r") as f:
+            stored = json.load(f)
+        stored_model_name = stored["model_name"]
+        stored_fingerprint = stored["config_fingerprint"]
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        raise ValueError(
+            f"Corrupted model signature file at {sig_path}. Delete the file or the "
+            + f"entire offload directory and retry. (Detail: {e})"
+        ) from e
+
+    if stored_model_name != model_name:
+        raise ValueError(
+            f"Model name mismatch: offload cache at '{offload_path}' was created for "
+            + f"model '{stored_model_name}', but you are loading '{model_name}'. Use a "
+            + f"different offload_path or delete the existing cache."
+        )
+
+    current_fingerprint = _compute_config_fingerprint(config)
+    if stored_fingerprint != current_fingerprint:
+        raise ValueError(
+            f"Model config mismatch: offload cache at '{offload_path}' has a different "
+            + f"model configuration than '{model_name}'. The model architecture or version "
+            + f"may have changed. Delete the existing cache and retry."
+        )
 
 
 def _load_prefetch_lib():
@@ -81,21 +186,22 @@ def _load_prefetch_lib():
     return _prefetch_lib
 
 
-# class ArcherException(Exception):
-#     pass
-
-
 class OffloadEngine(object):
     param_id = 0
     request_id = 0
-    # request_id_flag = False
     config = {}
 
-    def __init__(self, capacity, config: PretrainedConfig):
+    def __init__(
+        self,
+        capacity,
+        config: PretrainedConfig,
+        attention_backend=None,
+        enable_attention_offload: bool = False,
+        kv_cache_manager=None,
+        enable_kv_cache_offload: bool = False,
+    ):
         self.offload_exemption = set()
         self.expert_modules = []
-
-        # self.model_create_counter = None
 
         self.ckpt_files = []
 
@@ -103,12 +209,59 @@ class OffloadEngine(object):
         self.expert_predictor = ExpertPredictor(config)
         self.expert_predictor.add_tracer(self.expert_tracer)
 
-        # self.expert_cache = ExpertCache(config)
         self.config = config
 
         self.quant_method = None
 
-    # def init_trace(self, trace_path: str):
+        # AttentionBackend scaffolding (no-op by default)
+        # Set enable_attention_offload=True to activate (future work)
+        self._attention_backend = None
+        self._enable_attention_offload: bool = enable_attention_offload
+        if attention_backend is not None:
+            self.set_attention_backend(attention_backend)
+
+        # KVCacheManager scaffolding (no-op by default)
+        self._kv_cache_manager = kv_cache_manager
+        self._enable_kv_cache_offload: bool = enable_kv_cache_offload
+        self._captured_kv: dict[int, tuple[object, ...]] = {}
+        self.model = None
+
+    def get_attention_backend(self):
+        """Return the registered attention backend, or None if not configured.
+
+        Future: when enable_attention_offload=True, this backend will be used
+        to intercept attention computation for CPU offloading.
+        See moe_infinity/runtime/attention_backend.py for the interface.
+        """
+        return self._attention_backend
+
+    def set_attention_backend(self, backend):
+        """Register an AttentionBackend implementation.
+
+        Args:
+            backend: An object implementing the AttentionBackend Protocol.
+                     Use PlaceholderAttentionBackend for testing.
+        """
+        from moe_infinity.runtime.attention_backend import AttentionBackend
+
+        if not isinstance(backend, AttentionBackend):
+            raise TypeError(
+                f"backend must implement AttentionBackend Protocol, got {type(backend)}"
+            )
+        self._attention_backend = backend
+
+    def get_kv_cache_manager(self):
+        """Return the registered KVCacheManager, or None if not configured.
+
+        Future: when enable_kv_cache_offload=True, this manager handles
+        swapping KV cache blocks between GPU and CPU pinned memory.
+        See moe_infinity/memory/kv_cache_manager.py for the interface.
+        """
+        return self._kv_cache_manager
+
+    def set_kv_cache_manager(self, manager):
+        """Register a KVCacheManager for KV cache offloading."""
+        self._kv_cache_manager = manager
 
     def init(
         self,
@@ -141,34 +294,7 @@ class OffloadEngine(object):
 
         os.makedirs(self.checkpoint, exist_ok=True)
 
-        # print("Waiting for distributed init ...")
-
-        # local_rank = int(os.getenv('RANK', '0'))
-        # world_size = int(os.getenv("WORLD_SIZE", '1'))
-
-        # master_addr = os.getenv('MASTER_ADDR', 'localhost')
-        # master_port = os.getenv('MASTER_PORT', '6000')
-
-        # dist.init_process_group(
-        #     backend="nccl",
-        #     # _transports=["uv"], # https://discuss.pytorch.org/t/rpc-behavior-difference-between-pytorch-1-7-0-vs-1-9-0/124772/5
-        #     rank=local_rank,
-        #     world_size=world_size,
-        #     group_name="moe-infinity",
-        #     init_method= f"tcp://{master_addr}:{master_port}",
-        # )
-        # rpc.init_rpc(name=f"worker_{local_rank}",
-        #              rank=local_rank,
-        #              world_size=world_size)
-        # print("Distributed init done")
-
         self.prefetch_lib = _load_prefetch_lib()
-
-        # new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
-        #     self.prefetch_lib.__file__, "TorchAllocateDevice", "TorchFreeDevice"
-        # )
-        # # Swap the current allocator
-        # torch.cuda.memory.change_current_allocator(new_alloc)
 
         self.archer_engine = self.prefetch_lib.prefetch_handle(
             self.checkpoint, _archer_config.device_memory_ratio
@@ -178,22 +304,9 @@ class OffloadEngine(object):
         if _archer_config.trace_path is not None:
             self.expert_tracer.load_trace(_archer_config.trace_path)
 
-        # # truncate self.perfect_cache_file
-        # if (
-        #     os.path.exists(_archer_config.perfect_cache_file)
-        #     and _archer_config.save_cache
-        # ):
-        #     os.remove(_archer_config.perfect_cache_file)
-
         self.expert_executor = DistributedExpertExecutor(
             archer_config=_archer_config
         )
-        # self.expert_prefetcher = ExpertPrefetcher(self.config)
-        # self.device_map_manager = DeviceMapManager(archer_config=_archer_config)
-
-        # self.expert_executor.set_device_map_manager(self.device_map_manager)
-        # self.expert_prefetcher.set_device_map_manager(self.device_map_manager)
-        # self.expert_prefetcher.set_archer_engine(self.archer_engine)
 
         return self
 
@@ -203,7 +316,7 @@ class OffloadEngine(object):
             def archer_torch_index_select(input, dim, index):
                 return orig_torch_index_select(
                     input, dim, index.to(input.device)
-                ).to("cuda:0")
+                ).to(get_default_device())
 
             return archer_torch_index_select
 
@@ -272,16 +385,6 @@ class OffloadEngine(object):
 
         self.cls._old_init = self.cls.__init__
         self.cls.__init__ = do_nothing_decorator(self.cls._old_init)
-        # self.cls.config_class._old_from_pretrained = (
-        #     self.cls.config_class.from_pretrained)
-        # self.cls.config_class.from_pretrained = classmethod(
-        #     config_decorator(self.cls.config_class.from_pretrained))
-        # self.cls._old_load_pretrained_model = self.cls._load_pretrained_model
-        # self.cls._load_pretrained_model = classmethod(
-        #     load_pretrained_model_decorator(self.cls._load_pretrained_model))
-        # transformers.modeling_utils.old_load_state_dict = (
-        #     transformers.modeling_utils.load_state_dict)
-        # transformers.modeling_utils.load_state_dict = load_state_dict
         torch.nn.modules.module.Module._old_apply = (
             torch.nn.modules.module.Module.apply
         )
@@ -307,13 +410,6 @@ class OffloadEngine(object):
 
         activate_empty_init()
 
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._old_cast_classifier = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier = cast_classifier_decorator(
-            transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier
-        )
-
-        transformers.models.switch_transformers.modeling_switch_transformers._old_sparse_mlp = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP = SyncSwitchTransformersSparseMLP
         transformers.models.nllb_moe.modeling_nllb_moe._old_sparse_mlp = (
             transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP
         )
@@ -330,46 +426,55 @@ class OffloadEngine(object):
         transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
         transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = Qwen3MoEBlock
 
-        moe_infinity.models.modeling_grok.modeling_grok1._old_sparse_mlp = (
-            moe_infinity.models.modeling_grok.MoeBlock
-        )
-        moe_infinity.models.modeling_grok.modeling_grok1.MoeBlock = (
-            SyncGrokMoeBlock
+        transformers.models.qwen3_moe.modeling_qwen3_moe._old_qwen3_attention = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention
+        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention = (
+            Qwen3PagedAttention
         )
 
-        moe_infinity.models.modeling_arctic._old_sparse_mlp = (
-            moe_infinity.models.modeling_arctic.ArcticMoE
+        transformers.models.dbrx.modeling_dbrx._old_dbrx_ffn = (
+            transformers.models.dbrx.modeling_dbrx.DbrxFFN
         )
-        moe_infinity.models.modeling_arctic.modeling_arctic.ArcticMoE = (
-            SyncArcticMoeBlock
+        transformers.models.dbrx.modeling_dbrx.DbrxFFN = SyncDbrxFFNBlock
+
+        transformers.models.olmoe.modeling_olmoe._old_olmoe_moe = (
+            transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock
+        )
+        transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock = (
+            SyncOlmoeMoEBlock
         )
 
-        moe_infinity.models.modeling_deepseek_v2._old_sparse_mlp = (
-            moe_infinity.models.modeling_deepseek_v2.DeepseekV2MoE
+        transformers.models.jamba.modeling_jamba._old_jamba_moe = (
+            transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock
         )
-        moe_infinity.models.modeling_deepseek_v3._old_sparse_mlp = (
-            moe_infinity.models.modeling_deepseek_v3.DeepseekV3MoE
+        transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock = (
+            SyncJambaMoEBlock
         )
-        moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.DeepseekV2MoE = DeepseekMoEBlock
-        moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = DeepseekMoEBlock
+
+        transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe = transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE
+        transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
+        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = (
+            SyncDeepseekV2MoEBlock
+        )
+        transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = (
+            SyncDeepseekV3MoEBlock
+        )
+
+        transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp = (
+            transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP
+        )
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = SyncGptOssMLP
 
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
         ) -> Callable:
             @functools.wraps(orig_from_pretrained)
             def archer_from_pretrained(cls, *args, **kwargs):
-                # print("Creating model from scratch ...")
-
                 name_id_map_file = os.path.join(
                     self.checkpoint, "name_id_map.json"
                 )
 
                 self.model_name = model_name = args[0]
 
-                # if "arctic" in model_name:
-                #     self.config = ArcticConfig.from_pretrained(*args, **kwargs)
-                # else:
-                #     self.config = AutoConfig.from_pretrained(*args, **kwargs)
                 self.num_layers, self.num_experts, self.num_encoder_layers = (
                     parse_moe_param(self.config)
                 )
@@ -385,6 +490,10 @@ class OffloadEngine(object):
 
                 self.dtype = parse_expert_dtype(self.config)
                 self.dtype_cls = self.config.torch_dtype
+                if self.dtype_cls is None:
+                    self.dtype_cls = getattr(
+                        self.config, "dtype", torch.bfloat16
+                    )
 
                 if self.config.model_type == "deepseek_v3":
                     self.dtype_cls = torch.float8_e4m3fn
@@ -406,19 +515,57 @@ class OffloadEngine(object):
                         smoothing=0,
                     ):
                         state_dict = {}
+                        is_mxfp4_ckpt = False
                         if "safetensors" in ckpt:
                             with safe_open(
                                 ckpt, framework="pt", device="cpu"
                             ) as f:
-                                for k in f.keys():
+                                weight_keys = list(f.keys())
+                                mxfp4_pairs = identify_mxfp4_pairs(weight_keys)
+                                is_mxfp4_ckpt = bool(mxfp4_pairs)
+                                if not is_mxfp4_ckpt:
+                                    try:
+                                        is_mxfp4_ckpt = is_mxfp4_quantized(
+                                            self.config
+                                        )
+                                    except Exception:
+                                        is_mxfp4_ckpt = False
+
+                                for k in weight_keys:
                                     state_dict[k] = f.get_tensor(k)
                         else:
                             state_dict = torch.load(ckpt)
 
-                        # convert all tensors in state_dict to self.dtype_cls
+                        is_gptq_ckpt = is_gptq_quantized(self.config)
+
                         for k, v in state_dict.items():
+                            if is_gptq_ckpt and is_gptq_packed_tensor(k):
+                                state_dict[k] = v.to("cpu")
+                                continue
+                            if is_mxfp4_ckpt and (
+                                k.endswith("_blocks") or k.endswith("_scales")
+                            ):
+                                state_dict[k] = v.to("cpu")
+                                continue
                             try:
                                 state_dict[k] = v.to(self.dtype_cls).to("cpu")
+                            except (RuntimeError, TypeError) as e:
+                                if k.endswith("_blocks") or k.endswith(
+                                    "_scales"
+                                ):
+                                    warnings.warn(
+                                        f"Could not convert tensor {k} (dtype={v.dtype}) "
+                                        f"to {self.dtype_cls}: {e}. Keeping original dtype.",
+                                        UserWarning,
+                                        stacklevel=2,
+                                    )
+                                    state_dict[k] = v.to("cpu")
+                                    continue
+                                print(
+                                    f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
+                                    flush=True,
+                                )
+                                raise
                             except Exception as e:
                                 print(
                                     f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
@@ -426,35 +573,87 @@ class OffloadEngine(object):
                                 )
                                 raise
 
-                        self._offload_state_dict(state_dict, empty_state_dict)
+                        if (
+                            is_mxfp4_ckpt
+                            and os.environ.get("MOE_INFINITY_MXFP4_DEQUANT", "")
+                            == "1"
+                        ):
+                            from moe_infinity.kernel.mxfp4_gemm import (
+                                mxfp4_dequantize,
+                            )
 
-                        # print("Loading ckpt file", ckpt, flush=True)
+                            dequant_pairs = identify_mxfp4_pairs(
+                                list(state_dict.keys())
+                            )
+                            for blocks_key, scales_key in dequant_pairs:
+                                base = blocks_key[: -len("_blocks")]
+                                if (
+                                    blocks_key not in state_dict
+                                    or scales_key not in state_dict
+                                ):
+                                    continue
+                                blocks = state_dict[blocks_key]
+                                scales = state_dict[scales_key]
+                                if blocks.numel() == 0 or scales.numel() == 0:
+                                    continue
+                                if blocks.dim() == 4:
+                                    E, R, G, B = blocks.shape
+                                    blocks = blocks.reshape(E, R, G * B)
+                                flat_b = blocks.reshape(-1, blocks.shape[-1])
+                                flat_s = scales.reshape(-1, scales.shape[-1])
+                                unpacked_k = flat_b.shape[-1] * 2
+                                bs = unpacked_k // max(flat_s.shape[-1], 1)
+                                bf16 = mxfp4_dequantize(
+                                    flat_b,
+                                    flat_s,
+                                    dtype=self.dtype_cls,
+                                    block_size=bs,
+                                )
+                                E_dim = blocks.shape[0]
+                                N_dim = blocks.shape[1]
+                                K_dim = bf16.shape[-1]
+                                bf16_3d = bf16.reshape(E_dim, N_dim, K_dim)
+                                # Checkpoint: [E, N, K]. Model expects [E, K, N].
+                                state_dict[base] = bf16_3d.transpose(
+                                    1, 2
+                                ).contiguous()
+                                del state_dict[blocks_key]
+                                del state_dict[scales_key]
+
+                        self._offload_state_dict(state_dict, empty_state_dict)
 
                         del state_dict
                         gc.collect()
                         torch.cuda.empty_cache()
 
+                    if is_mxfp4_quantized(self.config):
+                        blocks_aliases = {}
+                        for key in list(self.name_id_map.keys()):
+                            if key.endswith("_blocks"):
+                                base_name = key[: -len("_blocks")]
+                                blocks_aliases[base_name] = self.name_id_map[
+                                    key
+                                ]
+                        self.name_id_map.update(blocks_aliases)
+
                     with open(name_id_map_file, "w") as f:
                         json.dump(self.name_id_map, f)
+                    _write_model_signature(
+                        self.checkpoint, model_name, self.config
+                    )
                 else:
                     print("Loading model from offload_path ...", flush=True)
+                    _validate_model_signature(
+                        self.checkpoint, model_name, self.config
+                    )
                     self.cls.__init__ = self.cls._old_init
                     # load the name_id_map
                     with open(name_id_map_file, "r") as f:
                         self.name_id_map = json.load(f)
 
-                # print(self.name_id_map, flush=True)
-
-                # get max tensor id from the name_id_map
-                # max_tensor_id = max(self.name_id_map.values())
-                # self.model_create_counter = tqdm(
-                #     total=max_tensor_id, desc="Model create"
-                # )
-
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
                 )
-                # self.archer_prefetch.n_layer, self.archer_prefetch.n_expert, n_encoder_layers = parse_moe_param(self.config)
                 model = cls._from_config(
                     self.config,
                     torch_dtype=self.dtype_cls
@@ -467,39 +666,12 @@ class OffloadEngine(object):
                     ),
                 )
 
-                # script_expert(
-                #     self.checkpoint,
-                #     self.config.model_type,
-                #     self.config,
-                # )
-
                 if self.config.model_type == "deepseek_v3":
                     model = model.to(torch.float8_e4m3fn)
 
-                # if (
-                #     self.dtype_cls is torch.bfloat16
-                #     or self.dtype_cls is torch.float16
-                # ):
-                #     model = cls._from_config(
-                #         self.config,
-                #         torch_dtype=self.dtype_cls,
-                #         attn_implementation=(
-                #             "flash_attention_2"
-                #             if is_flash_attn_available
-                #             else "eager"
-                #         ),
-                #     )
-                # else:
-                #     model = cls._from_config(self.config)
+                self.model = model
 
                 base_model_prefix = model.base_model_prefix
-                # model = model.to(self.dtype).to("cpu")
-
-                # print("Model created with dtype", self.dtype, flush=True)
-                # for name, param in model.named_parameters(recurse=False):
-                #     print(name, param.dtype, flush=True)
-
-                # print(self.config, flush=True)
 
                 if hasattr(self.config, "quantization_config"):
                     self.quant_method = self.config.quantization_config[
@@ -507,11 +679,9 @@ class OffloadEngine(object):
                     ]
                     self.config.quantization_config["use_exllama"] = False
                     self.config.quantization_config["disable_exllama"] = True
-                    # print("Quantizing model ...", self.quant_method, flush=True)
                     if self.quant_method == "gptq":
                         from optimum.gptq import GPTQQuantizer
 
-                        # print("Quantizing model with GPTQ ...", self.config.quantization_config, flush=True)
                         optimum_quantizer = GPTQQuantizer.from_dict(
                             self.config.quantization_config
                         )
@@ -559,7 +729,6 @@ class OffloadEngine(object):
                     layer_id, expert_id = parse_expert_id(name, self.config)
                     if expert_id is not None:
                         self.expert_tensor_map[(layer_id, expert_id)] = id
-                # print("expert_tensor_map", self.expert_tensor_map, flush=True)
                 self.expert_prefetcher.expert_tensor_map = (
                     self.expert_tensor_map
                 )
@@ -571,95 +740,56 @@ class OffloadEngine(object):
                         self.config.first_k_dense_replace
                     )
                     first_k_dense_replace = self.config.first_k_dense_replace
-                # extracted_experts = []
-                # for param_name, tensor_id in self.name_id_map.items():
-                #     # extract encoder, digits from "encoder.layers.7.ffn.experts.expert_78.fc1.weight"
-                #     result = re.findall(
-                #         r"(encoder|decoder)\.[a-z]+\.(\d+).*expert_(\d+)",
-                #         param_name)
-                #     if result:
-                #         layer_type, layer_id, expert_id = result[0]
-                #         layer_id = int(layer_id)
-                #         expert_id = int(expert_id)
-                #         extracted_experts.append(
-                #             (layer_type, layer_id, expert_id, tensor_id))
-                # # remove duplicated experts
-                # extracted_experts = list(set(extracted_experts))
-
-                # extracted_experts = [(x[1], x[2],
-                #                       x[3]) if x[0] == "encoder" else
-                #                      (x[1] + 1000, x[2], x[3])
-                #                      for x in extracted_experts]
-
-                # # sort experts by first layer id, then expert id
-                # extracted_experts = sorted(extracted_experts,
-                #                            key=lambda x: (x[0], x[1]))
-                # # transform to np.array
-                # # self.archer_prefetch.extracted_experts = np.zeros(
-                # #     (self.archer_prefetch.n_layer,
-                # #      self.archer_prefetch.n_expert))
-
-                # layer_idx = [x[0] for x in extracted_experts]
-                # # make unique and sort
-                # layer_idx = sorted(list(set(layer_idx)))
 
                 self.expert_executor.set_expert_dispatcher(
                     self.expert_dispatcher
                 )
+                if self.archer_config.speculative_prefetch:
+                    self.expert_executor.set_prefetcher(self.expert_prefetcher)
 
                 module_idx = 0
                 self.expert_layer_modules = []
+                # ATTENTION BACKEND INJECTION POINT (T15)
+                # When self._enable_attention_offload is True, replace attention modules here.
+                # Pattern: same as how SyncMixtralSparseMoeBlock replaces MixtralSparseMoeBlock.
+                # Future: self._attention_backend.forward() called in place of module.forward()
+                if (
+                    self._enable_attention_offload
+                    and self._attention_backend is not None
+                ):
+                    pass  # No-op: attention replacement not yet implemented
                 for module in model.modules():
                     if (
                         isinstance(module, SyncNllbMoeSparseMLP)
-                        or isinstance(module, SyncSwitchTransformersSparseMLP)
-                        or isinstance(module, SyncNllbMoeSparseMLP)
                         or isinstance(module, SyncMixtralSparseMoeBlock)
-                        or isinstance(module, SyncGrokMoeBlock)
-                        or isinstance(module, SyncArcticMoeBlock)
-                        or isinstance(module, DeepseekMoEBlock)
+                        or isinstance(module, SyncDeepseekV2MoEBlock)
+                        or isinstance(module, SyncDeepseekV3MoEBlock)
                         or isinstance(module, Qwen3MoEBlock)
+                        or isinstance(module, SyncDbrxFFNBlock)
+                        or isinstance(module, SyncGptOssMLP)
+                        or isinstance(module, SyncOlmoeMoEBlock)
+                        or isinstance(module, SyncJambaMoEBlock)
                     ):
-                        # module.archer_prefetch = self.archer_prefetch
-                        # module.archer_tracer = self.archer_tracer
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
-                        # module.expert_dispatcher = self.expert_dispatcher
+                        module.is_gptq = is_gptq_quantized(self.config)
                         self.expert_modules.append(module)
-                        module.expert_executor = self.expert_executor
-                        module.expert_prefetcher = self.expert_prefetcher
-                        module.expert_tracer = self.expert_tracer
-                        module.expert_predictor = self.expert_predictor
-                        module.expert_tensor_map = self.expert_tensor_map
+
+                        if not isinstance(module, SyncGptOssMLP):
+                            module.expert_executor = self.expert_executor
+                            module.expert_prefetcher = self.expert_prefetcher
+                            module.expert_tracer = self.expert_tracer
+                            module.expert_predictor = self.expert_predictor
+                            module.expert_tensor_map = self.expert_tensor_map
 
                         module.lib = self.prefetch_lib
 
                         self.expert_layer_modules.append(module)
-
-                        # module_experts = [
-                        #     x for x in extracted_experts
-                        #     if x[0] == layer_idx[module_idx]
-                        # ]
-
-                        # module.expert_tensor_ids = {
-                        #     x[1]: x[2]
-                        #     for x in module_experts
-                        # }
-                        # expert_tensor_ids = [
-                        #     item for item in module.expert_tensor_ids.items()
-                        # ]
-                        # #sort by k and v
-                        # expert_tensor_ids = sorted(expert_tensor_ids,
-                        #                            key=lambda x: (x[0], x[1]))
-                        # # self.archer_prefetch.extracted_experts[module_idx] = [
-                        # #     x[1] for x in expert_tensor_ids
-                        # # ]
                         module.layer_id = module_idx + first_k_dense_replace
 
                         module_idx += 1
 
                 self.setup_archer_hooks(model)
-                # print("OffloadEngine init done, rank", dist.get_rank(), flush=True)
                 return model
 
             return archer_from_pretrained
@@ -690,13 +820,14 @@ class OffloadEngine(object):
 
         deactivate_empty_init()
 
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
+            transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
+        )
+
     def get_topology(self, model):
         name_lst = []
         ret_dict = {}
 
-        # print("Getting topology ...", self.name_id_map)
-
-        # for name in model.state_dict().keys():
         for name, _ in model.named_parameters(recurse=True):
             match = re.search(r"\d+", name)
             if name not in self.name_id_map:
@@ -749,7 +880,6 @@ class OffloadEngine(object):
         for name, _ in model.named_buffers(recurse=True):
             match = re.search(r"\d+", name)
             if name not in self.name_id_map:
-                # print("buffer not in self.name_id_map", name)
                 continue
             if match:
                 if "expert" in name and "shared_experts" not in name:
@@ -820,11 +950,18 @@ class OffloadEngine(object):
             self.offload_set.add(buffer.data.data_ptr())
 
         topo = self.get_topology(model)
+        sparse_count = sum(
+            1 for _, t in topo if isinstance(t, list) and len(t) > 1
+        )
+        print(
+            f"TOPO: {len(topo)} stages, {sparse_count} sparse",
+            flush=True,
+        )
         self.archer_engine.set_topology(topo)
+        print("TOPO: set_topology done", flush=True)
 
         @torch.no_grad()
         def _pre_forward_input_hook(module, input, kwargs, device, tensors):
-            # print("pre_forward_input_hook", device, input, tensors)
             self.archer_engine.fetch_tensors(self.request_id, tensors)
             new_args = copy_args_to_device(device, input)
             new_kwargs = copy_kwargs_to_device(device, kwargs)
@@ -844,7 +981,6 @@ class OffloadEngine(object):
             key, input_device_index, output_device_index, tensors
         ):
             keys = key.split(".")
-            # print(keys)
             m = model
             for k in keys:
                 if k.isdigit():
@@ -875,18 +1011,15 @@ class OffloadEngine(object):
 
         output_device_index = None
         for key, tensors in topo:
-            # print(key, tensors)
             if "shared" in key or "lm_head" in key:
                 key = key.split(".")[0]
                 output_device_index = 0
 
-            if "expert" in key:
+            if "expert" in key and self.config.model_type != "gpt_oss":
                 for expert_idx, expert_tensors in enumerate(tensors):
                     expert_key = (
                         f"{key}.expert_{expert_idx}"
                         if self.config.model_type != "mixtral"
-                        and self.config.model_type != "grok-1"
-                        and self.config.model_type != "arctic"
                         and self.config.model_type != "deepseek_v2"
                         and self.config.model_type != "deepseek_v3"
                         else f"{key}.{expert_idx}"
@@ -896,19 +1029,14 @@ class OffloadEngine(object):
                             expert_tensors
                         )
                     )
-                    # gen_args_hook(
-                    #     expert_key,
-                    #     input_device_index,
-                    #     output_device_index,
-                    #     expert_tensors,
-                    # )
 
-                    self.expert_dispatcher.register_expert(
-                        expert_layer_id,
-                        expert_idx,
-                        expert_tensors,
-                        os.path.join(self.checkpoint, f"expert.pt"),
-                    )
+                    if not is_gptq_quantized(self.config):
+                        self.expert_dispatcher.register_expert(
+                            expert_layer_id,
+                            expert_idx,
+                            expert_tensors,
+                            os.path.join(self.checkpoint, f"expert.pt"),
+                        )
                 expert_layer_id += 1
             else:
                 input_device_index = self.archer_engine.get_node_default_device(
@@ -918,14 +1046,6 @@ class OffloadEngine(object):
                     key, input_device_index, output_device_index, tensors[0]
                 )
                 output_device_index = input_device_index
-
-        # @torch.no_grad()
-        # def request_id_hook(module, *args):
-        #     self.request_id_flag = False
-        #     # self.archer_tracer.clear_request_id()
-        #     # self.archer_prefetch.clear_request()
-
-        # model.register_forward_hook(request_id_hook)
 
         # likely one of them should be enough but just to be safe
         self._register_hooks_recursively(model)
@@ -959,6 +1079,140 @@ class OffloadEngine(object):
         gc.collect()
         torch.cuda.empty_cache()
 
+    @torch.no_grad()
+    def _capture_kv_cache(self, seq_id: int, past_key_values):
+        if not getattr(self, "_enable_kv_cache_offload", True):
+            return
+        if past_key_values is None:
+            return
+
+        captured = []
+        stream_map: dict[str, object] = {}
+
+        def _get_stream(device: torch.device):
+            key = str(device)
+            if key not in stream_map:
+                stream_map[key] = torch.cuda.Stream(device=device)
+            return stream_map[key]
+
+        for layer_kv in past_key_values:
+            if (
+                isinstance(layer_kv, (list, tuple))
+                and len(layer_kv) >= 2
+                and isinstance(layer_kv[0], torch.Tensor)
+                and isinstance(layer_kv[1], torch.Tensor)
+            ):
+                k, v = layer_kv[0], layer_kv[1]
+                if k.is_cuda:
+                    k_cpu = async_d2h(k, _get_stream(k.device))
+                else:
+                    k_cpu = k.to("cpu", non_blocking=True)
+                if v.is_cuda:
+                    v_cpu = async_d2h(v, _get_stream(v.device))
+                else:
+                    v_cpu = v.to("cpu", non_blocking=True)
+                captured.append((k_cpu, v_cpu, k.device, v.device))
+            else:
+                captured.append(layer_kv)
+
+        for stream in stream_map.values():
+            wait_transfer(stream)
+
+        self._captured_kv[seq_id] = tuple(captured)
+
+    @torch.no_grad()
+    def _reload_kv_cache(self, seq_id: int):
+        if not getattr(self, "_enable_kv_cache_offload", True):
+            return None
+        captured = self._captured_kv.pop(seq_id, None)
+        if captured is None:
+            return None
+
+        model_device = None
+        model = getattr(self, "model", None)
+        if model is not None:
+            try:
+                model_device = next(model.parameters()).device
+            except StopIteration:
+                model_device = None
+
+        restored = []
+        stream_map: dict[str, object] = {}
+
+        def _get_stream(device: torch.device):
+            key = str(device)
+            if key not in stream_map:
+                stream_map[key] = torch.cuda.Stream(device=device)
+            return stream_map[key]
+
+        for layer_kv in captured:
+            if (
+                isinstance(layer_kv, tuple)
+                and len(layer_kv) == 4
+                and isinstance(layer_kv[0], torch.Tensor)
+                and isinstance(layer_kv[1], torch.Tensor)
+            ):
+                k_cpu, v_cpu, k_device, v_device = layer_kv
+                k_target = (
+                    k_device
+                    if isinstance(k_device, torch.device)
+                    else model_device
+                )
+                v_target = (
+                    v_device
+                    if isinstance(v_device, torch.device)
+                    else model_device
+                )
+
+                if k_target is None:
+                    k_target = k_cpu.device
+                if v_target is None:
+                    v_target = v_cpu.device
+
+                if k_target.type == "cuda":
+                    k = async_h2d(k_cpu, k_target, _get_stream(k_target))
+                else:
+                    k = k_cpu.to(k_target, non_blocking=True)
+
+                if v_target.type == "cuda":
+                    v = async_h2d(v_cpu, v_target, _get_stream(v_target))
+                else:
+                    v = v_cpu.to(v_target, non_blocking=True)
+
+                restored.append((k, v))
+            elif (
+                isinstance(layer_kv, tuple)
+                and len(layer_kv) == 2
+                and isinstance(layer_kv[0], torch.Tensor)
+                and isinstance(layer_kv[1], torch.Tensor)
+            ):
+                k_cpu, v_cpu = layer_kv
+                target = (
+                    model_device if model_device is not None else k_cpu.device
+                )
+                if target.type == "cuda":
+                    stream = _get_stream(target)
+                    restored.append(
+                        (
+                            async_h2d(k_cpu, target, stream),
+                            async_h2d(v_cpu, target, stream),
+                        )
+                    )
+                else:
+                    restored.append(
+                        (
+                            k_cpu.to(target, non_blocking=True),
+                            v_cpu.to(target, non_blocking=True),
+                        )
+                    )
+            else:
+                restored.append(layer_kv)
+
+        for stream in stream_map.values():
+            wait_transfer(stream)
+
+        return tuple(restored)
+
     def _register_hooks_recursively(self, module, count=[0]):
         my_count = count[0]
         module.id = my_count
@@ -969,20 +1223,12 @@ class OffloadEngine(object):
 
         @torch.no_grad()
         def _pre_forward_module_hook(module, args, kwargs):
-            # if self.request_id_flag == False:
-            #     self.request_id_flag = True
-            #     # print(kwargs, args, type(module))
-
-            #     request_id = self._generate_request_id()
-            #     # self.archer_tracer.set_request_id(request_id)
-            #     # self.archer_prefetch.set_request(request_id)
-
             device_list = []
 
             for name, param in module.named_parameters(recurse=False):
                 if param.data.data_ptr() not in self.offload_set:
                     num_devices = torch.cuda.device_count()
-                    param.data = param.data.to(f"cuda:{num_devices-1}")
+                    param.data = param.data.to(get_device(num_devices - 1))
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
@@ -993,17 +1239,25 @@ class OffloadEngine(object):
 
             for name, buf in module.named_buffers(recurse=False):
                 if buf.data.data_ptr() not in self.offload_set:
-                    buf.data = buf.data.to("cuda:0")
+                    num_devices = torch.cuda.device_count()
+                    buf.data = buf.data.to(get_device(num_devices - 1))
                     continue
-
-                # print("offload buffer", name, buf.data.data_ptr())
 
                 self.offload_set.remove(buf.data_ptr())
                 self.archer_engine.begin(self.request_id, buf)
-                # buf = buf.to(self.dtype)
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.data.device)
+
+            # KV CACHE RELOAD POINT (T16)
+            # When enable_kv_cache_offload=True, reload swapped-out KV cache here.
+            # Future: self._kv_cache_manager.swap_in(block_ids_for_this_layer)
+            # This fires BEFORE each module's forward(), giving time to H2D transfer KV blocks.
+            if (
+                self._enable_kv_cache_offload
+                and self._kv_cache_manager is not None
+            ):
+                _ = self._reload_kv_cache(seq_id=self.request_id)
 
         @torch.no_grad()
         def _post_forward_module_hook(module, input, output):
@@ -1030,11 +1284,35 @@ class OffloadEngine(object):
 
                 device_list.append(buf.device)
 
-            if param_not_offload:
-                if isinstance(output, torch.Tensor):
-                    return output.to(torch.device("cuda:0"))
+            # KV CACHE CAPTURE POINT (T16)
+            # When enable_kv_cache_offload=True, capture past_key_values here.
+            # Future: extract output[1] (present_key_value) and call
+            #         self._kv_cache_manager.allocate_blocks(seq_id, num_blocks)
+            # This fires AFTER each module's forward(), when KV output is available.
+            if (
+                self._enable_kv_cache_offload
+                and self._kv_cache_manager is not None
+            ):
+                past_key_values = None
+                if isinstance(output, (list, tuple)):
+                    if len(output) > 1:
+                        past_key_values = output[1]
+                else:
+                    past_key_values = getattr(output, "past_key_values", None)
+                self._capture_kv_cache(
+                    seq_id=self.request_id, past_key_values=past_key_values
+                )
 
-                return copy_args_to_device(torch.device("cuda:0"), *output)
+            if param_not_offload:
+                if device_list:
+                    target = device_list[0]
+                else:
+                    num_devices = torch.cuda.device_count()
+                    target = torch.device(get_device(num_devices - 1))
+                if isinstance(output, torch.Tensor):
+                    return output.to(target)
+
+                return copy_args_to_device(target, *output)
 
         # Pre forward hook
         self.forward_hooks.append(
@@ -1050,9 +1328,6 @@ class OffloadEngine(object):
 
     # clean runtime hooks
     def clean_up(self):
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._old_cast_classifier
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP = transformers.models.switch_transformers.modeling_switch_transformers._old_sparse_mlp
-
         transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP = (
             transformers.models.nllb_moe.modeling_nllb_moe._old_sparse_mlp
         )
@@ -1061,13 +1336,28 @@ class OffloadEngine(object):
             transformers.models.mixtral.modeling_mixtral._old_sparse_mlp
         )
 
-        moe_infinity.models.modeling_grok.modeling_grok1.MoeBlock = (
-            moe_infinity.modeling_grok.modeling_grok1._old_sparse_mlp
+        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp
+
+        if hasattr(
+            transformers.models.qwen3_moe.modeling_qwen3_moe,
+            "_old_qwen3_attention",
+        ):
+            transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention = transformers.models.qwen3_moe.modeling_qwen3_moe._old_qwen3_attention
+
+        transformers.models.dbrx.modeling_dbrx.DbrxFFN = (
+            transformers.models.dbrx.modeling_dbrx._old_dbrx_ffn
         )
 
-        moe_infinity.models.modeling_arctic.modeling_arctic.ArcticMoE = (
-            moe_infinity.models.modeling_arctic._old_sparse_mlp
+        transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock = (
+            transformers.models.olmoe.modeling_olmoe._old_olmoe_moe
         )
 
-        moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.DeepseekV2MoE = moe_infinity.models.modeling_deepseek_v2._old_sparse_mlp
-        moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = moe_infinity.models.modeling_deepseek_v3._old_sparse_mlp
+        transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock = (
+            transformers.models.jamba.modeling_jamba._old_jamba_moe
+        )
+
+        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe
+        transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
+            transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
+        )

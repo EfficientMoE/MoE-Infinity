@@ -1,0 +1,12 @@
+{
+  "label": "prefetch_OFF",
+  "speculative_prefetch": false,
+  "avg_total_s": 3.7514,
+  "per_token_ms": 187.57,
+  "min_s": 3.0309,
+  "max_s": 4.3055,
+  "iters": 3,
+  "tokens": 20,
+  "gpu": "NVIDIA RTX A5000",
+  "torch": "2.9.1+cu128"
+}

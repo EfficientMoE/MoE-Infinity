@@ -1,0 +1,107 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install lint dependencies
+        run: pip install -r requirements-lint.txt
+
+      - name: Formatting checks
+        run: pre-commit run --all-files
+
+  type-check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-lint.txt
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run mypy
+        run: mypy --config-file=pyproject.toml
+
+  unit-tests:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install CPU PyTorch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install CPU-compatible runtime deps
+        run: |
+          grep -v -E '^(flash-attn|nvtx|sglang-kernel)' requirements.txt \
+            | pip install -r /dev/stdin 2>&1 || true
+
+      - name: Install test tools
+        run: pip install pytest pytest-xdist pytest-timeout
+
+      - name: Install package (no CUDA extensions)
+        run: pip install --no-build-isolation --no-deps -e .
+
+      - name: Run CPU unit tests
+        run: |
+          pytest tests/python/unit tests/python/serving \
+            -m "not gpu and not multi_gpu and not slow and not perf and not network" \
+            -x --timeout=120 -v
+
+      - name: Install contextpilot
+        run: pip install contextpilot
+
+      - name: Run contextpilot CPU tests
+        run: |
+          pytest tests/python/contextpilot/ \
+            -v -m "not gpu and not integration" --tb=short
+
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build tools
+        run: |
+          pip install setuptools==75.3.2 wheel build
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Build sdist
+        run: python -m build --sdist --no-isolation
