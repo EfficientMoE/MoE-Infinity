@@ -11,7 +11,6 @@ from .official_offload_adapter import (
     patch_moe_with_offload,
 )
 
-
 _NATIVE_TP_SHARD_DIMS = {
     "attn_sink": 0,
     "embed": 0,

@@ -42,13 +42,14 @@ import torch.distributed as dist
 sys.path.insert(0, "/workspace/official/inference")
 sys.path.insert(0, "/workspace/official/encoding")
 import model as M  # noqa: E402
-from generate import generate  # noqa: E402
 from encoding_dsv4 import encode_messages  # noqa: E402
+from generate import generate  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 sys.path.insert(0, "/workspace/moe")
-import moe_infinity  # noqa: E402
 from torch.utils.cpp_extension import load as _load_ext  # noqa: E402
+
+import moe_infinity  # noqa: E402
 
 _v4_fp4 = _load_ext(
     name="_v4_fp4",
@@ -62,16 +63,17 @@ _v4_fp4 = _load_ext(
 sys.modules["moe_infinity._v4_fp4"] = _v4_fp4
 setattr(moe_infinity, "_v4_fp4", _v4_fp4)
 
-from moe_infinity.models.deepseek_v4 import load_sharded_v4_flash  # noqa: E402
-from moe_infinity.serving.contextpilot_middleware import (  # noqa: E402
-    ContextPilotMiddleware,
+from benchmarks.contextpilot.benchmark_utils import (
+    compute_percentiles,  # noqa: E402
 )
 from benchmarks.contextpilot.dataset_utils import (  # noqa: E402
     get_workload_names,
     load_workload,
 )
-from benchmarks.contextpilot.benchmark_utils import compute_percentiles  # noqa: E402
-
+from moe_infinity.models.deepseek_v4 import load_sharded_v4_flash  # noqa: E402
+from moe_infinity.serving.contextpilot_middleware import (  # noqa: E402
+    ContextPilotMiddleware,
+)
 
 SINGLE_CKPT = "/ckpt/model0-mp1.safetensors"
 TOKENIZER_DIR = "/ckpt"
