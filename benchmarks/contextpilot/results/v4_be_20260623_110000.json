@@ -1,0 +1,26 @@
+{
+  "model": "deepseek-ai/DeepSeek-V4-Flash",
+  "fixture": "benchmarks/contextpilot/fixtures/longctx_tinysuffix_32k.json",
+  "world_size": 2,
+  "num_requests": 4,
+  "repeats": 1,
+  "max_new_tokens": 16,
+  "shared_prefix_tokens": 22707,
+  "full_prompt_tokens_mean": 22770.8,
+  "cp_prompt_tokens_mean": 22817.8,
+  "one_time_prefix_prefill_s": 71.6747,
+  "modes_ttft_s": {
+    "cold": 18.5575,
+    "cp_transform": 18.0128,
+    "snapshot_reuse": 15.7034,
+    "snapshot_reuse_amortized": 33.6221
+  },
+  "modes_e2e_s": {
+    "cold": 22.2357,
+    "cp_transform": 21.7117,
+    "snapshot_reuse": 20.0117
+  },
+  "restore_s": 0.007,
+  "reuse_token_match_rate": 0.0,
+  "ttft_speedup_reuse_vs_cold": 1.18
+}
