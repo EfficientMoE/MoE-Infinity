@@ -64,7 +64,7 @@ Two concrete implementations:
   - On terminal free (`free_sequence` via completed/abort paths), call `notify_blocks_freed`.
   - On swap-out/in, do not call terminal-free semantics (no-op for CP removal path).
 
-### native path (`moe_infinity/engine/scheduler.py` + `memory/kv_cache_manager.py`)
+### native path (`moe_infinity/engine/scheduler.py` + `moe_infinity/memory/kv_cache_manager.py`)
 
 - Scheduler phase:
   - Apply `get_allocation_priority` to waiting queue before `_allocate_with_prefix_cache` attempts.

@@ -19,6 +19,7 @@ from .expert_executor import (
 from .fp4_expert import dequant_fp4_e2m1, fp4_expert_forward
 from .fp8_expert import dequant_fp8_blockwise, fp8_shared_expert_forward
 from .host_offload import HostOffloadBundleProvider
+from .inmem_shard_loader import load_sharded_v4_flash
 from .official_offload_adapter import (
     OfficialExpertHostStore,
     load_offloaded_v4_flash,
@@ -55,4 +56,5 @@ __all__ = [
     "OfficialExpertHostStore",
     "patch_moe_with_offload",
     "load_offloaded_v4_flash",
+    "load_sharded_v4_flash",
 ]
