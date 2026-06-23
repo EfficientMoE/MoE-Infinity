@@ -233,6 +233,11 @@ _STORE_EXTRA_LINK_ARGS = [
     "-lpthread",
 ]
 
+# Link NVTX runtime when NVTX instrumentation is enabled (default).
+# The C++ NVTX ranges in core/ use nvtxDomainRangePop from libnvToolsExt.
+if os.environ.get("NVTX_DISABLE", "0") != "1":
+    _STORE_EXTRA_LINK_ARGS.append("-lnvToolsExt")
+
 if TORCH_LIB_DIR:
     _STORE_EXTRA_LINK_ARGS.append(f"-Wl,-rpath,{TORCH_LIB_DIR}")
 

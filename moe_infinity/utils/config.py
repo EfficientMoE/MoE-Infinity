@@ -48,6 +48,12 @@ class ArcherConfig:
             "help": "Enable speculative expert prefetching using router logits from layer L to predict L+1 experts."
         },
     )
+    speculative_prefetch_overlap: bool = field(
+        default=False,
+        metadata={
+            "help": "When True, fire speculative prefetch BEFORE the layer-L barrier in dispatch_local so PCIe transfers overlap with layer-L compute. When False (default), prefetch fires after the barrier (legacy behavior). Requires speculative_prefetch=True. Currently exposes a cache-pressure failure mode (see .sisyphus/findings/ibp-feasibility/SUMMARY.md) when device_memory_ratio is high; lower device_memory_ratio if you enable this and observe 'All cached expert locked' warnings."
+        },
+    )
     device_memory_ratio: float = field(
         default=0.9,
         metadata={"help": "Ratio of device memory to use"},

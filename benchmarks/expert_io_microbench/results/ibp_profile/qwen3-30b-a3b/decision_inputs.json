@@ -1,0 +1,29 @@
+{
+  "model": "Qwen/Qwen3-30B-A3B",
+  "hardware": "RTX PRO 6000 Blackwell 96GB (PCIe Gen5 x16)",
+  "iters": 5,
+  "max_new_tokens": 32,
+  "decode_step_count": 160,
+  "disk": {
+    "verdict": "PROCEED",
+    "T_step_ns": 123544767,
+    "T_h2d_ns": 5756352,
+    "T_d2d_ns": 63112708,
+    "T_disk_ns": 0,
+    "BW_h2d_observed_GBps": 58.450894073190796,
+    "Util_pcie": 0.9276741695211845,
+    "bytes_h2d_per_step": 2102899.50625
+  },
+  "host_only": {
+    "verdict": "PROCEED",
+    "T_step_ns": 125747364,
+    "T_h2d_ns": 5754272,
+    "T_d2d_ns": 63063180,
+    "T_disk_ns": 0,
+    "BW_h2d_observed_GBps": 58.47202235139388,
+    "Util_pcie": 0.9280094964352762,
+    "bytes_h2d_per_step": 2102899.50625
+  },
+  "delta_disk_minus_host_T_step_ms": -2.202597,
+  "disk_io_fraction_of_total": -0.0178283310049061
+}
