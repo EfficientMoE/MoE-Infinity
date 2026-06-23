@@ -1,0 +1,29 @@
+{
+  "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+  "hardware": "RTX PRO 6000 Blackwell 96GB (PCIe Gen5 x16)",
+  "iters": 5,
+  "max_new_tokens": 32,
+  "decode_step_count": 160,
+  "disk": {
+    "verdict": "NO_GO",
+    "T_step_ns": 63701344,
+    "T_h2d_ns": 103456,
+    "T_d2d_ns": 9998880,
+    "T_disk_ns": 0,
+    "BW_h2d_observed_GBps": 0.13175649551500154,
+    "Util_pcie": 0.0020911074072340265,
+    "bytes_h2d_per_step": 85.19375
+  },
+  "host_only": {
+    "verdict": "NO_GO",
+    "T_step_ns": 62921464,
+    "T_h2d_ns": 102880,
+    "T_d2d_ns": 9991551,
+    "T_disk_ns": 0,
+    "BW_h2d_observed_GBps": 0.13249416796267496,
+    "Util_pcie": 0.0021028150070256943,
+    "bytes_h2d_per_step": 85.19375
+  },
+  "delta_disk_minus_host_T_step_ms": 0.77988,
+  "disk_io_fraction_of_total": 0.012242755820034189
+}

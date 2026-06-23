@@ -1,12 +1,32 @@
+import importlib.machinery
+import sys
+import types
+
 import torch  # pyright: ignore[reportMissingImports]
 import torch.nn.functional as F  # pyright: ignore[reportMissingImports]
 
-from moe_infinity.models.modeling_deepseek_v3.configuration_deepseek import (
-    DeepseekV3Config,
+
+def _ensure_flash_attn_stub_has_spec() -> None:
+    flash_attn_module = sys.modules.get("flash_attn")
+    if flash_attn_module is None:
+        flash_attn_module = types.ModuleType("flash_attn")
+        flash_attn_module.__spec__ = importlib.machinery.ModuleSpec(
+            "flash_attn", loader=None
+        )
+        sys.modules["flash_attn"] = flash_attn_module
+    elif getattr(flash_attn_module, "__spec__", None) is None:
+        flash_attn_module.__spec__ = importlib.machinery.ModuleSpec(
+            "flash_attn", loader=None
+        )
+
+
+_ensure_flash_attn_stub_has_spec()
+
+from transformers import DeepseekV3Config
+from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
+    DeepseekV3TopkRouter,
 )
-from moe_infinity.models.modeling_deepseek_v3.modeling_deepseek import (
-    MoEGate,
-)
+
 from tests.python.ops.conftest import (
     BF16_ATOL,
     BF16_RTOL,
@@ -78,11 +98,13 @@ def _sort_idx_and_weight(topk_idx, topk_weight):
 @requires_cuda
 def test_deepseek_gate_grouped_topk_matches_reference(seed_everything):
     config = _build_config(topk_group=3, routed_scaling_factor=2.5)
-    gate = MoEGate(config).cuda().bfloat16().eval()
+    gate = DeepseekV3TopkRouter(config).cuda().bfloat16().eval()  # pyright: ignore[reportArgumentType]
+    gate_weight = gate.get_parameter("weight")
+    bias_correction = gate.get_buffer("e_score_correction_bias")
 
     with torch.no_grad():
-        gate.weight.copy_(torch.randn_like(gate.weight))
-        gate.e_score_correction_bias.zero_()
+        gate_weight.copy_(torch.randn_like(gate_weight))
+        bias_correction.zero_()
 
     hidden_states = torch.randn(
         3, 5, config.hidden_size, device="cuda", dtype=torch.bfloat16
@@ -92,8 +114,8 @@ def test_deepseek_gate_grouped_topk_matches_reference(seed_everything):
         custom_idx, custom_weight = gate(hidden_states)
         ref_idx, ref_weight = reference_moe_gate(
             hidden_states,
-            gate.weight.detach(),
-            gate.e_score_correction_bias.detach(),
+            gate_weight.detach(),
+            bias_correction.detach(),
             config.n_group,
             config.topk_group,
             config.num_experts_per_tok,
@@ -120,7 +142,9 @@ def test_deepseek_gate_grouped_topk_matches_reference(seed_everything):
 @requires_cuda
 def test_deepseek_gate_bias_correction_matches_reference(seed_everything):
     config = _build_config(topk_group=1, routed_scaling_factor=2.5)
-    gate = MoEGate(config).cuda().bfloat16().eval()
+    gate = DeepseekV3TopkRouter(config).cuda().bfloat16().eval()  # pyright: ignore[reportArgumentType]
+    gate_weight = gate.get_parameter("weight")
+    bias_correction = gate.get_buffer("e_score_correction_bias")
 
     experts_per_group = config.n_routed_experts // config.n_group
     bias = torch.full(
@@ -129,8 +153,8 @@ def test_deepseek_gate_bias_correction_matches_reference(seed_everything):
     bias[:experts_per_group] = 5.0
 
     with torch.no_grad():
-        gate.weight.copy_(torch.randn_like(gate.weight))
-        gate.e_score_correction_bias.copy_(bias)
+        gate_weight.copy_(torch.randn_like(gate_weight))
+        bias_correction.copy_(bias)
 
     hidden_states = torch.randn(
         2, 7, config.hidden_size, device="cuda", dtype=torch.bfloat16
@@ -140,8 +164,8 @@ def test_deepseek_gate_bias_correction_matches_reference(seed_everything):
         custom_idx, custom_weight = gate(hidden_states)
         ref_idx, ref_weight = reference_moe_gate(
             hidden_states,
-            gate.weight.detach(),
-            gate.e_score_correction_bias.detach(),
+            gate_weight.detach(),
+            bias_correction.detach(),
             config.n_group,
             config.topk_group,
             config.num_experts_per_tok,
@@ -169,13 +193,13 @@ def test_deepseek_gate_bias_correction_matches_reference(seed_everything):
 @requires_cuda
 def test_deepseek_gate_scaling_and_epsilon_matches_reference(seed_everything):
     config = _build_config(topk_group=3, routed_scaling_factor=2.5)
-    gate = MoEGate(config).cuda().bfloat16().eval()
+    gate = DeepseekV3TopkRouter(config).cuda().bfloat16().eval()  # pyright: ignore[reportArgumentType]
+    gate_weight = gate.get_parameter("weight")
+    bias_correction = gate.get_buffer("e_score_correction_bias")
 
     with torch.no_grad():
-        gate.weight.copy_(torch.randn_like(gate.weight))
-        gate.e_score_correction_bias.copy_(
-            torch.randn_like(gate.e_score_correction_bias)
-        )
+        gate_weight.copy_(torch.randn_like(gate_weight))
+        bias_correction.copy_(torch.randn_like(bias_correction))
 
     hidden_states = torch.randn(
         4, 3, config.hidden_size, device="cuda", dtype=torch.bfloat16
@@ -185,8 +209,8 @@ def test_deepseek_gate_scaling_and_epsilon_matches_reference(seed_everything):
         custom_idx, custom_weight = gate(hidden_states)
         ref_idx, ref_weight = reference_moe_gate(
             hidden_states,
-            gate.weight.detach(),
-            gate.e_score_correction_bias.detach(),
+            gate_weight.detach(),
+            bias_correction.detach(),
             config.n_group,
             config.topk_group,
             config.num_experts_per_tok,
@@ -219,8 +243,8 @@ def test_deepseek_gate_scaling_and_epsilon_matches_reference(seed_everything):
     )
 
     with torch.no_grad():
-        gate.weight.copy_(-torch.rand_like(gate.weight).abs() * 2_000.0)
-        gate.e_score_correction_bias.zero_()
+        gate_weight.copy_(-torch.rand_like(gate_weight).abs() * 2_000.0)
+        bias_correction.zero_()
 
     hidden_states_eps = (
         torch.rand(
@@ -233,8 +257,8 @@ def test_deepseek_gate_scaling_and_epsilon_matches_reference(seed_everything):
         custom_idx_eps, custom_weight_eps = gate(hidden_states_eps)
         ref_idx_eps, ref_weight_eps = reference_moe_gate(
             hidden_states_eps,
-            gate.weight.detach(),
-            gate.e_score_correction_bias.detach(),
+            gate_weight.detach(),
+            bias_correction.detach(),
             config.n_group,
             config.topk_group,
             config.num_experts_per_tok,

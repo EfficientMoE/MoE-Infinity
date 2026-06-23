@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import tempfile
+import warnings
 from typing import Callable, Dict, Type, Union
 
 import torch
@@ -42,11 +43,11 @@ from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
 from moe_infinity.models import (
     Qwen3MoEBlock,
-    SyncArcticMoeBlock,
+    Qwen3PagedAttention,
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
-    SyncGrokMoeBlock,
+    SyncGptOssMLP,
     SyncJambaMoEBlock,
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
@@ -70,6 +71,8 @@ from moe_infinity.utils.async_transfer import (
     wait_transfer,
 )
 from moe_infinity.utils.device import get_default_device, get_device
+from moe_infinity.utils.gptq import is_gptq_packed_tensor, is_gptq_quantized
+from moe_infinity.utils.mxfp4 import identify_mxfp4_pairs, is_mxfp4_quantized
 from moe_infinity.utils.quantization import (
     detect_quantization,
     should_cast_tensor,
@@ -430,6 +433,11 @@ class OffloadEngine(object):
         transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
         transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = Qwen3MoEBlock
 
+        transformers.models.qwen3_moe.modeling_qwen3_moe._old_qwen3_attention = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention
+        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention = (
+            Qwen3PagedAttention
+        )
+
         transformers.models.dbrx.modeling_dbrx._old_dbrx_ffn = (
             transformers.models.dbrx.modeling_dbrx.DbrxFFN
         )
@@ -449,20 +457,6 @@ class OffloadEngine(object):
             SyncJambaMoEBlock
         )
 
-        moe_infinity.models.modeling_grok.modeling_grok1._old_sparse_mlp = (
-            moe_infinity.models.modeling_grok.MoeBlock
-        )
-        moe_infinity.models.modeling_grok.modeling_grok1.MoeBlock = (
-            SyncGrokMoeBlock
-        )
-
-        moe_infinity.models.modeling_arctic._old_sparse_mlp = (
-            moe_infinity.models.modeling_arctic.ArcticMoE
-        )
-        moe_infinity.models.modeling_arctic.modeling_arctic.ArcticMoE = (
-            SyncArcticMoeBlock
-        )
-
         transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe = transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE
         transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
         transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = (
@@ -471,6 +465,11 @@ class OffloadEngine(object):
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = (
             SyncDeepseekV3MoEBlock
         )
+
+        transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp = (
+            transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP
+        )
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = SyncGptOssMLP
 
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
@@ -508,6 +507,10 @@ class OffloadEngine(object):
 
                 self.dtype = parse_expert_dtype(self.config)
                 self.dtype_cls = self.config.torch_dtype
+                if self.dtype_cls is None:
+                    self.dtype_cls = getattr(
+                        self.config, "dtype", torch.bfloat16
+                    )
 
                 if self.config.model_type == "deepseek_v3":
                     self.dtype_cls = torch.float8_e4m3fn
@@ -529,22 +532,96 @@ class OffloadEngine(object):
                         smoothing=0,
                     ):
                         state_dict = {}
+                        is_mxfp4_ckpt = False
                         if "safetensors" in ckpt:
                             with safe_open(
                                 ckpt, framework="pt", device="cpu"
                             ) as f:
-                                for k in f.keys():
+                                weight_keys = list(f.keys())
+                                mxfp4_pairs = identify_mxfp4_pairs(weight_keys)
+                                is_mxfp4_ckpt = bool(mxfp4_pairs)
+                                if not is_mxfp4_ckpt:
+                                    try:
+                                        is_mxfp4_ckpt = is_mxfp4_quantized(
+                                            self.config
+                                        )
+                                    except Exception:
+                                        is_mxfp4_ckpt = False
+
+                                for k in weight_keys:
                                     state_dict[k] = f.get_tensor(k)
                         else:
                             state_dict = torch.load(ckpt)
 
-                        self._cast_state_dict_tensors(state_dict)
+                        is_gptq_ckpt = is_gptq_quantized(self.config)
+                        self._cast_state_dict_tensors(
+                            state_dict,
+                            is_gptq_ckpt=is_gptq_ckpt,
+                            is_mxfp4_ckpt=is_mxfp4_ckpt,
+                        )
+
+                        if (
+                            is_mxfp4_ckpt
+                            and os.environ.get("MOE_INFINITY_MXFP4_DEQUANT", "")
+                            == "1"
+                        ):
+                            from moe_infinity.kernel.mxfp4_gemm import (
+                                mxfp4_dequantize,
+                            )
+
+                            dequant_pairs = identify_mxfp4_pairs(
+                                list(state_dict.keys())
+                            )
+                            for blocks_key, scales_key in dequant_pairs:
+                                base = blocks_key[: -len("_blocks")]
+                                if (
+                                    blocks_key not in state_dict
+                                    or scales_key not in state_dict
+                                ):
+                                    continue
+                                blocks = state_dict[blocks_key]
+                                scales = state_dict[scales_key]
+                                if blocks.numel() == 0 or scales.numel() == 0:
+                                    continue
+                                if blocks.dim() == 4:
+                                    E, R, G, B = blocks.shape
+                                    blocks = blocks.reshape(E, R, G * B)
+                                flat_b = blocks.reshape(-1, blocks.shape[-1])
+                                flat_s = scales.reshape(-1, scales.shape[-1])
+                                unpacked_k = flat_b.shape[-1] * 2
+                                bs = unpacked_k // max(flat_s.shape[-1], 1)
+                                bf16 = mxfp4_dequantize(
+                                    flat_b,
+                                    flat_s,
+                                    dtype=self.dtype_cls,
+                                    block_size=bs,
+                                )
+                                E_dim = blocks.shape[0]
+                                N_dim = blocks.shape[1]
+                                K_dim = bf16.shape[-1]
+                                bf16_3d = bf16.reshape(E_dim, N_dim, K_dim)
+                                # Checkpoint: [E, N, K]. Model expects [E, K, N].
+                                state_dict[base] = bf16_3d.transpose(
+                                    1, 2
+                                ).contiguous()
+                                del state_dict[blocks_key]
+                                del state_dict[scales_key]
 
                         self._offload_state_dict(state_dict, empty_state_dict)
 
                         del state_dict
                         gc.collect()
                         torch.cuda.empty_cache()
+
+                    if is_mxfp4_quantized(self.config):
+                        blocks_aliases = {}
+                        for key in list(self.name_id_map.keys()):
+                            if key.endswith("_blocks"):
+                                base_name = key[: -len("_blocks")]
+                                blocks_aliases[base_name] = self.name_id_map[
+                                    key
+                                ]
+                        self.name_id_map.update(blocks_aliases)
 
                     with open(name_id_map_file, "w") as f:
                         json.dump(self.name_id_map, f)
@@ -641,6 +718,8 @@ class OffloadEngine(object):
                 self.expert_executor.set_expert_dispatcher(
                     self.expert_dispatcher
                 )
+                if self.archer_config.speculative_prefetch:
+                    self.expert_executor.set_prefetcher(self.expert_prefetcher)
 
                 module_idx = 0
                 self.expert_layer_modules = []
@@ -657,23 +736,25 @@ class OffloadEngine(object):
                     if (
                         isinstance(module, SyncNllbMoeSparseMLP)
                         or isinstance(module, SyncMixtralSparseMoeBlock)
-                        or isinstance(module, SyncGrokMoeBlock)
-                        or isinstance(module, SyncArcticMoeBlock)
                         or isinstance(module, SyncDeepseekV2MoEBlock)
                         or isinstance(module, SyncDeepseekV3MoEBlock)
                         or isinstance(module, Qwen3MoEBlock)
                         or isinstance(module, SyncDbrxFFNBlock)
+                        or isinstance(module, SyncGptOssMLP)
                         or isinstance(module, SyncOlmoeMoEBlock)
                         or isinstance(module, SyncJambaMoEBlock)
                     ):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
+                        module.is_gptq = is_gptq_quantized(self.config)
                         self.expert_modules.append(module)
-                        module.expert_executor = self.expert_executor
-                        module.expert_prefetcher = self.expert_prefetcher
-                        module.expert_tracer = self.expert_tracer
-                        module.expert_predictor = self.expert_predictor
-                        module.expert_tensor_map = self.expert_tensor_map
+
+                        if not isinstance(module, SyncGptOssMLP):
+                            module.expert_executor = self.expert_executor
+                            module.expert_prefetcher = self.expert_prefetcher
+                            module.expert_tracer = self.expert_tracer
+                            module.expert_predictor = self.expert_predictor
+                            module.expert_tensor_map = self.expert_tensor_map
 
                         module.lib = self.prefetch_lib
 
@@ -712,6 +793,10 @@ class OffloadEngine(object):
         PreTrainedModel.post_init = PreTrainedModel._old_post_init
 
         deactivate_empty_init()
+
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
+            transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
+        )
 
     def get_topology(self, model):
         name_lst = []
@@ -848,7 +933,15 @@ class OffloadEngine(object):
             self.offload_set.add(buffer.data.data_ptr())
 
         topo = self.get_topology(model)
+        sparse_count = sum(
+            1 for _, t in topo if isinstance(t, list) and len(t) > 1
+        )
+        print(
+            f"TOPO: {len(topo)} stages, {sparse_count} sparse",
+            flush=True,
+        )
         self.archer_engine.set_topology(topo)
+        print("TOPO: set_topology done", flush=True)
 
         @torch.no_grad()
         def _pre_forward_input_hook(module, input, kwargs, device, tensors):
@@ -905,13 +998,11 @@ class OffloadEngine(object):
                 key = key.split(".")[0]
                 output_device_index = 0
 
-            if "expert" in key:
+            if "expert" in key and self.config.model_type != "gpt_oss":
                 for expert_idx, expert_tensors in enumerate(tensors):
                     expert_key = (
                         f"{key}.expert_{expert_idx}"
                         if self.config.model_type != "mixtral"
-                        and self.config.model_type != "grok-1"
-                        and self.config.model_type != "arctic"
                         and self.config.model_type != "deepseek_v2"
                         and self.config.model_type != "deepseek_v3"
                         else f"{key}.{expert_idx}"
@@ -922,12 +1013,13 @@ class OffloadEngine(object):
                         )
                     )
 
-                    self.expert_dispatcher.register_expert(
-                        expert_layer_id,
-                        expert_idx,
-                        expert_tensors,
-                        os.path.join(self.checkpoint, f"expert.pt"),
-                    )
+                    if not is_gptq_quantized(self.config):
+                        self.expert_dispatcher.register_expert(
+                            expert_layer_id,
+                            expert_idx,
+                            expert_tensors,
+                            os.path.join(self.checkpoint, f"expert.pt"),
+                        )
                 expert_layer_id += 1
             else:
                 input_device_index = self.archer_engine.get_node_default_device(
@@ -971,14 +1063,47 @@ class OffloadEngine(object):
         torch.cuda.empty_cache()
 
     def _cast_state_dict_tensors(
-        self, state_dict: Dict[str, torch.Tensor]
+        self,
+        state_dict: Dict[str, torch.Tensor],
+        *,
+        is_gptq_ckpt: bool = False,
+        is_mxfp4_ckpt: bool = False,
     ) -> None:
+        quant_info = getattr(self, "_quant_info", None)
+
         for k, v in state_dict.items():
             try:
-                if should_cast_tensor(k, self._quant_info):
-                    state_dict[k] = v.to(self.dtype_cls).to("cpu")
-                else:
+                if is_mxfp4_ckpt and (
+                    k.endswith("_blocks") or k.endswith("_scales")
+                ):
                     state_dict[k] = v.to("cpu")
+                    continue
+
+                if (is_gptq_ckpt and is_gptq_packed_tensor(k)) or (
+                    not should_cast_tensor(k, quant_info)
+                ):
+                    state_dict[k] = v.to("cpu")
+                    continue
+
+                state_dict[k] = v.to(self.dtype_cls).to("cpu")
+
+            except (RuntimeError, TypeError) as e:
+                if k.endswith("_blocks") or k.endswith("_scales"):
+                    warnings.warn(
+                        f"Could not convert tensor {k} (dtype={v.dtype}) "
+                        f"to {self.dtype_cls}: {e}. Keeping original dtype.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    state_dict[k] = v.to("cpu")
+                    continue
+
+                print(
+                    f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
+                    flush=True,
+                )
+                raise
+
             except Exception as e:
                 print(
                     f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
@@ -1327,6 +1452,12 @@ class OffloadEngine(object):
 
         transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp
 
+        if hasattr(
+            transformers.models.qwen3_moe.modeling_qwen3_moe,
+            "_old_qwen3_attention",
+        ):
+            transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention = transformers.models.qwen3_moe.modeling_qwen3_moe._old_qwen3_attention
+
         transformers.models.dbrx.modeling_dbrx.DbrxFFN = (
             transformers.models.dbrx.modeling_dbrx._old_dbrx_ffn
         )
@@ -1339,13 +1470,8 @@ class OffloadEngine(object):
             transformers.models.jamba.modeling_jamba._old_jamba_moe
         )
 
-        moe_infinity.models.modeling_grok.modeling_grok1.MoeBlock = (
-            moe_infinity.modeling_grok.modeling_grok1._old_sparse_mlp
-        )
-
-        moe_infinity.models.modeling_arctic.modeling_arctic.ArcticMoE = (
-            moe_infinity.models.modeling_arctic._old_sparse_mlp
-        )
-
         transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe
+        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
+            transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
+        )

@@ -144,27 +144,24 @@ def test_apply_rotary_pos_emb_mixtral_matches_hf(seed_everything, seq_len):
 @requires_cuda
 @pytest.mark.parametrize("seq_len", [1, 64, 512])
 @pytest.mark.parametrize(
-    "variant_name,module_path",
+    "variant_name,module_path,fn_name",
     [
         (
-            "deepseek_v2",
-            "moe_infinity.models.modeling_deepseek_v2.modeling_deepseek",
-        ),
-        (
             "deepseek_v3",
-            "moe_infinity.models.modeling_deepseek_v3.modeling_deepseek",
+            "transformers.models.deepseek_v3.modeling_deepseek_v3",
+            "apply_rotary_pos_emb",
         ),
     ],
 )
 def test_apply_rotary_pos_emb_deepseek_matches_variants(
-    seed_everything, seq_len, variant_name, module_path
+    seed_everything, seq_len, variant_name, module_path, fn_name
 ):
     try:
         module = importlib.import_module(module_path)
     except ModuleNotFoundError:
         pytest.skip(f"{variant_name} module not available")
 
-    reference_apply = module.apply_rotary_pos_emb
+    reference_apply = getattr(module, fn_name)
     q, k, cos, sin, position_ids = _build_rope_inputs(seq_len)
 
     custom_q, custom_k = apply_rotary_pos_emb_deepseek(

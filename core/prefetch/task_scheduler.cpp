@@ -6,6 +6,9 @@
 #include <sstream>
 
 #include <c10/cuda/CUDACachingAllocator.h>
+#ifndef NVTX_DISABLE
+  #include <nvtx3/nvtx3.hpp>
+#endif
 
 #include "common/time.h"
 #include "memory/memory_pool.h"
@@ -80,6 +83,10 @@ void ArcherTaskPool::FetchExec(const std::uint64_t& request_id,
 }
 
 void ArcherTaskPool::EnqueueTask(const TaskPtr& task) {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("task_queue_push");
+#endif
+
   DLOG_TRACE("EnqueueTask: {}", task->DebugString());
 
   {
@@ -95,7 +102,9 @@ void ArcherTaskPool::EnqueueTask(const TaskPtr& task) {
                                        (task->node->corr_id & 0xffffffff));
             bool need_remove =
                 (is_same_node && is_lower_priority) || is_outdate_layers;
-            if (need_remove) t->node->mutex.unlock();
+            if (need_remove)
+              t->node->exec_state.store(NodeExecState::IDLE,
+                                        std::memory_order_release);
             return need_remove;
           });
       unified_queue_[i].erase(it, unified_queue_[i].end());
@@ -295,13 +304,17 @@ bool ArcherTaskPool::RemoveCachedSparseNode(const NodePtr& node,
       if (nodes_exec.find(n) != nodes_exec.end()) {
         continue;
       }
-      if (n->mutex.try_lock()) {
-        DLOG_TRACE("RemoveCachedSparseNode: {}", n->str());
-        n->SetDevice(n->default_host);
-        // n->incache_visit_count = 0;
-        n->mutex.unlock();
-        cache_size -= n->byte_size;
-        if ((node->io_state & NODE_STATE_VISITED) == 0) node->unused_count += 1;
+      {
+        auto expected = NodeExecState::IDLE;
+        if (n->exec_state.compare_exchange_strong(
+                expected, NodeExecState::FETCHING, std::memory_order_acq_rel)) {
+          DLOG_TRACE("RemoveCachedSparseNode: {}", n->str());
+          n->SetDevice(n->default_host);
+          n->exec_state.store(NodeExecState::IDLE, std::memory_order_release);
+          cache_size -= n->byte_size;
+          if ((node->io_state & NODE_STATE_VISITED) == 0)
+            node->unused_count += 1;
+        }
       }
       if (cache_size <= cache_limit) {
         break;
@@ -345,12 +358,14 @@ bool ArcherTaskPool::RemoveCachedDenseNode(const NodePtr& node) {
     });
 
     for (auto& n : device_nodes) {
-      if (n->mutex.try_lock()) {
+      auto expected = NodeExecState::IDLE;
+      if (n->exec_state.compare_exchange_strong(
+              expected, NodeExecState::FETCHING, std::memory_order_acq_rel)) {
         DLOG_TRACE("RemoveCachedDenseNode: {} {}MB {}MB {}", device_id,
                    cache_size / MB, cache_limit / MB, n->str());
 
         n->SetDevice(n->default_host);
-        n->mutex.unlock();
+        n->exec_state.store(NodeExecState::IDLE, std::memory_order_release);
         cache_size -= n->byte_size;
       }
 
@@ -390,7 +405,8 @@ bool ArcherTaskPool::RemoveCachedDenseNode(const NodePtr& node) {
 //     std::unordered_set<NodePtr> nodes_exec;
 //     {
 //         std::lock_guard<std::mutex> lock(exec_mutex_);
-//         for (auto& [id, task] : exec_queue_) { nodes_exec.insert(task->node);
+//         for (auto& [id, task] : exec_queue_) {
+//         nodes_exec.insert(task->node);
 //         }
 //     }
 
@@ -450,6 +466,10 @@ bool ArcherTaskPool::RemoveCachedDenseNode(const NodePtr& node) {
 
 void ArcherTaskPool::GPUThreadFunc(int gpu_id, int thread_id) {
   while (!main_thread_stop_flag_.load()) {
+#ifndef NVTX_DISABLE
+    nvtx3::scoped_range r("task_queue_pop");
+#endif
+
     std::uint32_t max_priority = 1000;
     std::unique_lock<std::mutex> lock(unified_mutex_);
     for (std::uint32_t i = 0; i < NUM_PRIORITY; ++i) {
@@ -503,7 +523,13 @@ void ArcherTaskPool::GPUThreadFunc(int gpu_id, int thread_id) {
         continue;
       }
     }
-    SetNodeDevice(task);
+
+    {
+#ifndef NVTX_DISABLE
+      nvtx3::scoped_range r("task_execute");
+#endif
+      SetNodeDevice(task);
+    }
 
     if (task->on_demand) {
       node->state = 0;
@@ -518,8 +544,13 @@ void ArcherTaskPool::SetNodeDevice(const TaskPtr& task) {
   DLOG_TRACE("SetNodeDevice: task: {}, node: {}", task->DebugString(),
              node->str());
   if (!task->on_demand) {
-    if (!node->mutex.try_lock()) {
-      DLOG_TRACE("SetNodeDevice: task: {}, mutex locked", task->DebugString());
+    node->is_prefetching.store(true, std::memory_order_release);
+    auto expected = NodeExecState::IDLE;
+    if (!node->exec_state.compare_exchange_strong(
+            expected, NodeExecState::FETCHING, std::memory_order_acq_rel)) {
+      node->is_prefetching.store(false, std::memory_order_release);
+      DLOG_TRACE("SetNodeDevice: task: {}, exec_state not IDLE",
+                 task->DebugString());
       return;
     }
   }
@@ -527,7 +558,10 @@ void ArcherTaskPool::SetNodeDevice(const TaskPtr& task) {
   if (node->device.type() == task->dst_device.type()) {
     DLOG_TRACE("SetNodeDevice: task: {}, skip same device",
                task->DebugString());
-    if (!task->on_demand) node->mutex.unlock();
+    if (!task->on_demand) {
+      node->exec_state.store(NodeExecState::IDLE, std::memory_order_release);
+      node->is_prefetching.store(false, std::memory_order_release);
+    }
     return;
   }
 
@@ -544,8 +578,10 @@ void ArcherTaskPool::SetNodeDevice(const TaskPtr& task) {
   DLOG_TRACE("SetNodeDevice: task: {}, emplace time {} us", task->DebugString(),
              end_time - start_time);
 
-  // do not unlock if node in exec queue, leave this to the release of node
-  if (!task->on_demand) node->mutex.unlock();
+  if (!task->on_demand) {
+    node->exec_state.store(NodeExecState::IDLE, std::memory_order_release);
+    node->is_prefetching.store(false, std::memory_order_release);
+  }
 
   node->io_state = NODE_STATE_CACHED;
 

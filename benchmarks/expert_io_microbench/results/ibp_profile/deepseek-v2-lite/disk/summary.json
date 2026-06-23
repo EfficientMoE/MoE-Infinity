@@ -1,0 +1,112 @@
+{
+  "T_step_ns": 208986571,
+  "T_h2d_ns": 15740368177,
+  "T_disk_ns": 0,
+  "T_d2h_ns": 93832047,
+  "T_d2d_ns": 90233172,
+  "T_sync_ns": 106060330,
+  "T_expert_wait_ns": 38043521809,
+  "T_expert_compute_ns": 14682302685,
+  "T_compute_useful_ns": 0,
+  "bytes_h2d_per_step": 1726432627.9125,
+  "bytes_d2d_total": 1065323855,
+  "BW_h2d_observed_GBps": 17.549095253669424,
+  "BW_d2d_observed_GBps": 11.806343846584491,
+  "BW_pcie_theoretical_GBps": 31.504,
+  "Util_pcie": 0.5570433993673636,
+  "Util_pcie_d2d": 0.3747569783705082,
+  "verdict": "DEFER",
+  "ranges": {
+    "task_queue_pop": {
+      "total_ns": 68307717899.0,
+      "count": 1092360,
+      "mean_ns": 62532.2,
+      "p50_ns": 62611.0
+    },
+    "expert_wait_barrier": {
+      "total_ns": 38043521809.0,
+      "count": 8320,
+      "mean_ns": 4572538.7,
+      "p50_ns": 3177750.5
+    },
+    "DeepseekMoEBlock": {
+      "total_ns": 23890343263.0,
+      "count": 4160,
+      "mean_ns": 5742871.0,
+      "p50_ns": 4289372.0
+    },
+    "expert_compute": {
+      "total_ns": 14682302685.0,
+      "count": 31591,
+      "mean_ns": 464762.2,
+      "p50_ns": 172003.0
+    },
+    "DeepSeekPrepare": {
+      "total_ns": 1142252072.0,
+      "count": 4160,
+      "mean_ns": 274579.8,
+      "p50_ns": 271375.5
+    },
+    "moe_routing": {
+      "total_ns": 414740921.0,
+      "count": 4160,
+      "mean_ns": 99697.3,
+      "p50_ns": 96071.0
+    },
+    "CCCL:cub::DeviceSelect::Flagged": {
+      "total_ns": 334503722.0,
+      "count": 22233,
+      "mean_ns": 15045.4,
+      "p50_ns": 13711.0
+    },
+    "gpu_to_cpu": {
+      "total_ns": 198625153.0,
+      "count": 15226,
+      "mean_ns": 13045.1,
+      "p50_ns": 8755.5
+    },
+    "cpu_to_gpu": {
+      "total_ns": 188791472.0,
+      "count": 15226,
+      "mean_ns": 12399.3,
+      "p50_ns": 10411.0
+    },
+    "CCCL:cub::DeviceReduce::Sum": {
+      "total_ns": 159006194.0,
+      "count": 22233,
+      "mean_ns": 7151.8,
+      "p50_ns": 6790.0
+    },
+    "expert_dispatch": {
+      "total_ns": 136188858.0,
+      "count": 4160,
+      "mean_ns": 32737.7,
+      "p50_ns": 28371.0
+    },
+    "cuda_stream_sync": {
+      "total_ns": 106060330.0,
+      "count": 15226,
+      "mean_ns": 6965.7,
+      "p50_ns": 6580.0
+    },
+    "expert_enqueue": {
+      "total_ns": 95913663.0,
+      "count": 31591,
+      "mean_ns": 3036.1,
+      "p50_ns": 2300.0
+    }
+  },
+  "memcpy": {
+    "h2d_bytes": 276229220466,
+    "h2d_count": 15551,
+    "d2h_bytes": 173056983,
+    "d2h_count": 26558,
+    "d2d_bytes": 1065323855,
+    "d2d_count": 63182
+  },
+  "step_count": 160,
+  "hw": {
+    "link_width": 16,
+    "link_gen": 4
+  }
+}

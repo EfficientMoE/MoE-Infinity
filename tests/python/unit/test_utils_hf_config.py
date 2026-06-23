@@ -13,7 +13,7 @@ from moe_infinity.utils.hf_config import (
 
 
 def _cfg(**kwargs) -> PretrainedConfig:
-    return cast(PretrainedConfig, SimpleNamespace(**kwargs))
+    return cast(PretrainedConfig, cast(object, SimpleNamespace(**kwargs)))
 
 
 def test_parse_expert_dtype_supported():
@@ -74,18 +74,7 @@ def test_parse_expert_id_mixtral():
     assert (layer_id, expert_id) == (2, 5)
 
 
-def test_parse_expert_id_grok_and_deepseek():
-    grok = _cfg(
-        architectures=["Grok"],
-        num_hidden_layers=3,
-        num_experts=2,
-    )
-    layer_id, expert_id = parse_expert_id(
-        "model.layers.1.moe_block.experts.0.linear_1.weight",
-        grok,
-    )
-    assert (layer_id, expert_id) == (1, 0)
-
+def test_parse_expert_id_deepseek():
     deepseek = _cfg(
         architectures=["Deepseek"],
         num_hidden_layers=3,

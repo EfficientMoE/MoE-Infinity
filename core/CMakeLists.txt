@@ -15,6 +15,7 @@ set(ARCHER_CORE_CXX_SOURCES
   ${CMAKE_SOURCE_DIR}/core/memory/pinned_memory_pool.cpp
   ${CMAKE_SOURCE_DIR}/core/memory/kv_cache_pool.cpp
   ${CMAKE_SOURCE_DIR}/core/memory/stream_pool.cpp
+  ${CMAKE_SOURCE_DIR}/core/memory/event_pool.cpp
   ${CMAKE_SOURCE_DIR}/core/memory/host_caching_allocator.cpp
   ${CMAKE_SOURCE_DIR}/core/memory/device_caching_allocator.cpp
   # parallel
@@ -61,6 +62,7 @@ target_include_directories(archer_core PUBLIC
   ${CUTLASS_DIR}/tools/util/include
   ${TORCH_INCLUDE_DIRS}
   ${Python3_INCLUDE_DIRS}
+  /usr/local/cuda/include
 )
 
 target_compile_options(archer_core PRIVATE

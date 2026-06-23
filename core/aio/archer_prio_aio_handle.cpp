@@ -12,6 +12,10 @@
 
 #include <cstdlib>
 
+#ifndef NVTX_DISABLE
+  #include <nvtx3/nvtx3.hpp>
+#endif
+
 #include "archer_aio_utils.h"
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
@@ -60,6 +64,10 @@ std::int64_t ArcherPrioAioHandle::Read(const std::string& filename,
                                        void* buffer, const bool high_prio,
                                        const std::int64_t num_bytes,
                                        const std::int64_t offset) {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("aio_read_submit");
+#endif
+
   int fd = -1;
   {
     std::lock_guard<std::mutex> lock(file_set_mutex_);
@@ -116,12 +124,7 @@ std::int64_t ArcherPrioAioHandle::Read(const std::string& filename,
   io_request->pending_callbacks.store(io_request->callbacks.size());
   aio_context_.AcceptRequest(io_request, high_prio);
 
-  {
-    std::unique_lock<std::mutex> lock(io_request->mutex);
-    io_request->cv.wait(lock, [&io_request] {
-      return io_request->pending_callbacks.load() == 0;
-    });
-  }
+  Wait(io_request);
 
   return num_bytes_aligned;
 }
@@ -131,6 +134,10 @@ std::int64_t ArcherPrioAioHandle::Write(const std::string& filename,
                                         const bool high_prio,
                                         const std::int64_t num_bytes,
                                         const std::int64_t offset) {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("aio_write_submit");
+#endif
+
   int fd = -1;
   {
     std::lock_guard<std::mutex> lock(file_set_mutex_);
@@ -195,14 +202,20 @@ std::int64_t ArcherPrioAioHandle::Write(const std::string& filename,
   io_request->pending_callbacks.store(io_request->callbacks.size());
   aio_context_.AcceptRequest(io_request, high_prio);
 
-  {
-    std::unique_lock<std::mutex> lock(io_request->mutex);
-    io_request->cv.wait(lock, [&io_request] {
-      return io_request->pending_callbacks.load() == 0;
-    });
-  }
+  Wait(io_request);
 
   return num_bytes_aligned;
+}
+
+void ArcherPrioAioHandle::Wait(const std::shared_ptr<AioRequest>& io_request) {
+#ifndef NVTX_DISABLE
+  nvtx3::scoped_range r("aio_wait");
+#endif
+
+  std::unique_lock<std::mutex> lock(io_request->mutex);
+  io_request->cv.wait(lock, [&io_request] {
+    return io_request->pending_callbacks.load() == 0;
+  });
 }
 
 int ArcherPrioAioContext::GetDefaultNumIoThreads() {

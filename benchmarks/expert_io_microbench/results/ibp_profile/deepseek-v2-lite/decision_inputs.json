@@ -1,0 +1,30 @@
+{
+  "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+  "hardware": "NVIDIA RTX A5000 (PCIe Gen4 x16 under load, Gen1 idle)",
+  "iters": 5,
+  "max_new_tokens": 32,
+  "warmup_tokens": 8,
+  "decode_step_count": 160,
+  "disk": {
+    "verdict": "DEFER",
+    "T_step_ns": 208986571,
+    "T_h2d_ns": 15740368177,
+    "T_d2d_ns": 90233172,
+    "T_disk_ns": 0,
+    "BW_h2d_observed_GBps": 17.549095253669424,
+    "Util_pcie": 0.5570433993673636,
+    "bytes_h2d_per_step": 1726432627.9125
+  },
+  "host_only": {
+    "verdict": "DEFER",
+    "T_step_ns": 205006113,
+    "T_h2d_ns": 15734112711,
+    "T_d2d_ns": 90365097,
+    "T_disk_ns": 0,
+    "BW_h2d_observed_GBps": 17.556072308601376,
+    "Util_pcie": 0.5572648650521005,
+    "bytes_h2d_per_step": 1726432627.9125
+  },
+  "delta_disk_minus_host_T_step_ms": 3.980458,
+  "disk_io_fraction_of_total": 0.01904647739303785
+}

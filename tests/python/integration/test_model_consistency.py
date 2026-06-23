@@ -31,7 +31,7 @@ config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
 ensure_config_compat(config)
 
 if "deepseek" in model_name.lower():
-    from moe_infinity.models.modeling_deepseek_v2.modeling_deepseek import (
+    from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
         DeepseekV2ForCausalLM,
     )
     model = DeepseekV2ForCausalLM.from_pretrained(

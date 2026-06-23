@@ -29,6 +29,18 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
+struct ReduceSum {
+  __host__ __device__ __forceinline__ float operator()(float a, float b) const {
+    return a + b;
+  }
+};
+
+struct ReduceMax {
+  __host__ __device__ __forceinline__ float operator()(float a, float b) const {
+    return (a > b) ? a : b;
+  }
+};
+
 static constexpr int WARP_SIZE = 32;
 
 /// Aligned array type
@@ -57,7 +69,7 @@ __launch_bounds__(TPB) __global__
 
   const int thread_row_offset = blockIdx.x * num_cols;
 
-  cub::Sum sum;
+  ReduceSum sum;
   float threadData(-FLT_MAX);
 
   // Don't touch finished rows.
@@ -70,7 +82,7 @@ __launch_bounds__(TPB) __global__
     threadData = max(static_cast<float>(input[idx]), threadData);
   }
 
-  const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
+  const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, ReduceMax());
   if (threadIdx.x == 0) {
     float_max = maxElem;
   }

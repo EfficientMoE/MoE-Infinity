@@ -237,3 +237,10 @@ AGENTS.md
 /tests/cuda/build/
 /tests/queues/build/
 .hf_cache/
+
+# Benchmark / profiling outputs
+/results/
+benchmarks/expert_io_microbench/results/
+benchmarks/eval/__pycache__/
+*.nsys-rep
+*.sqlite

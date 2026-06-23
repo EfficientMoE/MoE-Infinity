@@ -10,6 +10,7 @@ from .device import (
     is_cuda_available,
     to_device,
 )
+from .gptq import is_gptq_packed_tensor, is_gptq_quantized
 from .hf_config import (
     parse_expert_dtype,
     parse_expert_id,
@@ -33,6 +34,8 @@ __all__ = [
     "get_num_devices",
     "get_pinned_memory_device",
     "is_cuda_available",
+    "is_gptq_packed_tensor",
+    "is_gptq_quantized",
     "parse_expert_dtype",
     "parse_expert_id",
     "parse_moe_param",

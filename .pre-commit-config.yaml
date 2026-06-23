@@ -1,3 +1,13 @@
+# Install both commit-time and push-time hooks with a single `pre-commit install`.
+# Running formatters at the pre-push stage as well catches any format drift
+# that slips past a commit (e.g. `git commit --no-verify`) before it reaches CI.
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit, pre-push]
+
+# Vendored third-party kernel (Marlin, Apache-2.0, IST-DASLab) is excluded from
+# style/spelling hooks so we keep it byte-for-byte upstream.
+exclude: ^moe_infinity/kernel/marlin/
+
 repos:
 -   repo: meta
     hooks:
@@ -44,7 +54,7 @@ repos:
             # Do not check files that are automatically generated
             '--skip=docs/Gemfile.lock,tests/unit/gpt2-merges.txt,tests/unit/gpt2-vocab.json',
             '--ignore-regex=\\n',  # Do not count the 'n' in an escaped newline as part of a word
-            '--ignore-words-list=youn,unsupport,noe,ccompiler,statics',  # Word used in error messages that need rewording
+            '--ignore-words-list=youn,unsupport,noe,ccompiler,statics,nd',  # Word used in error messages that need rewording
             --check-filenames,
             --check-hidden
         ]

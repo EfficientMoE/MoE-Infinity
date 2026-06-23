@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_QUANT_METHODS = frozenset({"gptq", "awq"})
 
+# MXFP4 has its own runtime path (utils/mxfp4.py); excluded here so
+# validate_quantization_support() does not reject GPT-OSS as "unsupported".
+_HANDLED_ELSEWHERE_METHODS = frozenset({"mxfp4"})
+
 _QUANT_TENSOR_SUFFIXES = frozenset(
     {
         "qweight",
@@ -71,7 +75,7 @@ def _detect_from_config_attr(config: object) -> Optional[QuantizationInfo]:
         return None
 
     method = qc.get("quant_method", "").lower().strip()
-    if not method:
+    if not method or method in _HANDLED_ELSEWHERE_METHODS:
         return None
 
     return QuantizationInfo(
@@ -107,7 +111,7 @@ def _detect_from_checkpoint_files(
         if not method and expected_method:
             method = expected_method
 
-        if not method:
+        if not method or method in _HANDLED_ELSEWHERE_METHODS:
             continue
 
         return QuantizationInfo(

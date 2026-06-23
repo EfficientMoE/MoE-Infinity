@@ -99,6 +99,8 @@ pre-commit install --install-hooks
 pre-commit run --all-files
 ```
 
+`pre-commit install` registers both the **pre-commit** and **pre-push** hooks (configured via `default_install_hook_types`). The formatters therefore run again at `git push` time, so any drift that slipped past a commit is caught locally before it reaches CI.
+
 Current lint/format stack includes:
 
 - `ruff` + `ruff-format`
@@ -106,11 +108,21 @@ Current lint/format stack includes:
 - `clang-format` (for C++/CUDA sources)
 - `codespell`
 
+The pinned tool versions in `.pre-commit-config.yaml` are the source of truth — CI runs the exact same versions. Always run formatting through `pre-commit` (which installs those pinned versions in isolated environments) rather than a system-wide `ruff`/`clang-format`, whose version may differ and produce mismatched formatting.
+
 Please run formatting/lint checks before opening a PR.
 
 ## Running Tests
 
-We keep tests under `tests/` with unit tests and Docker/integration tests.
+We keep tests under `tests/` with Python suites and Docker/integration coverage.
+
+Current Python test layout:
+
+- `tests/python/unit/`: unit tests for core runtime and utilities
+- `tests/python/integration/`: integration tests (including OpenAI-compatible API tests)
+- `tests/python/serving/`: serving engine, scheduler, streaming, and cache tests
+- `tests/python/ops/`: kernel/operator correctness tests (paged attention, fused ops, routing)
+- `tests/python/e2e/`: end-to-end KV/offloading and serving scenarios
 
 Recommended full local test command:
 
@@ -123,6 +135,18 @@ Useful targeted commands:
 ```bash
 # Unit tests
 python -m pytest -v --tb=short tests/python/unit/
+
+# Integration tests
+python -m pytest -v --tb=short tests/python/integration/
+
+# Serving tests
+python -m pytest -v --tb=short tests/python/serving/
+
+# Operator/kernel tests
+python -m pytest -v --tb=short tests/python/ops/
+
+# End-to-end tests
+python -m pytest -v --tb=short tests/python/e2e/
 
 # Integration tests without CUDA
 python -m pytest -v --tb=short -m "not cuda" tests/docker/test_io_integration.py

@@ -1,8 +1,11 @@
+# pyright: reportMissingTypeArgument=false, reportUninitializedInstanceVariable=false, reportAttributeAccessIssue=false, reportCallIssue=false, reportArgumentType=false
 import copy
+import json
 import os
+import time
 import uuid
-from collections import Counter
-from typing import Union
+from collections import Counter, deque
+from typing import Dict, Union
 
 import numpy as np
 import torch
@@ -13,9 +16,25 @@ from transformers import PretrainedConfig
 from moe_infinity.memory.expert_entry import ExpertTraceEntry
 from moe_infinity.utils import parse_moe_param
 
+_io_profile_env_cache = None
+
 
 class ExpertTracer:
     _instance = None
+    _io_events = None
+    _io_profiling_enabled = None
+    _VALID_IO_STAGES = {
+        "routing",
+        "cache_lookup",
+        "prefetch_predict",
+        "transfer_schedule",
+        "disk_to_cpu",
+        "cpu_to_gpu",
+        "sync_wait",
+        "expert_compute",
+        "eviction",
+        "queue_coordination",
+    }
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -123,3 +142,105 @@ class ExpertTracer:
 
         entry = self.trace_collection[min_idx].to("cpu").numpy()
         return entry
+
+    def _init_io_tracking(self):
+        global _io_profile_env_cache
+
+        if getattr(self, "_io_events", None) is None:
+            self._io_events = deque(maxlen=10000)
+
+        if getattr(self, "_io_profiling_enabled", None) is None:
+            if _io_profile_env_cache is None:
+                _io_profile_env_cache = bool(
+                    os.environ.get("MOE_INFINITY_PROFILE_IO")
+                )
+            self._io_profiling_enabled = _io_profile_env_cache
+
+    def record_io_event(
+        self,
+        layer_idx,
+        expert_id,
+        stage,
+        duration_ns,
+        bytes_transferred=0,
+    ):
+        if (
+            getattr(self, "_io_events", None) is None
+            or getattr(self, "_io_profiling_enabled", None) is None
+        ):
+            self._init_io_tracking()
+
+        if self._io_profiling_enabled is None or not self._io_profiling_enabled:
+            return
+
+        if stage not in self._VALID_IO_STAGES:
+            raise ValueError(f"Unsupported I/O stage: {stage}")
+
+        io_events = self._io_events
+        if io_events is None:
+            return
+
+        io_events.append(
+            {
+                "ts_ns": int(time.time_ns()),
+                "layer_idx": int(layer_idx),
+                "expert_id": int(expert_id),
+                "stage": stage,
+                "duration_ns": int(duration_ns),
+                "bytes_transferred": int(bytes_transferred),
+            }
+        )
+
+    def get_io_stats(self) -> Dict[str, Dict[str, Union[int, float]]]:
+        if (
+            getattr(self, "_io_events", None) is None
+            or getattr(self, "_io_profiling_enabled", None) is None
+        ):
+            self._init_io_tracking()
+
+        if self._io_profiling_enabled is None or not self._io_profiling_enabled:
+            return {}
+
+        io_events = self._io_events
+        if not io_events:
+            return {}
+
+        duration_by_stage = {}
+        bytes_by_stage = Counter()
+
+        for event in io_events:
+            stage = event["stage"]
+            duration_by_stage.setdefault(stage, []).append(event["duration_ns"])
+            bytes_by_stage[stage] += event.get("bytes_transferred", 0)
+
+        stats = {}
+        for stage, durations in duration_by_stage.items():
+            duration_arr = np.array(durations, dtype=np.float64)
+            stats[stage] = {
+                "count": int(duration_arr.size),
+                "min_ns": int(np.min(duration_arr)),
+                "max_ns": int(np.max(duration_arr)),
+                "mean_ns": float(np.mean(duration_arr)),
+                "p50_ns": float(np.percentile(duration_arr, 50)),
+                "p95_ns": float(np.percentile(duration_arr, 95)),
+                "p99_ns": float(np.percentile(duration_arr, 99)),
+                "total_bytes": int(bytes_by_stage[stage]),
+            }
+
+        return stats
+
+    def to_jsonl(self, filepath: Union[str, os.PathLike[str]]):
+        if (
+            getattr(self, "_io_events", None) is None
+            or getattr(self, "_io_profiling_enabled", None) is None
+        ):
+            self._init_io_tracking()
+
+        io_events = self._io_events
+        if io_events is None:
+            io_events = []
+
+        with open(filepath, "w", encoding="utf-8") as file:
+            for event in io_events:
+                file.write(json.dumps(event))
+                file.write("\n")

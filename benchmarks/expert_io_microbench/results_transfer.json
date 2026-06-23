@@ -1,0 +1,29 @@
+{
+  "disk_to_cpu": {
+    "min_ns": null,
+    "max_ns": null,
+    "mean_ns": null,
+    "p50_ns": null,
+    "p95_ns": null,
+    "p99_ns": null,
+    "count": 0,
+    "bytes_transferred": 0,
+    "effective_bandwidth_gbps": 0.0
+  },
+  "cpu_to_gpu": {
+    "min_ns": null,
+    "max_ns": null,
+    "mean_ns": null,
+    "p50_ns": null,
+    "p95_ns": null,
+    "p99_ns": null,
+    "count": 0,
+    "bytes_transferred": 0,
+    "effective_bandwidth_gbps": 0.0
+  },
+  "sync_overhead": {
+    "total_sync_ms": 2820.787648,
+    "sync_pct_of_step": 88.55020327603108,
+    "sync_event_count": 78
+  }
+}

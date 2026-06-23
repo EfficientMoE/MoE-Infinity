@@ -73,6 +73,7 @@ class ArcherPrioAioHandle {
   std::int64_t Write(const std::string& filename, const void* buffer,
                      const bool high_prio, const std::int64_t num_bytes,
                      const std::int64_t offset);
+  void Wait(const std::shared_ptr<AioRequest>& io_request);
 
  private:
   void Run();  // io submit thread function

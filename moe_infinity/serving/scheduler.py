@@ -3,12 +3,19 @@ from __future__ import annotations
 import logging
 from collections import deque
 from math import ceil
+from typing import Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
 from .batch import SchedulerOutput
 from .kv_cache import PagedKVCache
 from .sequence import SequenceData, SequenceGroup, SequenceStatus
+
+
+class CPAwareKVManager(Protocol):
+    def predict_prefix_reuse(
+        self, request_id: str, token_ids: list[int]
+    ) -> float: ...
 
 
 class Scheduler:
@@ -41,6 +48,10 @@ class Scheduler:
 
         self._sequence_map: dict[int, SequenceData] = {}
         self._request_map: dict[str, SequenceGroup] = {}
+        self._cp_kv_manager: Optional[CPAwareKVManager] = None
+
+    def set_cp_kv_manager(self, manager: CPAwareKVManager) -> None:
+        self._cp_kv_manager = manager
 
     def add_request(self, seq_group: SequenceGroup) -> None:
         if seq_group.request_id in self._request_map:
@@ -66,6 +77,22 @@ class Scheduler:
 
         scheduled_seqs = 0
         scheduled_tokens = 0
+
+        self._recover_swapped_groups(swapped_snapshot)
+
+        if self._cp_kv_manager is not None and len(self._waiting) > 1:
+            scored_waiting = [
+                (
+                    self._cp_kv_manager.predict_prefix_reuse(
+                        group.request_id,
+                        self._group_token_ids(group),
+                    ),
+                    group,
+                )
+                for group in self._waiting
+            ]
+            scored_waiting.sort(key=lambda x: x[0], reverse=True)
+            self._waiting = deque(group for _, group in scored_waiting)
 
         waiting_blocked = False
         while self._waiting and not waiting_blocked:
@@ -121,8 +148,6 @@ class Scheduler:
             scheduled_seqs += len(next_seqs)
             scheduled_tokens += prefill_tokens
             output.num_prefill_tokens += prefill_tokens
-
-        self._recover_swapped_groups(swapped_snapshot)
 
         for group in self._running:
             for sequence in group.sequences:
@@ -211,6 +236,10 @@ class Scheduler:
 
     def has_work(self) -> bool:
         return bool(self._waiting or self._running)
+
+    @property
+    def num_waiting(self) -> int:
+        return len(self._waiting)
 
     def get_running_seq_ids(self) -> list[int]:
         running_seq_ids: list[int] = []
@@ -342,6 +371,13 @@ class Scheduler:
     @staticmethod
     def _num_prefill_tokens(sequence: SequenceData) -> int:
         return max(0, sequence.prompt_length - sequence.num_computed_tokens)
+
+    @staticmethod
+    def _group_token_ids(group: SequenceGroup) -> list[int]:
+        token_ids: list[int] = []
+        for sequence in group.sequences:
+            token_ids.extend(sequence.prompt_token_ids)
+        return token_ids
 
 
 RequestScheduler = Scheduler

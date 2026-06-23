@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Callable, Optional, Protocol, cast
 
 from moe_infinity.engine.transfer_types import (
@@ -10,6 +11,20 @@ from moe_infinity.engine.transfer_types import (
 from moe_infinity.engine.unified_transfer_scheduler import (
     UnifiedTransferScheduler,
 )
+
+try:
+    import nvtx  # type: ignore[reportMissingTypeStubs]
+except ImportError:
+    nvtx = None
+
+HAS_NVTX = nvtx is not None
+
+try:
+    from moe_infinity.profiling.io_profiler import (  # pyright: ignore[reportMissingImports]
+        IOProfiler,
+    )
+except Exception:
+    IOProfiler = None
 
 
 class ExpertPrefetcherLike(Protocol):
@@ -106,11 +121,23 @@ class ExpertOffloadCoordinator:
         if self._transfer_scheduler is None:
             raise RuntimeError("transfer scheduler must be registered first")
 
-        target_device = (
-            self._target_device_for_expert(expert_ids[0])
-            if expert_ids
-            else "cuda:0"
+        profiler = IOProfiler.instance() if IOProfiler is not None else None
+        nvtx_cm = nullcontext()
+        if HAS_NVTX and nvtx is not None:
+            nvtx_cm = nvtx.annotate("cache_lookup", color="purple")
+        profiler_cm = (
+            profiler.time("cache_lookup")
+            if profiler is not None
+            else nullcontext()
         )
+
+        with profiler_cm:
+            with nvtx_cm:
+                target_device = (
+                    self._target_device_for_expert(expert_ids[0])
+                    if expert_ids
+                    else "cuda:0"
+                )
 
         request = TransferRequest(
             transfer_id="",
@@ -124,9 +151,22 @@ class ExpertOffloadCoordinator:
         return self._transfer_scheduler.enqueue(request)
 
     def _handle_expert_fetch(self, request: TransferRequest) -> None:
-        layer_id = self._decode_layer_id(request.tensor_id)
-        expert_ids = list(request.block_ids)
-        self._expert_prefetcher.prefetch_experts_list(layer_id, expert_ids)
+        profiler = IOProfiler.instance() if IOProfiler is not None else None
+        nvtx_cm = nullcontext()
+        if HAS_NVTX and nvtx is not None:
+            nvtx_cm = nvtx.annotate("cache_lookup", color="purple")
+        profiler_cm = (
+            profiler.time("cache_lookup")
+            if profiler is not None
+            else nullcontext()
+        )
+        with profiler_cm:
+            with nvtx_cm:
+                layer_id = self._decode_layer_id(request.tensor_id)
+                expert_ids = list(request.block_ids)
+                self._expert_prefetcher.prefetch_experts_list(
+                    layer_id, expert_ids
+                )
 
     def _handle_expert_evict(self, request: TransferRequest) -> None:
         layer_id = self._decode_layer_id(request.tensor_id)

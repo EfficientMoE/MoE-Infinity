@@ -6,7 +6,7 @@
 import io
 import os
 import sys
-from typing import Any
+from typing import Any, Optional
 
 from setuptools import find_packages, setup
 
@@ -66,18 +66,89 @@ def read_readme() -> str:
         return ""
 
 
+def _find_cuda_home() -> str:
+    cuda_version = (
+        torch.version.cuda if torch_available and torch.version.cuda else ""
+    )
+    cuda_major = cuda_version.split(".")[0] if cuda_version else ""
+    if cuda_major == "12":
+        candidates = [
+            "/usr/local/cuda-12.6",
+            "/usr/local/cuda-12.2",
+            os.environ.get("CUDA_HOME"),
+            "/usr/local/cuda",
+            "/usr/local/cuda-13.2",
+            "/usr/local/cuda-13",
+        ]
+    elif cuda_major == "13":
+        candidates = [
+            "/usr/local/cuda-13.2",
+            "/usr/local/cuda-13",
+            os.environ.get("CUDA_HOME"),
+            "/usr/local/cuda",
+            "/usr/local/cuda-12.6",
+            "/usr/local/cuda-12.2",
+        ]
+    else:
+        candidates = [
+            os.environ.get("CUDA_HOME"),
+            "/usr/local/cuda",
+            "/usr/local/cuda-13.2",
+            "/usr/local/cuda-13",
+            "/usr/local/cuda-12.6",
+            "/usr/local/cuda-12.2",
+        ]
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = os.path.expanduser(candidate)
+        if os.path.isfile(os.path.join(candidate, "bin", "nvcc")):
+            return candidate
+
+    return os.path.expanduser(os.environ.get("CUDA_HOME", "/usr/local/cuda"))
+
+
 install_requires = fetch_requirements("requirements.txt")
 
 # Get CUTLASS_DIR from environment or default to ~/cutlass
 CUTLASS_DIR = os.path.expanduser(os.environ.get("CUTLASS_DIR", "~/cutlass"))
 
+CUDA_HOME = _find_cuda_home()
+os.environ["CUDA_HOME"] = CUDA_HOME
+cpp_extension.CUDA_HOME = CUDA_HOME
+
+
+def _find_nvtx_include_dir() -> Optional[str]:
+    cuda_roots = [
+        CUDA_HOME,
+        "/usr/local/cuda",
+        "/usr/local/cuda-13.2",
+        "/usr/local/cuda-13",
+        "/usr/local/cuda-12.6",
+        "/usr/local/cuda-12.2",
+    ]
+    for root in cuda_roots:
+        nvtx_header = os.path.join(
+            os.path.expanduser(root), "include", "nvtx3", "nvtx3.hpp"
+        )
+        if os.path.isfile(nvtx_header):
+            return os.path.dirname(os.path.dirname(nvtx_header))
+    return None
+
+
+COMMON_NVTX_INCLUDE_DIR = _find_nvtx_include_dir()
+
 # Common include paths
 COMMON_INCLUDE_PATHS = [
     get_path("core"),
+    get_path("core", "include"),
     get_path("extensions"),
     os.path.join(CUTLASS_DIR, "include"),
     os.path.join(CUTLASS_DIR, "tools/util/include"),
 ]
+if COMMON_NVTX_INCLUDE_DIR is not None:
+    COMMON_INCLUDE_PATHS.append(COMMON_NVTX_INCLUDE_DIR)
 
 # Common compile args
 COMMON_NVCC_ARGS = [
@@ -97,6 +168,10 @@ COMMON_CXX_ARGS = [
     "-fopenmp",
 ]
 
+if os.environ.get("NVTX_DISABLE", "0") == "1":
+    COMMON_CXX_ARGS.append("-DNVTX_DISABLE")
+    COMMON_NVCC_ARGS.append("-DNVTX_DISABLE")
+
 # _store extension: IO/checkpoint and prefetch functionality
 # Includes AIO, prefetch handle, tensor index, memory pools, model topology
 _STORE_SOURCES = [
@@ -115,6 +190,7 @@ _STORE_SOURCES = [
     "core/memory/memory_pool.cpp",
     "core/memory/pinned_memory_pool.cpp",
     "core/memory/stream_pool.cpp",
+    "core/memory/event_pool.cpp",
     "core/memory/host_caching_allocator.cpp",
     "core/memory/device_caching_allocator.cpp",
     # parallel
@@ -157,6 +233,11 @@ _STORE_EXTRA_LINK_ARGS = [
     "-lpthread",
 ]
 
+# Link NVTX runtime when NVTX instrumentation is enabled (default).
+# The C++ NVTX ranges in core/ use nvtxDomainRangePop from libnvToolsExt.
+if os.environ.get("NVTX_DISABLE", "0") != "1":
+    _STORE_EXTRA_LINK_ARGS.append("-lnvToolsExt")
+
 if TORCH_LIB_DIR:
     _STORE_EXTRA_LINK_ARGS.append(f"-Wl,-rpath,{TORCH_LIB_DIR}")
 
@@ -189,6 +270,11 @@ _PAGED_ATTN_SOURCES = [
     "extensions/kernel/paged_attention.cu",
 ]
 
+_MARLIN_SOURCES = [
+    "moe_infinity/kernel/marlin/marlin_cuda.cpp",
+    "moe_infinity/kernel/marlin/marlin_cuda_kernel.cu",
+]
+
 # Note: _engine needs CUTLASS for fused_glu_cuda.cu
 
 ext_modules = []
@@ -197,6 +283,8 @@ if cuda_available:
     _cuda_arch_flags = ["-gencode=arch=compute_80,code=sm_80"]
     if os.environ.get("MOE_ENABLE_SM90", "1") == "1":
         _cuda_arch_flags.append("-gencode=arch=compute_90,code=sm_90")
+    if os.environ.get("MOE_ENABLE_SM120", "0") == "1":
+        _cuda_arch_flags.append("-gencode=arch=compute_120,code=sm_120")
 
     # _store extension: IO and prefetch
     ext_modules.append(
@@ -250,6 +338,44 @@ if cuda_available:
         )
     )
 
+    _v4fp4_arch_flags = [
+        f
+        for f in _cuda_arch_flags
+        if "compute_80" not in f and "compute_90" not in f
+    ]
+    if not _v4fp4_arch_flags:
+        _v4fp4_arch_flags = ["-gencode=arch=compute_120a,code=sm_120a"]
+    else:
+        _v4fp4_arch_flags = [
+            f.replace("compute_120,code=sm_120", "compute_120a,code=sm_120a")
+            for f in _v4fp4_arch_flags
+        ]
+    ext_modules.append(
+        cpp_extension.CUDAExtension(
+            name="moe_infinity._v4_fp4",
+            sources=[
+                "extensions/kernel/v4_fp4/v4_fp4_binding.cpp",
+                "extensions/kernel/v4_fp4/v4_fp4_dequant.cu",
+            ],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17", "-fPIC"],
+                "nvcc": ["-O3", "--use_fast_math", "-std=c++17"]
+                + _v4fp4_arch_flags,
+            },
+        )
+    )
+
+    ext_modules.append(
+        cpp_extension.CUDAExtension(
+            name="moe_infinity._marlin",
+            sources=_MARLIN_SOURCES,
+            extra_compile_args={
+                "nvcc": ["-O3", "--use_fast_math", "-std=c++17"]
+                + _cuda_arch_flags,
+            },
+        )
+    )
+
 cmdclass = {
     "build_ext": cpp_extension.BuildExtension.with_options(use_ninja=True)
 }
@@ -263,6 +389,10 @@ setup(
     packages=find_packages(exclude=["extensions", "extensions.*"]),
     include_package_data=True,
     install_requires=install_requires,
+    extras_require={
+        "flashinfer": ["flashinfer"],
+        "contextpilot": ["contextpilot>=0.4.0"],
+    },
     author="EfficientMoE Team",
     long_description=read_readme(),
     long_description_content_type="text/markdown",

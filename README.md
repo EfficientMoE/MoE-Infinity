@@ -2,55 +2,85 @@
 
 MoE-Infinity is a cost-effective, fast, and easy-to-use library for Mixture-of-Experts (MoE) inference.
 
-MoE-Infinity is cost-effective yet fast:
+## Overview
 
-- Offloading MoE's experts to host memory, allowing memory-constrained GPUs to serve MoE models.
-- Minimizing the expert offloading overheads through several novel techniques: expert activation tracing, activation-aware expert prefetching, and activation-aware expert caching.
-- Supporting LLM acceleration techniques (such as [FlashAttention](https://github.com/Dao-AILab/flash-attention)).
-- Supporting multi-GPU environments with numerous OS-level performance optimizations.
-- Achieving SOTA latency performance when serving MoEs in a resource-constrained GPU environment (in comparison with [vLLM](https://github.com/vllm-project/vllm), HuggingFace [Accelerate](https://github.com/huggingface/accelerate), [DeepSpeed](https://github.com/microsoft/DeepSpeed), [Mixtral-Offloading](https://github.com/dvmazur/mixtral-offloading), and [Ollama/LLama.cpp](https://github.com/ollama/ollama)).
+MoE-Infinity runs large Mixture-of-Experts models on memory-constrained GPUs by **offloading expert weights to host memory (and SSD)** and fetching them just in time. An activation-aware cache keeps hot experts resident on the GPU, while activation tracing and prefetching hide most of the transfer cost. On top of the offloading runtime, MoE-Infinity ships a HuggingFace-compatible `MoE` class and an async, OpenAI-compatible serving engine with continuous batching, paged KV cache, and streaming.
 
-MoE-Infinity is easy-to-use:
+This open-sourced version has been redesigned to be HuggingFace-friendly and differs from the version reported in the [paper](https://arxiv.org/abs/2401.14361), which prioritizes extreme performance. **Single-server multi-GPU inference is supported** — expert parameters are distributed round-robin across all visible GPUs, with per-GPU caching, peer-to-peer transfers, and dedicated I/O threads. Multi-node distributed inference (across separate machines) is not yet supported.
 
-- HuggingFace model compatible, and HuggingFace programmer friendly.
-- Supporting all available MoE checkpoints (including [Deepseek-V2/V3](https://huggingface.co/collections/deepseek-ai/deepseek-v2-669a1c8b8f2dbc203fbd7746), [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b), [Mixtral](mistralai/Mixtral-8x7B-Instruct-v0.1), and [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B)).
+## Features
 
-Note that: The open-sourced MoE-Infinity has been redesigned for making it HuggingFace-users friendly. This version is different from the version reported in the paper, which takes extreme performance as the top priority. Single-server multi-GPU inference is supported: expert parameters are distributed round-robin across all visible GPUs, with per-GPU caching, peer-to-peer transfers, and dedicated I/O threads. Multi-node distributed inference (across separate machines) is not yet supported in this open-sourced version.
+Key benefits include:
+
+- **Cost-effective.** Expert offloading to host memory/SSD lets memory-constrained GPUs serve MoE models that would otherwise not fit. DeepSeek-V4-Flash additionally offloads **FP4-quantized** experts for a large memory reduction.
+- **Fast.** Activation-aware expert caching, prefetching, and tracing minimize offloading overhead; fused CUDA kernels, CUDA graph capture, Marlin INT4 GEMM, and FP4/MXFP4 expert paths accelerate the hot path.
+- **HuggingFace-native.** Drop-in `MoE` class with the familiar `from_pretrained` / `generate` workflow, compatible with standard HuggingFace checkpoints.
+- **Production serving.** OpenAI-compatible HTTP server with continuous batching, paged KV cache, request scheduling with preemption, prefix caching, streaming (SSE), runtime hot reload, watchdog/health monitoring, and crash-recovery logging.
+- **Acceleration-aware.** Automatically integrates with [FlashAttention](https://github.com/Dao-AILab/flash-attention) and [FlashInfer](https://flashinfer.ai/) when installed, with graceful fallback to built-in kernels.
+- **Multi-GPU.** Single-server multi-GPU with round-robin expert distribution, per-GPU caching, and an in-memory N-way tensor-parallel shard loader.
 
 ## Contents
-- [Performance](#performance)
+- [Key Features](#key-features)
+- [Supported Models](#supported-models)
 - [Installation](#installation)
     - [Prerequisites](#prerequisites)
     - [Install from conda environment](#install-from-conda-environment)
     - [Install from PyPI](#install-from-pypi)
     - [Install from Source](#install-from-source)
     - [Enable FlashAttention (Optional)](#enable-flashattention-optional)
+    - [Enable FlashInfer (Optional)](#enable-flashinfer-optional)
 - [Usage and Examples](#usage-and-examples)
     - [Sample Code of Huggingface LLM Inference](#sample-code-of-huggingface-llm-inference)
     - [Running Inference](#running-inference)
     - [Benchmarking](#benchmarking)
+    - [OpenAI-Compatible Server (Continuous Batching)](#openai-compatible-server-continuous-batching)
+- [ContextPilot Integration (Optional)](#contextpilot-integration-optional)
+- [Architecture](#architecture)
 - [Release Plan](#release-plan)
+- [Contributing and Security](#contributing-and-security)
 - [Citation](#citation)
 
-## Performance
+## Key Features
 
-Single GPU A5000 (24GB Memory), per-token-latency (seconds) for generation with a mixed dataset that includes [LongBench](https://huggingface.co/datasets/THUDM/LongBench), [GSM8K](https://huggingface.co/datasets/openai/gsm8k),  [FLAN](https://huggingface.co/datasets/Muennighoff/flan), [BIG-Bench](https://huggingface.co/datasets/bigbench) and [MMLU](https://huggingface.co/datasets/lukaemon/mmlu) datasets.
-Lower per-token-latency is preferable.
+- **Expert offloading** with activation-aware caching, prefetching, and tracing for memory-constrained GPUs.
+- **FP4/MXFP4 expert quantization** with host offloading (DeepSeek-V4-Flash native FP4 path, plus Triton fallback).
+- **KV cache offloading** with paged attention for long-context serving.
+- **Continuous batching** serving engine with request scheduling, preemption, swapping, and prefix caching.
+- **Fused CUDA/Triton kernels** — fused QKV projection, fused Gate+Up+SiLU FFN, fused decode-phase paged attention, and Marlin INT4 (W4A16) GEMM.
+- **CUDA graph capture** for decode batches to cut per-step launch overhead.
+- **OpenAI-compatible API** with streaming chat/completions, runtime hot reload, and live config management.
+- **Serving stability** hardening with watchdogs, health monitoring, and crash-recovery (incremental result writer).
+- **Memory and prefetch coordination** to balance the GPU budget between experts and KV cache and improve throughput.
 
-|  | NLLB-MoE-54B | Mixtral-8x7b | DeepSeek-V2-Lite-Chat | Qwen3-30B-A3B |
-| :---: | :---: | :---: | :---: | :---: |
-| <ins>MoE-Infinity</ins> | <ins>*0.119*</ins> | <ins>*0.735*</ins> | <ins>*0.100*</ins> | <ins>*0.150*</ins> |
-| Accelerate | 3.071 | 6.633 |  1.743  | |
-|DeepSpeed (0.16.2) | 8.381 | 2.486 | 0.737 | 7.857 |
-|Mixtral Offloading| X | 1.752 | X |X|
-|Ollama | X | 0.903 | 1.250 ||
-|vLLM (v0.8.5)| X | 2.137 | 0.149 | 0.205 |
+## Supported Models
 
+MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/common/constants.py`](./moe_infinity/common/constants.py):
 
+| Model | Example checkpoints |
+|---|---|
+| [DeepSeek-V2 / V3](https://huggingface.co/collections/deepseek-ai/deepseek-v2-669a1c8b8f2dbc203fbd7746) | `deepseek-ai/DeepSeek-V2-Lite-Chat`, `deepseek-ai/DeepSeek-V3` |
+| DeepSeek-V4-Flash (FP4 expert offloading) | requires a `transformers` build shipping `DeepseekV4ForCausalLM` |
+| [Mixtral](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) | `mistralai/Mixtral-8x7B-Instruct-v0.1`, `Mixtral-8x22B` |
+| [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B) | `Qwen/Qwen3-30B-A3B` |
+| [GPT-OSS](https://huggingface.co/models?search=gpt-oss) | `openai/gpt-oss-*` |
+| [DBRX](https://huggingface.co/models?search=dbrx) | `databricks/dbrx-instruct` |
+| [Jamba](https://huggingface.co/models?search=jamba) | `ai21labs/Jamba-*` |
+| [OLMoE](https://huggingface.co/models?search=olmoe) | `allenai/OLMoE-*` |
+| [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b) | `facebook/nllb-moe-54b` |
+
+> DeepSeek-V4-Flash is only registered when your installed `transformers` provides `DeepseekV4ForCausalLM`; otherwise it is skipped automatically.
 
 ## Installation
 
 We recommend installing MoE-Infinity in a virtual environment. To install MoE-Infinity, you can either install it from PyPI or build it from source.
+
+### Prerequisites
+
+- Python 3.8+
+- CUDA-capable environment for GPU inference
+- Recommended: isolated virtual environment
+
+### Install from conda environment
 
 ```bash
 conda create -n moe-infinity python=3.9
@@ -64,7 +94,7 @@ conda activate moe-infinity
 # install stable release
 pip install moe-infinity
 
-# install nightly release (latest development build from main branch)
+# install nightly release (latest development build from main branch, published to PyPI as pre-release dev versions)
 pip install --pre moe-infinity
 ```
 
@@ -85,9 +115,25 @@ FLASH_ATTENTION_FORCE_BUILD=TRUE pip install flash-attn
 ```
 Post-installation, MoE-Infinity will automatically integrate with FlashAttention to enhance performance.
 
+### Enable FlashInfer (Optional)
+
+Install [FlashInfer](https://flashinfer.ai/) for optimized paged attention kernels during prefill and decode. FlashInfer provides significant speedups for paged KV cache attention compared to standard PyTorch SDPA.
+
+```bash
+# For CUDA 12.4 + PyTorch 2.5:
+pip install flashinfer -i https://flashinfer.ai/whl/cu124/torch2.5/
+
+# For CUDA 12.1 + PyTorch 2.4:
+pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
+```
+
+Check the [FlashInfer installation guide](https://docs.flashinfer.ai/installation.html) for other CUDA/PyTorch version combinations.
+
+Post-installation, MoE-Infinity will automatically detect and use FlashInfer for faster paged attention in both prefill and decode phases. When FlashInfer is not installed, MoE-Infinity gracefully falls back to its built-in attention kernels with no behavior change.
+
 ## Usage and Examples
 
-We provide a simple API for diverse setups, including single GPU, multiple GPUs, and multiple nodes. The following examples show how to use MoE-Infinity to run generation on a Huggingface LLM model.
+We provide a simple API for diverse setups, including single GPU and multiple GPUs. The following examples show how to use MoE-Infinity to run generation on a Huggingface LLM model.
 
 ### Important Note
 
@@ -105,7 +151,7 @@ from moe_infinity import MoE
 user_home = os.path.expanduser('~')
 
 checkpoint = "deepseek-ai/DeepSeek-V2-Lite-Chat"
-tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote=True)
+tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
 
 config = {
     "offload_path": os.path.join(user_home, "moe-infinity"),
@@ -173,29 +219,50 @@ python benchmarks/serving/latency.py \
     --concurrency 1 2 4 8
 ```
 
-### OpenAI-Compatible Server
+### OpenAI-Compatible Server (Continuous Batching)
 
-Start the OpenAI-compatible server locally
+MoE-Infinity includes a continuous batching serving engine with an OpenAI-compatible API. The server supports concurrent requests, streaming, request scheduling with preemption, and paged KV cache management.
+
+Start the server:
 ```bash
-python -m moe_infinity.entrypoints.openai.api_server --model deepseek-ai/DeepSeek-V2-Lite-Chat --offload-dir ./offload_dir
+python -m moe_infinity.entrypoints.openai.api_server_v2 \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir ./offload_dir \
+    --device-memory-ratio 0.5 \
+    --kv-cache-ratio 0.15 \
+    --max-batch-size 8
 ```
 
-Query the model via `/v1/components/`. (We currently only support the required fields, i.e., "model" and "prompt").
+| Flag | Default | Description |
+|---|---|---|
+| `--device-memory-ratio` | 0.75 | Fraction of GPU memory for expert caching. Lower this if you hit OOM (0.5 is a safe starting point for 24GB GPUs). |
+| `--kv-cache-ratio` | 0.25 | Fraction of remaining GPU memory for paged KV cache blocks. |
+| `--max-batch-size` | 32 | Maximum number of concurrent sequences in a batch. |
+| `--enable-prefix-caching` | off | Enable prefix caching for shared prompt prefixes. |
+
+You can also start the server programmatically from Python:
+```python
+from moe_infinity import MoE
+
+model = MoE("deepseek-ai/DeepSeek-V2-Lite-Chat", {
+    "offload_path": "./offload_dir/deepseek-v2-lite",
+    "device_memory_ratio": 0.5,
+})
+model.serve(host="0.0.0.0", port=8000, offload_dir="./offload_dir")
+```
+
+Query via `/v1/completions`:
 ```bash
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
-        "prompt": "Hello, my name is"
+        "prompt": "Hello, my name is",
+        "max_tokens": 32
     }'
 ```
-You can also use `openai` python package to query the model.
-```bash
-pip install openai
-python tests/test_oai_completions.py
-```
 
-Query the model via `/v1/chat/completions`. (We currently only support the required fields, i.e., "model" and "messages").
+Query via `/v1/chat/completions` with streaming:
 ```bash
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
@@ -204,26 +271,95 @@ curl http://localhost:8000/v1/chat/completions \
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Tell me a joke"}
-        ]
+        ],
+        "max_tokens": 128,
+        "stream": true
     }'
 ```
-You can also use `openai` python package to query the model.
+
+Supported request fields: `model`, `prompt`/`messages`, `max_tokens`, `temperature`, `top_p`, `stop`, `stream`.
+
+The server returns `finish_reason: "stop"` when the model emits an EOS token or hits a stop sequence, and `finish_reason: "length"` when `max_tokens` is reached.
+
+The server also exposes operational endpoints:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/models` | GET | List the loaded model(s). |
+| `/health` | GET | Liveness/readiness state (`STARTING`, `HEALTHY`, `UNHEALTHY`). |
+| `/metrics` | GET | Prometheus-format serving metrics. |
+| `/admin/stats` | GET | Engine statistics (queue depth, batch sizes, cache hit rates). |
+| `/v1/config` | GET / POST | Inspect and update runtime configuration. |
+| `/v1/reload` | POST | Hot-reload server Python modules without restarting the process. |
+
+You can also use the `openai` Python package:
 ```bash
 pip install openai
-python tests/test_oai_chat_completions.py
+python tests/python/integration/test_oai_completions.py
+python tests/python/integration/test_oai_chat_completions.py
 ```
+
+## ContextPilot Integration (Optional)
+
+ContextPilot is an optional overlap-aware prompt optimization layer for shared-prefix and multi-turn workloads. You can enable it inside the OpenAI-compatible server before tokenization, or extend it into KV allocation and scheduling for deeper reuse gains.
+
+Phase B quick start, in-process middleware:
+
+```bash
+python -m moe_infinity.entrypoints.openai.api_server_v2 \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir ./offload_dir \
+    --enable-contextpilot
+```
+
+Set `CONTEXTPILOT_ENABLED=0` to force-disable ContextPilot at runtime, even if the CLI flag is enabled.
+
+Measured baseline on single A5000 (24 GB) with DeepSeek-V2-Lite-Chat (expert offloading):
+
+| Workload | TTFT p50 | E2E p50 | Prefill tok/s |
+|---|---:|---:|---:|
+| Shared-prefix RAG | 3.70s | 5.29s | 25.4 |
+| Multi-turn conversation | 3.82s | 5.46s | 26.3 |
+| Batch with overlap | 2.21s | 2.69s | 35.5 |
+| No-overlap baseline | 3.40s | 4.86s | 4.2 |
+
+Projected Phase B/C improvements (based on [ContextPilot benchmarks on vLLM/SGLang](https://github.com/EfficientContext/ContextPilot)):
+
+| Phase | Integration mode | Expected TTFT reduction | Expected token savings |
+|---|---|---:|---:|
+| Phase B | In-process middleware | 15–25% | 20–30% |
+| Phase C | Deep scheduler integration | 20–30% | 25–35% |
+
+Actual improvements depend on context overlap ratio. Run `python benchmarks/contextpilot/compare_phases.py` for detailed dry-run projections, or run Phase B against a live server for real measurements.
+
+See [docs/contextpilot/README.md](docs/contextpilot/README.md) for setup details, CLI flags, environment variables, admin endpoints, and troubleshooting.
+
+## Architecture
+
+For a contributor-oriented map of the codebase — the two execution paths (synchronous `engine/` vs async `serving/`), module layout, request lifecycle, and the public API surface — see **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 
 ## Release Plan
 
-We plan to release two functions in the following months:
+Recent releases and near-term roadmap:
 
-* We currently support PyTorch as the default inference engine, and we are in the process of supporting vLLM as another inference runtime, which includes the support of KV cache offloading.
-* Supporting expert parallelism for distributed MoE inference.
-* More (We welcome contributors to join us!)
+* ✅ Expert offloading runtime with activation-aware caching, prefetching, and tracing.
+* ✅ FP4/MXFP4 expert quantization with host offloading (DeepSeek-V4-Flash native FP4 path).
+* ✅ Continuous batching server with paged KV cache, streaming, preemptive scheduling, and prefix caching.
+* ✅ Fused CUDA/Triton kernels (QKV, Gate+Up+SiLU FFN, decode attention), Marlin INT4 GEMM, and CUDA graph capture.
+* ✅ Serving stability: watchdog/health monitoring, runtime hot reload, live config, and crash-recovery (incremental writer).
+* 🚧 Improving vLLM runtime interoperability.
+* 🚧 Expert parallelism and multi-node distributed MoE inference.
+* 🚧 OpenAI-compatible Batch API (`/v1/batches`).
+* More (We welcome contributors to join us!).
+
+## Contributing and Security
+
+- See [CONTRIBUTING.md](./CONTRIBUTING.md) for development workflow, coding standards, and tests.
+- See [SECURITY.md](./SECURITY.md) for vulnerability reporting and support policy.
 
 ## Citation
 
-If you use MoE-Inifity for your research, please cite our [paper](https://arxiv.org/abs/2401.14361):
+If you use MoE-Infinity for your research, please cite our [paper](https://arxiv.org/abs/2401.14361):
 ```bibtex
 @misc{moe-infinity,
   author       = {Leyang Xue and

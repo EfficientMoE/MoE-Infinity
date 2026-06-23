@@ -1,0 +1,64 @@
+{
+  "status": "PASS",
+  "mode": "dry-run",
+  "model_requirement":
+      "Real benchmark requires model download and CUDA-capable GPU.",
+  "requested_model": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+  "offload_dir": "./offload_dir",
+  "environment": {
+    "torch_version": "2.5.1+cu124",
+    "torch_cuda_version": "12.4",
+    "cuda_available": false,
+    "cuda_device_count": 8
+  },
+  "workloads": {
+    "shared_prefix_rag": {
+      "ttft_p50": 0.0,
+      "ttft_p90": 0.0,
+      "ttft_p99": 0.0,
+      "prefill_throughput": 0.0,
+      "kv_cache_hit_rate": 0.0,
+      "e2e_latency_p50": 0.0,
+      "e2e_latency_p90": 0.0,
+      "e2e_latency_p99": 0.0,
+      "expert_cache_hit_rate": 0.0,
+      "token_savings_pct": 0.0
+    },
+    "multi_turn_conversation": {
+      "ttft_p50": 0.0,
+      "ttft_p90": 0.0,
+      "ttft_p99": 0.0,
+      "prefill_throughput": 0.0,
+      "kv_cache_hit_rate": 0.0,
+      "e2e_latency_p50": 0.0,
+      "e2e_latency_p90": 0.0,
+      "e2e_latency_p99": 0.0,
+      "expert_cache_hit_rate": 0.0,
+      "token_savings_pct": 0.0
+    },
+    "batch_with_overlap": {
+      "ttft_p50": 0.0,
+      "ttft_p90": 0.0,
+      "ttft_p99": 0.0,
+      "prefill_throughput": 0.0,
+      "kv_cache_hit_rate": 0.0,
+      "e2e_latency_p50": 0.0,
+      "e2e_latency_p90": 0.0,
+      "e2e_latency_p99": 0.0,
+      "expert_cache_hit_rate": 0.0,
+      "token_savings_pct": 0.0
+    },
+    "no_overlap_baseline": {
+      "ttft_p50": 0.0,
+      "ttft_p90": 0.0,
+      "ttft_p99": 0.0,
+      "prefill_throughput": 0.0,
+      "kv_cache_hit_rate": 0.0,
+      "e2e_latency_p50": 0.0,
+      "e2e_latency_p90": 0.0,
+      "e2e_latency_p99": 0.0,
+      "expert_cache_hit_rate": 0.0,
+      "token_savings_pct": 0.0
+    }
+  }
+}

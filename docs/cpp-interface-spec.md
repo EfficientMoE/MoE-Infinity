@@ -1,8 +1,8 @@
 # C++ Interface Requirements: KV Cache Transport for MoE-Infinity
 
-> Status: SPECIFICATION (not yet implemented)
+> Status: PARTIALLY IMPLEMENTED — the native `_kv_cache` extension (`KVCachePool`) is built and registered; the Python `KVCacheManager` still performs block bookkeeping in pure Python and does not yet call the native bindings (see the checklist below).
 > Authors: MoE-Infinity Team
-> Related: `moe_infinity/memory/kv_cache_manager.py`, `moe_infinity/runtime/attention_backend.py`
+> Related: `moe_infinity/memory/kv_cache_manager.py`, `moe_infinity/runtime/attention_backend.py`, `core/memory/kv_cache_pool.{h,cpp}`, `core/python/py_kv_cache.cpp`
 
 ## Overview
 
@@ -193,12 +193,12 @@ PCIe bandwidth is the shared bottleneck. When expert weights and KV cache blocks
 
 For the C++ implementer:
 
-- [ ] Create `core/memory/kv_cache_pool.h` and `core/memory/kv_cache_pool.cpp`
-- [ ] Create `core/python/py_kv_cache.cpp` with pybind11 bindings
-- [ ] Add `kv_cache_pool.cpp` to `ARCHER_CORE_CXX_SOURCES` in `core/CMakeLists.txt`
-- [ ] Add the new Python extension in `setup.py` alongside `_store` and `_engine`
-- [ ] Update `moe_infinity/memory/kv_cache_manager.py` to remove `NotImplementedError` stubs and to call the new `_kv_cache` bindings
-- [ ] Add an integration test in `tests/python/integration` that exercises swap in, swap out, and attention computation against a small toy model
+- [x] Create `core/memory/kv_cache_pool.h` and `core/memory/kv_cache_pool.cpp`
+- [x] Create `core/python/py_kv_cache.cpp` with pybind11 bindings
+- [x] Add `kv_cache_pool.cpp` to `ARCHER_CORE_CXX_SOURCES` in `core/CMakeLists.txt`
+- [x] Add the new Python extension in `setup.py` alongside `_store` and `_engine` (registered as `moe_infinity._kv_cache`)
+- [ ] Update `moe_infinity/memory/kv_cache_manager.py` to call the native `_kv_cache` bindings (currently the swap path is tracked in pure Python; `runtime/model_offload.py` still has `Future:` stubs for the native swap-in/out calls)
+- [ ] Add an integration test in `tests/python/integration` that exercises swap in, swap out, and attention computation against a small toy model using the native pool (existing `test_kv_cache_swap.py` exercises only the Python `KVCacheManager`)
 
 ## Files Modified or Created
 
