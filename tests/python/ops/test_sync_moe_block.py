@@ -26,6 +26,7 @@ class _LocalExpertExecutor:
         hidden_states: torch.Tensor,
         router_mask: torch.Tensor,
         router_weights: torch.Tensor,
+        **kwargs,
     ) -> None:
         del layer_id
         self.hidden_states = hidden_states

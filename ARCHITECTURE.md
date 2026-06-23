@@ -21,10 +21,16 @@ On top of the runtime there are two serving paths:
 
 ## 2. Module Map
 
-All Python source lives under `moe_infinity/`. Two C++/CUDA source trees
-support it: `core/` (the native offload engine) and `csrc/` kernels that get
-compiled into the extension modules you see as `_engine.so`, `_kv_cache.so`,
-etc.
+All Python source lives under `moe_infinity/`. Two native source trees support
+it:
+- `core/` — the C++/CUDA offload engine (C++ in `core/**/*.cpp`, CUDA in
+  `core/**/*.cu`, pybind bindings under `core/python/`).
+- `extensions/kernel/` — standalone CUDA kernels (fused MoE MLP, activation,
+  top-k softmax, paged attention, and the `v4_fp4/` FP4 dequant path).
+
+These compile into the extension modules you see as `_engine.so`,
+`_kv_cache.so`, `_paged_attn.so`, `_store.so`, `_v4_fp4.so`, and `_marlin.so`
+(the exact source-to-module mapping is defined in `setup.py`).
 
 ```
 moe_infinity/
@@ -225,8 +231,11 @@ From the top-level package:
 
 From the OpenAI server:
 - `python -m moe_infinity.entrypoints.openai.api_server_v2 --help`
-- Endpoints: `/v1/completions`, `/v1/chat/completions`, `/health`, and
-  optional `/contextpilot/*` admin endpoints.
+- Inference endpoints: `/v1/completions`, `/v1/chat/completions`, `/v1/models`.
+- Operational endpoints: `/health`, `/metrics`, `/admin/stats`, `/v1/config`
+  (GET/POST), `/v1/reload`.
+- Optional ContextPilot admin endpoints: `/contextpilot/toggle`,
+  `/contextpilot/inject-fault`, `/contextpilot/status`.
 
 Everything under `engine/`, `serving/`, `runtime/`, `memory/`, `distributed/`,
 `kernel/`, and `models/` is **internal**. Import paths may change without

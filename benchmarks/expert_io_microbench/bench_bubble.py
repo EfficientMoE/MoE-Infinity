@@ -22,7 +22,6 @@ if str(PROJECT_ROOT) not in sys.path:
 DEFAULT_WARMUP = 10
 DEFAULT_ITERS = 100
 DEFAULT_MAX_NEW_TOKENS = 1
-DEFAULT_DECODE_TOKENS = 10
 SYNC_STAGE = "sync_wait"
 
 
@@ -62,26 +61,6 @@ def parse_args() -> argparse.Namespace:
             "Copy offload weights to /dev/shm (tmpfs) to eliminate disk I/O. "
             "Measures pure PCIe+sync overhead without disk reads. "
             "Requires sufficient /dev/shm space (use Docker --shm-size=32g)."
-        ),
-    )
-    parser.add_argument(
-        "--phase",
-        choices=["combined", "split"],
-        default="combined",
-        help=(
-            "Measurement phase. 'combined' (default) measures prefill+decode "
-            "together with max_new_tokens=1. 'split' measures prefill and "
-            "decode separately by comparing max_new_tokens=1 vs "
-            "max_new_tokens=--decode-tokens, then deriving per-phase bubbles."
-        ),
-    )
-    parser.add_argument(
-        "--decode-tokens",
-        type=int,
-        default=DEFAULT_DECODE_TOKENS,
-        help=(
-            "Number of decode tokens to generate in 'split' mode (default: 10). "
-            "Higher values give more accurate per-token decode estimates."
         ),
     )
     return parser.parse_args()
@@ -347,7 +326,6 @@ def run_one_iteration(
     tokenizer: Any,
     profiler: Any,
     input_ids: torch.Tensor,
-    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
 ) -> dict[str, Any]:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -356,7 +334,7 @@ def run_one_iteration(
     start_ns = time.perf_counter_ns()
     _ = model.generate(
         input_ids,
-        max_new_tokens=max_new_tokens,
+        max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
         do_sample=False,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
@@ -552,163 +530,6 @@ def summarize_iterations(iterations: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def run_split_measurement(
-    model: Any,
-    tokenizer: Any,
-    profiler: Any,
-    input_ids: torch.Tensor,
-    warmup: int,
-    iters: int,
-    decode_tokens: int,
-) -> dict[str, Any]:
-    """Run prefill-only and prefill+decode measurements, derive per-phase stats.
-
-    Strategy:
-      1. Run generate(max_new_tokens=1)  -> time_1  (≈ prefill + 1 decode)
-      2. Run generate(max_new_tokens=N)  -> time_N  (≈ prefill + N decode)
-      3. decode_per_token = (time_N - time_1) / (N - 1)
-      4. prefill_time     = time_1 - decode_per_token
-    """
-    assert decode_tokens >= 2, "--decode-tokens must be >= 2 for split mode"
-
-    # --- Warmup both paths ---
-    for _ in range(warmup):
-        _ = run_one_iteration(
-            model=model,
-            tokenizer=tokenizer,
-            profiler=profiler,
-            input_ids=input_ids,
-            max_new_tokens=1,
-        )
-    for _ in range(warmup):
-        _ = run_one_iteration(
-            model=model,
-            tokenizer=tokenizer,
-            profiler=profiler,
-            input_ids=input_ids,
-            max_new_tokens=decode_tokens,
-        )
-
-    # --- Measure: max_new_tokens=1 (prefill + 1 decode step) ---
-    short_iters: list[dict[str, Any]] = []
-    for _ in range(iters):
-        result = run_one_iteration(
-            model=model,
-            tokenizer=tokenizer,
-            profiler=profiler,
-            input_ids=input_ids,
-            max_new_tokens=1,
-        )
-        short_iters.append(result)
-
-    # --- Measure: max_new_tokens=decode_tokens (prefill + N decode steps) ---
-    long_iters: list[dict[str, Any]] = []
-    for _ in range(iters):
-        result = run_one_iteration(
-            model=model,
-            tokenizer=tokenizer,
-            profiler=profiler,
-            input_ids=input_ids,
-            max_new_tokens=decode_tokens,
-        )
-        long_iters.append(result)
-
-    # --- Derive per-phase timings ---
-    short_totals = [int(r["step_total_ns"]) for r in short_iters]
-    long_totals = [int(r["step_total_ns"]) for r in long_iters]
-    short_waits = [int(r["expert_wait_ns"]) for r in short_iters]
-    long_waits = [int(r["expert_wait_ns"]) for r in long_iters]
-
-    n_minus_1 = decode_tokens - 1
-    mean_short_total = float(np.mean(short_totals))
-    mean_long_total = float(np.mean(long_totals))
-    mean_short_wait = float(np.mean(short_waits))
-    mean_long_wait = float(np.mean(long_waits))
-
-    # Per-token decode = (long - short) / (N - 1)
-    decode_total_per_token = max(
-        (mean_long_total - mean_short_total) / n_minus_1, 0.0
-    )
-    decode_wait_per_token = max(
-        (mean_long_wait - mean_short_wait) / n_minus_1, 0.0
-    )
-
-    # Prefill ≈ short - 1 decode step
-    prefill_total = max(mean_short_total - decode_total_per_token, 0.0)
-    prefill_wait = max(mean_short_wait - decode_wait_per_token, 0.0)
-
-    prefill_bubble = prefill_wait / prefill_total if prefill_total > 0 else 0.0
-    decode_bubble = (
-        decode_wait_per_token / decode_total_per_token
-        if decode_total_per_token > 0
-        else 0.0
-    )
-
-    # Per-iteration decode stats (paired subtraction)
-    decode_totals_per_iter = [
-        max(long_t - short_t, 0) / n_minus_1
-        for long_t, short_t in zip(long_totals, short_totals)
-    ]
-    decode_waits_per_iter = [
-        max(long_w - short_w, 0) / n_minus_1
-        for long_w, short_w in zip(long_waits, short_waits)
-    ]
-    decode_bubbles_per_iter = [
-        w / t if t > 0 else 0.0
-        for w, t in zip(decode_waits_per_iter, decode_totals_per_iter)
-    ]
-
-    prefill_totals_per_iter = [
-        max(short_t - dt, 0)
-        for short_t, dt in zip(short_totals, decode_totals_per_iter)
-    ]
-    prefill_waits_per_iter = [
-        max(short_w - dw, 0)
-        for short_w, dw in zip(short_waits, decode_waits_per_iter)
-    ]
-    prefill_bubbles_per_iter = [
-        w / t if t > 0 else 0.0
-        for w, t in zip(prefill_waits_per_iter, prefill_totals_per_iter)
-    ]
-
-    def _stats(values: list[float]) -> dict[str, float | None]:
-        if not values:
-            return {"mean": None, "p50": None, "p95": None, "p99": None}
-        arr = np.array(values, dtype=np.float64)
-        return {
-            "mean": float(np.mean(arr)),
-            "p50": float(np.percentile(arr, 50)),
-            "p95": float(np.percentile(arr, 95)),
-            "p99": float(np.percentile(arr, 99)),
-        }
-
-    return {
-        "phase": "split",
-        "decode_tokens": decode_tokens,
-        "combined": summarize_iterations(short_iters),
-        "prefill": {
-            "total_ns": _stats(prefill_totals_per_iter),
-            "expert_wait_ns": _stats(prefill_waits_per_iter),
-            "bubble_ratio": _stats(prefill_bubbles_per_iter),
-            "mean_total_ns": prefill_total,
-            "mean_wait_ns": prefill_wait,
-            "mean_bubble_ratio": prefill_bubble,
-        },
-        "decode_per_token": {
-            "total_ns": _stats(decode_totals_per_iter),
-            "expert_wait_ns": _stats(decode_waits_per_iter),
-            "bubble_ratio": _stats(decode_bubbles_per_iter),
-            "mean_total_ns": decode_total_per_token,
-            "mean_wait_ns": decode_wait_per_token,
-            "mean_bubble_ratio": decode_bubble,
-        },
-        "raw": {
-            "short_iters_summary": summarize_iterations(short_iters),
-            "long_iters_summary": summarize_iterations(long_iters),
-        },
-    }
-
-
 def blocked_payload(
     *,
     reason: str,
@@ -799,63 +620,38 @@ def main() -> int:
     try:
         input_ids = build_prompt_input_ids(tokenizer)
 
-        if args.phase == "split":
-            split_result = run_split_measurement(
+        for _ in range(args.warmup):
+            _ = run_one_iteration(
                 model=model,
                 tokenizer=tokenizer,
                 profiler=profiler,
                 input_ids=input_ids,
-                warmup=args.warmup,
-                iters=args.iters,
-                decode_tokens=args.decode_tokens,
             )
-            payload = {
-                "status": "PASS",
-                "environment": env,
-                "requested_model": args.model,
-                "offload_dir": actual_offload_dir,
-                "source_offload_dir": args.offload_dir,
-                "mode": mode,
-                "io_mode": mode,
-                "warmup": args.warmup,
-                "iters": args.iters,
-                "measurement_mode": "split",
-                **split_result,
-            }
-        else:
-            for _ in range(args.warmup):
-                _ = run_one_iteration(
-                    model=model,
-                    tokenizer=tokenizer,
-                    profiler=profiler,
-                    input_ids=input_ids,
-                )
 
-            iterations: list[dict[str, Any]] = []
-            for _ in range(args.iters):
-                result = run_one_iteration(
-                    model=model,
-                    tokenizer=tokenizer,
-                    profiler=profiler,
-                    input_ids=input_ids,
-                )
-                iterations.append(result)
+        iterations: list[dict[str, Any]] = []
+        for _ in range(args.iters):
+            result = run_one_iteration(
+                model=model,
+                tokenizer=tokenizer,
+                profiler=profiler,
+                input_ids=input_ids,
+            )
+            iterations.append(result)
 
-            summary = summarize_iterations(iterations)
-            payload = {
-                "status": "PASS",
-                "environment": env,
-                "requested_model": args.model,
-                "offload_dir": actual_offload_dir,
-                "source_offload_dir": args.offload_dir,
-                "mode": mode,
-                "io_mode": mode,
-                "warmup": args.warmup,
-                "iters": args.iters,
-                "measurement_mode": "max_new_tokens=1",
-                **summary,
-            }
-
+        summary = summarize_iterations(iterations)
+        payload = {
+            "status": "PASS",
+            "environment": env,
+            "requested_model": args.model,
+            "offload_dir": actual_offload_dir,
+            "source_offload_dir": args.offload_dir,
+            "mode": mode,
+            "io_mode": mode,
+            "warmup": args.warmup,
+            "iters": args.iters,
+            "measurement_mode": "max_new_tokens=1",
+            **summary,
+        }
         write_json(output_path, payload)
         return 0
     finally:

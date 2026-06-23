@@ -8,6 +8,7 @@ import math
 import os
 import time
 from contextlib import suppress
+from dataclasses import dataclass, field
 from threading import Event, Lock
 from types import SimpleNamespace
 from typing import Any, Literal, Optional, cast
@@ -34,9 +35,15 @@ except Exception:
             return False
 
     class Response:  # type: ignore[no-redef]
-        def __init__(self, status_code: int = 200, content: Any = None) -> None:
+        def __init__(
+            self,
+            status_code: int = 200,
+            content: Any = None,
+            media_type: Optional[str] = None,
+        ) -> None:
             self.status_code = status_code
             self.content = content
+            self.media_type = media_type
 
     class JSONResponse(Response):  # type: ignore[no-redef]
         pass
@@ -53,6 +60,12 @@ except Exception:
 
     class _FallbackFastAPI:
         def on_event(self, *_args: Any, **_kwargs: Any) -> Any:
+            def _decorator(func: Any) -> Any:
+                return func
+
+            return _decorator
+
+        def middleware(self, *_args: Any, **_kwargs: Any) -> Any:
             def _decorator(func: Any) -> Any:
                 return func
 
@@ -96,6 +109,9 @@ from .protocol import (
     CompletionResponseChoice,
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
+    LogProbs,
+    ModelCard,
+    ModelList,
     UsageInfo,
     create_error_response,
     random_uuid,
@@ -131,11 +147,124 @@ _cp_middleware: Optional[Any] = None
 _eviction_sync: Optional[Any] = None
 _cp_reorder_latencies: collections.deque[float] = collections.deque(maxlen=100)
 
+_api_keys: set[str] = set()
+_rate_limit_rpm: int = 0
+_rate_limit_buckets: dict[str, list[float]] = {}
+_rate_limit_lock = Lock()
+_max_waiting_requests: int = 0
+_max_n: int = 16
+
+
+@dataclass
+class _SequenceResultState:
+    seq_id: int
+    token_texts: list[str] = field(default_factory=list)
+    text_offsets: list[int] = field(default_factory=list)
+    token_logprobs: list[Optional[float]] = field(default_factory=list)
+    top_logprobs: list[Optional[dict[int, float]]] = field(default_factory=list)
+    usage: dict[str, int] = field(default_factory=dict)
+    finish_reason: Optional[str] = None
+    cumulative_logprob: float = 0.0
+    token_count: int = 0
+    current_text_offset: int = 0
+
+
+@dataclass
+class _FinalSequenceResult:
+    seq_id: int
+    text: str
+    usage: dict[str, int]
+    finish_reason: Optional[str]
+    logprobs: Optional[LogProbs]
+    cumulative_logprob: float
+    token_count: int
+
 
 def _resolve_contextpilot_enabled(cli_enabled: bool) -> bool:
     if os.environ.get("CONTEXTPILOT_ENABLED", "1") == "0":
         return False
     return bool(cli_enabled)
+
+
+def _configure_auth(api_key_csv: Optional[str], rate_limit: int) -> None:
+    global _api_keys
+    global _rate_limit_rpm
+    global _rate_limit_buckets
+
+    configured_keys = {
+        key.strip() for key in (api_key_csv or "").split(",") if key.strip()
+    }
+    _api_keys = configured_keys
+    _rate_limit_rpm = max(0, int(rate_limit))
+    with _rate_limit_lock:
+        _rate_limit_buckets = {}
+
+
+def _check_auth(request: Any) -> Any:
+    if not _api_keys:
+        return None
+
+    if request.url.path in {"/health", "/metrics", "/v1/models"}:
+        return None
+
+    auth_header = str(request.headers.get("Authorization", ""))
+    scheme, _, token = auth_header.partition(" ")
+    if scheme != "Bearer" or not token or token not in _api_keys:
+        return create_error_response(
+            status_code=401,
+            message="Invalid or missing API key.",
+            error_type="authentication_error",
+            code="invalid_api_key",
+        )
+
+    if _rate_limit_rpm <= 0:
+        return None
+
+    now = time.time()
+    window_start = now - 60.0
+    with _rate_limit_lock:
+        bucket = _rate_limit_buckets.setdefault(token, [])
+        bucket[:] = [
+            timestamp for timestamp in bucket if timestamp >= window_start
+        ]
+        if len(bucket) >= _rate_limit_rpm:
+            return create_error_response(
+                status_code=429,
+                message="Rate limit exceeded. Please retry later.",
+                error_type="rate_limit_error",
+                code="rate_limit_exceeded",
+            )
+        bucket.append(now)
+
+    return None
+
+
+def _check_backpressure(runtime_engine: object) -> Any:
+    if _max_waiting_requests <= 0:
+        return None
+
+    scheduler = getattr(runtime_engine, "scheduler", None)
+    num_waiting = getattr(scheduler, "num_waiting", 0)
+    if int(num_waiting) < _max_waiting_requests:
+        return None
+
+    return create_error_response(
+        status_code=503,
+        message="Server is at capacity. Please retry later.",
+        error_type="server_error",
+        code="queue_full",
+    )
+
+
+_configure_auth(os.environ.get("MOE_API_KEYS"), 0)
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next: Any) -> Response:
+    auth_result = _check_auth(request)
+    if auth_result is not None:
+        return auth_result
+    return await call_next(request)
 
 
 def _is_contextpilot_active() -> bool:
@@ -450,13 +579,167 @@ def _build_sampling_params(
     top_p: Optional[float],
     max_tokens: Optional[int],
     stop: Any,
+    logprobs: Optional[int | bool] = None,
 ) -> SamplingParams:
     return SamplingParams(
         temperature=float(temperature) if temperature is not None else 1.0,
         top_p=float(top_p) if top_p is not None else 1.0,
+        logprobs=int(logprobs) if logprobs else 0,
         max_tokens=cast(int, max_tokens),
         stop=_extract_stop_sequences(stop),
     )
+
+
+def _validate_parallel_sampling(
+    *,
+    n: Optional[int],
+    best_of: Optional[int] = None,
+) -> Optional[Any]:
+    requested_n = int(n or 1)
+    requested_best_of = int(best_of or requested_n)
+
+    if requested_n <= 0:
+        return create_error_response(
+            status_code=400,
+            message="n must be greater than 0",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            param="n",
+        )
+    if requested_n > _max_n:
+        return create_error_response(
+            status_code=400,
+            message=f"n must be less than or equal to {_max_n}",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            param="n",
+        )
+    if requested_best_of <= 0:
+        return create_error_response(
+            status_code=400,
+            message="best_of must be greater than 0",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            param="best_of",
+        )
+    if requested_best_of > _max_n:
+        return create_error_response(
+            status_code=400,
+            message=f"best_of must be less than or equal to {_max_n}",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            param="best_of",
+        )
+    if requested_best_of < requested_n:
+        return create_error_response(
+            status_code=400,
+            message="best_of must be greater than or equal to n",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            param="best_of",
+        )
+    return None
+
+
+def _finalize_sequence_result(
+    state: _SequenceResultState,
+    *,
+    include_logprobs: bool,
+) -> _FinalSequenceResult:
+    logprobs: Optional[LogProbs] = None
+    if include_logprobs:
+        logprobs = LogProbs(
+            text_offset=state.text_offsets,
+            token_logprobs=state.token_logprobs,
+            tokens=state.token_texts,
+            top_logprobs=state.top_logprobs,
+        )
+
+    return _FinalSequenceResult(
+        seq_id=state.seq_id,
+        text="".join(state.token_texts),
+        usage=dict(state.usage),
+        finish_reason=state.finish_reason,
+        logprobs=logprobs,
+        cumulative_logprob=state.cumulative_logprob,
+        token_count=state.token_count,
+    )
+
+
+def _select_best_results(
+    results: list[_FinalSequenceResult],
+    *,
+    n: int,
+    best_of: int,
+    use_logprobs: bool,
+) -> list[_FinalSequenceResult]:
+    if len(results) <= n and best_of <= n:
+        return sorted(results, key=lambda result: result.seq_id)
+
+    if use_logprobs:
+        ranked = sorted(
+            results,
+            key=lambda result: (-result.cumulative_logprob, result.seq_id),
+        )
+    else:
+        ranked = sorted(
+            results,
+            key=lambda result: (-result.token_count, result.seq_id),
+        )
+
+    selected = ranked[:n]
+    return sorted(selected, key=lambda result: result.seq_id)
+
+
+def _apply_response_format_validation(
+    result: _FinalSequenceResult,
+    response_format: Any,
+) -> _FinalSequenceResult:
+    if response_format is None:
+        return result
+
+    format_type = str(getattr(response_format, "type", "text"))
+    if format_type != "json_object":
+        return result
+
+    try:
+        json.loads(result.text)
+    except Exception:
+        result.finish_reason = "error"
+
+    return result
+
+
+def _format_prometheus_metrics(stats: dict[str, object]) -> str:
+    lines = []
+    lines.append("# HELP moe_requests_completed Total completed requests")
+    lines.append("# TYPE moe_requests_completed counter")
+    lines.append(f"moe_requests_completed {stats.get('completed_requests', 0)}")
+    lines.append("# HELP moe_requests_cancelled Total cancelled requests")
+    lines.append("# TYPE moe_requests_cancelled counter")
+    lines.append(f"moe_requests_cancelled {stats.get('cancelled_requests', 0)}")
+    lines.append("# HELP moe_queue_depth Current pending requests")
+    lines.append("# TYPE moe_queue_depth gauge")
+    lines.append(f"moe_queue_depth {stats.get('pending_requests', 0)}")
+    lines.append("# HELP moe_tokens_generated_total Total tokens generated")
+    lines.append("# TYPE moe_tokens_generated_total counter")
+    lines.append(
+        f"moe_tokens_generated_total {stats.get('total_generated_tokens', 0)}"
+    )
+    lines.append("# HELP moe_kv_cache_free_blocks Free KV cache blocks")
+    lines.append("# TYPE moe_kv_cache_free_blocks gauge")
+    lines.append(
+        f"moe_kv_cache_free_blocks {stats.get('kv_cache_free_blocks', 0)}"
+    )
+    lines.append("# HELP moe_kv_cache_total_blocks Total KV cache blocks")
+    lines.append("# TYPE moe_kv_cache_total_blocks gauge")
+    lines.append(
+        f"moe_kv_cache_total_blocks {stats.get('kv_cache_num_blocks', 0)}"
+    )
+    lines.append("# HELP moe_engine_steps_total Total engine steps")
+    lines.append("# TYPE moe_engine_steps_total counter")
+    lines.append(f"moe_engine_steps_total {stats.get('num_steps', 0)}")
+    return "\n".join(lines) + "\n"
 
 
 def _tokenize_text(prompt: str) -> list[int]:
@@ -514,33 +797,49 @@ async def _wait_non_stream_result(
     prompt_token_ids: list[int],
     sampling_params: SamplingParams,
     raw_request: Request,
-) -> tuple[str, dict[str, int], Optional[str]]:
+    expected_sequences: int = 1,
+) -> list[_FinalSequenceResult]:
     runtime_engine, _ = _ensure_runtime_ready()
     done_event = Event()
-    token_texts: list[str] = []
-    usage: dict[str, int] = {
-        "prompt_tokens": len(prompt_token_ids),
-        "completion_tokens": 0,
-        "total_tokens": len(prompt_token_ids),
-    }
-    finish_reason: Optional[str] = None
+    finished_seq_ids: set[int] = set()
+    results_by_seq_id: dict[int, _SequenceResultState] = {}
 
     def on_token(output: RequestOutput) -> None:
-        nonlocal usage, finish_reason
-        token_texts.append(
-            _decode_token_text(output.token_id, output.token_text)
+        state = results_by_seq_id.setdefault(
+            output.seq_id,
+            _SequenceResultState(
+                seq_id=output.seq_id,
+                usage={
+                    "prompt_tokens": len(prompt_token_ids),
+                    "completion_tokens": 0,
+                    "total_tokens": len(prompt_token_ids),
+                },
+            ),
         )
+        token_text = _decode_token_text(output.token_id, output.token_text)
+        state.token_texts.append(token_text)
+        state.token_count += 1
+        if sampling_params.logprobs > 0:
+            state.text_offsets.append(state.current_text_offset)
+            state.token_logprobs.append(output.token_logprob)
+            state.top_logprobs.append(output.top_logprobs)
+            state.current_text_offset += len(token_text)
+        if output.token_logprob is not None:
+            state.cumulative_logprob += output.token_logprob
         if output.usage is not None:
-            usage = output.usage
+            state.usage = output.usage
         if output.finished:
-            finish_reason = output.finish_reason or "stop"
-            done_event.set()
+            state.finish_reason = output.finish_reason or "stop"
+            finished_seq_ids.add(output.seq_id)
+            if len(finished_seq_ids) >= expected_sequences:
+                done_event.set()
 
     runtime_engine.add_request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         on_token=on_token,
+        n=expected_sequences,
     )
 
     while not done_event.is_set():
@@ -549,7 +848,13 @@ async def _wait_non_stream_result(
             raise HTTPException(status_code=499, detail="client disconnected")
         await asyncio.sleep(0.01)
 
-    return "".join(token_texts), usage, finish_reason
+    return [
+        _finalize_sequence_result(
+            state,
+            include_logprobs=sampling_params.logprobs > 0,
+        )
+        for seq_id, state in sorted(results_by_seq_id.items())
+    ]
 
 
 def _next_stream_event(generator: Any) -> Optional[str]:
@@ -557,6 +862,18 @@ def _next_stream_event(generator: Any) -> Optional[str]:
         return next(generator)
     except StopIteration:
         return None
+
+
+def _model_to_json(model: object, *, exclude_none: bool = False) -> str:
+    model_dump_json_fn = getattr(model, "model_dump_json", None)
+    if callable(model_dump_json_fn):
+        return str(model_dump_json_fn(exclude_none=exclude_none))
+
+    json_fn = getattr(model, "json", None)
+    if callable(json_fn):
+        return str(json_fn(exclude_none=exclude_none))
+
+    raise TypeError("response model does not support JSON serialization")
 
 
 def _make_completion_stream_chunk(
@@ -585,7 +902,7 @@ def _make_completion_stream_chunk(
             )
         ],
     )
-    return f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+    return f"data: {_model_to_json(chunk, exclude_none=True)}\n\n"
 
 
 async def _completion_event_generator(
@@ -835,11 +1152,31 @@ async def shutdown_event() -> None:
 
 
 @app.get("/health")
-async def health() -> Response:
+async def health():
     status_dict = _health_state.get_status_dict()
     is_healthy = _health_state.is_healthy()
     status_code = 200 if is_healthy else 503
     return JSONResponse(content=status_dict, status_code=status_code)
+
+
+@app.get("/admin/stats")
+async def admin_stats():
+    if engine is None:
+        return create_error_response(
+            status_code=503,
+            message="Service is starting. Please retry shortly.",
+            error_type="server_error",
+            code="service_starting",
+        )
+
+    return JSONResponse(content=engine.get_stats())
+
+
+@app.get("/metrics")
+async def metrics():
+    stats = engine.get_stats() if engine is not None else {}
+    body = _format_prometheus_metrics(stats)
+    return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
 @app.post("/contextpilot/toggle")
@@ -981,6 +1318,9 @@ async def completion(request: CompletionRequest, raw_request: Request):
         )
 
     runtime_engine, runtime_stream_manager = _ensure_runtime_ready()
+    backpressure_response = _check_backpressure(runtime_engine)
+    if backpressure_response is not None:
+        return backpressure_response
     created_time = int(time.monotonic())
     model_name = request.model or model_name_global or "unknown"
 
@@ -1000,6 +1340,16 @@ async def completion(request: CompletionRequest, raw_request: Request):
             param=exc.param,
         )
 
+    parallel_validation = _validate_parallel_sampling(
+        n=request.n,
+        best_of=request.best_of,
+    )
+    if parallel_validation is not None:
+        return parallel_validation
+
+    requested_n = int(request.n or 1)
+    requested_best_of = int(request.best_of or requested_n)
+
     try:
         prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
     except ValueError as exc:
@@ -1015,9 +1365,17 @@ async def completion(request: CompletionRequest, raw_request: Request):
         top_p=request.top_p,
         max_tokens=request.max_tokens,
         stop=request.stop,
+        logprobs=request.logprobs,
     )
 
     if request.stream:
+        if requested_n != 1 or requested_best_of != 1:
+            return create_error_response(
+                status_code=400,
+                message="streaming completions only support n=1 and best_of=1",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
         if len(prompts) != 1:
             return create_error_response(
                 status_code=400,
@@ -1071,6 +1429,7 @@ async def completion(request: CompletionRequest, raw_request: Request):
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             on_token=on_stream_token,
+            n=1,
         )
 
         return StreamingResponse(
@@ -1112,29 +1471,39 @@ async def completion(request: CompletionRequest, raw_request: Request):
                 code="context_length_exceeded",
             )
 
-        (
-            output_text,
-            usage,
-            result_finish_reason,
-        ) = await _wait_non_stream_result(
+        sequence_results = await _wait_non_stream_result(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             raw_request=raw_request,
+            expected_sequences=requested_best_of,
         )
 
-        choices.append(
-            CompletionResponseChoice(
-                index=index,
-                text=output_text,
-                logprobs=None,
-                finish_reason=cast(
-                    Literal["stop", "length"], result_finish_reason or "stop"
-                ),
-            )
+        selected_results = _select_best_results(
+            sequence_results,
+            n=requested_n,
+            best_of=requested_best_of,
+            use_logprobs=sampling_params.logprobs > 0,
         )
-        usage_prompt_tokens += usage.get("prompt_tokens", 0)
-        usage_completion_tokens += usage.get("completion_tokens", 0)
+        selected_results = [
+            _apply_response_format_validation(result, request.response_format)
+            for result in selected_results
+        ]
+
+        for result in selected_results:
+            choices.append(
+                CompletionResponseChoice(
+                    index=len(choices),
+                    text=result.text,
+                    logprobs=result.logprobs,
+                    finish_reason=cast(
+                        Literal["stop", "length", "error"],
+                        result.finish_reason or "stop",
+                    ),
+                )
+            )
+            usage_completion_tokens += result.usage.get("completion_tokens", 0)
+        usage_prompt_tokens += len(prompt_token_ids)
 
     return CompletionResponse(
         id=f"cmpl-{random_uuid()}",
@@ -1160,6 +1529,9 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
         )
 
     runtime_engine, runtime_stream_manager = _ensure_runtime_ready()
+    backpressure_response = _check_backpressure(runtime_engine)
+    if backpressure_response is not None:
+        return backpressure_response
     created_time = int(time.monotonic())
     model_name = request.model or model_name_global or "unknown"
     request_id = random_uuid()
@@ -1180,11 +1552,18 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
             param=exc.param,
         )
 
+    parallel_validation = _validate_parallel_sampling(n=request.n)
+    if parallel_validation is not None:
+        return parallel_validation
+
+    requested_n = int(request.n or 1)
+
     sampling_params = _build_sampling_params(
         temperature=request.temperature,
         top_p=request.top_p,
         max_tokens=request.max_tokens,
         stop=request.stop,
+        logprobs=request.top_logprobs if request.logprobs else request.logprobs,
     )
     processed_messages = _process_chat_messages_with_contextpilot(
         request.messages,
@@ -1212,6 +1591,13 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
         )
 
     if request.stream:
+        if requested_n != 1:
+            return create_error_response(
+                status_code=400,
+                message="streaming chat completions only support n=1",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
         stream = runtime_stream_manager.create_stream(
             request_id=request_id,
             model=model_name,
@@ -1232,6 +1618,7 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             on_token=on_stream_token,
+            n=1,
         )
         return StreamingResponse(
             _chat_event_generator(
@@ -1242,11 +1629,20 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
             media_type="text/event-stream",
         )
 
-    output_text, usage, chat_finish_reason = await _wait_non_stream_result(
+    sequence_results = await _wait_non_stream_result(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         raw_request=raw_request,
+        expected_sequences=requested_n,
+    )
+    sequence_results = [
+        _apply_response_format_validation(result, request.response_format)
+        for result in sequence_results
+    ]
+
+    usage_completion_tokens = sum(
+        result.usage.get("completion_tokens", 0) for result in sequence_results
     )
 
     return ChatCompletionResponse(
@@ -1255,19 +1651,86 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
         model=model_name,
         choices=[
             ChatCompletionResponseChoice(
-                index=0,
-                message=ChatMessage(role="assistant", content=output_text),
+                index=index,
+                message=ChatMessage(role="assistant", content=result.text),
+                logprobs=result.logprobs,
                 finish_reason=cast(
-                    Literal["stop", "length"], chat_finish_reason or "stop"
+                    Literal["stop", "length", "error"],
+                    result.finish_reason or "stop",
                 ),
             )
+            for index, result in enumerate(sequence_results)
         ],
         usage=UsageInfo(
-            prompt_tokens=usage.get("prompt_tokens", len(prompt_token_ids)),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", len(prompt_token_ids)),
+            prompt_tokens=len(prompt_token_ids),
+            completion_tokens=usage_completion_tokens,
+            total_tokens=len(prompt_token_ids) + usage_completion_tokens,
         ),
     )
+
+
+@app.get("/v1/models")
+async def list_models():
+    if engine is None:
+        return create_error_response(
+            status_code=503,
+            message="Service is starting. Please retry shortly.",
+            error_type="server_error",
+            code="service_starting",
+        )
+
+    model_name = model_name_global or "unknown"
+    card = ModelCard(id=model_name)
+    return ModelList(data=[card])
+
+
+@app.post("/v1/reload")
+async def reload_modules(payload: dict[str, Any]) -> JSONResponse:
+    modules = payload.get("modules", [])
+    if not isinstance(modules, list) or not all(
+        isinstance(m, str) for m in modules
+    ):
+        raise HTTPException(
+            status_code=400, detail="'modules' must be a list of strings"
+        )
+    reloaded = []
+    errors = []
+    for module_name in modules:
+        try:
+            mod = importlib.import_module(module_name)
+            importlib.reload(mod)
+            reloaded.append(module_name)
+        except Exception as e:
+            errors.append({"module": module_name, "error": str(e)})
+    status = "ok" if not errors else "partial"
+    return JSONResponse(
+        content={"status": status, "reloaded": reloaded, "errors": errors}
+    )
+
+
+@app.get("/v1/config")
+async def get_config() -> JSONResponse:
+    if engine is None:
+        return create_error_response(
+            status_code=503,
+            message="Service starting",
+            error_type="server_error",
+            code="service_starting",
+        )
+    return JSONResponse(content=engine.get_config())
+
+
+@app.post("/v1/config")
+async def update_config(payload: dict[str, Any]) -> JSONResponse:
+    if engine is None:
+        return create_error_response(
+            status_code=503,
+            message="Service starting",
+            error_type="server_error",
+            code="service_starting",
+        )
+    updated = engine.update_config(payload)
+    return JSONResponse(content={"status": "ok", "updated": updated})
 
 
 def _resolve_int_attr(config: object, *names: str) -> Optional[int]:
@@ -1379,6 +1842,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device-memory-ratio", type=float, default=0.75)
     parser.add_argument("--kv-cache-ratio", type=float, default=0.25)
     parser.add_argument("--max-batch-size", type=int, default=32)
+    parser.add_argument("--api-key", type=str, default=None)
+    parser.add_argument("--rate-limit", type=int, default=0)
+    parser.add_argument("--max-waiting-requests", type=int, default=0)
+    parser.add_argument("--max-n", type=int, default=16)
     parser.add_argument("--enable-prefix-caching", action="store_true")
     parser.add_argument(
         "--startup-timeout",
@@ -1414,6 +1881,11 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
+    _max_waiting_requests = max(0, int(args.max_waiting_requests))
+    _max_n = max(1, int(args.max_n))
+    _configure_auth(
+        args.api_key or os.environ.get("MOE_API_KEYS"), args.rate_limit
+    )
     with _contextpilot_state_lock:
         _contextpilot_enabled = _resolve_contextpilot_enabled(
             args.enable_contextpilot

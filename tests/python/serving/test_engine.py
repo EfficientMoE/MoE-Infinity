@@ -308,3 +308,60 @@ def test_engine_has_pending_requests() -> None:
     _ = engine.run_until_done()
 
     assert engine.has_pending_requests() is False
+
+
+def test_engine_n_creates_multiple_sequences() -> None:
+    engine = _make_engine(tokenizer=MockTokenizer())
+
+    engine.add_request(
+        request_id="req-n",
+        prompt_token_ids=[10],
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=2),
+        n=3,
+    )
+
+    assert len(engine._request_to_seq_ids["req-n"]) == 3
+
+    outputs = engine.run_until_done()
+
+    assert outputs == {
+        "req-n": [
+            [11, 12],
+            [11, 12],
+            [11, 12],
+        ]
+    }
+    assert engine.get_request_n_outputs("req-n") == [
+        [11, 12],
+        [11, 12],
+        [11, 12],
+    ]
+
+
+def test_engine_n_finished_when_all_complete() -> None:
+    engine = _make_engine()
+
+    engine.add_request(
+        request_id="req-n",
+        prompt_token_ids=[10],
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=3),
+        n=2,
+    )
+
+    original_get_finish_reason = engine._get_finish_reason
+
+    def _get_finish_reason(sequence, token_id):
+        if sequence.seq_id == 0 and len(sequence.output_token_ids) == 1:
+            return "stop"
+        return original_get_finish_reason(sequence, token_id)
+
+    engine._get_finish_reason = _get_finish_reason
+
+    first_step_outputs = engine.step()
+
+    assert any(
+        output.request_id == "req-n" and output.finished
+        for output in first_step_outputs
+    )
+    assert engine.has_pending_requests() is True
+    assert "req-n" not in engine._completed_request_ids

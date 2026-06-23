@@ -46,40 +46,36 @@ def _load_module(module_name: str, file_path: Path):
     return module
 
 
+_v2_dir = ROOT / "moe_infinity" / "models" / "modeling_deepseek_v2"
+_v3_dir = ROOT / "moe_infinity" / "models" / "modeling_deepseek_v3"
+if not _v2_dir.is_dir() or not _v3_dir.is_dir():
+    pytest.skip(
+        "vendored modeling_deepseek_v2/v3 removed; migrated to upstream transformers",
+        allow_module_level=True,
+    )
+
 _ensure_package("moe_infinity", ROOT / "moe_infinity")
 _ensure_package("moe_infinity.models", ROOT / "moe_infinity" / "models")
 _ensure_package(
     "moe_infinity.models.modeling_deepseek_v2",
-    ROOT / "moe_infinity" / "models" / "modeling_deepseek_v2",
+    _v2_dir,
 )
 _ensure_package(
     "moe_infinity.models.modeling_deepseek_v3",
-    ROOT / "moe_infinity" / "models" / "modeling_deepseek_v3",
+    _v3_dir,
 )
 
 v2_config_module = _load_module(
     "moe_infinity.models.modeling_deepseek_v2.configuration_deepseek",
-    ROOT
-    / "moe_infinity"
-    / "models"
-    / "modeling_deepseek_v2"
-    / "configuration_deepseek.py",
+    _v2_dir / "configuration_deepseek.py",
 )
 v2_modeling = _load_module(
     "moe_infinity.models.modeling_deepseek_v2.modeling_deepseek",
-    ROOT
-    / "moe_infinity"
-    / "models"
-    / "modeling_deepseek_v2"
-    / "modeling_deepseek.py",
+    _v2_dir / "modeling_deepseek.py",
 )
 v3_config_module = _load_module(
     "moe_infinity.models.modeling_deepseek_v3.configuration_deepseek",
-    ROOT
-    / "moe_infinity"
-    / "models"
-    / "modeling_deepseek_v3"
-    / "configuration_deepseek.py",
+    _v3_dir / "configuration_deepseek.py",
 )
 v3_modeling = _load_module(
     "moe_infinity.models.modeling_deepseek_v3.modeling_deepseek",

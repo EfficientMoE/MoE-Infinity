@@ -137,6 +137,16 @@ def parse_expert_id(
             layer_id, expert_id = result[0]
             layer_id = int(layer_id)
             expert_id = int(expert_id)
+    elif "deepseekv4" in arch:
+        decoder_sparse_step = 1
+        layer_type = "decoder"
+
+        # native key: "layers.1.ffn.experts.0.w1.weight"
+        result = re.findall(r"layers\.(\d+)\.ffn\.experts\.(\d+)\.", param_name)
+        if result:
+            layer_id, expert_id = result[0]
+            layer_id = int(layer_id)
+            expert_id = int(expert_id)
     elif "deepseek" in arch or "qwen3" in arch:
         decoder_sparse_step = 1
         layer_type = "decoder"

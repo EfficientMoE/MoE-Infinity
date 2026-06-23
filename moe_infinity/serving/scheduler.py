@@ -237,6 +237,10 @@ class Scheduler:
     def has_work(self) -> bool:
         return bool(self._waiting or self._running)
 
+    @property
+    def num_waiting(self) -> int:
+        return len(self._waiting)
+
     def get_running_seq_ids(self) -> list[int]:
         running_seq_ids: list[int] = []
         for group in self._running:

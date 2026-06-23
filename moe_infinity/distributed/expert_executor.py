@@ -63,6 +63,7 @@ class DistributedExpertExecutor:
         self._speculative_prefetch_overlap = bool(
             getattr(archer_config, "speculative_prefetch_overlap", False)
         )
+        self._pending_prefetch = None
 
     def set_expert_dispatcher(self, expert_dispatcher):
         global _expert_dispatcher
@@ -89,7 +90,6 @@ class DistributedExpertExecutor:
         prefetcher=None,
     ):
         profiler = _profiler_instance()
-
         routing_nvtx_ctx = _nvtx_ctx("moe_routing")
         routing_profiler_ctx = (
             profiler.time("routing", layer=layer_id, expert=-1)

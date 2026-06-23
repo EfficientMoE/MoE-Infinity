@@ -2,77 +2,73 @@
 
 MoE-Infinity is a cost-effective, fast, and easy-to-use library for Mixture-of-Experts (MoE) inference.
 
-MoE-Infinity is cost-effective yet fast:
+## Overview
 
-- Offloading MoE's experts to host memory, allowing memory-constrained GPUs to serve MoE models.
-- Minimizing the expert offloading overheads through several novel techniques: expert activation tracing, activation-aware expert prefetching, and activation-aware expert caching.
-- Supporting LLM acceleration techniques (such as [FlashAttention](https://github.com/Dao-AILab/flash-attention)).
-- Supporting multi-GPU environments with numerous OS-level performance optimizations.
-- Achieving SOTA latency performance when serving MoEs in a resource-constrained GPU environment (in comparison with [vLLM](https://github.com/vllm-project/vllm), HuggingFace [Accelerate](https://github.com/huggingface/accelerate), [DeepSpeed](https://github.com/microsoft/DeepSpeed), [Mixtral-Offloading](https://github.com/dvmazur/mixtral-offloading), and [Ollama/LLama.cpp](https://github.com/ollama/ollama)).
+MoE-Infinity runs large Mixture-of-Experts models on memory-constrained GPUs by **offloading expert weights to host memory (and SSD)** and fetching them just in time. An activation-aware cache keeps hot experts resident on the GPU, while activation tracing and prefetching hide most of the transfer cost. On top of the offloading runtime, MoE-Infinity ships a HuggingFace-compatible `MoE` class and an async, OpenAI-compatible serving engine with continuous batching, paged KV cache, and streaming.
 
-MoE-Infinity is easy-to-use:
+This open-sourced version has been redesigned to be HuggingFace-friendly and differs from the version reported in the [paper](https://arxiv.org/abs/2401.14361), which prioritizes extreme performance. **Single-server multi-GPU inference is supported** — expert parameters are distributed round-robin across all visible GPUs, with per-GPU caching, peer-to-peer transfers, and dedicated I/O threads. Multi-node distributed inference (across separate machines) is not yet supported.
 
-- HuggingFace model compatible, and HuggingFace programmer friendly.
-- Supporting all available MoE checkpoints (including [DeepSeek-V2/V3](https://huggingface.co/collections/deepseek-ai/deepseek-v2-669a1c8b8f2dbc203fbd7746), [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b), [Mixtral](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1), [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B), [DBRX](https://huggingface.co/models?search=dbrx), [Jamba](https://huggingface.co/models?search=jamba), and [OLMoE](https://huggingface.co/models?search=olmoe)).
+## Features
 
-Note that: The open-sourced MoE-Infinity has been redesigned for making it HuggingFace-users friendly. This version is different from the version reported in the paper, which takes extreme performance as the top priority. Single-server multi-GPU inference is supported: expert parameters are distributed round-robin across all visible GPUs, with per-GPU caching, peer-to-peer transfers, and dedicated I/O threads. Multi-node distributed inference (across separate machines) is not yet supported in this open-sourced version.
+Key benefits include:
+
+- **Cost-effective.** Expert offloading to host memory/SSD lets memory-constrained GPUs serve MoE models that would otherwise not fit. DeepSeek-V4-Flash additionally offloads **FP4-quantized** experts for a large memory reduction.
+- **Fast.** Activation-aware expert caching, prefetching, and tracing minimize offloading overhead; fused CUDA kernels, CUDA graph capture, Marlin INT4 GEMM, and FP4/MXFP4 expert paths accelerate the hot path.
+- **HuggingFace-native.** Drop-in `MoE` class with the familiar `from_pretrained` / `generate` workflow, compatible with standard HuggingFace checkpoints.
+- **Production serving.** OpenAI-compatible HTTP server with continuous batching, paged KV cache, request scheduling with preemption, prefix caching, streaming (SSE), runtime hot reload, watchdog/health monitoring, and crash-recovery logging.
+- **Acceleration-aware.** Automatically integrates with [FlashAttention](https://github.com/Dao-AILab/flash-attention) and [FlashInfer](https://flashinfer.ai/) when installed, with graceful fallback to built-in kernels.
+- **Multi-GPU.** Single-server multi-GPU with round-robin expert distribution, per-GPU caching, and an in-memory N-way tensor-parallel shard loader.
 
 ## Contents
 - [Key Features](#key-features)
-- [Performance](#performance)
+- [Supported Models](#supported-models)
 - [Installation](#installation)
     - [Prerequisites](#prerequisites)
     - [Install from conda environment](#install-from-conda-environment)
     - [Install from PyPI](#install-from-pypi)
     - [Install from Source](#install-from-source)
     - [Enable FlashAttention (Optional)](#enable-flashattention-optional)
+    - [Enable FlashInfer (Optional)](#enable-flashinfer-optional)
 - [Usage and Examples](#usage-and-examples)
     - [Sample Code of Huggingface LLM Inference](#sample-code-of-huggingface-llm-inference)
     - [Running Inference](#running-inference)
     - [Benchmarking](#benchmarking)
+    - [OpenAI-Compatible Server (Continuous Batching)](#openai-compatible-server-continuous-batching)
+- [ContextPilot Integration (Optional)](#contextpilot-integration-optional)
+- [Architecture](#architecture)
 - [Release Plan](#release-plan)
 - [Contributing and Security](#contributing-and-security)
 - [Citation](#citation)
 
 ## Key Features
 
-- Expert offloading with activation-aware caching and prefetching for memory-constrained GPUs.
-- KV cache offloading with paged attention support for long-context serving.
-- Continuous batching serving engine with request scheduling, preemption, and prefix caching.
-- Streaming responses for OpenAI-compatible chat completion APIs.
-- Serving stability hardening with watchdogs and health monitoring.
-- Memory coordination and expert prefetch coordination to improve throughput and utilization.
+- **Expert offloading** with activation-aware caching, prefetching, and tracing for memory-constrained GPUs.
+- **FP4/MXFP4 expert quantization** with host offloading (DeepSeek-V4-Flash native FP4 path, plus Triton fallback).
+- **KV cache offloading** with paged attention for long-context serving.
+- **Continuous batching** serving engine with request scheduling, preemption, swapping, and prefix caching.
+- **Fused CUDA/Triton kernels** — fused QKV projection, fused Gate+Up+SiLU FFN, fused decode-phase paged attention, and Marlin INT4 (W4A16) GEMM.
+- **CUDA graph capture** for decode batches to cut per-step launch overhead.
+- **OpenAI-compatible API** with streaming chat/completions, runtime hot reload, and live config management.
+- **Serving stability** hardening with watchdogs, health monitoring, and crash-recovery (incremental result writer).
+- **Memory and prefetch coordination** to balance the GPU budget between experts and KV cache and improve throughput.
 
-## Performance
+## Supported Models
 
-Single GPU A5000 (24GB Memory), per-token-latency (seconds) for generation with a mixed dataset that includes [LongBench](https://huggingface.co/datasets/THUDM/LongBench), [GSM8K](https://huggingface.co/datasets/openai/gsm8k),  [FLAN](https://huggingface.co/datasets/Muennighoff/flan), [BIG-Bench](https://huggingface.co/datasets/bigbench) and [MMLU](https://huggingface.co/datasets/lukaemon/mmlu) datasets.
-Lower per-token-latency is preferable.
+MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/common/constants.py`](./moe_infinity/common/constants.py):
 
-|  | DeepSeek-V2-Lite-Chat | Mixtral-8x7b | Qwen3-30B-A3B | gpt-oss-20b |
-| :---: | :---: | :---: | :---: | :---: |
-| <ins>MoE-Infinity</ins> (FP16) | <ins>*0.100*</ins> | <ins>*0.735*</ins> | <ins>*0.150*</ins> | <ins>*0.555*</ins> |
-| vLLM v0.18.1 | 0.011 | X | X | 0.007 |
-| llama.cpp b8640 (Q4_K_M) | 0.006 | X | 0.007 | X |
+| Model | Example checkpoints |
+|---|---|
+| [DeepSeek-V2 / V3](https://huggingface.co/collections/deepseek-ai/deepseek-v2-669a1c8b8f2dbc203fbd7746) | `deepseek-ai/DeepSeek-V2-Lite-Chat`, `deepseek-ai/DeepSeek-V3` |
+| DeepSeek-V4-Flash (FP4 expert offloading) | requires a `transformers` build shipping `DeepseekV4ForCausalLM` |
+| [Mixtral](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) | `mistralai/Mixtral-8x7B-Instruct-v0.1`, `Mixtral-8x22B` |
+| [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B) | `Qwen/Qwen3-30B-A3B` |
+| [GPT-OSS](https://huggingface.co/models?search=gpt-oss) | `openai/gpt-oss-*` |
+| [DBRX](https://huggingface.co/models?search=dbrx) | `databricks/dbrx-instruct` |
+| [Jamba](https://huggingface.co/models?search=jamba) | `ai21labs/Jamba-*` |
+| [OLMoE](https://huggingface.co/models?search=olmoe) | `allenai/OLMoE-*` |
+| [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b) | `facebook/nllb-moe-54b` |
 
-> **—** = Not yet measured. Run [`benchmarks/comparison/run_all.sh`](benchmarks/comparison/run_all.sh) to populate.
-> **X** = Model cannot run on this framework with a single 24GB GPU.
-> Precision: MoE-Infinity uses FP16 with expert offloading (full quality, no quantization loss). vLLM uses FP8 for DeepSeek-V2-Lite (fell back from FP16 OOM) and native MXFP4 for gpt-oss-20b; Mixtral-8x7b and Qwen3-30B-A3B OOM at FP8. llama.cpp uses Q4_K_M GGUF quantization; Mixtral-8x7b exceeds 24GB at Q4_K_M; no GGUF is available for gpt-oss-20b.
-> MoE-Infinity's expert offloading enables serving models that exceed GPU memory at full FP16 precision. Other frameworks require the full model to fit in VRAM (with quantization), limiting which models they can serve on a single 24GB GPU.
-> See [Benchmark Reproduction Guide](docs/benchmark_reproduction.md) to reproduce these numbers.
-
-<details>
-<summary>Legacy comparison (Accelerate, DeepSpeed, Mixtral Offloading, Ollama, vLLM v0.8.5)</summary>
-
-|  | NLLB-MoE-54B | Mixtral-8x7b | DeepSeek-V2-Lite-Chat | Qwen3-30B-A3B |
-| :---: | :---: | :---: | :---: | :---: |
-| <ins>MoE-Infinity</ins> | <ins>*0.119*</ins> | <ins>*0.735*</ins> | <ins>*0.100*</ins> | <ins>*0.150*</ins> |
-| Accelerate | 3.071 | 6.633 | 1.743 | — |
-| DeepSpeed (0.16.2) | 8.381 | 2.486 | 0.737 | 7.857 |
-| Mixtral Offloading | X | 1.752 | X | X |
-| Ollama | X | 0.903 | 1.250 | — |
-| vLLM (v0.8.5) | X | 2.137 | 0.149 | 0.205 |
-
-</details>
+> DeepSeek-V4-Flash is only registered when your installed `transformers` provides `DeepseekV4ForCausalLM`; otherwise it is skipped automatically.
 
 ## Installation
 
@@ -285,6 +281,17 @@ Supported request fields: `model`, `prompt`/`messages`, `max_tokens`, `temperatu
 
 The server returns `finish_reason: "stop"` when the model emits an EOS token or hits a stop sequence, and `finish_reason: "length"` when `max_tokens` is reached.
 
+The server also exposes operational endpoints:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/models` | GET | List the loaded model(s). |
+| `/health` | GET | Liveness/readiness state (`STARTING`, `HEALTHY`, `UNHEALTHY`). |
+| `/metrics` | GET | Prometheus-format serving metrics. |
+| `/admin/stats` | GET | Engine statistics (queue depth, batch sizes, cache hit rates). |
+| `/v1/config` | GET / POST | Inspect and update runtime configuration. |
+| `/v1/reload` | POST | Hot-reload server Python modules without restarting the process. |
+
 You can also use the `openai` Python package:
 ```bash
 pip install openai
@@ -327,13 +334,22 @@ Actual improvements depend on context overlap ratio. Run `python benchmarks/cont
 
 See [docs/contextpilot/README.md](docs/contextpilot/README.md) for setup details, CLI flags, environment variables, admin endpoints, and troubleshooting.
 
+## Architecture
+
+For a contributor-oriented map of the codebase — the two execution paths (synchronous `engine/` vs async `serving/`), module layout, request lifecycle, and the public API surface — see **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
+
 ## Release Plan
 
 Recent releases and near-term roadmap:
 
-* ✅ PyTorch runtime now includes KV cache offloading, paged attention kernels, continuous batching serving, streaming support, preemptive request scheduling with prefix caching, watchdog-based health hardening, memory coordination, and expert prefetch coordination.
-* 🚧 We continue improving vLLM runtime interoperability.
-* 🚧 Supporting expert parallelism for distributed MoE inference.
+* ✅ Expert offloading runtime with activation-aware caching, prefetching, and tracing.
+* ✅ FP4/MXFP4 expert quantization with host offloading (DeepSeek-V4-Flash native FP4 path).
+* ✅ Continuous batching server with paged KV cache, streaming, preemptive scheduling, and prefix caching.
+* ✅ Fused CUDA/Triton kernels (QKV, Gate+Up+SiLU FFN, decode attention), Marlin INT4 GEMM, and CUDA graph capture.
+* ✅ Serving stability: watchdog/health monitoring, runtime hot reload, live config, and crash-recovery (incremental writer).
+* 🚧 Improving vLLM runtime interoperability.
+* 🚧 Expert parallelism and multi-node distributed MoE inference.
+* 🚧 OpenAI-compatible Batch API (`/v1/batches`).
 * More (We welcome contributors to join us!).
 
 ## Contributing and Security
@@ -343,7 +359,7 @@ Recent releases and near-term roadmap:
 
 ## Citation
 
-If you use MoE-Inifity for your research, please cite our [paper](https://arxiv.org/abs/2401.14361):
+If you use MoE-Infinity for your research, please cite our [paper](https://arxiv.org/abs/2401.14361):
 ```bibtex
 @misc{moe-infinity,
   author       = {Leyang Xue and
