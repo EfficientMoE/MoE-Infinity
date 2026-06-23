@@ -61,6 +61,10 @@ class MoE:
         from moe_infinity.runtime import OffloadEngine
         from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
         from moe_infinity.utils.hf_config import ensure_config_compat
+        from moe_infinity.utils.quantization import (
+            detect_quantization,
+            validate_quantization_support,
+        )
 
         # TODO: remove the torch version check once older versions are supported
         if is_torch_version is not None and not is_torch_version(">=", "2.0"):
@@ -86,6 +90,11 @@ class MoE:
             model_name_or_path, trust_remote_code=True
         )
         model_config = ensure_config_compat(model_config)
+
+        quant_info = detect_quantization(model_config, "")
+        if quant_info is not None:
+            validate_quantization_support(quant_info, model_name_or_path)
+
         architectures = getattr(model_config, "architectures", None)
         if not architectures or not isinstance(architectures, list):
             raise RuntimeError("Unable to resolve model architecture")
@@ -107,7 +116,11 @@ class MoE:
         # with init_empty_weights():
         #     self.model = model_cls(model_config)
         if os.path.exists(model_name_or_path):
-            checkpoint_paths = get_checkpoint_paths(model_name_or_path)
+            model_path = model_name_or_path
+            quant_info = detect_quantization(model_config, model_path)
+            if quant_info is not None:
+                validate_quantization_support(quant_info, model_name_or_path)
+            checkpoint_paths = get_checkpoint_paths(model_path)
         else:
             checkpoint_paths = None
             # get the checkpoint download path from huggingface hub
@@ -121,6 +134,11 @@ class MoE:
                     f"The `snapshot_download` function could not find the checkpoint {model_name_or_path}. "
                     f"Please provide a valid checkpoint."
                 )
+
+            quant_info = detect_quantization(model_config, model_path)
+            if quant_info is not None:
+                validate_quantization_support(quant_info, model_name_or_path)
+
             checkpoint_paths = get_checkpoint_paths(model_path)
 
         if isinstance(config, dict):
