@@ -34,7 +34,7 @@ RUN git clone --branch v3.2.2 --depth 1 https://github.com/NVIDIA/NVTX.git /tmp/
 WORKDIR /workspace/MoE-Infinity
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir setuptools>=75 wheel ninja py-cpuinfo
+RUN pip install --no-cache-dir "setuptools>=78.1.1,<82" wheel ninja py-cpuinfo
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
