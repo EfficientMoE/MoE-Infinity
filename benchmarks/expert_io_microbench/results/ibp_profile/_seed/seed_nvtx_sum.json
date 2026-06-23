@@ -1,0 +1,86 @@
+[
+  {
+    "Time (%)": 52.2,
+    "Total Time (ns)": 311126404,
+    "Instances": 52,
+    "Avg (ns)": 5983200.1,
+    "Med (ns)": 6581208.0,
+    "Min (ns)": 2726151,
+    "Max (ns)": 14901980,
+    "StdDev (ns)": 2152367.1,
+    "Style": "PushPop",
+    "Range": ":DeepseekMoEBlock"
+  },
+  {
+    "Time (%)": 40.0,
+    "Total Time (ns)": 238789306,
+    "Instances": 52,
+    "Avg (ns)": 4592102.0,
+    "Med (ns)": 5290234.0,
+    "Min (ns)": 1494778,
+    "Max (ns)": 8769825,
+    "StdDev (ns)": 1762079.5,
+    "Style": "PushPop",
+    "Range": ":expert_wait_barrier"
+  },
+  {
+    "Time (%)": 3.3,
+    "Total Time (ns)": 19431792,
+    "Instances": 52,
+    "Avg (ns)": 373688.3,
+    "Med (ns)": 276400.0,
+    "Min (ns)": 266495,
+    "Max (ns)": 5218057,
+    "StdDev (ns)": 685086.5,
+    "Style": "PushPop",
+    "Range": ":DeepSeekPrepare"
+  },
+  {
+    "Time (%)": 2.2,
+    "Total Time (ns)": 13331452,
+    "Instances": 855,
+    "Avg (ns)": 15592.3,
+    "Med (ns)": 14730.0,
+    "Min (ns)": 13600,
+    "Max (ns)": 36030,
+    "StdDev (ns)": 2470.0,
+    "Style": "PushPop",
+    "Range": "CCCL:cub::DeviceSelect::Flagged"
+  },
+  {
+    "Time (%)": 1.1,
+    "Total Time (ns)": 6646066,
+    "Instances": 855,
+    "Avg (ns)": 7773.2,
+    "Med (ns)": 7320.0,
+    "Min (ns)": 6480,
+    "Max (ns)": 35681,
+    "StdDev (ns)": 1861.9,
+    "Style": "PushPop",
+    "Range": "CCCL:cub::DeviceReduce::Sum"
+  },
+  {
+    "Time (%)": 0.9,
+    "Total Time (ns)": 5355988,
+    "Instances": 52,
+    "Avg (ns)": 102999.8,
+    "Med (ns)": 99397.0,
+    "Min (ns)": 93021,
+    "Max (ns)": 180954,
+    "StdDev (ns)": 14122.4,
+    "Style": "PushPop",
+    "Range": ":moe_routing"
+  },
+  {
+    "Time (%)": 0.3,
+    "Total Time (ns)": 1610862,
+    "Instances": 52,
+    "Avg (ns)": 30978.1,
+    "Med (ns)": 32455.5,
+    "Min (ns)": 16610,
+    "Max (ns)": 49261,
+    "StdDev (ns)": 8584.7,
+    "Style": "PushPop",
+    "Range": ":expert_dispatch"
+  }
+]

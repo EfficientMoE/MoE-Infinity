@@ -55,9 +55,8 @@ def test_get_default_device_returns_valid_string():
 def test_get_default_device_cpu_when_no_cuda():
     from moe_infinity.utils.device import get_default_device
 
-    with (
-        patch("torch.cuda.is_available", return_value=False),
-        patch("torch.cuda.device_count", return_value=0),
+    with patch("torch.cuda.is_available", return_value=False), patch(
+        "torch.cuda.device_count", return_value=0
     ):
         device = get_default_device()
         assert device == "cpu"
@@ -66,9 +65,8 @@ def test_get_default_device_cpu_when_no_cuda():
 def test_get_device_with_int_id():
     from moe_infinity.utils.device import get_device
 
-    with (
-        patch("torch.cuda.is_available", return_value=True),
-        patch("torch.cuda.device_count", return_value=4),
+    with patch("torch.cuda.is_available", return_value=True), patch(
+        "torch.cuda.device_count", return_value=4
     ):
         device = get_device(0)
         assert device == "cuda:0"
@@ -86,9 +84,8 @@ def test_get_device_none_returns_default():
 def test_get_device_out_of_range_returns_cpu():
     from moe_infinity.utils.device import get_device
 
-    with (
-        patch("torch.cuda.is_available", return_value=True),
-        patch("torch.cuda.device_count", return_value=2),
+    with patch("torch.cuda.is_available", return_value=True), patch(
+        "torch.cuda.device_count", return_value=2
     ):
         device = get_device(5)
         assert device == "cpu"

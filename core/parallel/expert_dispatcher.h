@@ -70,14 +70,19 @@ class ExpertDispatcher : public base::noncopyable {
       }
     }
     for (int i = 0; i < static_cast<int>(input_queue_.size()); ++i) {
-      input_queue_[i].NotifyAll();
+      input_queue_[i].Close();
     }
     for (int i = 0; i < static_cast<int>(exec_queue_.size()); ++i) {
-      exec_queue_[i].NotifyAll();
+      exec_queue_[i].Close();
     }
-    // Threads auto-detach via ~Thread() if not joined.
-    // Don't join here — background threads may be in spin-waits
-    // that only terminate after exec_state is forced to IDLE above.
+    for (int i = 0; i < static_cast<int>(cache_cv_.size()); ++i) {
+      cache_cv_[i].notify_all();
+    }
+    for (auto& t : threads_) {
+      if (t) {
+        t->join();
+      }
+    }
     for (auto& stream : exec_streams_) {
       cudaStreamDestroy(stream);
     }

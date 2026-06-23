@@ -61,6 +61,10 @@ class MoE:
         from moe_infinity.runtime import OffloadEngine
         from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
         from moe_infinity.utils.hf_config import ensure_config_compat
+        from moe_infinity.utils.quantization import (
+            detect_quantization,
+            validate_quantization_support,
+        )
 
         # TODO: remove the torch version check once older versions are supported
         if is_torch_version is not None and not is_torch_version(">=", "2.0"):
@@ -86,6 +90,11 @@ class MoE:
             model_name_or_path, trust_remote_code=True
         )
         model_config = ensure_config_compat(model_config)
+
+        quant_info = detect_quantization(model_config, "")
+        if quant_info is not None:
+            validate_quantization_support(quant_info, model_name_or_path)
+
         architectures = getattr(model_config, "architectures", None)
         if not architectures or not isinstance(architectures, list):
             raise RuntimeError("Unable to resolve model architecture")
@@ -107,7 +116,11 @@ class MoE:
         # with init_empty_weights():
         #     self.model = model_cls(model_config)
         if os.path.exists(model_name_or_path):
-            checkpoint_paths = get_checkpoint_paths(model_name_or_path)
+            model_path = model_name_or_path
+            quant_info = detect_quantization(model_config, model_path)
+            if quant_info is not None:
+                validate_quantization_support(quant_info, model_name_or_path)
+            checkpoint_paths = get_checkpoint_paths(model_path)
         else:
             checkpoint_paths = None
             # get the checkpoint download path from huggingface hub
@@ -121,6 +134,11 @@ class MoE:
                     f"The `snapshot_download` function could not find the checkpoint {model_name_or_path}. "
                     f"Please provide a valid checkpoint."
                 )
+
+            quant_info = detect_quantization(model_config, model_path)
+            if quant_info is not None:
+                validate_quantization_support(quant_info, model_name_or_path)
+
             checkpoint_paths = get_checkpoint_paths(model_path)
 
         if isinstance(config, dict):
@@ -536,9 +554,7 @@ class MoE:
         )
 
         if self.arch == "mixtral":
-            import moe_infinity.models.modeling_mixtral
-
-            transformers.models.mixtral.modeling_mixtral.apply_rotary_pos_emb = apply_rotary_pos_emb
+            import moe_infinity.models.mixtral  # noqa: F401
 
         batch_size = input_ids.shape[0]
         self.seq_id_list = [
@@ -597,8 +613,13 @@ class MoE:
             )
 
         max_tokens = kwargs.get("max_new_tokens", kwargs.get("max_tokens", 256))
+        do_sample = kwargs.get("do_sample", None)
+        if do_sample is False:
+            sampling_temperature = 0.0
+        else:
+            sampling_temperature = float(kwargs.get("temperature", 1.0))
         sampling_params = SamplingParams(
-            temperature=float(kwargs.get("temperature", 1.0)),
+            temperature=sampling_temperature,
             top_p=float(kwargs.get("top_p", 1.0)),
             top_k=int(kwargs.get("top_k", 0)),
             max_tokens=int(max_tokens) if max_tokens is not None else 256,

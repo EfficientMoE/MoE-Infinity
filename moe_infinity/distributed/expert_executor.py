@@ -60,6 +60,9 @@ class DistributedExpertExecutor:
         self.expert_dispatcher = cast(Any, None)
         self.device_map_manager = cast(Any, None)
         self.prefetcher = None
+        self._speculative_prefetch_overlap = bool(
+            getattr(archer_config, "speculative_prefetch_overlap", False)
+        )
         self._pending_prefetch = None
 
     def set_expert_dispatcher(self, expert_dispatcher):
@@ -132,11 +135,21 @@ class DistributedExpertExecutor:
         if prefetcher is None:
             prefetcher = self.prefetcher
 
+        if (
+            self._speculative_prefetch_overlap
+            and prefetcher is not None
+            and router_logits is not None
+        ):
+            self.trigger_speculative_prefetch(layer_id, router_logits)
+            pending_router_logits = None
+        else:
+            pending_router_logits = router_logits
+
         self._pending_prefetch = (
             prefetcher,
             layer_id,
             expert_list,
-            router_logits,
+            pending_router_logits,
         )
 
     def wait_dispatch_local(self):

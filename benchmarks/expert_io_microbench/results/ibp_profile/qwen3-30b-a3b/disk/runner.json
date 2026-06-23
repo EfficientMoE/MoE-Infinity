@@ -1,0 +1,28 @@
+{
+  "model": "Qwen/Qwen3-30B-A3B",
+  "mode": "disk",
+  "hardware_tag": "rtx-pro-6000-blackwell-96g",
+  "offload_dir": "/mnt/raid0nvme0/leyang/moe-bench/qwen3-30b-a3b",
+  "max_new_tokens": 32,
+  "warmup_tokens": 8,
+  "iters": 5,
+  "device_memory_ratio": 0.5,
+  "speculative_prefetch": false,
+  "speculative_prefetch_overlap": false,
+  "num_threads": 1,
+  "decode_step_times_ns": [
+    4007619772,
+    3901761967,
+    3931089747,
+    3966613654,
+    3960077585
+  ],
+  "decode_step_total_ns": 19767162725,
+  "decode_step_count": 160,
+  "pcie_link_width_observed": 16,
+  "pcie_link_gen_observed": 5,
+  "pcie_link_width_pre": 16,
+  "pcie_link_gen_pre": 5,
+  "pcie_link_width_post": 16,
+  "pcie_link_gen_post": 5
+}
