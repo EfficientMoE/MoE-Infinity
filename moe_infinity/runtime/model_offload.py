@@ -88,6 +88,39 @@ prefetch_op = None
 logger = logging.getLogger(__name__)
 
 
+def _remap_mixtral_v5_experts(state_dict: Dict[str, torch.Tensor]) -> None:
+    # transformers v5 stores Mixtral experts as batched 3D tensors
+    # (experts.gate_up_proj [E, 2I, H], experts.down_proj [E, H, I]) instead of
+    # v4 per-expert w1/w2/w3. Expand them back to per-expert keys so the
+    # per-expert offload scheme and parse_expert_id keep working unchanged.
+    # gate_up_proj[e] splits on dim 0 into w1 (gate) and w3 (up); down_proj[e]
+    # is w2. Verified numerically equivalent to the v5 forward.
+    gate_up_suffix = ".gate_up_proj"
+    batched_keys = [
+        k
+        for k in list(state_dict.keys())
+        if k.endswith("experts" + gate_up_suffix)
+    ]
+    for gate_up_key in batched_keys:
+        prefix = gate_up_key[: -len(gate_up_suffix)]
+        down_key = prefix + ".down_proj"
+        if down_key not in state_dict:
+            continue
+        gate_up = state_dict[gate_up_key]
+        down = state_dict[down_key]
+        if gate_up.dim() != 3 or down.dim() != 3:
+            continue
+        num_experts = gate_up.shape[0]
+        for expert_idx in range(num_experts):
+            gate_w, up_w = gate_up[expert_idx].chunk(2, dim=0)
+            base = f"{prefix}.{expert_idx}"
+            state_dict[f"{base}.w1.weight"] = gate_w.contiguous()
+            state_dict[f"{base}.w3.weight"] = up_w.contiguous()
+            state_dict[f"{base}.w2.weight"] = down[expert_idx].contiguous()
+        del state_dict[gate_up_key]
+        del state_dict[down_key]
+
+
 def _compute_config_fingerprint(config: object) -> str:
     fields = [
         "model_type",
@@ -552,6 +585,8 @@ class OffloadEngine(object):
                                     state_dict[k] = f.get_tensor(k)
                         else:
                             state_dict = torch.load(ckpt)
+
+                        _remap_mixtral_v5_experts(state_dict)
 
                         is_gptq_ckpt = is_gptq_quantized(self.config)
                         self._cast_state_dict_tensors(
