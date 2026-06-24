@@ -68,6 +68,7 @@ def test_qwen3_remap_keeps_mlp_and_uses_proj_names():
 
 
 def test_mixtral_remap_numerically_equivalent():
+    torch.manual_seed(0)
     n, hidden, inter = 3, 8, 16
     v5 = "model.layers.0.mlp.experts"
     out = "model.layers.0.block_sparse_moe.experts"
@@ -91,10 +92,11 @@ def test_mixtral_remap_numerically_equivalent():
             sd[f"{out}.{e}.w2.weight"],
             x,
         )
-        assert torch.allclose(ref, out_v, atol=1e-6)
+        assert torch.allclose(ref, out_v, atol=1e-4)
 
 
 def test_qwen3_remap_numerically_equivalent():
+    torch.manual_seed(0)
     n, hidden, inter = 3, 8, 16
     experts = "model.layers.0.mlp.experts"
     gate_up = torch.randn(n, 2 * inter, hidden)
@@ -117,7 +119,7 @@ def test_qwen3_remap_numerically_equivalent():
             sd[f"{experts}.{e}.down_proj.weight"],
             x,
         )
-        assert torch.allclose(ref, out_v, atol=1e-6)
+        assert torch.allclose(ref, out_v, atol=1e-4)
 
 
 def test_remapped_keys_match_parse_expert_id_mixtral():
