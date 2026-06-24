@@ -60,6 +60,7 @@ from moe_infinity.utils import (
     parse_expert_dtype,
     parse_expert_id,
     parse_moe_param,
+    resolve_config_dtype,
 )
 from moe_infinity.utils.arguments import (
     copy_args_to_device,
@@ -506,11 +507,9 @@ class OffloadEngine(object):
                     )
 
                 self.dtype = parse_expert_dtype(self.config)
-                self.dtype_cls = self.config.torch_dtype
+                self.dtype_cls = resolve_config_dtype(self.config)
                 if self.dtype_cls is None:
-                    self.dtype_cls = getattr(
-                        self.config, "dtype", torch.bfloat16
-                    )
+                    self.dtype_cls = torch.bfloat16
 
                 if self.config.model_type == "deepseek_v3":
                     self.dtype_cls = torch.float8_e4m3fn
