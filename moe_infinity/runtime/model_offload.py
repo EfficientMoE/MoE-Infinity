@@ -89,12 +89,15 @@ logger = logging.getLogger(__name__)
 
 
 def _remap_mixtral_v5_experts(state_dict: Dict[str, torch.Tensor]) -> None:
-    # transformers v5 stores Mixtral experts as batched 3D tensors
-    # (experts.gate_up_proj [E, 2I, H], experts.down_proj [E, H, I]) instead of
-    # v4 per-expert w1/w2/w3. Expand them back to per-expert keys so the
-    # per-expert offload scheme and parse_expert_id keep working unchanged.
-    # gate_up_proj[e] splits on dim 0 into w1 (gate) and w3 (up); down_proj[e]
-    # is w2. Verified numerically equivalent to the v5 forward.
+    # Canonicalizes transformers v5 Mixtral checkpoints to the v4 offload layout.
+    # v5: batched ".mlp" submodule -> mlp.experts.gate_up_proj [E, 2I, H],
+    #     mlp.experts.down_proj [E, H, I], mlp.gate.weight.
+    # v4 (target): per-expert ".block_sparse_moe" -> experts.{E}.w1/w2/w3.weight,
+    #     block_sparse_moe.gate.weight. parse_expert_id keys off
+    #     "block_sparse_moe.experts.{E}", so both the per-expert split and the
+    #     ".mlp" -> ".block_sparse_moe" block path are required.
+    # gate_up_proj[e] splits on dim 0 into w1 (gate) and w3 (up); down_proj[e] is
+    # w2. Numerically equivalent to the v5 expert forward.
     gate_up_suffix = ".gate_up_proj"
     batched_keys = [
         k
@@ -102,18 +105,31 @@ def _remap_mixtral_v5_experts(state_dict: Dict[str, torch.Tensor]) -> None:
         if k.endswith("experts" + gate_up_suffix)
     ]
     for gate_up_key in batched_keys:
-        prefix = gate_up_key[: -len(gate_up_suffix)]
-        down_key = prefix + ".down_proj"
+        experts_prefix = gate_up_key[: -len(gate_up_suffix)]
+        down_key = experts_prefix + ".down_proj"
         if down_key not in state_dict:
             continue
         gate_up = state_dict[gate_up_key]
         down = state_dict[down_key]
         if gate_up.dim() != 3 or down.dim() != 3:
             continue
+
+        # experts_prefix is e.g. "model.layers.0.mlp.experts"; block_prefix is
+        # the MoE block path. Normalize a v5 ".mlp" block to ".block_sparse_moe".
+        block_prefix = experts_prefix[: -len(".experts")]
+        if block_prefix.endswith(".mlp"):
+            out_block = block_prefix[: -len(".mlp")] + ".block_sparse_moe"
+            gate_key = block_prefix + ".gate.weight"
+            out_gate_key = out_block + ".gate.weight"
+            if gate_key in state_dict and out_gate_key not in state_dict:
+                state_dict[out_gate_key] = state_dict.pop(gate_key)
+        else:
+            out_block = block_prefix
+
         num_experts = gate_up.shape[0]
         for expert_idx in range(num_experts):
             gate_w, up_w = gate_up[expert_idx].chunk(2, dim=0)
-            base = f"{prefix}.{expert_idx}"
+            base = f"{out_block}.experts.{expert_idx}"
             state_dict[f"{base}.w1.weight"] = gate_w.contiguous()
             state_dict[f"{base}.w3.weight"] = up_w.contiguous()
             state_dict[f"{base}.w2.weight"] = down[expert_idx].contiguous()
