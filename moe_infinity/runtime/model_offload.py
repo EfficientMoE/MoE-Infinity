@@ -35,7 +35,8 @@ except ImportError:
 
 from safetensors import safe_open
 from tqdm import tqdm
-from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
+from transformers import PretrainedConfig
+from transformers.modeling_utils import PreTrainedModel
 
 import moe_infinity
 from moe_infinity.common import parse_expert_type
