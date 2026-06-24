@@ -47,10 +47,17 @@ def ensure_config_compat(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
-def parse_expert_dtype(config: PretrainedConfig) -> int:
-    dtype = config.torch_dtype
+def resolve_config_dtype(config: object) -> Optional[torch.dtype]:
+    # transformers v5 renamed config.torch_dtype -> config.dtype. Read the new
+    # name first, fall back to the old one so both 4.x and 5.x configs work.
+    dtype = getattr(config, "dtype", None)
     if dtype is None:
-        dtype = getattr(config, "dtype", None)
+        dtype = getattr(config, "torch_dtype", None)
+    return dtype
+
+
+def parse_expert_dtype(config: PretrainedConfig) -> int:
+    dtype = resolve_config_dtype(config)
     if dtype is None:
         dtype = torch.bfloat16
     if dtype == torch.bfloat16:

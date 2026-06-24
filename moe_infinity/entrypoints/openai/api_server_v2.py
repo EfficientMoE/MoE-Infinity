@@ -1744,7 +1744,9 @@ def _resolve_int_attr(config: object, *names: str) -> Optional[int]:
 def _resolve_dtype(model: object) -> str:
     model_config = getattr(model, "config", None)
     if model_config is not None:
-        torch_dtype = getattr(model_config, "torch_dtype", None)
+        torch_dtype = getattr(model_config, "dtype", None)
+        if torch_dtype is None:
+            torch_dtype = getattr(model_config, "torch_dtype", None)
         if isinstance(torch_dtype, str):
             return torch_dtype.replace("torch.", "")
         if torch_dtype is not None:

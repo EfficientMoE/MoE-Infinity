@@ -243,7 +243,9 @@ class MoE:
 
     @staticmethod
     def _resolve_torch_dtype(model_config: object) -> torch.dtype:
-        torch_dtype = getattr(model_config, "torch_dtype", None)
+        torch_dtype = getattr(model_config, "dtype", None)
+        if torch_dtype is None:
+            torch_dtype = getattr(model_config, "torch_dtype", None)
         if isinstance(torch_dtype, torch.dtype):
             return torch_dtype
         if isinstance(torch_dtype, str):

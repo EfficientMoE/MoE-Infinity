@@ -15,6 +15,7 @@ from .hf_config import (
     parse_expert_dtype,
     parse_expert_id,
     parse_moe_param,
+    resolve_config_dtype,
 )
 from .quantization import (
     QuantizationInfo,
@@ -39,6 +40,7 @@ __all__ = [
     "parse_expert_dtype",
     "parse_expert_id",
     "parse_moe_param",
+    "resolve_config_dtype",
     "QuantizationInfo",
     "validate_quantization_support",
     "wait_transfer",
