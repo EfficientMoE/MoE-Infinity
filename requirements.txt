@@ -2,7 +2,6 @@ accelerate
 chardet
 datasets>=2.12.0
 fastapi
-flash-attn
 hjson
 ninja
 numpy
@@ -13,7 +12,7 @@ packaging>=20.0
 protobuf
 py-cpuinfo
 pyarrow
-pydantic==1.10.13
+pydantic>=1.10.19,<2
 scipy
 sentencepiece
 sglang-kernel>=0.4.0

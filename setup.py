@@ -390,7 +390,8 @@ setup(
     include_package_data=True,
     install_requires=install_requires,
     extras_require={
-        "flashinfer": ["flashinfer"],
+        "flashinfer": ["flashinfer-python"],
+        "flash_attn": ["flash-attn>=2.5.2"],
         "contextpilot": ["contextpilot>=0.4.0"],
     },
     author="EfficientMoE Team",
@@ -399,15 +400,14 @@ setup(
     url="https://github.com/EfficientMoE/MoE-Infinity",
     project_urls={"Homepage": "https://github.com/EfficientMoE/MoE-Infinity"},
     classifiers=[
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     license="Apache License 2.0",
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     ext_modules=ext_modules,
     cmdclass=cmdclass,
 )
