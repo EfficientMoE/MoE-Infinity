@@ -111,10 +111,21 @@ jobs:
           asset_name: ${{ env.asset_name }}
           asset_content_type: application/*
 
-      - name: Publish Package to PyPI
+      - name: Stage sdist for PyPI
+        if: ${{ matrix.python-version == '3.10' }}
+        run: |
+          mkdir -p sdist_only
+          cp dist/*.tar.gz sdist_only/
+
+      # Only the sdist is published to PyPI. Prebuilt CUDA wheels are ABI-locked to a
+      # specific torch/CUDA, which PyPI wheel tags cannot express; they are attached to
+      # the GitHub Release instead. pip installs the sdist and compiles it locally.
+      - name: Publish sdist to PyPI
+        if: ${{ matrix.python-version == '3.10' }}
         uses: pypa/gh-action-pypi-publish@release/v1.8
         with:
           skip-existing: true
+          packages-dir: sdist_only
         env:
           TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
