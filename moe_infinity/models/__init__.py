@@ -18,6 +18,7 @@ from .model_utils import (
 from .nllb_moe import SyncNllbMoeSparseMLP
 from .olmoe import SyncOlmoeMoEBlock
 from .qwen import Qwen3MoEBlock
+from .qwen3_5_moe import SyncQwen3_5MoeSparseMoeBlock
 
 # Qwen3PagedAttention is lazily imported to avoid a circular dependency:
 # model_offload -> moe_infinity.models -> qwen3_paged_attention
@@ -35,6 +36,7 @@ __all__ = [
     "SyncMixtralSparseMoeBlock",
     "SyncNllbMoeSparseMLP",
     "SyncOlmoeMoEBlock",
+    "SyncQwen3_5MoeSparseMoeBlock",
     "apply_rotary_pos_emb",
     "apply_rotary_pos_emb_deepseek",
     "rotate_half",

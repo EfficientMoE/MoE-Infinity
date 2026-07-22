@@ -1,5 +1,6 @@
 """Root conftest: stub CUDA-only deps so CPU-only CI can collect all tests."""
 
+import importlib.machinery
 import sys
 from unittest.mock import MagicMock
 
@@ -22,7 +23,9 @@ def _stub_if_missing(name: str) -> None:
     try:
         __import__(name)
     except (ImportError, OSError):
-        sys.modules[name] = MagicMock()
+        stub = MagicMock()
+        stub.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+        sys.modules[name] = stub
 
 
 for _mod in _OPTIONAL_CUDA_MODULES:
