@@ -11,6 +11,43 @@
 #include <cutlass/epilogue/thread/linear_combination.h>
 #include <cutlass/gemm/device/gemm.h>
 
+#include <ATen/ATen.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
+
+#include <cstdlib>
+#include <string>
+
+// The CUTLASS GEMMs below are specialised for cutlass::arch::Sm80 tensor ops.
+// On Blackwell (sm_120) those kernels compile and report kSuccess but produce
+// numerically wrong results, so route through a cuBLAS/libtorch path there.
+// MOE_INFINITY_FORCE_CUBLAS_MOE=1 forces the fallback on any architecture.
+static bool moe_use_cublas_fallback(const torch::Tensor& input) {
+  const char* force = std::getenv("MOE_INFINITY_FORCE_CUBLAS_MOE");
+  if (force != nullptr && std::string(force) != "0") {
+    return true;
+  }
+  const auto* prop = at::cuda::getDeviceProperties(input.get_device());
+  return prop->major >= 12;
+}
+
+static void fused_moe_ffn_into_torch_fallback(
+    torch::Tensor& hidden, torch::Tensor& gate_proj, torch::Tensor& up_proj,
+    torch::Tensor& down_proj, torch::Tensor& gate_buf,
+    torch::Tensor& fused_buf, torch::Tensor& output, cudaStream_t stream) {
+  c10::cuda::CUDAGuard device_guard(hidden.device());
+  auto torch_stream =
+      c10::cuda::getStreamFromExternal(stream, hidden.get_device());
+  c10::cuda::CUDAStreamGuard stream_guard(torch_stream);
+  at::NoGradGuard no_grad;
+
+  gate_buf.copy_(at::mm(hidden, gate_proj.transpose(0, 1)));
+  auto up = at::mm(hidden, up_proj.transpose(0, 1));
+  fused_buf.copy_(at::silu(gate_buf) * up);
+  output.copy_(at::mm(fused_buf, down_proj.transpose(0, 1)));
+}
+
 // Small-M tile sizes tuned for kMaxTokens = 128.
 // Threadblock covers 64 rows of M, so 128-token batches use 2 threadblocks.
 // K-tile=32 is efficient for narrow hidden dims (H≤2048).
@@ -125,6 +162,12 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
               "fused_moe_ffn_into: gate/up proj K-dim mismatch");
   TORCH_CHECK(down_proj.size(1) == I,
               "fused_moe_ffn_into: down proj intermediate dim mismatch");
+
+  if (moe_use_cublas_fallback(hidden)) {
+    fused_moe_ffn_into_torch_fallback(hidden, gate_proj, up_proj, down_proj,
+                                      gate_buf, fused_buf, output, stream);
+    return;
+  }
 
   using Elem = ElementInput;
 

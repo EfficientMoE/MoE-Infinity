@@ -4,10 +4,12 @@
 // EfficientMoE Team
 
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 #include "parallel/expert_dispatcher.h"
 #include "prefetch/archer_prefetch_handle.h"
 #include "model/moe.h"
 #include "kernel/ops.h"
+#include "kernel/fused_moe_mlp.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("init_moe_layer", InitMoELayer,
@@ -87,6 +89,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("clean_up_resources", &ArcherPrefetchHandle::CleanUpResources);
   //    .def("set_node_cache_priority",
   //    &ArcherPrefetchHandle::SetNodeCachePriority);
+
+  m.def(
+      "fused_moe_ffn_test",
+      [](torch::Tensor input, torch::Tensor gate_proj, torch::Tensor up_proj,
+         torch::Tensor down_proj) {
+        auto gate_buf =
+            at::empty({input.size(0), gate_proj.size(0)}, input.options());
+        auto fused_buf = at::empty_like(gate_buf);
+        auto output =
+            at::empty({input.size(0), down_proj.size(0)}, input.options());
+        auto stream =
+            at::cuda::getCurrentCUDAStream(input.get_device()).stream();
+        fused_moe_ffn_into(input, gate_proj, up_proj, down_proj, gate_buf,
+                           fused_buf, output, stream);
+        return output;
+      },
+      "Test entrypoint for fused_moe_ffn_into (allocates buffers, current "
+      "stream).");
 
   m.def("silu_and_mul", &silu_and_mul, "Fused SiLU(gate) * up");
   m.def("gelu_and_mul", &gelu_and_mul, "Fused GeLU(gate) * up");

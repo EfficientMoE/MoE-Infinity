@@ -534,14 +534,23 @@ class OffloadEngine(object):
             SyncJambaMoEBlock
         )
 
-        transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe = transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE
-        transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
-        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = (
-            SyncDeepseekV2MoEBlock
+        _v2_mod = transformers.models.deepseek_v2.modeling_deepseek_v2
+        _v2_moe_name = (
+            "DeepseekV2Moe"
+            if hasattr(_v2_mod, "DeepseekV2Moe")
+            else "DeepseekV2MoE"
         )
-        transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = (
-            SyncDeepseekV3MoEBlock
+        _v2_mod._old_deepseek_v2_moe = getattr(_v2_mod, _v2_moe_name)
+        setattr(_v2_mod, _v2_moe_name, SyncDeepseekV2MoEBlock)
+
+        _v3_mod = transformers.models.deepseek_v3.modeling_deepseek_v3
+        _v3_moe_name = (
+            "DeepseekV3MoE"
+            if hasattr(_v3_mod, "DeepseekV3MoE")
+            else "DeepseekV3Moe"
         )
+        _v3_mod._old_deepseek_v3_moe = getattr(_v3_mod, _v3_moe_name)
+        setattr(_v3_mod, _v3_moe_name, SyncDeepseekV3MoEBlock)
 
         transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp = (
             transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP
@@ -840,6 +849,7 @@ class OffloadEngine(object):
 
                         module_idx += 1
 
+                self._load_resident_shared_experts(model)
                 self.setup_archer_hooks(model)
                 return model
 
@@ -875,12 +885,73 @@ class OffloadEngine(object):
             transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
         )
 
+    @staticmethod
+    def _is_shared_expert_param(name: str) -> bool:
+        return ".shared_experts." in name
+
+    @torch.no_grad()
+    def _load_resident_shared_experts(self, model):
+        # Shared experts run inside the Python MoE block (not the C++ expert
+        # executor) and are used on every MoE layer. The Archer offload path
+        # leaves their live param as a [1] placeholder that is never
+        # materialized before shared_experts(x) runs, so load their real
+        # weights once and keep them resident instead.
+        wanted = {
+            name: param
+            for name, param in model.named_parameters(recurse=True)
+            if self._is_shared_expert_param(name)
+        }
+        if not wanted:
+            return
+
+        remaining = set(wanted)
+        for ckpt in self.ckpt_files:
+            if not remaining:
+                break
+            if ckpt.endswith(".safetensors"):
+                with safe_open(ckpt, framework="pt", device="cpu") as f:
+                    keys = set(f.keys())
+                    for name in list(remaining):
+                        if name not in keys:
+                            continue
+                        param = wanted[name]
+                        param.data = (
+                            f.get_tensor(name)
+                            .to(dtype=param.dtype, device="cpu")
+                            .contiguous()
+                        )
+                        param.requires_grad_(False)
+                        param._moe_infinity_resident = True
+                        remaining.remove(name)
+            else:
+                state = torch.load(ckpt, map_location="cpu")
+                for name in list(remaining):
+                    if name not in state:
+                        continue
+                    param = wanted[name]
+                    param.data = (
+                        state[name]
+                        .to(dtype=param.dtype, device="cpu")
+                        .contiguous()
+                    )
+                    param.requires_grad_(False)
+                    param._moe_infinity_resident = True
+                    remaining.remove(name)
+                del state
+
+        if remaining:
+            raise RuntimeError(
+                f"Missing shared_experts weights: {sorted(remaining)[:5]}"
+            )
+
     def get_topology(self, model):
         name_lst = []
         ret_dict = {}
 
         for name, _ in model.named_parameters(recurse=True):
             match = re.search(r"\d+", name)
+            if self._is_shared_expert_param(name):
+                continue
             if name not in self.name_id_map:
                 print("param not in self.name_id_map", name)
                 continue
@@ -995,13 +1066,18 @@ class OffloadEngine(object):
 
     def setup_archer_hooks(self, model):
         for name, param in model.named_parameters(recurse=True):
+            if self._is_shared_expert_param(name):
+                if param.data.numel() <= 1:
+                    raise RuntimeError(
+                        f"shared_experts param not materialized: {name}"
+                    )
+                param.requires_grad_(False)
+                param._moe_infinity_resident = True
+                continue
             if name not in self.name_id_map:
                 continue
             self.archer_engine.register(param.data, self.name_id_map[name])
             self.offload_set.add(param.data.data_ptr())
-
-            if "shared" in name:
-                self.offload_exemption.add(param.data.data_ptr())
 
         for name, buffer in model.named_buffers(recurse=True):
             if name not in self.name_id_map:
@@ -1419,7 +1495,18 @@ class OffloadEngine(object):
             for name, param in module.named_parameters(recurse=False):
                 if param.data.data_ptr() not in self.offload_set:
                     num_devices = torch.cuda.device_count()
-                    param.data = param.data.to(get_device(num_devices - 1))
+                    if getattr(param, "_moe_infinity_resident", False):
+                        target = next(
+                            (
+                                x.device
+                                for x in list(args) + list(kwargs.values())
+                                if isinstance(x, torch.Tensor)
+                            ),
+                            torch.device(get_device(num_devices - 1)),
+                        )
+                    else:
+                        target = torch.device(get_device(num_devices - 1))
+                    param.data = param.data.to(target)
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
@@ -1547,8 +1634,21 @@ class OffloadEngine(object):
             transformers.models.jamba.modeling_jamba._old_jamba_moe
         )
 
-        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe
-        transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe
+        _v2_mod = transformers.models.deepseek_v2.modeling_deepseek_v2
+        _v2_moe_name = (
+            "DeepseekV2Moe"
+            if hasattr(_v2_mod, "DeepseekV2Moe")
+            else "DeepseekV2MoE"
+        )
+        setattr(_v2_mod, _v2_moe_name, _v2_mod._old_deepseek_v2_moe)
+
+        _v3_mod = transformers.models.deepseek_v3.modeling_deepseek_v3
+        _v3_moe_name = (
+            "DeepseekV3MoE"
+            if hasattr(_v3_mod, "DeepseekV3MoE")
+            else "DeepseekV3Moe"
+        )
+        setattr(_v3_mod, _v3_moe_name, _v3_mod._old_deepseek_v3_moe)
         transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
             transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
         )

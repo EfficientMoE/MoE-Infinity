@@ -120,7 +120,7 @@ RUN python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}
 # E2E Stage 2: example smoke tests (--help exits 0)
 # ---------------------------------------------------------------
 RUN python examples/interface_example.py --help
-RUN python examples/readme_example.py --help
+RUN python examples/deepseek_v2_chat_example.py --help
 
 # ---------------------------------------------------------------
 # Run Tier 1 tests (build-time, no CUDA)
