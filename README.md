@@ -62,6 +62,7 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 | DeepSeek-V4-Flash (FP4 expert offloading) | requires a `transformers` build shipping `DeepseekV4ForCausalLM` |
 | [Mixtral](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) | `mistralai/Mixtral-8x7B-Instruct-v0.1`, `Mixtral-8x22B` |
 | [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B) | `Qwen/Qwen3-30B-A3B` |
+| [Qwen3.5-MoE](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | `Qwen/Qwen3.5-35B-A3B` (text-only; see note) |
 | [GPT-OSS](https://huggingface.co/models?search=gpt-oss) | `openai/gpt-oss-*` |
 | [DBRX](https://huggingface.co/models?search=dbrx) | `databricks/dbrx-instruct` |
 | [Jamba](https://huggingface.co/models?search=jamba) | `ai21labs/Jamba-*` |
@@ -69,6 +70,8 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 | [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b) | `facebook/nllb-moe-54b` |
 
 > DeepSeek-V4-Flash is only registered when your installed `transformers` provides `DeepseekV4ForCausalLM`; otherwise it is skipped automatically.
+
+> Qwen3.5-MoE (`Qwen3_5MoeForConditionalGeneration`, requires `transformers` >= 5.12) is a vision-language checkpoint served **text-only**: its 256 routed experts are offloaded while the small text backbone — token embeddings, the hybrid linear (GatedDeltaNet) / full attention layers, shared expert, and `lm_head` — stays resident on GPU. The v5 packed expert tensors are expanded to per-expert on load. Vision and MTP weights are present but unused for text generation.
 
 ## Installation
 
