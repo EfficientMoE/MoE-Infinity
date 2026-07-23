@@ -36,13 +36,13 @@ jobs:
 
   wheel:
     name: Build Wheel
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     needs: release
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.10', '3.11', '3.12']
-        cuda-version: ['12.1']
+        cuda-version: ['12.8']
 
     steps:
       - name: Checkout Source Code
@@ -59,19 +59,34 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install Dependencies
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install build
-
       - name: Install CUDA ${{ matrix.cuda-version }}
         run: |
-          bash -x .github/workflows/scripts/cuda-install.sh ${{ matrix.cuda-version }} ${{ matrix.os }}
+          bash -x .github/workflows/scripts/cuda-install.sh ${{ matrix.cuda-version }} ubuntu-22.04
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build git uuid-dev
+
+      - name: Install Python build dependencies (torch matched to CUDA)
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "setuptools>=78.1.1,<82" wheel ninja py-cpuinfo build
+          python3 -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+      - name: Fetch CUTLASS headers
+        run: |
+          git clone --depth 1 --branch v3.9.2 https://github.com/NVIDIA/cutlass.git "${HOME}/cutlass"
 
       - name: Build Wheel
         shell: bash
+        env:
+          NVTX_DISABLE: "1"
         run: |
-          python3 -m build --wheel
+          export CUDA_HOME="/usr/local/cuda-${{ matrix.cuda-version }}"
+          export PATH="${CUDA_HOME}/bin:${PATH}"
+          export CUTLASS_DIR="${HOME}/cutlass"
+          python3 -m build --wheel --no-isolation
           wheel_name=$(ls dist/*whl | xargs -n 1 basename)
           asset_name=${wheel_name//"linux"/"manylinux1"}
           echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
@@ -96,10 +111,21 @@ jobs:
           asset_name: ${{ env.asset_name }}
           asset_content_type: application/*
 
-      - name: Publish Package to PyPI
+      - name: Stage sdist for PyPI
+        if: ${{ matrix.python-version == '3.10' }}
+        run: |
+          mkdir -p sdist_only
+          cp dist/*.tar.gz sdist_only/
+
+      # Only the sdist is published to PyPI. Prebuilt CUDA wheels are ABI-locked to a
+      # specific torch/CUDA, which PyPI wheel tags cannot express; they are attached to
+      # the GitHub Release instead. pip installs the sdist and compiles it locally.
+      - name: Publish sdist to PyPI
+        if: ${{ matrix.python-version == '3.10' }}
         uses: pypa/gh-action-pypi-publish@release/v1.8
         with:
           skip-existing: true
+          packages-dir: sdist_only
         env:
           TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
