@@ -971,9 +971,6 @@ class OffloadEngine(object):
                 f"Missing shared_experts weights: {sorted(remaining)[:5]}"
             )
 
-    @staticmethod
-    def _is_shared_expert_param(name: str) -> bool:
-        return ".shared_experts." in name
 
     @torch.no_grad()
     def _load_resident_shared_experts(self, model):
