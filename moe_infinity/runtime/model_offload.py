@@ -780,7 +780,9 @@ class OffloadEngine(object):
                     param.ar_id = self.name_id_map.get(name, None)
 
                 # the case for NLLB MoE
-                if "lm_head.weight" not in self.name_id_map:
+                if "lm_head.weight" not in self.name_id_map and hasattr(
+                    getattr(model, "model", model), "encoder"
+                ):
                     print(
                         "lm_head.weight not in name_id_map, add it as embed_tokens"
                     )
@@ -1287,6 +1289,17 @@ class OffloadEngine(object):
         param_names = list(state_dict.keys())
 
         for param_name in param_names:
+            # Qwen3.5: only the routed experts are offloaded. The text backbone
+            # is kept resident (loaded from contiguous shards) and the vision
+            # tower + MTP head are unused for text-only generation. Offloading
+            # any of these fragments large tensors across store partitions and
+            # triggers a pathologically slow cross-partition ReadTensor path
+            # during topology setup, so skip everything that is not a routed
+            # expert.
+            if getattr(self.config, "model_type", "") == "qwen3_5_moe":
+                _, _expert_id = parse_expert_id(param_name, self.config)
+                if _expert_id is None:
+                    continue
             self.name_id_map[param_name] = self._generate_param_id()
             if not self.archer_engine.is_tensor_offloaded(
                 self.name_id_map[param_name]
