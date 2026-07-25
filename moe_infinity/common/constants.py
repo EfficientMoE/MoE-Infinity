@@ -17,6 +17,11 @@ try:
 except ImportError:
     DeepseekV4ForCausalLM = None
 
+try:
+    from transformers import Qwen3_5MoeForConditionalGeneration
+except ImportError:
+    Qwen3_5MoeForConditionalGeneration = None
+
 MODEL_MAPPING_NAMES = {
     "nllb": NllbMoeForConditionalGeneration,
     "mixtral": MixtralForCausalLM,
@@ -50,13 +55,24 @@ if DeepseekV4ForCausalLM is not None:
     MODEL_MAPPING_NAMES["deepseekv4"] = DeepseekV4ForCausalLM
     MODEL_MAPPING_TYPES["deepseekv4"] = 5
 
+# Qwen3.5-MoE (arch "Qwen3_5MoeForConditionalGeneration") uses per-expert
+# gate_proj/up_proj/down_proj weights (expert-type 5, like Qwen3/DeepSeek); the
+# v5 packed checkpoint tensors are expanded to per-expert on load. Registered
+# only when the HF class is importable (mirrors the V4 guard above).
+if Qwen3_5MoeForConditionalGeneration is not None:
+    MODEL_MAPPING_NAMES["qwen3_5"] = Qwen3_5MoeForConditionalGeneration
+    MODEL_MAPPING_TYPES["qwen3_5"] = 5
+
 
 def parse_expert_type(config: PretrainedConfig) -> int:
     architecture = (
         config.architectures[0].lower() if config.architectures else ""
     )
     arch = None
-    for supp_arch in MODEL_MAPPING_NAMES:
+    # Match the most specific key first: "qwen3_5" and "deepseek_v3" both
+    # contain shorter keys ("qwen3", "deepseek") as substrings, so longest-key
+    # order prevents a shorter key from shadowing a more specific architecture.
+    for supp_arch in sorted(MODEL_MAPPING_NAMES, key=len, reverse=True):
         if supp_arch in architecture:
             arch = supp_arch
             break
