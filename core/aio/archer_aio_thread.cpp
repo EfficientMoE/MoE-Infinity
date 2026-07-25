@@ -66,7 +66,15 @@ void ArcherAioThread::Run() {
       callbacks_.pop_front();
     }
     callback();
-    if (pending_callbacks_.fetch_sub(1) == 1) {
+    // Must decrement under mutex_: an unlocked update races Wait()'s predicate
+    // check and loses the done_cv_ wakeup (atomic pending_callbacks_ is not
+    // enough), intermittently hanging the offload load path.
+    bool done;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      done = (pending_callbacks_.fetch_sub(1) == 1);
+    }
+    if (done) {
       done_cv_.notify_all();
     }
   }
