@@ -233,10 +233,8 @@ _STORE_EXTRA_LINK_ARGS = [
     "-lpthread",
 ]
 
-# Link NVTX runtime when NVTX instrumentation is enabled (default).
-# The C++ NVTX ranges in core/ use nvtxDomainRangePop from libnvToolsExt.
-if os.environ.get("NVTX_DISABLE", "0") != "1":
-    _STORE_EXTRA_LINK_ARGS.append("-lnvToolsExt")
+# NVTX v3 (nvtx3.hpp) is header-only and requires no link library; the legacy
+# libnvToolsExt was removed in CUDA 13, so do not link it.
 
 if TORCH_LIB_DIR:
     _STORE_EXTRA_LINK_ARGS.append(f"-Wl,-rpath,{TORCH_LIB_DIR}")
