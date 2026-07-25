@@ -9,6 +9,7 @@ from moe_infinity.utils.hf_config import (
     parse_expert_dtype,
     parse_expert_id,
     parse_moe_param,
+    resolve_config_dtype,
 )
 
 
@@ -31,6 +32,34 @@ def test_parse_expert_dtype_unsupported():
     cfg = _cfg(torch_dtype=torch.int32)
     with pytest.raises(AssertionError):
         parse_expert_dtype(cfg)
+
+
+def test_resolve_config_dtype_v5_shape():
+    cfg = _cfg(dtype=torch.bfloat16)
+    assert resolve_config_dtype(cfg) == torch.bfloat16
+
+
+def test_resolve_config_dtype_v4_shape():
+    cfg = _cfg(torch_dtype=torch.float16)
+    assert resolve_config_dtype(cfg) == torch.float16
+
+
+def test_resolve_config_dtype_prefers_new_name():
+    cfg = _cfg(dtype=torch.float32, torch_dtype=torch.float16)
+    assert resolve_config_dtype(cfg) == torch.float32
+
+
+def test_resolve_config_dtype_missing_returns_none():
+    cfg = _cfg(hidden_size=128)
+    assert resolve_config_dtype(cfg) is None
+
+
+def test_parse_expert_dtype_v5_shape():
+    cfg = _cfg(dtype=torch.bfloat16)
+    assert parse_expert_dtype(cfg) == 0
+
+    cfg = _cfg(dtype=torch.float16)
+    assert parse_expert_dtype(cfg) == 2
 
 
 def test_parse_moe_param_nllb():

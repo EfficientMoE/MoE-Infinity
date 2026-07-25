@@ -35,7 +35,8 @@ except ImportError:
 
 from safetensors import safe_open
 from tqdm import tqdm
-from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
+from transformers import PretrainedConfig
+from transformers.modeling_utils import PreTrainedModel
 
 import moe_infinity
 from moe_infinity.common import parse_expert_type
@@ -52,6 +53,7 @@ from moe_infinity.models import (
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
     SyncOlmoeMoEBlock,
+    SyncQwen3_5MoeSparseMoeBlock,
 )
 from moe_infinity.runtime.compile import script_expert
 from moe_infinity.runtime.hooks import *
@@ -60,6 +62,7 @@ from moe_infinity.utils import (
     parse_expert_dtype,
     parse_expert_id,
     parse_moe_param,
+    resolve_config_dtype,
 )
 from moe_infinity.utils.arguments import (
     copy_args_to_device,
@@ -84,6 +87,81 @@ _prefetch_lib = None
 prefetch_op = None
 
 logger = logging.getLogger(__name__)
+
+
+def _arch_name(config: object) -> str:
+    archs = getattr(config, "architectures", None) or [""]
+    name = (archs[0] or "").lower()
+    if not name:
+        name = (getattr(config, "model_type", "") or "").lower()
+    return name
+
+
+def _remap_v5_batched_experts(
+    state_dict: Dict[str, torch.Tensor], config: object
+) -> None:
+    # transformers v5 stores MoE experts as batched 3D tensors under ".mlp":
+    #   mlp.experts.gate_up_proj [E, 2*inter, H], mlp.experts.down_proj [E, *, *].
+    # MoE-Infinity offloads per-expert, so expand them back to the per-expert keys
+    # each arch's parse_expert_id expects. Two naming schemes:
+    #   - Mixtral: block ".mlp" -> ".block_sparse_moe", experts.{E}.w1/w3/w2.weight
+    #     (w1=gate, w3=up, w2=down), gate moved to block_sparse_moe.gate.weight.
+    #   - Qwen3 / DeepSeek / OLMoE: keep ".mlp", experts.{E}.gate_proj/up_proj/
+    #     down_proj.weight.
+    # gate_up_proj[e] splits on dim 0 into gate and up; down_proj[e] is down.
+    # Numerically equivalent to the v5 expert forward. No-op on v4 checkpoints.
+    # GPT-OSS keeps its own batched path (regex + MXFP4), so it is excluded.
+    arch = _arch_name(config)
+    if "gpt_oss" in arch or "gptoss" in arch:
+        return
+
+    is_mixtral = "mixtral" in arch
+    if is_mixtral:
+        gate_name, up_name, down_name = "w1", "w3", "w2"
+    else:
+        gate_name, up_name, down_name = "gate_proj", "up_proj", "down_proj"
+
+    def _out_block(experts_prefix: str) -> str:
+        block_prefix = experts_prefix[: -len(".experts")]
+        if is_mixtral and block_prefix.endswith(".mlp"):
+            out_block = block_prefix[: -len(".mlp")] + ".block_sparse_moe"
+            gate_key = block_prefix + ".gate.weight"
+            out_gate_key = out_block + ".gate.weight"
+            if gate_key in state_dict and out_gate_key not in state_dict:
+                state_dict[out_gate_key] = state_dict.pop(gate_key)
+            return out_block
+        return block_prefix
+
+    # In sharded checkpoints, a layer's gate_up_proj and down_proj can live in
+    # different shards, so expand each independently instead of requiring both
+    # in the same per-shard state_dict slice.
+    for gate_up_key in [
+        k for k in list(state_dict) if k.endswith("experts.gate_up_proj")
+    ]:
+        gate_up = state_dict[gate_up_key]
+        if gate_up.dim() != 3:
+            continue
+        out_block = _out_block(gate_up_key[: -len(".gate_up_proj")])
+        for expert_idx in range(gate_up.shape[0]):
+            gate_w, up_w = gate_up[expert_idx].chunk(2, dim=0)
+            base = f"{out_block}.experts.{expert_idx}"
+            state_dict[f"{base}.{gate_name}.weight"] = gate_w.contiguous()
+            state_dict[f"{base}.{up_name}.weight"] = up_w.contiguous()
+        del state_dict[gate_up_key]
+
+    for down_key in [
+        k for k in list(state_dict) if k.endswith("experts.down_proj")
+    ]:
+        down = state_dict[down_key]
+        if down.dim() != 3:
+            continue
+        out_block = _out_block(down_key[: -len(".down_proj")])
+        for expert_idx in range(down.shape[0]):
+            base = f"{out_block}.experts.{expert_idx}"
+            state_dict[f"{base}.{down_name}.weight"] = down[
+                expert_idx
+            ].contiguous()
+        del state_dict[down_key]
 
 
 def _compute_config_fingerprint(config: object) -> str:
@@ -471,6 +549,10 @@ class OffloadEngine(object):
         )
         transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = SyncGptOssMLP
 
+        _q35_mod = transformers.models.qwen3_5_moe.modeling_qwen3_5_moe
+        _q35_mod._old_qwen3_5_sparse_moe = _q35_mod.Qwen3_5MoeSparseMoeBlock
+        _q35_mod.Qwen3_5MoeSparseMoeBlock = SyncQwen3_5MoeSparseMoeBlock
+
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
         ) -> Callable:
@@ -496,7 +578,10 @@ class OffloadEngine(object):
                     parse_moe_param(self.config)
                 )
 
-                if "qwen" in model_name.lower():
+                if (
+                    "qwen" in model_name.lower()
+                    and self.config.model_type != "qwen3_5_moe"
+                ):
                     self.prefetch_lib.init_moe_layer(
                         self.num_experts,
                         self.config.num_experts_per_tok,
@@ -506,11 +591,9 @@ class OffloadEngine(object):
                     )
 
                 self.dtype = parse_expert_dtype(self.config)
-                self.dtype_cls = self.config.torch_dtype
+                self.dtype_cls = resolve_config_dtype(self.config)
                 if self.dtype_cls is None:
-                    self.dtype_cls = getattr(
-                        self.config, "dtype", torch.bfloat16
-                    )
+                    self.dtype_cls = torch.bfloat16
 
                 if self.config.model_type == "deepseek_v3":
                     self.dtype_cls = torch.float8_e4m3fn
@@ -552,6 +635,8 @@ class OffloadEngine(object):
                                     state_dict[k] = f.get_tensor(k)
                         else:
                             state_dict = torch.load(ckpt)
+
+                        _remap_v5_batched_experts(state_dict, self.config)
 
                         is_gptq_ckpt = is_gptq_quantized(self.config)
                         self._cast_state_dict_tensors(
@@ -752,6 +837,7 @@ class OffloadEngine(object):
                         or isinstance(module, Qwen3MoEBlock)
                         or isinstance(module, SyncDbrxFFNBlock)
                         or isinstance(module, SyncGptOssMLP)
+                        or isinstance(module, SyncQwen3_5MoeSparseMoeBlock)
                         or isinstance(module, SyncOlmoeMoEBlock)
                         or isinstance(module, SyncJambaMoEBlock)
                     ):
@@ -808,6 +894,83 @@ class OffloadEngine(object):
         transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
             transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
         )
+        _q35_mod = transformers.models.qwen3_5_moe.modeling_qwen3_5_moe
+        if hasattr(_q35_mod, "_old_qwen3_5_sparse_moe"):
+            _q35_mod.Qwen3_5MoeSparseMoeBlock = _q35_mod._old_qwen3_5_sparse_moe
+
+    def _is_shared_expert_param(self, name: str) -> bool:
+        # DeepSeek names shared experts ".shared_experts." (plural); Qwen3.5-MoE
+        # uses singular ".shared_expert." plus ".shared_expert_gate.". The
+        # substring "shared_expert" matches all of them and no routed-expert key.
+        if "shared_expert" in name:
+            return True
+        # Qwen3.5-MoE: keep the small text backbone (embed, hybrid attention,
+        # norms, lm_head) resident and offload ONLY the routed experts. This
+        # avoids the per-module begin/end offload path for the VLM embedding and
+        # the GatedDeltaNet linear-attention layers, which are not compatible
+        # with the native offload engine's begin/end lifecycle.
+        if getattr(self.config, "model_type", "") == "qwen3_5_moe":
+            if "language_model." in name:
+                _, expert_id = parse_expert_id(name, self.config)
+                return expert_id is None
+            if name.endswith("lm_head.weight"):
+                return True
+        return False
+
+    @torch.no_grad()
+    def _load_resident_shared_experts(self, model):
+        # Shared experts run inside the Python MoE block (not the C++ expert
+        # executor) and are used on every MoE layer. The Archer offload path
+        # leaves their live param as a [1] placeholder that is never
+        # materialized before shared_experts(x) runs, so load their real
+        # weights once and keep them resident instead.
+        wanted = {
+            name: param
+            for name, param in model.named_parameters(recurse=True)
+            if self._is_shared_expert_param(name)
+        }
+        if not wanted:
+            return
+
+        remaining = set(wanted)
+        for ckpt in self.ckpt_files:
+            if not remaining:
+                break
+            if ckpt.endswith(".safetensors"):
+                with safe_open(ckpt, framework="pt", device="cpu") as f:
+                    keys = set(f.keys())
+                    for name in list(remaining):
+                        if name not in keys:
+                            continue
+                        param = wanted[name]
+                        param.data = (
+                            f.get_tensor(name)
+                            .to(dtype=param.dtype, device="cpu")
+                            .contiguous()
+                        )
+                        param.requires_grad_(False)
+                        param._moe_infinity_resident = True
+                        remaining.remove(name)
+            else:
+                state = torch.load(ckpt, map_location="cpu")
+                for name in list(remaining):
+                    if name not in state:
+                        continue
+                    param = wanted[name]
+                    param.data = (
+                        state[name]
+                        .to(dtype=param.dtype, device="cpu")
+                        .contiguous()
+                    )
+                    param.requires_grad_(False)
+                    param._moe_infinity_resident = True
+                    remaining.remove(name)
+                del state
+
+        if remaining:
+            raise RuntimeError(
+                f"Missing shared_experts weights: {sorted(remaining)[:5]}"
+            )
 
     def get_topology(self, model):
         name_lst = []
@@ -1437,7 +1600,7 @@ class OffloadEngine(object):
                 if isinstance(output, torch.Tensor):
                     return output.to(target)
 
-                return copy_args_to_device(target, *output)
+                return copy_args_to_device(target, output)
 
         # Pre forward hook
         self.forward_hooks.append(
@@ -1486,3 +1649,6 @@ class OffloadEngine(object):
         transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
             transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
         )
+        _q35_mod = transformers.models.qwen3_5_moe.modeling_qwen3_5_moe
+        if hasattr(_q35_mod, "_old_qwen3_5_sparse_moe"):
+            _q35_mod.Qwen3_5MoeSparseMoeBlock = _q35_mod._old_qwen3_5_sparse_moe

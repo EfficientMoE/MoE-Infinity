@@ -69,7 +69,7 @@ COPY requirements.txt .
 
 # Install Python build dependencies first (torch is already in the base image)
 RUN pip install --no-cache-dir \
-    setuptools>=75 \
+    "setuptools>=78.1.1,<82" \
     wheel \
     ninja \
     py-cpuinfo

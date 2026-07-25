@@ -17,10 +17,6 @@ ENV CCACHE_MAXSIZE=10G
 ENV PATH=/usr/lib/ccache:${PATH}
 RUN mkdir -p ${CCACHE_DIR}
 
-# CUDA 13.0 moved nvToolsExt.h into nvtx3/ subdirectory.
-# The vendored nvtx3.hpp does #include "nvToolsExt.h" expecting it at include root.
-RUN ln -sf /usr/local/cuda/include/nvtx3/nvToolsExt.h /usr/local/cuda/include/nvToolsExt.h 2>/dev/null || true
-
 ARG CUTLASS_REPO=https://github.com/NVIDIA/cutlass.git
 ARG CUTLASS_VERSION=v4.4.0
 ARG CUTLASS_NVCC_ARCHS=120
@@ -44,7 +40,7 @@ RUN git clone --branch v3.2.2 --depth 1 https://github.com/NVIDIA/NVTX.git /tmp/
 WORKDIR /workspace/MoE-Infinity
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir setuptools>=75 wheel ninja py-cpuinfo pytest pytest-timeout
+RUN pip install --no-cache-dir "setuptools>=78.1.1,<82" wheel ninja py-cpuinfo pytest pytest-timeout
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir --no-deps contextpilot && \
     pip install --no-cache-dir elasticsearch ujson

@@ -8,11 +8,31 @@ from typing import Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.models.mixtral.modeling_mixtral import (
-    MixtralBlockSparseTop2MLP,
-)
+from transformers.activations import ACT2FN
 
 from moe_infinity.utils import ArcherConfig
+
+
+class MixtralExpertMLP(nn.Module):
+    # Self-contained replica of transformers v4 MixtralBlockSparseTop2MLP, which
+    # was removed in transformers v5 (experts were batched into MixtralExperts).
+    # Keeps the v4 w1/w2/w3 layout so per-expert offload keys stay unchanged.
+    def __init__(self, config):
+        super().__init__()
+        self.ffn_dim = config.intermediate_size
+        self.hidden_dim = config.hidden_size
+
+        self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
+        self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)
+        self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
+
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(
+            hidden_states
+        )
+        return self.w2(current_hidden_states)
 
 
 class SyncMixtralSparseMoeBlock(nn.Module):
@@ -30,7 +50,7 @@ class SyncMixtralSparseMoeBlock(nn.Module):
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
 
         self.experts = nn.ModuleList(
-            [MixtralBlockSparseTop2MLP(config) for _ in range(self.num_experts)]
+            [MixtralExpertMLP(config) for _ in range(self.num_experts)]
         )
 
         self.expert_executor = None

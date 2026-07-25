@@ -69,14 +69,14 @@ For substantial changes (for example, new runtime behavior or model-family suppo
 
 MoE-Infinity builds Python and CUDA/C++ components. We recommend a fresh conda environment.
 
-- Supported Python range in packaging metadata: `>=3.8`
-- Recommended local development version: Python `3.9`
+- Supported Python range in packaging metadata: `>=3.10` (some required dependencies, e.g. `sglang-kernel`, ship wheels for Python ≥ 3.10 only)
+- Recommended local development version: Python `3.12`
 
 ```bash
 git clone https://github.com/EfficientMoE/MoE-Infinity.git
 cd MoE-Infinity
 
-conda create -n moe-infinity-dev python=3.9
+conda create -n moe-infinity-dev python=3.12
 conda activate moe-infinity-dev
 
 pip install -e .

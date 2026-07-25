@@ -62,6 +62,7 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 | DeepSeek-V4-Flash (FP4 expert offloading) | requires a `transformers` build shipping `DeepseekV4ForCausalLM` |
 | [Mixtral](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) | `mistralai/Mixtral-8x7B-Instruct-v0.1`, `Mixtral-8x22B` |
 | [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B) | `Qwen/Qwen3-30B-A3B` |
+| [Qwen3.5-MoE](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | `Qwen/Qwen3.5-35B-A3B` (text-only; see note) |
 | [GPT-OSS](https://huggingface.co/models?search=gpt-oss) | `openai/gpt-oss-*` |
 | [DBRX](https://huggingface.co/models?search=dbrx) | `databricks/dbrx-instruct` |
 | [Jamba](https://huggingface.co/models?search=jamba) | `ai21labs/Jamba-*` |
@@ -70,48 +71,78 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 
 > DeepSeek-V4-Flash is only registered when your installed `transformers` provides `DeepseekV4ForCausalLM`; otherwise it is skipped automatically.
 
+> Qwen3.5-MoE (`Qwen3_5MoeForConditionalGeneration`, requires `transformers` >= 5.12) is a vision-language checkpoint served **text-only**: its 256 routed experts are offloaded while the small text backbone — token embeddings, the hybrid linear (GatedDeltaNet) / full attention layers, shared expert, and `lm_head` — stays resident on GPU. The v5 packed expert tensors are expanded to per-expert on load. Vision and MTP weights are present but unused for text generation.
+
 ## Installation
 
 We recommend installing MoE-Infinity in a virtual environment. To install MoE-Infinity, you can either install it from PyPI or build it from source.
 
 ### Prerequisites
 
-- Python 3.8+
-- CUDA-capable environment for GPU inference
-- Recommended: isolated virtual environment
+- Python 3.10+ (3.12 recommended). Some required dependencies (e.g. `sglang-kernel`) publish wheels for Python ≥ 3.10 only, so Python 3.8/3.9 will fail to install.
+- A CUDA-capable GPU. The from-source build targets compute capabilities `sm_80`/`sm_90` by default; for Blackwell (`sm_120`, e.g. RTX PRO 6000 / RTX 50-series) build with `MOE_ENABLE_SM120=1` (see [Install from Source](#install-from-source)).
+- When building from source, a CUDA toolkit whose major version matches your installed PyTorch build (PyTorch enforces this at compile time).
+- Recommended: isolated virtual environment (conda or venv).
 
 ### Install from conda environment
 
 ```bash
-conda create -n moe-infinity python=3.9
+conda create -n moe-infinity python=3.12
 conda activate moe-infinity
 # install from either PyPI or Source will trigger requirements.txt automatically
 ```
 
 ### Install from PyPI
 
+> **Note:** Official PyPI wheels are not published yet — the current `moe-infinity` entry on PyPI is a placeholder that does **not** contain the runtime (importing `MoE` from it will fail). Until the official release, please [install from source](#install-from-source).
+
 ```bash
-# install stable release
+# (available once official wheels are published) stable release
 pip install moe-infinity
 
-# install nightly release (latest development build from main branch, published to PyPI as pre-release dev versions)
+# (available once official wheels are published) nightly / pre-release build
 pip install --pre moe-infinity
 ```
 
 ### Install from Source
 
+Building the CUDA/C++ extensions needs a few system packages, the CUTLASS headers, and PyTorch installed **before** `pip install -e .`:
+
 ```bash
+# 1. System build dependencies (Debian/Ubuntu; use your distro's equivalents otherwise)
+sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build git uuid-dev
+
+# 2. Build tools + PyTorch. Match PyTorch's CUDA build to your CUDA toolkit
+#    (pick the index URL for your CUDA version from https://pytorch.org).
+pip install "setuptools>=78.1.1,<82" wheel ninja py-cpuinfo
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# 3. CUTLASS headers (header-only; no separate build required)
+git clone --depth 1 https://github.com/NVIDIA/cutlass.git ~/cutlass
+export CUTLASS_DIR=~/cutlass
+
+# 4. Build and install MoE-Infinity
 git clone https://github.com/EfficientMoE/MoE-Infinity.git
 cd MoE-Infinity
-pip install -e .
-conda install -c conda-forge libstdcxx-ng=12 # assume using conda, otherwise install libstdcxx-ng=12 using your package manager or gcc=12
+pip install --no-build-isolation -e .
+
+# 5. Ensure a recent libstdc++ is available for the compiled extensions
+conda install -c conda-forge libstdcxx-ng=12 # with conda; otherwise install libstdc++ (gcc 12+) via your package manager
+```
+
+**Building for Blackwell / SM120 GPUs** (RTX PRO 6000, RTX 50-series): the default build targets `sm_80`+`sm_90`. Enable the `sm_120` path (and the native FP4 kernel) explicitly:
+
+```bash
+MOE_ENABLE_SM120=1 MOE_ENABLE_SM90=0 CUTLASS_DIR=~/cutlass pip install --no-build-isolation -e .
 ```
 
 ### Enable FlashAttention (Optional)
 
-Install FlashAttention (>=2.5.2) for faster inference with the following command.
+FlashAttention is **not** installed by default. Install it (>=2.5.2) for faster inference:
 ```bash
 FLASH_ATTENTION_FORCE_BUILD=TRUE pip install flash-attn
+# or, equivalently, via the optional extra:
+pip install -e '.[flash_attn]'
 ```
 Post-installation, MoE-Infinity will automatically integrate with FlashAttention to enhance performance.
 
@@ -120,14 +151,13 @@ Post-installation, MoE-Infinity will automatically integrate with FlashAttention
 Install [FlashInfer](https://flashinfer.ai/) for optimized paged attention kernels during prefill and decode. FlashInfer provides significant speedups for paged KV cache attention compared to standard PyTorch SDPA.
 
 ```bash
-# For CUDA 12.4 + PyTorch 2.5:
-pip install flashinfer -i https://flashinfer.ai/whl/cu124/torch2.5/
-
-# For CUDA 12.1 + PyTorch 2.4:
-pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
+# Install the FlashInfer Python package (JIT-compiles kernels to match your Torch/CUDA):
+pip install flashinfer-python
+# or, equivalently, via the optional extra:
+pip install -e '.[flashinfer]'
 ```
 
-Check the [FlashInfer installation guide](https://docs.flashinfer.ai/installation.html) for other CUDA/PyTorch version combinations.
+Check the [FlashInfer installation guide](https://docs.flashinfer.ai/installation.html) for prebuilt-wheel options matching specific CUDA/PyTorch versions.
 
 Post-installation, MoE-Infinity will automatically detect and use FlashInfer for faster paged attention in both prefill and decode phases. When FlashInfer is not installed, MoE-Infinity gracefully falls back to its built-in attention kernels with no behavior change.
 
@@ -181,11 +211,42 @@ Run on multiple GPUs (expert parameters are automatically distributed across all
 CUDA_VISIBLE_DEVICES=0,1 python script.py
 ```
 
-We provide a simple example to run inference on a Huggingface LLM model. The script will download the model checkpoint and run inference on the specified input text. The output will be printed to the console.
+We provide ready-to-run examples under [`examples/`](./examples). The scripts download the checkpoint, run inference on the input, and print the output.
 
 ```bash
+# Minimal single-prompt example (DeepSeek-V2-Lite-Chat)
+CUDA_VISIBLE_DEVICES=0 python examples/deepseek_v2_chat_example.py --offload_dir <your local path on SSD>
+
+# Streaming benchmark example over GSM8K (TTFT + decode timing)
 CUDA_VISIBLE_DEVICES=0 python examples/interface_example.py --model_name_or_path "deepseek-ai/DeepSeek-V2-Lite-Chat" --offload_dir <your local path on SSD>
 ```
+
+**Suggested hardware (DeepSeek-V2-Lite-Chat):** a single GPU with **>= 16 GB VRAM** (e.g. RTX 4090 / A5000 / A100) plus a fast local SSD for `--offload_dir`. Lower `--device_memory_ratio` (default `0.75`) if you hit OOM on smaller GPUs.
+
+### DeepSeek-V4-Flash (FP4 Expert Offloading)
+
+DeepSeek-V4-Flash has two usage paths depending on your checkpoint.
+
+**Path A — HuggingFace-native `MoE` API.** If your installed `transformers` ships `DeepseekV4ForCausalLM`, V4-Flash works through the same drop-in `MoE` class as above:
+
+```python
+from moe_infinity import MoE
+
+model = MoE("deepseek-ai/DeepSeek-V4-Flash", {
+    "offload_path": "/ssd/moe-infinity/deepseek-v4-flash",
+    "device_memory_ratio": 0.75,
+})
+```
+
+**Path B — Official FP4 offload loader.** The native V4-Flash checkpoint (FP4 routed experts + FP8 shared/attention weights) cannot be loaded by HuggingFace; it is driven through the official `inference/model.py` and MoE-Infinity's `load_offloaded_v4_flash` adapter, which streams the ~132 GB of FP4 experts from pinned host RAM (resident GPU memory drops to ~5-6 GB/rank):
+
+```bash
+torchrun --nproc-per-node 4 examples/deepseek_v4_flash_example.py \
+    --ckpt-path <MP_SHARDED_CKPT> --config-path <MP_SHARDED_CKPT>/config.json \
+    --max-resident-experts 16
+```
+
+**Suggested hardware / environment (Path B):** **4x GPUs** (tensor-parallel mp4; mp1 exceeds the sparse-attention kernel's shared-memory limit), **>= ~140 GB pinned host RAM**, and the `v4flash` docker image (tilelang `fp4_gemm`; on Blackwell/SM120 the native `moe_infinity._v4_fp4` CUDA path is auto-selected and is 1.5–3.2x faster). The checkpoint must first be converted to the official mp-sharded format. See [`moe_infinity/models/deepseek_v4/README.md`](./moe_infinity/models/deepseek_v4/README.md) for checkpoint conversion, kernel selection, and validation details.
 
 ### Benchmarking
 

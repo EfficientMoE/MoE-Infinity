@@ -101,7 +101,9 @@ class MoE:
         architecture = str(architectures[0]).lower()
 
         arch = None
-        for supp_arch in MODEL_MAPPING_NAMES:
+        # Longest key first so specific arches ("qwen3_5", "deepseek_v3") win
+        # over the shorter keys they contain ("qwen3", "deepseek").
+        for supp_arch in sorted(MODEL_MAPPING_NAMES, key=len, reverse=True):
             if supp_arch in architecture:
                 arch = supp_arch
                 break
@@ -149,6 +151,11 @@ class MoE:
         self.use_native_engine = bool(
             getattr(engine_config, "use_native_engine", True)
         )
+        # Qwen3.5-MoE interleaves linear (GatedDeltaNet) and full attention; the
+        # native paged-KV engine assumes uniform full attention across layers, so
+        # Phase 1 drives generation through HF's own forward instead.
+        if getattr(model_config, "model_type", "") == "qwen3_5_moe":
+            self.use_native_engine = False
         default_max_seq_length = getattr(
             model_config, "max_position_embeddings", None
         )
@@ -195,6 +202,7 @@ class MoE:
                 or arch == "deepseek_v3"
                 or arch == "nllb"
                 or arch == "gptoss"
+                or arch == "qwen3_5"
             ):
                 is_flash_attn_available = False
         except ImportError:
@@ -235,15 +243,26 @@ class MoE:
     def _resolve_model_int_attr(
         model_config: object, *names: str
     ) -> Optional[int]:
-        for name in names:
-            value = getattr(model_config, name, None)
-            if isinstance(value, int):
-                return value
+        get_text = getattr(model_config, "get_text_config", None)
+        text_config = (
+            get_text()
+            if callable(get_text)
+            else getattr(model_config, "text_config", None)
+        )
+        for cfg in (model_config, text_config):
+            if cfg is None:
+                continue
+            for name in names:
+                value = getattr(cfg, name, None)
+                if isinstance(value, int):
+                    return value
         return None
 
     @staticmethod
     def _resolve_torch_dtype(model_config: object) -> torch.dtype:
-        torch_dtype = getattr(model_config, "torch_dtype", None)
+        torch_dtype = getattr(model_config, "dtype", None)
+        if torch_dtype is None:
+            torch_dtype = getattr(model_config, "torch_dtype", None)
         if isinstance(torch_dtype, torch.dtype):
             return torch_dtype
         if isinstance(torch_dtype, str):

@@ -47,10 +47,17 @@ def ensure_config_compat(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
-def parse_expert_dtype(config: PretrainedConfig) -> int:
-    dtype = config.torch_dtype
+def resolve_config_dtype(config: object) -> Optional[torch.dtype]:
+    # transformers v5 renamed config.torch_dtype -> config.dtype. Read the new
+    # name first, fall back to the old one so both 4.x and 5.x configs work.
+    dtype = getattr(config, "dtype", None)
     if dtype is None:
-        dtype = getattr(config, "dtype", None)
+        dtype = getattr(config, "torch_dtype", None)
+    return dtype
+
+
+def parse_expert_dtype(config: PretrainedConfig) -> int:
+    dtype = resolve_config_dtype(config)
     if dtype is None:
         dtype = torch.bfloat16
     if dtype == torch.bfloat16:
@@ -61,6 +68,16 @@ def parse_expert_dtype(config: PretrainedConfig) -> int:
         return 2
     else:
         assert False, "Unknown dtype %s" % dtype
+
+
+def moe_text_config(config: PretrainedConfig) -> PretrainedConfig:
+    # Qwen3.5-MoE is a vision-language wrapper: its MoE fields (num_experts,
+    # num_hidden_layers, ...) live under the nested text sub-config, exposed via
+    # get_text_config() in transformers v5. Flat models return themselves.
+    getter = getattr(config, "get_text_config", None)
+    if callable(getter):
+        return getter()
+    return getattr(config, "text_config", config)
 
 
 def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
@@ -78,6 +95,12 @@ def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
         num_decoder_layers = config.num_hidden_layers
         num_layers = config.num_hidden_layers
         num_experts = config.num_local_experts
+    elif "qwen3_5" in arch:
+        text = moe_text_config(config)
+        num_encoder_layers = 0
+        num_decoder_layers = text.num_hidden_layers
+        num_layers = text.num_hidden_layers
+        num_experts = text.num_experts
     elif "qwen3" in arch:
         num_encoder_layers = 0
         num_decoder_layers = config.num_hidden_layers
@@ -143,6 +166,20 @@ def parse_expert_id(
 
         # native key: "layers.1.ffn.experts.0.w1.weight"
         result = re.findall(r"layers\.(\d+)\.ffn\.experts\.(\d+)\.", param_name)
+        if result:
+            layer_id, expert_id = result[0]
+            layer_id = int(layer_id)
+            expert_id = int(expert_id)
+    elif "qwen3_5" in arch:
+        decoder_sparse_step = 1
+        layer_type = "decoder"
+
+        # per-expert keys after the v5 batched-expert expand; anchored on
+        # language_model to exclude MTP (`mtp.*`) and vision (`model.visual.*`).
+        # e.g. "model.language_model.layers.13.mlp.experts.7.gate_proj.weight"
+        result = re.findall(
+            r"language_model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.", param_name
+        )
         if result:
             layer_id, expert_id = result[0]
             layer_id = int(layer_id)

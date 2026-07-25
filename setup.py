@@ -233,10 +233,8 @@ _STORE_EXTRA_LINK_ARGS = [
     "-lpthread",
 ]
 
-# Link NVTX runtime when NVTX instrumentation is enabled (default).
-# The C++ NVTX ranges in core/ use nvtxDomainRangePop from libnvToolsExt.
-if os.environ.get("NVTX_DISABLE", "0") != "1":
-    _STORE_EXTRA_LINK_ARGS.append("-lnvToolsExt")
+# NVTX v3 (nvtx3.hpp) is header-only and requires no link library; the legacy
+# libnvToolsExt was removed in CUDA 13, so do not link it.
 
 if TORCH_LIB_DIR:
     _STORE_EXTRA_LINK_ARGS.append(f"-Wl,-rpath,{TORCH_LIB_DIR}")
@@ -390,7 +388,8 @@ setup(
     include_package_data=True,
     install_requires=install_requires,
     extras_require={
-        "flashinfer": ["flashinfer"],
+        "flashinfer": ["flashinfer-python"],
+        "flash_attn": ["flash-attn>=2.5.2"],
         "contextpilot": ["contextpilot>=0.4.0"],
     },
     author="EfficientMoE Team",
@@ -399,15 +398,14 @@ setup(
     url="https://github.com/EfficientMoE/MoE-Infinity",
     project_urls={"Homepage": "https://github.com/EfficientMoE/MoE-Infinity"},
     classifiers=[
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     license="Apache License 2.0",
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     ext_modules=ext_modules,
     cmdclass=cmdclass,
 )

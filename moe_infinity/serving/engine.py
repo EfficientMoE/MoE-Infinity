@@ -343,6 +343,28 @@ class ContinuousBatchingEngine:
             "memory": self.memory_manager.report(),
         }
 
+    def get_config(self) -> dict[str, object]:
+        config: dict[str, object] = {}
+        for key, value in self.config.items():
+            if value is None or isinstance(value, (str, int, float, bool)):
+                config[key] = value
+            else:
+                config[key] = str(value)
+        return config
+
+    def update_config(self, updates: dict[str, object]) -> dict[str, object]:
+        applied: dict[str, object] = {}
+        for key in ("max_batch_size", "max_tokens_per_step"):
+            if key not in updates:
+                continue
+            value = updates[key]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{key} must be an integer value")
+            self.config[key] = value
+            setattr(self.scheduler, key, value)
+            applied[key] = value
+        return applied
+
     def _resolve_num_blocks(
         self,
         *,
