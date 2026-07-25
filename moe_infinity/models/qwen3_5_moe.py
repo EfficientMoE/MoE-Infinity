@@ -40,7 +40,9 @@ class SyncQwen3_5MoeSparseMoeBlock(nn.Module):
         self.lib = None
 
     def _route(self, hidden_flat):
-        router_logits, routing_weights, selected_experts = self.gate(hidden_flat)
+        router_logits, routing_weights, selected_experts = self.gate(
+            hidden_flat
+        )
         num_tokens = hidden_flat.shape[0]
         router_mask = torch.zeros(
             num_tokens,
@@ -99,6 +101,6 @@ class SyncQwen3_5MoeSparseMoeBlock(nn.Module):
         )
 
         expert_output = expert_output.view(-1, hidden_dim) + shared_output
-        return expert_output.view(
-            batch_size, sequence_length, hidden_dim
-        ).to(hidden_states.dtype)
+        return expert_output.view(batch_size, sequence_length, hidden_dim).to(
+            hidden_states.dtype
+        )
