@@ -39,7 +39,7 @@ MODEL_MAPPING_TYPES = {
     "gptoss": 4,
     "qwen3": 5,
     "dbrx": 4,
-    "olmoe": 4,
+    "olmoe": 5,
     "jamba": 4,
 }
 

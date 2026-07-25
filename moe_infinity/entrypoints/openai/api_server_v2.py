@@ -142,6 +142,7 @@ _contextpilot_state_lock = Lock()
 _contextpilot_fallback_count: int = 0
 _contextpilot_last_fallback_count: int = 0
 
+logger = logging.getLogger(__name__)
 _cp_logger = logging.getLogger("moe_infinity.contextpilot")
 _cp_middleware: Optional[Any] = None
 _eviction_sync: Optional[Any] = None
@@ -1093,11 +1094,18 @@ async def _initialize_model() -> None:
             )
 
         _ensure_engine_loop_running()
+        _health_state.set_healthy()
+    except Exception as exc:
+        # _model_init_task is fire-and-forget (asyncio.create_task, never
+        # awaited) -- without this, an exception here is silently dropped:
+        # the process keeps running, /health stays stuck on "starting"
+        # forever, and every request gets a 503 indistinguishable from a
+        # genuine hang. Log it and surface it through /health instead.
+        logger.exception("Model initialization failed")
+        _health_state.set_unhealthy(f"{type(exc).__name__}: {exc}")
     finally:
         if _startup_watchdog is not None:
             _startup_watchdog.cancel()
-
-    _health_state.set_healthy()
 
 
 @app.on_event("startup")
