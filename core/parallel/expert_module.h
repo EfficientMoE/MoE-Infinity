@@ -197,6 +197,7 @@ struct MoEMLP : public torch::nn::Module {
 
  private:
   void ForwardHelper(cudaStream_t stream);
+  void EnsureCapacity(int64_t num_tokens);
 
  private:
   std::vector<torch::Tensor> buffer_;
@@ -211,6 +212,11 @@ struct MoEMLP : public torch::nn::Module {
 
   int dtype_;
   int expert_type_;
+
+  int64_t buffer_capacity_ = 0;
+  int64_t hdim_ = 0;
+  int64_t idim_ = 0;
+  int64_t num_intermediate_ = 0;
 };
 
 struct ExpertNode {

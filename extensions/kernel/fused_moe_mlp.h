@@ -3,6 +3,10 @@
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
+// Selects which per-expert GEMM variant to launch by token count (M).
+// kAuto picks latency vs throughput from a hardware-derived M threshold.
+enum class FfnDispatchPolicy { kAuto, kForceLatency, kForceThroughput };
+
 // Fused MoE MLP forward pass using CUTLASS.
 //
 // Computes: output = (silu(input @ gate_proj^T) * (input @ up_proj^T)) @
@@ -27,4 +31,5 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
                         torch::Tensor& gate_buf,   // [M, I]
                         torch::Tensor& fused_buf,  // [M, I]
                         torch::Tensor& output,     // [M, H]
-                        cudaStream_t stream);
+                        cudaStream_t stream,
+                        FfnDispatchPolicy policy = FfnDispatchPolicy::kAuto);

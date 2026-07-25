@@ -16,6 +16,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <string>
 
@@ -141,6 +142,160 @@ using GemmDownLK = cutlass::gemm::device::Gemm<
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
     /*Stages=*/3>;
 
+// ---------------------------------------------------------------------------
+// Throughput tiles for large M: the 128x128 threadblock quadruples the work
+// per CTA vs the 64x64 latency tile, keeping the tensor cores fed once M is
+// large enough to cover many CTAs. 4 warps/CTA (64x64 each).
+//   default-K smem: 2*(128*32)*2B*3 stages = 48 KB
+//   large-K  smem: 2*(128*64)*2B*3 stages = 96 KB (CUTLASS opts into dynamic
+//                  smem; fits sm_80/sm_90, tight on sm_86)
+// ---------------------------------------------------------------------------
+using TPThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;
+using TPWarpShape = cutlass::gemm::GemmShape<64, 64, 32>;
+using TPLargeKThreadblockShape = cutlass::gemm::GemmShape<128, 128, 64>;
+using TPLargeKWarpShape = cutlass::gemm::GemmShape<64, 64, 64>;
+
+using GemmGateTP = cutlass::gemm::device::Gemm<
+    ElementInput, LayoutA, ElementInput, LayoutB, ElementInput, LayoutC,
+    ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+    TPThreadblockShape, TPWarpShape, MoEInstructionShape, StdEpilogue,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>, /*Stages=*/3>;
+
+using GemmUpFusedTP = cutlass::gemm::device::Gemm<
+    ElementInput, LayoutA, ElementInput, LayoutB, ElementInput, LayoutC,
+    ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+    TPThreadblockShape, TPWarpShape, MoEInstructionShape, SiLUMulEpilogue,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>, /*Stages=*/3>;
+
+using GemmDownTP = cutlass::gemm::device::Gemm<
+    ElementInput, LayoutA, ElementInput, LayoutB, ElementInput, LayoutC,
+    ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+    TPThreadblockShape, TPWarpShape, MoEInstructionShape, StdEpilogue,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>, /*Stages=*/3>;
+
+using GemmGateTPLK = cutlass::gemm::device::Gemm<
+    ElementInput, LayoutA, ElementInput, LayoutB, ElementInput, LayoutC,
+    ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+    TPLargeKThreadblockShape, TPLargeKWarpShape, MoEInstructionShape,
+    StdEpilogue, cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    /*Stages=*/3>;
+
+using GemmUpFusedTPLK = cutlass::gemm::device::Gemm<
+    ElementInput, LayoutA, ElementInput, LayoutB, ElementInput, LayoutC,
+    ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+    TPLargeKThreadblockShape, TPLargeKWarpShape, MoEInstructionShape,
+    SiLUMulEpilogue, cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    /*Stages=*/3>;
+
+using GemmDownTPLK = cutlass::gemm::device::Gemm<
+    ElementInput, LayoutA, ElementInput, LayoutB, ElementInput, LayoutC,
+    ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+    TPLargeKThreadblockShape, TPLargeKWarpShape, MoEInstructionShape,
+    StdEpilogue, cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    /*Stages=*/3>;
+
+// ---------------------------------------------------------------------------
+// Size-based dispatch: choose latency (small M) vs throughput (large M) tiles,
+// composed with the existing large-K (I>=3072) axis.
+// ---------------------------------------------------------------------------
+
+struct FfnLaunchSpec {
+  bool torch_fallback;
+  bool m_throughput;
+  bool k_large;
+};
+
+// Token count above which the throughput path is selected. Scales with SM
+// count (~128 tokens per band, 1-4 bands) and bumps one band on Hopper+.
+// Override with MOE_MLP_M_THRESHOLD.
+static int ffn_m_threshold(const torch::Tensor& input) {
+  if (const char* env = std::getenv("MOE_MLP_M_THRESHOLD")) {
+    const int v = std::atoi(env);
+    if (v > 0) return v;
+  }
+  const auto* prop = at::cuda::getDeviceProperties(input.get_device());
+  int band = (prop->multiProcessorCount + 39) / 40;  // ceil(SM_count / 40)
+  band = std::max(1, std::min(band, 4));
+  if (prop->major >= 9 && band < 4) band += 1;
+  return 128 * band;
+}
+
+// Override the auto M-based choice with MOE_MLP_DISPATCH=latency|throughput.
+static FfnLaunchSpec ffn_select(int M, int I, const torch::Tensor& input,
+                                FfnDispatchPolicy policy) {
+  FfnLaunchSpec spec;
+  spec.torch_fallback = moe_use_cublas_fallback(input);
+  spec.k_large = (I >= 3072);
+
+  if (const char* env = std::getenv("MOE_MLP_DISPATCH")) {
+    const std::string v(env);
+    if (v == "latency") {
+      policy = FfnDispatchPolicy::kForceLatency;
+    } else if (v == "throughput") {
+      policy = FfnDispatchPolicy::kForceThroughput;
+    }
+  }
+  switch (policy) {
+    case FfnDispatchPolicy::kForceLatency:
+      spec.m_throughput = false;
+      break;
+    case FfnDispatchPolicy::kForceThroughput:
+      spec.m_throughput = true;
+      break;
+    default:
+      spec.m_throughput = (M > ffn_m_threshold(input));
+      break;
+  }
+  return spec;
+}
+
+template <typename GemmGateT, typename GemmUpT, typename GemmDownT>
+static void launch_ffn_gemms(ElementInput* input_ptr, ElementInput* gate_ptr,
+                             ElementInput* up_ptr, ElementInput* down_ptr,
+                             ElementInput* gate_buf_ptr, ElementInput* fused_ptr,
+                             ElementInput* out_ptr, int M, int H, int I,
+                             cudaStream_t stream) {
+  {
+    GemmGateT gemm;
+    typename GemmGateT::Arguments args{{M, I, H},
+                                       {input_ptr, H},
+                                       {gate_ptr, H},
+                                       {gate_buf_ptr, I},
+                                       {gate_buf_ptr, I},
+                                       {1.0f, 0.0f}};
+    cutlass::Status status = gemm(args, nullptr, stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+                "fused_moe_ffn_into GEMM0 (gate) failed: ",
+                cutlassGetStatusString(status));
+  }
+  {
+    GemmUpT gemm;
+    typename GemmUpT::Arguments args{{M, I, H},
+                                     {input_ptr, H},
+                                     {up_ptr, H},
+                                     {gate_buf_ptr, I},
+                                     {fused_ptr, I},
+                                     {1.0f, 1.0f}};
+    cutlass::Status status = gemm(args, nullptr, stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+                "fused_moe_ffn_into GEMM1 (up+silu-mul) failed: ",
+                cutlassGetStatusString(status));
+  }
+  {
+    GemmDownT gemm;
+    typename GemmDownT::Arguments args{{M, H, I},
+                                       {fused_ptr, I},
+                                       {down_ptr, I},
+                                       {out_ptr, H},
+                                       {out_ptr, H},
+                                       {1.0f, 0.0f}};
+    cutlass::Status status = gemm(args, nullptr, stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+                "fused_moe_ffn_into GEMM2 (down) failed: ",
+                cutlassGetStatusString(status));
+  }
+}
+
 void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
                         torch::Tensor& gate_proj,  // [I, H]
                         torch::Tensor& up_proj,    // [I, H]
@@ -148,7 +303,7 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
                         torch::Tensor& gate_buf,   // [M, I]
                         torch::Tensor& fused_buf,  // [M, I]
                         torch::Tensor& output,     // [M, H]
-                        cudaStream_t stream) {
+                        cudaStream_t stream, FfnDispatchPolicy policy) {
   TORCH_CHECK(hidden.scalar_type() == at::kBFloat16,
               "fused_moe_ffn_into: BF16 only");
 
@@ -163,14 +318,15 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
   TORCH_CHECK(down_proj.size(1) == I,
               "fused_moe_ffn_into: down proj intermediate dim mismatch");
 
-  if (moe_use_cublas_fallback(hidden)) {
+  const FfnLaunchSpec spec = ffn_select(M, I, hidden, policy);
+
+  if (spec.torch_fallback) {
     fused_moe_ffn_into_torch_fallback(hidden, gate_proj, up_proj, down_proj,
                                       gate_buf, fused_buf, output, stream);
     return;
   }
 
   using Elem = ElementInput;
-
   auto* input_ptr = reinterpret_cast<Elem*>(hidden.data_ptr());
   auto* gate_ptr = reinterpret_cast<Elem*>(gate_proj.data_ptr());
   auto* up_ptr = reinterpret_cast<Elem*>(up_proj.data_ptr());
@@ -179,139 +335,28 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
   auto* fused_ptr = reinterpret_cast<Elem*>(fused_buf.data_ptr());
   auto* out_ptr = reinterpret_cast<Elem*>(output.data_ptr());
 
-  // Dispatch: use large-K tile when I >= 3072.
-  // K-tile=64 halves k-loop iterations for wide dims (K=4096: 128→64 iters).
-  const bool use_large_k = (I >= 3072);
-
-  if (use_large_k) {
-    // ------------------------------------------------------------------
-    // GEMM0 (large-K): gate_buf = input @ gate_proj^T
-    // ------------------------------------------------------------------
-    {
-      GemmGateLK gemm;
-      GemmGateLK::Arguments args{
-          {M, I, H},          // problem size [M, N, K]
-          {input_ptr, H},     // ref_A: [M, H] RowMajor
-          {gate_ptr, H},      // ref_B: [H, I] ColMajor, ldb = K = H
-          {gate_buf_ptr, I},  // ref_C: not read (beta=0)
-          {gate_buf_ptr, I},  // ref_D: gate_buf output
-          {1.0f, 0.0f}        // {alpha, beta}
-      };
-      cutlass::Status status = gemm(args, nullptr, stream);
-      TORCH_CHECK(status == cutlass::Status::kSuccess,
-                  "fused_moe_ffn_into GEMM0-LK (gate) failed: ",
-                  cutlassGetStatusString(status));
-    }
-
-    // ------------------------------------------------------------------
-    // GEMM1 (large-K): fused_buf = silu(gate_buf) * (input @ up_proj^T)
-    // ------------------------------------------------------------------
-    {
-      GemmUpFusedLK gemm;
-      GemmUpFusedLK::Arguments args{
-          {M, I, H},          // problem size
-          {input_ptr, H},     // ref_A
-          {up_ptr, H},        // ref_B: [H, I] ColMajor, ldb = K = H
-          {gate_buf_ptr, I},  // ref_C: gate_buf (SiLU source)
-          {fused_ptr, I},     // ref_D: fused_buf output
-          {1.0f, 1.0f}        // {alpha, beta} — beta=1 causes C to be loaded
-      };
-      cutlass::Status status = gemm(args, nullptr, stream);
-      TORCH_CHECK(status == cutlass::Status::kSuccess,
-                  "fused_moe_ffn_into GEMM1-LK (up+silu-mul) failed: ",
-                  cutlassGetStatusString(status));
-    }
-
-    // ------------------------------------------------------------------
-    // GEMM2 (large-K): output = fused_buf @ down_proj^T
-    // ------------------------------------------------------------------
-    {
-      GemmDownLK gemm;
-      GemmDownLK::Arguments args{
-          {M, H, I},       // problem size [M, N, K]
-          {fused_ptr, I},  // ref_A: [M, I] RowMajor
-          {down_ptr, I},   // ref_B: [I, H] ColMajor, ldb = K = I
-          {out_ptr, H},    // ref_C: not read (beta=0)
-          {out_ptr, H},    // ref_D: output
-          {1.0f, 0.0f}     // {alpha, beta}
-      };
-      cutlass::Status status = gemm(args, nullptr, stream);
-      TORCH_CHECK(status == cutlass::Status::kSuccess,
-                  "fused_moe_ffn_into GEMM2-LK (down) failed: ",
-                  cutlassGetStatusString(status));
+  // M-axis dispatch: large M uses the 128x128 throughput tiles; small M keeps
+  // the 64x64 latency tiles (bit-identical to the original single-path code).
+  // Each M-variant composes with the large-K (I>=3072) axis.
+  if (spec.m_throughput) {
+    if (spec.k_large) {
+      launch_ffn_gemms<GemmGateTPLK, GemmUpFusedTPLK, GemmDownTPLK>(
+          input_ptr, gate_ptr, up_ptr, down_ptr, gate_buf_ptr, fused_ptr,
+          out_ptr, M, H, I, stream);
+    } else {
+      launch_ffn_gemms<GemmGateTP, GemmUpFusedTP, GemmDownTP>(
+          input_ptr, gate_ptr, up_ptr, down_ptr, gate_buf_ptr, fused_ptr,
+          out_ptr, M, H, I, stream);
     }
   } else {
-    // ------------------------------------------------------------------
-    // GEMM0: gate_buf = input @ gate_proj^T
-    //
-    // CUTLASS GEMM: D [M, N] = A [M, K] × B [K, N]
-    //   M=batch, N=I (intermediate), K=H (hidden)
-    //   A: [M, H] RowMajor,        lda = H
-    //   B: [H, I] ColMajor         ldb = H   (gate_proj [I,H] RowMajor ≡ [H,I]
-    //   ColMajor) D: [M, I] RowMajor,        ldd = I beta=0 → C not read
-    // ------------------------------------------------------------------
-    {
-      GemmGate gemm;
-      GemmGate::Arguments args{
-          {M, I, H},          // problem size [M, N, K]
-          {input_ptr, H},     // ref_A: [M, H] RowMajor
-          {gate_ptr, H},      // ref_B: [H, I] ColMajor, ldb = K = H
-          {gate_buf_ptr, I},  // ref_C: not read (beta=0)
-          {gate_buf_ptr, I},  // ref_D: gate_buf output
-          {1.0f, 0.0f}        // {alpha, beta}
-      };
-      cutlass::Status status = gemm(args, nullptr, stream);
-      TORCH_CHECK(status == cutlass::Status::kSuccess,
-                  "fused_moe_ffn_into GEMM0 (gate) failed: ",
-                  cutlassGetStatusString(status));
-    }
-
-    // ------------------------------------------------------------------
-    // GEMM1: fused_buf = silu(gate_buf) * (input @ up_proj^T)
-    //
-    //   Same A/B shapes as GEMM0 but uses up_proj
-    //   C = gate_buf [M, I]: read as the "source" in SiLUMulEpilogue
-    //   D = fused_buf [M, I]: D[i] = silu(C[i]) * accum[i]
-    //   beta=1 → C is loaded by the epilogue
-    // ------------------------------------------------------------------
-    {
-      GemmUpFused gemm;
-      GemmUpFused::Arguments args{
-          {M, I, H},          // problem size
-          {input_ptr, H},     // ref_A
-          {up_ptr, H},        // ref_B: [H, I] ColMajor, ldb = K = H
-          {gate_buf_ptr, I},  // ref_C: gate_buf (SiLU source)
-          {fused_ptr, I},     // ref_D: fused_buf output
-          {1.0f, 1.0f}        // {alpha, beta} — beta=1 causes C to be loaded
-      };
-      cutlass::Status status = gemm(args, nullptr, stream);
-      TORCH_CHECK(status == cutlass::Status::kSuccess,
-                  "fused_moe_ffn_into GEMM1 (up+silu-mul) failed: ",
-                  cutlassGetStatusString(status));
-    }
-
-    // ------------------------------------------------------------------
-    // GEMM2: output = fused_buf @ down_proj^T
-    //
-    //   M=batch, N=H (hidden), K=I (intermediate)
-    //   A: [M, I] RowMajor,        lda = I
-    //   B: [I, H] ColMajor,        ldb = I   (down_proj [H,I] RowMajor ≡ [I,H]
-    //   ColMajor) D: [M, H] RowMajor,        ldd = H beta=0 → C not read
-    // ------------------------------------------------------------------
-    {
-      GemmDown gemm;
-      GemmDown::Arguments args{
-          {M, H, I},       // problem size [M, N, K]
-          {fused_ptr, I},  // ref_A: [M, I] RowMajor
-          {down_ptr, I},   // ref_B: [I, H] ColMajor, ldb = K = I
-          {out_ptr, H},    // ref_C: not read (beta=0)
-          {out_ptr, H},    // ref_D: output
-          {1.0f, 0.0f}     // {alpha, beta}
-      };
-      cutlass::Status status = gemm(args, nullptr, stream);
-      TORCH_CHECK(status == cutlass::Status::kSuccess,
-                  "fused_moe_ffn_into GEMM2 (down) failed: ",
-                  cutlassGetStatusString(status));
+    if (spec.k_large) {
+      launch_ffn_gemms<GemmGateLK, GemmUpFusedLK, GemmDownLK>(
+          input_ptr, gate_ptr, up_ptr, down_ptr, gate_buf_ptr, fused_ptr,
+          out_ptr, M, H, I, stream);
+    } else {
+      launch_ffn_gemms<GemmGate, GemmUpFused, GemmDown>(
+          input_ptr, gate_ptr, up_ptr, down_ptr, gate_buf_ptr, fused_ptr,
+          out_ptr, M, H, I, stream);
     }
   }
 }

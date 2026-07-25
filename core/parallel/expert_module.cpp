@@ -9,7 +9,11 @@
 #include "utils/logger.h"
 #include "kernel/fused_moe_mlp.h"
 
-static const int64_t kMaxTokens = 256;
+static const int64_t kInitialTokens = 256;
+
+// Round token capacity up to a multiple of 128 to stay aligned with the
+// CUTLASS threadblock M-tiles used by the expert GEMMs.
+static inline int64_t RoundUpTokens(int64_t n) { return ((n + 127) / 128) * 128; }
 
 void ExpertNode::SetTensorsFromBlob(const torch::Device& device) {
   auto expert_type = static_cast<ExpertType>(this->expert_type);
@@ -51,11 +55,6 @@ MoEMLP::MoEMLP(int dtype, int expert_type) {
 }
 
 void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
-  int device = at::cuda::current_device();
-  auto options = torch::TensorOptions()
-                     .dtype(dtype_to_torch(dtype_))
-                     .device(CUDA_DEVICE(device));
-
   // Safety: exec_state is FETCHING/EXECUTING throughout forward(), so the
   // expert's GPU memory cannot be evicted until OutputFunc resets to IDLE.
   std::vector<std::vector<int64_t>> tensor_shapes;
@@ -66,66 +65,47 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
   }
 
   if (!param_init_) {
-    auto allocator = c10::DeviceCachingAllocator::get(device);
-
-    int64_t hdim = tensor_shapes[0][1];
-    int64_t idim = tensor_shapes[0][0];
-
-    std::vector<std::vector<int64_t>> data_shapes;
-    data_shapes.push_back({kMaxTokens, hdim});
-    data_shapes.push_back({kMaxTokens, hdim});
-
-    for (size_t i = 0; i < tensor_shapes.size(); i++) {
-      data_shapes.push_back({kMaxTokens, idim});
-    }
-
-    for (size_t i = 0; i < data_shapes.size(); i++) {
-      auto data_shape = data_shapes[i];
-      auto data_size = torch_shape_size(data_shape, dtype_);
-      void* buffer_ptr = allocator->allocate(data_size);
-      buffer_[i].set_data(torch::from_blob(buffer_ptr, data_shape,
-                                           DoNothingDeleter<void>{}, options));
-      DLOG_TRACE("MoEMLP::SetTensorsFromIds: buffer_ tensor", i, "data_shape",
-                 data_shape, "data_size", data_size, "device",
-                 buffer_[i].device().str());
-    }
-    param_init_ = true;
-  }
-
-  if (!param_init_) {
-    // Allocate computation buffers (input, output, intermediates) once.
-    // These are reused across expert invocations.
-    auto allocator = c10::DeviceCachingAllocator::get(device);
-
-    // MLP tensor shape: weight is [intermediate, hidden], so
-    //   hdim = tensor_shapes[0][1], idim = tensor_shapes[0][0]
-    int64_t hdim = tensor_shapes[0][1];
-    int64_t idim = tensor_shapes[0][0];
-
-    std::vector<std::vector<int64_t>> data_shapes;
-    data_shapes.push_back({kMaxTokens, hdim});  // input buffer
-    data_shapes.push_back({kMaxTokens, hdim});  // output buffer
-
-    for (size_t i = 0; i < tensor_shapes.size(); i++) {
-      data_shapes.push_back({kMaxTokens, idim});  // intermediate buffers
-    }
-
-    for (size_t i = 0; i < data_shapes.size(); i++) {
-      auto data_shape = data_shapes[i];
-      auto data_size = torch_shape_size(data_shape, dtype_);
-      void* buffer_ptr = allocator->allocate(data_size);
-      buffer_[i].set_data(torch::from_blob(buffer_ptr, data_shape,
-                                           DoNothingDeleter<void>{}, options));
-      DLOG_TRACE("MoEMLP::SetTensorsFromIds: buffer_ tensor", i, "data_shape",
-                 data_shape, "data_size", data_size, "device",
-                 buffer_[i].device().str());
-    }
+    // MLP weight shape is [intermediate, hidden]: idim = rows, hdim = cols.
+    idim_ = tensor_shapes[0][0];
+    hdim_ = tensor_shapes[0][1];
+    num_intermediate_ = static_cast<int64_t>(tensor_shapes.size());
+    EnsureCapacity(kInitialTokens);
     param_init_ = true;
   }
 
   assert(param_init_ == true);
   assert(param_set_ == false);
   param_set_ = true;
+}
+
+void MoEMLP::EnsureCapacity(int64_t num_tokens) {
+  if (num_tokens <= buffer_capacity_) {
+    return;
+  }
+  // Grow-only: jump to at least 2x current capacity to amortize reallocations.
+  int64_t new_cap = RoundUpTokens(std::max(num_tokens, buffer_capacity_ * 2));
+
+  int device = at::cuda::current_device();
+  auto options = torch::TensorOptions()
+                     .dtype(dtype_to_torch(dtype_))
+                     .device(CUDA_DEVICE(device));
+  auto allocator = c10::DeviceCachingAllocator::get(device);
+
+  std::vector<std::vector<int64_t>> data_shapes;
+  data_shapes.push_back({new_cap, hdim_});
+  data_shapes.push_back({new_cap, hdim_});
+  for (int64_t i = 0; i < num_intermediate_; i++) {
+    data_shapes.push_back({new_cap, idim_});
+  }
+
+  for (size_t i = 0; i < data_shapes.size(); i++) {
+    auto data_shape = data_shapes[i];
+    auto data_size = torch_shape_size(data_shape, dtype_);
+    void* buffer_ptr = allocator->allocate(data_size);
+    buffer_[i].set_data(torch::from_blob(buffer_ptr, data_shape,
+                                         DoNothingDeleter<void>{}, options));
+  }
+  buffer_capacity_ = new_cap;
 }
 
 torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
@@ -139,9 +119,8 @@ torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
   int64_t batch_size = hidden_states.size(0);
   int64_t hdim = hidden_states.size(1);
 
-  DLOG_FATAL_IF(batch_size > kMaxTokens || batch_size <= 0,
-                "batch_size should be (0,", kMaxTokens, "] , but got",
-                batch_size);
+  DLOG_FATAL_IF(batch_size <= 0, "batch_size must be > 0, but got", batch_size);
+  EnsureCapacity(batch_size);
 
   // Use async copy with the provided execution stream
   cudaMemcpyAsync(input_.data_ptr(), hidden_states.data_ptr(),
@@ -157,7 +136,7 @@ torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
     int64_t col = buffer.size(1);
     auto dtype = buffer.dtype();
 
-    if (row == kMaxTokens) {
+    if (row == buffer_capacity_) {
       buffer.set_data(torch::from_blob(
           buffer.data_ptr(), {batch_size, col}, DoNothingDeleter<void>{},
           torch::TensorOptions().dtype(dtype).device(
@@ -172,7 +151,7 @@ torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
 
   auto output = output_.clone();
 
-  // Restore buffers to kMaxTokens shape for next invocation
+  // Restore buffers to full capacity shape for next invocation
   for (auto& buffer : buffer_) {
     auto shape_vec = buffer.sizes().vec();
     if (shape_vec.size() != 2) continue;
@@ -180,9 +159,9 @@ torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
     int64_t col = buffer.size(1);
     auto dtype = buffer.dtype();
 
-    if (row == batch_size && batch_size != kMaxTokens) {
+    if (row == batch_size && batch_size != buffer_capacity_) {
       buffer.set_data(torch::from_blob(
-          buffer.data_ptr(), {kMaxTokens, col}, DoNothingDeleter<void>{},
+          buffer.data_ptr(), {buffer_capacity_, col}, DoNothingDeleter<void>{},
           torch::TensorOptions().dtype(dtype).device(
               CUDA_DEVICE(at::cuda::current_device()))));
     }
