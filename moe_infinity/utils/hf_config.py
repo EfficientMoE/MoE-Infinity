@@ -100,6 +100,11 @@ def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
         num_decoder_layers = config.num_hidden_layers
         num_layers = config.num_hidden_layers
         num_experts = config.num_local_experts
+    elif "glmmoedsa" in arch:
+        num_encoder_layers = 0
+        num_decoder_layers = config.num_hidden_layers
+        num_layers = config.num_hidden_layers
+        num_experts = config.n_routed_experts
     else:
         raise RuntimeError(f"Unsupported architecture {arch}")
 
@@ -173,6 +178,17 @@ def parse_expert_id(
         if result:
             layer_id = int(result[0][0])
             return layer_id, None
+    elif "glmmoedsa" in arch:
+        decoder_sparse_step = 1
+        layer_type = "decoder"
+
+        result = re.findall(r"layers\.(\d+)\.mlp\.experts\.(\d+)\.", param_name)
+        if result:
+            layer_id, expert_id = result[0]
+            layer_id = int(layer_id)
+            expert_id = int(expert_id)
+            if layer_id >= config.num_hidden_layers:
+                return None, None
 
     if result:
         if layer_type == "decoder":

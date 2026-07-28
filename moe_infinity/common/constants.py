@@ -17,6 +17,16 @@ try:
 except ImportError:
     DeepseekV4ForCausalLM = None
 
+try:
+    from transformers import GlmMoeDsaForCausalLM
+except ImportError:
+    try:
+        from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+            GlmMoeDsaForCausalLM,
+        )
+    except ImportError:
+        GlmMoeDsaForCausalLM = None
+
 MODEL_MAPPING_NAMES = {
     "nllb": NllbMoeForConditionalGeneration,
     "mixtral": MixtralForCausalLM,
@@ -49,6 +59,12 @@ MODEL_MAPPING_TYPES = {
 if DeepseekV4ForCausalLM is not None:
     MODEL_MAPPING_NAMES["deepseekv4"] = DeepseekV4ForCausalLM
     MODEL_MAPPING_TYPES["deepseekv4"] = 5
+
+# Key must be a substring of "glmmoedsaforcausallm" (parse_expert_type matches
+# by substring), so "glmmoedsa" not "glm_moe_dsa". Registered only when importable.
+if GlmMoeDsaForCausalLM is not None:
+    MODEL_MAPPING_NAMES["glmmoedsa"] = GlmMoeDsaForCausalLM
+    MODEL_MAPPING_TYPES["glmmoedsa"] = 5
 
 
 def parse_expert_type(config: PretrainedConfig) -> int:
