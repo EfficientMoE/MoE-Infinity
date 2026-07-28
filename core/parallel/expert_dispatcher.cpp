@@ -515,6 +515,19 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       modules_[thread_idx]->SetTensorsFromIds(
           args.expert_node->node->tensor_ids);
 
+      {
+        std::lock_guard<std::mutex> lock(scales_mutex_);
+        auto scale_it = layer_scales_.find(args.expert_node->layer_idx);
+        if (scale_it != layer_scales_.end()) {
+          modules_[thread_idx]->SetScales(
+              scale_it->second[0].select(0, expert_idx).to(device),
+              scale_it->second[1].select(0, expert_idx).to(device),
+              scale_it->second[2].select(0, expert_idx).to(device));
+        } else {
+          modules_[thread_idx]->ClearScales();
+        }
+      }
+
       c10::cuda::CUDAStream torch_stream =
           c10::cuda::getStreamFromExternal(stream, gpu_id);
       c10::cuda::CUDAStreamGuard guard(torch_stream);

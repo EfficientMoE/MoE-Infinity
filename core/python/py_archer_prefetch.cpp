@@ -90,8 +90,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("silu_and_mul", &silu_and_mul, "Fused SiLU(gate) * up");
   m.def("gelu_and_mul", &gelu_and_mul, "Fused GeLU(gate) * up");
-  m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul, "Fused GeLU-tanh(gate) * up");
+  m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul,
+        "Fused GeLU-tanh(gate) * up");
   m.def("fatrelu_and_mul", &fatrelu_and_mul, "Fused FatReLU(gate) * up");
+  m.def("dequant_fp8_blockwise", &DequantFp8Blockwise,
+        "Block-wise FP8 E4M3 dequant to BF16 (128x128 blocks)");
 
   py::class_<ExpertDispatcher>(m, "expert_dispatcher")
       .def(py::init<int, int, int, int, int>())
@@ -102,6 +105,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       //  .def("wait_expert", &ExpertDispatcher::WaitExpert)
       .def("wait_expert", &ExpertDispatcher::WaitHiddenStates)
       .def("notify_fetch_start", &ExpertDispatcher::NotifyFetchStart)
+      .def("set_layer_scales", &ExpertDispatcher::SetLayerScales)
       .def("clear_expert_cache_counts",
            &ExpertDispatcher::ClearExpertCacheCounts);
 }

@@ -106,6 +106,12 @@ class ExpertDispatcher : public base::noncopyable {
                       const std::vector<std::uint32_t>& tensor_ids,
                       std::string jit_path);
   void ClearExpertCacheCounts();
+  void SetLayerScales(int layer_idx, torch::Tensor gate, torch::Tensor up,
+                      torch::Tensor down) {
+    std::lock_guard<std::mutex> lock(scales_mutex_);
+    layer_scales_[layer_idx] = {std::move(gate), std::move(up),
+                                std::move(down)};
+  }
   void SetExpectedQueue(int expected_pending = 0) {
     pending_.store(expected_pending);
   }
@@ -159,6 +165,8 @@ class ExpertDispatcher : public base::noncopyable {
 
   std::mutex output_mutex_;
   std::mutex accum_mutex_;
+  std::mutex scales_mutex_;
+  std::unordered_map<int, std::array<torch::Tensor, 3>> layer_scales_;
 
   std::vector<cudaStream_t> exec_streams_;
   std::vector<cudaStream_t> fetch_streams_;

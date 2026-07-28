@@ -189,11 +189,25 @@ torch::Tensor launch_fused_moe_ffn(torch::Tensor hidden,  // [M, K]
                                    torch::Tensor w3,      // [K, N]
                                    cudaStream_t stream);  // CUDA stream
 
+// Block-wise FP8 E4M3 dequant to BF16 (128x128 blocks). Exposed to Python for
+// numerical parity tests against moe_infinity.utils.fp8.dequant_fp8_blockwise.
+torch::Tensor DequantFp8Blockwise(const torch::Tensor& weight,
+                                  const torch::Tensor& scale);
+
 struct MoEMLP : public torch::nn::Module {
   explicit MoEMLP(int dtype, int expert_type);
   torch::Tensor forward(torch::Tensor hidden_states, cudaStream_t stream);
 
   void SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids);
+
+  void SetScales(torch::Tensor gate, torch::Tensor up, torch::Tensor down) {
+    scale_gate_ = std::move(gate);
+    scale_up_ = std::move(up);
+    scale_down_ = std::move(down);
+    has_scales_ = true;
+  }
+
+  void ClearScales() { has_scales_ = false; }
 
  private:
   void ForwardHelper(cudaStream_t stream);
@@ -201,6 +215,10 @@ struct MoEMLP : public torch::nn::Module {
  private:
   std::vector<torch::Tensor> buffer_;
   std::vector<torch::Tensor> param_;
+  torch::Tensor scale_gate_;
+  torch::Tensor scale_up_;
+  torch::Tensor scale_down_;
+  bool has_scales_ = false;
 
   at::cuda::CUDAGraph graph_;
   int warmup_count_ = 5;

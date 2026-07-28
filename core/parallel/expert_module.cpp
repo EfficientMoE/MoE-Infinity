@@ -10,6 +10,21 @@
 #include "kernel/fused_moe_mlp.h"
 
 static const int64_t kMaxTokens = 256;
+static const int64_t kFp8BlockSize = 128;
+
+// Block-wise FP8 dequant: expand [ceil(n/128), ceil(k/128)] scales to [n, k]
+// and multiply. Must match moe_infinity.utils.fp8.dequant_fp8_blockwise.
+torch::Tensor DequantFp8Blockwise(const torch::Tensor& weight,
+                                  const torch::Tensor& scale) {
+  int64_t n = weight.size(0);
+  int64_t k = weight.size(1);
+  auto scale_full = scale.to(torch::kFloat32)
+                        .repeat_interleave(kFp8BlockSize, 0)
+                        .repeat_interleave(kFp8BlockSize, 1)
+                        .narrow(0, 0, n)
+                        .narrow(1, 0, k);
+  return (weight.to(torch::kFloat32) * scale_full).to(torch::kBFloat16);
+}
 
 void ExpertNode::SetTensorsFromBlob(const torch::Device& device) {
   auto expert_type = static_cast<ExpertType>(this->expert_type);
@@ -216,8 +231,27 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
     auto& gate_out = buffer_[2];
     auto& fused_out = buffer_[3];
 
-    fused_moe_ffn_into(input, gate_proj, up_proj, down_proj, gate_out,
-                       fused_out, output, stream);
+    torch::Tensor gate_w = gate_proj;
+    torch::Tensor up_w = up_proj;
+    torch::Tensor down_w = down_proj;
+    if (gate_proj.scalar_type() == torch::kFloat8_e4m3fn && has_scales_) {
+      // GLM Option B: block-quantized fp8 experts + block scales delivered via
+      // expert_dispatcher.set_layer_scales() at init; dequant on-GPU here.
+      gate_w = DequantFp8Blockwise(gate_proj, scale_gate_);
+      up_w = DequantFp8Blockwise(up_proj, scale_up_);
+      down_w = DequantFp8Blockwise(down_proj, scale_down_);
+    } else if (gate_proj.scalar_type() == torch::kFloat8_e4m3fn &&
+               dtype_ != DTYPE_FP8_E4M3FN) {
+      // fp8 weights but no scales registered and the dispatcher was not built
+      // for flat-fp8 (DeepSeek-V3, dtype_ == DTYPE_FP8_E4M3FN, which keeps the
+      // historical pass-through below): misconfigured scale delivery.
+      TORCH_CHECK(false,
+                  "fp8 block-quantized expert weights require scales; call "
+                  "expert_dispatcher.set_layer_scales() at init");
+    }
+
+    fused_moe_ffn_into(input, gate_w, up_w, down_w, gate_out, fused_out,
+                       output, stream);
     return;
   }
   DLOG_FATAL("MoEMLP::forward: expert_type not supported", expert_type_);
