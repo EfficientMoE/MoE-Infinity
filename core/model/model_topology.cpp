@@ -636,13 +636,6 @@ void ArcherTopologyHandle::InitializeTopology(
 
   DLOG_INFO("Moving sparse parameters to CPU");
   if (!sparse_nodes.empty()) {
-    std::map<uint32_t, std::vector<size_t>> nodes_by_partition;
-    for (size_t i = 0; i < sparse_nodes.size(); i++) {
-      auto fid =
-          kTensorIndex->find(sparse_nodes[i]->tensor_ids[0])->second.file_id;
-      nodes_by_partition[fid].push_back(i);
-    }
-
     auto read_partition =
         [](const std::string& filename) -> std::pair<void*, int64_t> {
       struct stat st;
@@ -655,6 +648,7 @@ void ArcherTopologyHandle::InitializeTopology(
         free(buf);
         return {nullptr, 0};
       }
+      posix_fadvise(fd, 0, file_size, POSIX_FADV_SEQUENTIAL);
       int64_t total = 0;
       while (total < file_size) {
         auto n = ::read(fd, static_cast<char*>(buf) + total,
@@ -667,61 +661,66 @@ void ArcherTopologyHandle::InitializeTopology(
       return {buf, file_size};
     };
 
-    std::vector<uint32_t> partition_ids;
-    for (auto& [fid, _] : nodes_by_partition) partition_ids.push_back(fid);
-    std::sort(partition_ids.begin(), partition_ids.end());
+    // Fill every sparse (expert) tensor from a single sequential bulk read of
+    // its own partition file. Grouping placements by file_id and scattering via
+    // memcpy avoids per-tensor random ReadTensor reads, which collapse to
+    // effectively-infinite latency on a cold page cache when reloading a large
+    // offload store from disk.
+    struct TensorPlacement {
+      NodePtr node;
+      int64_t param_offset;
+      int64_t size;
+      int64_t file_offset;
+    };
+    std::map<uint32_t, std::vector<TensorPlacement>> tensors_by_file;
+    for (auto& node_ptr : sparse_nodes) {
+      node_ptr->default_device =
+          torch::Device(torch::kCUDA, target_device_id);
+      target_device_id = (target_device_id + 1) % num_gpu;
 
-    for (size_t pi = 0; pi < partition_ids.size(); pi++) {
-      auto [buf, buf_size] = read_partition(
-          kArcherTensorHandle->GetIndexFileName(partition_ids[pi]));
+      node_ptr->host_memory_ptr = kHostMemoryPool->AllocateMemory(
+          node_ptr->id, node_ptr->byte_size, CPU_DEVICE);
+      assert(node_ptr->host_memory_ptr != nullptr);
+
+      int64_t param_offset = 0;
+      for (auto& tensor_id : node_ptr->tensor_ids) {
+        auto it = kTensorIndex->find(tensor_id);
+        auto& meta = it->second;
+        int64_t size_aligned =
+            (static_cast<int64_t>(meta.size) + kAioAlignment - 1) &
+            ~(kAioAlignment - 1);
+        tensors_by_file[meta.file_id].push_back(
+            {node_ptr, param_offset, static_cast<int64_t>(meta.size),
+             static_cast<int64_t>(meta.offset)});
+        param_offset += size_aligned;
+      }
+      node_ptr->device = CPU_DEVICE;
+    }
+
+    std::vector<uint32_t> file_ids;
+    for (auto& [fid, _] : tensors_by_file) file_ids.push_back(fid);
+    std::sort(file_ids.begin(), file_ids.end());
+
+    for (size_t fi = 0; fi < file_ids.size(); fi++) {
+      uint32_t fid = file_ids[fi];
+      auto [buf, buf_size] =
+          read_partition(kArcherTensorHandle->GetIndexFileName(fid));
       assert(buf != nullptr);
 
-      uint32_t current_fid = partition_ids[pi];
-      DLOG_INFO("Processing partition ", current_fid, " (",
-                buf_size / (1024 * 1024), " MB, ",
-                nodes_by_partition[current_fid].size(), " nodes)");
-
-      for (auto idx : nodes_by_partition[current_fid]) {
-        auto& node_ptr = sparse_nodes[idx];
-        node_ptr->default_device =
-            torch::Device(torch::kCUDA, target_device_id);
-        target_device_id = (target_device_id + 1) % num_gpu;
-
-        node_ptr->host_memory_ptr = kHostMemoryPool->AllocateMemory(
-            node_ptr->id, node_ptr->byte_size, CPU_DEVICE);
-        assert(node_ptr->host_memory_ptr != nullptr);
-
-        int64_t param_offset = 0;
-        bool need_fallback = false;
-        for (auto& tensor_id : node_ptr->tensor_ids) {
-          auto it = kTensorIndex->find(tensor_id);
-          auto& meta = it->second;
-          int64_t size_aligned =
-              (static_cast<int64_t>(meta.size) + kAioAlignment - 1) &
-              ~(kAioAlignment - 1);
-
-          if (meta.file_id == current_fid) {
-            memcpy(static_cast<char*>(node_ptr->host_memory_ptr) + param_offset,
-                   static_cast<char*>(buf) + meta.offset, meta.size);
-          } else {
-            kArcherTensorHandle->ReadTensor(
-                tensor_id,
-                static_cast<char*>(node_ptr->host_memory_ptr) + param_offset,
-                false);
-            need_fallback = true;
-          }
-          param_offset += size_aligned;
-        }
-        if (need_fallback) {
-          DLOG_WARN("Node ", node_ptr->id,
-                    " has cross-partition tensors, used ReadTensor fallback");
-        }
-
-        SetModuleMemoryFromDisk_Views(node_ptr->tensor_ids,
-                                      node_ptr->host_memory_ptr);
-        node_ptr->device = CPU_DEVICE;
+      auto& placements = tensors_by_file[fid];
+      DLOG_INFO("Processing partition ", fid, " (", buf_size / (1024 * 1024),
+                " MB, ", placements.size(), " tensors)");
+      for (auto& p : placements) {
+        memcpy(static_cast<char*>(p.node->host_memory_ptr) + p.param_offset,
+               static_cast<char*>(buf) + p.file_offset,
+               static_cast<size_t>(p.size));
       }
       free(buf);
+    }
+
+    for (auto& node_ptr : sparse_nodes) {
+      SetModuleMemoryFromDisk_Views(node_ptr->tensor_ids,
+                                    node_ptr->host_memory_ptr);
     }
   }
 
