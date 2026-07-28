@@ -78,6 +78,9 @@ def _detect_from_config_attr(config: object) -> Optional[QuantizationInfo]:
     if not method or method in _HANDLED_ELSEWHERE_METHODS:
         return None
 
+    if method == "fp8" and qc.get("weight_block_size"):
+        return None
+
     return QuantizationInfo(
         method=method,
         supported=method in SUPPORTED_QUANT_METHODS,
