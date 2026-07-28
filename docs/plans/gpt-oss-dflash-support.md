@@ -1,6 +1,6 @@
 # Plan: Support DFlash Speculative Decoding for gpt-oss-120b in MoE-Infinity
 
-**Status:** Draft / RFC
+**Status:** RFC — Phase 0 (SGLang reference validation) complete → **GO** for native port (see §0.1)
 **Date:** 2026-07-28
 **Goal:** Add **DFlash** (block-diffusion speculative decoding, arXiv 2602.06036) support to MoE-Infinity so `openai/gpt-oss-120b` (target) can be accelerated by the `z-lab/gpt-oss-120b-DFlash` 0.8B drafter, and produce **distribution-lossless** greedy output identical to plain gpt-oss-120b decoding.
 
@@ -19,6 +19,32 @@ MoE-Infinity today: gpt-oss-120b is a supported target (offloaded MXFP4 experts)
 **Resident-only for v1.** MoE-Infinity's differentiator is expert offloading, but a 9-token verify block activates many more experts per step; the current next-layer/top-2/mean-router prefetcher would thrash. Spec-decode + offload is deferred (adaptive-fallback design sketched, not built).
 
 **Effort:** Phase 0 = Small–Medium (mostly downloads + a possibly-fragile sglang branch build). Native sync integration (Phases 1–4) = Medium. Async serving + offload-aware = Large (deferred).
+
+---
+
+## 0.1 Phase 0 Results — SGLang reference validation (2026-07-28) → GO
+
+Validated `openai/gpt-oss-120b` + `z-lab/gpt-oss-120b-DFlash` via the SGLang reference on 6× RTX PRO 6000 Blackwell (SM120).
+
+| Check | Result |
+|---|---|
+| DFlash worker init | PASS — `DFlashDraftModel`, `block_size=10`, `mask_token_id=200000`, greedy head folded into draft CUDA graph |
+| Health | PASS (200) |
+| Acceptance length | PASS — mean **3.66** (chat), ~2.6 (long technical); sanity band 3–5 (H200 ref 3.7–5.4) |
+| Single-stream decode tok/s | **1.18–1.32×** speedup vs no-spec |
+| Concurrency-8 | **0.65× (regression)** — verify blocks hurt under batching |
+| Strict string-losslessness | FAIL by string-identity, but **not a DFlash bug** (see finding 2) |
+
+**Two findings that refine this plan:**
+
+1. **TP=4 is currently infeasible on SM120 for gpt-oss MXFP4 (sglang main).** No MXFP4 MoE backend supports it: Marlin fails the shape check (`intermediate 2880 / 4 = 720`, `720 % 32 ≠ 0`), `flashinfer_mxfp4` is SM90/SM100-only, and `triton_kernel` exceeds the RTX PRO 6000's 99 KB shared-mem/block (vs 227 KB on B200). Validation therefore ran **TP=2 + Marlin** (`2880 / 2 = 1440 % 32 = 0`). A fully-resident native port should target **TP=2 (or DP2×TP2)** on SM120, not TP=4, until an upstream MXFP4-at-TP=4 fix lands.
+
+2. **Strict token-identity is unattainable on this stack — and not DFlash's fault.** The no-spec baseline is not string-identical to *itself* across repeated greedy runs (1/5 → 3/5 even with `--enable-deterministic-inference`); divergences are floating-point near-tie argmax flips (Marlin MXFP4 grouped-GEMM reduction ordering; 10-token verify forwards take a different-but-valid rounding path than 1-token decode). All outputs are coherent/correct. This is the standard "lossless in exact arithmetic ≠ bit-identical in FP" property of speculative decoding.
+
+**Carried into Phases 1–3 (gates revised accordingly):**
+- The parity gate (QA-3.1) compares DFlash vs plain decoding **in the same engine build/process** using a **token agreement-rate** metric, not string identity.
+- **Disable/avoid spec-decode at high batch sizes** — it is a single/few-stream win, which is exactly MoE-Infinity's resident regime.
+- Resident config target on SM120 is **TP=2** (not TP=4) until the upstream MXFP4-at-TP=4 gap closes.
 
 ---
 
@@ -142,20 +168,20 @@ Shell vars: `$PY=/mnt/raid0nvme0/leyang/MoE-Infinity/.venv/bin/python`; `$HF_HOM
 
 **QA-2.2 (accept rule parity)** — `pytest tests/python/dflash/test_accept_rule.py -q`: on synthetic `(candidates, target_predict)`, `acceptance_length` equals `cumprod(cand[:,1:]==tgt[:,:-1]).sum()` for hand-checked cases (full accept=9, first-mismatch=k, none=0).
 
-**QA-3.1 (end-to-end losslessness)** — `$PY tests/python/dflash/compare_greedy.py --prompt-file $PROMPTS`: DFlash greedy 16-token continuation token-identical to plain `$TGT` greedy for every prompt. Exit 0.
+**QA-3.1 (end-to-end parity — agreement-rate, same-process)** — `$PY tests/python/dflash/compare_greedy.py --prompt-file $PROMPTS`: run DFlash greedy vs plain greedy **in the same engine build/process** and compute the per-position **token agreement rate** over a 128-token continuation. Pass iff agreement ≥ the plain-decode **self-consistency** rate measured on the same box (i.e., DFlash disagrees no more than plain decoding disagrees with itself across repeat runs). Do NOT gate on exact string identity — Phase 0 (§0.1) showed FP near-tie argmax flips make plain decoding non-self-identical on this MXFP4 stack. Report first-divergence positions for inspection. Exit 0.
 
 **QA-3.2 (acceptance sanity)** — mean acceptance length over `$PROMPTS` within ±30% of Phase-0 reference for block_size 10. Exit 0.
 
 ---
 
 ## 6. Open Questions (for review)
-- Q1: Phase 0 — is a real SGLang build required, or is the HF `spec_generate` reference sufficient as the correctness oracle if the sglang branch is fragile on Blackwell/torch-2.11? (Lean: try sglang for tok/s baseline; fall back to HF for correctness.)
+- Q1: ~~Phase 0 — is a real SGLang build required...~~ **Resolved (§0.1):** sglang git-main built and ran on SM120 (TP=2 Marlin; TP=4 infeasible on SM120 — see §0.1); HF `spec_generate` fallback was not needed.
 - Q2: Reuse the drafter's shipped `dflash.py` via `trust_remote_code`, or vendor a clean reimplementation into `moe_infinity/spec_decode/dflash/`? (Lean: trust_remote_code for v1 correctness; vendor later for control/perf.)
 - Q3: Does capturing `output_hidden_states=True` on gpt-oss interact badly with the `SyncGptOssMLP` monkey-patch or CUDA-graph capture? (Verify in Phase 1.)
-- Q4: Is native MoE-Infinity DFlash worth it at all if Phase 0 shows the win is fully captured by SGLang resident-mode (i.e., MoE-Infinity's offload edge is neutralized)? (Explicit go/no-go after Phase 0.)
+- Q4: ~~Is native MoE-Infinity DFlash worth it...~~ **Resolved → GO (§0.1):** single/few-stream resident decode (MoE-Infinity's regime) shows a 1.18–1.32× win; proceed with the native sync port, keeping spec-decode off at high batch sizes.
 
 ## 7. Definition of Done (v1)
-- Phase 0 reference validated: lossless + measured resident speedup recorded.
-- Native sync DFlash path in MoE-Infinity produces **argmax-identical** greedy output to plain gpt-oss-120b on the fixed prompt set (QA-3.1).
+- Phase 0 reference validated: acceptance length + resident speedup recorded (done — §0.1: mean accept 3.66, single-stream 1.18–1.32×).
+- Native sync DFlash path in MoE-Infinity matches plain gpt-oss-120b greedy **within the plain-decode self-consistency agreement rate** on the fixed prompt set (QA-3.1; strict string identity is not required — see §0.1).
 - Acceptance length within sanity range of the reference (QA-3.2).
-- Runs fully resident; existing gpt-oss tests still pass (no regression). Offload + async serving explicitly deferred and documented.
+- Runs fully resident (TP=2 on SM120); existing gpt-oss tests still pass (no regression). Spec-decode disabled at high batch sizes. Offload + async serving explicitly deferred and documented.
