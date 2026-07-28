@@ -67,8 +67,11 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 | [Jamba](https://huggingface.co/models?search=jamba) | `ai21labs/Jamba-*` |
 | [OLMoE](https://huggingface.co/models?search=olmoe) | `allenai/OLMoE-*` |
 | [Meta NLLB-MoE](https://huggingface.co/facebook/nllb-moe-54b) | `facebook/nllb-moe-54b` |
+| [GLM MoE (glm_moe_dsa)](https://huggingface.co/zai-org) | `zai-org/GLM-5.2-FP8` (block-wise FP8; requires a `transformers` build shipping `glm_moe_dsa`) |
 
 > DeepSeek-V4-Flash is only registered when your installed `transformers` provides `DeepseekV4ForCausalLM`; otherwise it is skipped automatically.
+
+> GLM `glm_moe_dsa` (e.g. `zai-org/GLM-5.2-FP8`) is only registered when your installed `transformers` provides `GlmMoeDsaForCausalLM`. Its official block-wise FP8 routed experts stay **FP8 in the offload store** (~1× the FP8 checkpoint size) and are dequantized to BF16 on-GPU right after fetch, before the fused expert GEMM; non-expert FP8 weights (attention, dense MLPs, shared experts) are dequantized to BF16 at load. DeepSeek-Sparse-Attention runs through the native `transformers` attention path, so GLM is supported on the synchronous `MoE.generate()` path (the async paged-KV serving engine does not support DSA attention).
 
 ## Installation
 
