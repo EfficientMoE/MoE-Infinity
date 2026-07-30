@@ -3,6 +3,7 @@
 
 # EfficientMoE Team
 
+import glob
 import io
 import os
 import sys
@@ -128,13 +129,43 @@ def _find_nvtx_include_dir() -> Optional[str]:
         "/usr/local/cuda-12.6",
         "/usr/local/cuda-12.2",
     ]
+    include_dirs = []
     for root in cuda_roots:
-        nvtx_header = os.path.join(
-            os.path.expanduser(root), "include", "nvtx3", "nvtx3.hpp"
+        if not root:
+            continue
+        root = os.path.expanduser(root)
+        include_dirs.append(os.path.join(root, "include"))
+        include_dirs.append(
+            os.path.join(root, "targets", "x86_64-linux", "include")
         )
-        if os.path.isfile(nvtx_header):
-            return os.path.dirname(os.path.dirname(nvtx_header))
+    try:
+        import nvidia
+
+        nvidia_root = os.path.dirname(nvidia.__file__)
+        for sub in ("cu13", "cu12", "cuda_nvtx", "cuda_runtime"):
+            include_dirs.append(os.path.join(nvidia_root, sub, "include"))
+    except Exception:
+        pass
+    for inc in include_dirs:
+        if os.path.isfile(os.path.join(inc, "nvtx3", "nvtx3.hpp")):
+            return inc
     return None
+
+
+def _libnvtoolsext_available() -> bool:
+    lib_dirs = []
+    for root in (CUDA_HOME, "/usr/local/cuda"):
+        if root:
+            root = os.path.expanduser(root)
+            lib_dirs.append(os.path.join(root, "lib64"))
+            lib_dirs.append(
+                os.path.join(root, "targets", "x86_64-linux", "lib")
+            )
+    lib_dirs += ["/usr/lib/x86_64-linux-gnu", "/usr/lib64"]
+    for d in lib_dirs:
+        if glob.glob(os.path.join(d, "libnvToolsExt.so*")):
+            return True
+    return False
 
 
 COMMON_NVTX_INCLUDE_DIR = _find_nvtx_include_dir()
@@ -168,7 +199,11 @@ COMMON_CXX_ARGS = [
     "-fopenmp",
 ]
 
-if os.environ.get("NVTX_DISABLE", "0") == "1":
+NVTX_DISABLED = (
+    os.environ.get("NVTX_DISABLE", "0") == "1"
+    or not _libnvtoolsext_available()
+)
+if NVTX_DISABLED:
     COMMON_CXX_ARGS.append("-DNVTX_DISABLE")
     COMMON_NVCC_ARGS.append("-DNVTX_DISABLE")
 
@@ -233,9 +268,10 @@ _STORE_EXTRA_LINK_ARGS = [
     "-lpthread",
 ]
 
-# Link NVTX runtime when NVTX instrumentation is enabled (default).
-# The C++ NVTX ranges in core/ use nvtxDomainRangePop from libnvToolsExt.
-if os.environ.get("NVTX_DISABLE", "0") != "1":
+# Link libnvToolsExt only when it exists. CUDA >= 12.9 ships NVTX3 header-only
+# and removes libnvToolsExt, so linking it there fails; NVTX_DISABLED handles
+# both the -DNVTX_DISABLE compile define and skipping the link.
+if not NVTX_DISABLED:
     _STORE_EXTRA_LINK_ARGS.append("-lnvToolsExt")
 
 if TORCH_LIB_DIR:
