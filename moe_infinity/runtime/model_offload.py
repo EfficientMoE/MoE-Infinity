@@ -164,6 +164,28 @@ def _remap_v5_batched_experts(
         del state_dict[down_key]
 
 
+def _identify_fp8_blockwise_pairs(keys):
+    key_set = set(keys)
+    pairs = []
+    for k in keys:
+        if k.endswith("_scale_inv"):
+            base = k[: -len("_scale_inv")]
+            if base in key_set:
+                pairs.append((base, k))
+    return pairs
+
+
+def _has_fp8_blockwise(config: object) -> bool:
+    qcfg = getattr(config, "quantization_config", None)
+    if qcfg is None:
+        return False
+    if isinstance(qcfg, dict):
+        method = qcfg.get("quant_method", "") or qcfg.get("fmt", "")
+    else:
+        method = getattr(qcfg, "quant_method", "") or getattr(qcfg, "fmt", "")
+    return "fp8" in str(method).lower()
+
+
 def _compute_config_fingerprint(config: object) -> str:
     fields = [
         "model_type",
@@ -639,10 +661,18 @@ class OffloadEngine(object):
                         _remap_v5_batched_experts(state_dict, self.config)
 
                         is_gptq_ckpt = is_gptq_quantized(self.config)
+                        _arch0_cast = (
+                            getattr(self.config, "architectures", None) or [""]
+                        )[0]
+                        is_glm_fp8_ckpt = (
+                            "GlmMoeDsa" in _arch0_cast
+                            and _has_fp8_blockwise(self.config)
+                        )
                         self._cast_state_dict_tensors(
                             state_dict,
                             is_gptq_ckpt=is_gptq_ckpt,
                             is_mxfp4_ckpt=is_mxfp4_ckpt,
+                            is_glm_fp8_ckpt=is_glm_fp8_ckpt,
                         )
 
                         if (
@@ -691,6 +721,33 @@ class OffloadEngine(object):
                                 ).contiguous()
                                 del state_dict[blocks_key]
                                 del state_dict[scales_key]
+
+                        arch0 = (
+                            getattr(self.config, "architectures", None) or [""]
+                        )[0]
+                        is_glm_fp8 = (
+                            "GlmMoeDsa" in arch0
+                            and _has_fp8_blockwise(self.config)
+                        )
+                        if is_glm_fp8:
+                            from moe_infinity.utils.fp8 import (
+                                dequant_fp8_blockwise,
+                            )
+
+                            fp8_pairs = _identify_fp8_blockwise_pairs(
+                                list(state_dict.keys())
+                            )
+                            for base_key, scale_key in fp8_pairs:
+                                w = state_dict.get(base_key)
+                                s = state_dict.get(scale_key)
+                                if w is None or s is None:
+                                    continue
+                                if w.dtype != torch.float8_e4m3fn:
+                                    continue
+                                state_dict[base_key] = dequant_fp8_blockwise(
+                                    w, s, dtype=torch.bfloat16, block_size=128
+                                )
+                                del state_dict[scale_key]
 
                         self._offload_state_dict(state_dict, empty_state_dict)
 
@@ -1231,6 +1288,7 @@ class OffloadEngine(object):
         *,
         is_gptq_ckpt: bool = False,
         is_mxfp4_ckpt: bool = False,
+        is_glm_fp8_ckpt: bool = False,
     ) -> None:
         quant_info = getattr(self, "_quant_info", None)
 
@@ -1238,6 +1296,13 @@ class OffloadEngine(object):
             try:
                 if is_mxfp4_ckpt and (
                     k.endswith("_blocks") or k.endswith("_scales")
+                ):
+                    state_dict[k] = v.to("cpu")
+                    continue
+
+                if is_glm_fp8_ckpt and (
+                    k.endswith("_scale_inv")
+                    or v.dtype == torch.float8_e4m3fn
                 ):
                     state_dict[k] = v.to("cpu")
                     continue
