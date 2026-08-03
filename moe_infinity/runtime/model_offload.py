@@ -48,6 +48,7 @@ from moe_infinity.models import (
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
+    SyncGlmMoeDsaMoEBlock,
     SyncGptOssMLP,
     SyncJambaMoEBlock,
     SyncMixtralSparseMoeBlock,
@@ -575,6 +576,13 @@ class OffloadEngine(object):
         _q35_mod._old_qwen3_5_sparse_moe = _q35_mod.Qwen3_5MoeSparseMoeBlock
         _q35_mod.Qwen3_5MoeSparseMoeBlock = SyncQwen3_5MoeSparseMoeBlock
 
+        try:
+            import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
+            _glm_mod._old_glm_moe_dsa_moe = _glm_mod.GlmMoeDsaMoE
+            _glm_mod.GlmMoeDsaMoE = SyncGlmMoeDsaMoEBlock
+        except (ImportError, AttributeError):
+            pass
+
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
         ) -> Callable:
@@ -783,15 +791,17 @@ class OffloadEngine(object):
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
                 )
+                _model_type = getattr(self.config, "model_type", "")
+                _force_eager = _model_type == "glm_moe_dsa"
                 model = cls._from_config(
                     self.config,
                     torch_dtype=self.dtype_cls
                     if self.config.model_type != "deepseek_v3"
                     else torch.bfloat16,
                     attn_implementation=(
-                        "flash_attention_2"
-                        if is_flash_attn_available
-                        else "eager"
+                        "eager"
+                        if _force_eager or not is_flash_attn_available
+                        else "flash_attention_2"
                     ),
                 )
 
@@ -849,9 +859,9 @@ class OffloadEngine(object):
                     self.expert_tensor_map
                 )
 
-                # for deepseek, we need to set the expert_tensor_map for the model
+                # for deepseek and glm, we need to set the expert_tensor_map for the model
                 first_k_dense_replace = 0
-                if "deepseek" in model_name:
+                if "deepseek" in model_name or "glm" in model_name.lower():
                     self.expert_prefetcher.first_k_dense_replace = (
                         self.config.first_k_dense_replace
                     )
@@ -886,6 +896,7 @@ class OffloadEngine(object):
                         or isinstance(module, SyncQwen3_5MoeSparseMoeBlock)
                         or isinstance(module, SyncOlmoeMoEBlock)
                         or isinstance(module, SyncJambaMoEBlock)
+                        or isinstance(module, SyncGlmMoeDsaMoEBlock)
                     ):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
@@ -943,6 +954,13 @@ class OffloadEngine(object):
         _q35_mod = transformers.models.qwen3_5_moe.modeling_qwen3_5_moe
         if hasattr(_q35_mod, "_old_qwen3_5_sparse_moe"):
             _q35_mod.Qwen3_5MoeSparseMoeBlock = _q35_mod._old_qwen3_5_sparse_moe
+
+        try:
+            import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
+            if hasattr(_glm_mod, "_old_glm_moe_dsa_moe"):
+                _glm_mod.GlmMoeDsaMoE = _glm_mod._old_glm_moe_dsa_moe
+        except (ImportError, AttributeError):
+            pass
 
     def _is_shared_expert_param(self, name: str) -> bool:
         # DeepSeek names shared experts ".shared_experts." (plural); Qwen3.5-MoE
