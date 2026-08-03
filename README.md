@@ -63,6 +63,7 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 | [Mixtral](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) | `mistralai/Mixtral-8x7B-Instruct-v0.1`, `Mixtral-8x22B` |
 | [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B) | `Qwen/Qwen3-30B-A3B` |
 | [Qwen3.5-MoE](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | `Qwen/Qwen3.5-35B-A3B` (text-only; see note) |
+| [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2-FP8) | `zai-org/GLM-5.2-FP8` (requires `transformers` >= 5.12) |
 | [GPT-OSS](https://huggingface.co/models?search=gpt-oss) | `openai/gpt-oss-*` |
 | [DBRX](https://huggingface.co/models?search=dbrx) | `databricks/dbrx-instruct` |
 | [Jamba](https://huggingface.co/models?search=jamba) | `ai21labs/Jamba-*` |
@@ -72,6 +73,8 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 > DeepSeek-V4-Flash is only registered when your installed `transformers` provides `DeepseekV4ForCausalLM`; otherwise it is skipped automatically.
 
 > Qwen3.5-MoE (`Qwen3_5MoeForConditionalGeneration`, requires `transformers` >= 5.12) is a vision-language checkpoint served **text-only**: its 256 routed experts are offloaded while the small text backbone — token embeddings, the hybrid linear (GatedDeltaNet) / full attention layers, shared expert, and `lm_head` — stays resident on GPU. The v5 packed expert tensors are expanded to per-expert on load. Vision and MTP weights are present but unused for text generation.
+
+> GLM-5.2 (`GlmMoeDsaForCausalLM`, `model_type="glm_moe_dsa"`) requires `transformers` >= 5.12 and is registered only when that class is importable (otherwise skipped automatically). Its 256 routed FP8 experts (block-scale e4m3, dequantized to BF16 on load) are offloaded; the 3 dense layers, shared expert, MLA attention, DSA indexer, and MTP layer stay resident. Sparse attention uses `attn_implementation="eager"`.
 
 ## Installation
 
@@ -247,6 +250,21 @@ torchrun --nproc-per-node 4 examples/deepseek_v4_flash_example.py \
 ```
 
 **Suggested hardware / environment (Path B):** **4x GPUs** (tensor-parallel mp4; mp1 exceeds the sparse-attention kernel's shared-memory limit), **>= ~140 GB pinned host RAM**, and the `v4flash` docker image (tilelang `fp4_gemm`; on Blackwell/SM120 the native `moe_infinity._v4_fp4` CUDA path is auto-selected and is 1.5–3.2x faster). The checkpoint must first be converted to the official mp-sharded format. See [`moe_infinity/models/deepseek_v4/README.md`](./moe_infinity/models/deepseek_v4/README.md) for checkpoint conversion, kernel selection, and validation details.
+
+### GLM-5.2 (FP8 Expert Offloading)
+
+GLM-5.2 (`zai-org/GLM-5.2-FP8`) runs through the drop-in `MoE` class. Its FP8 block-scaled routed experts are dequantized to BF16 on load and offloaded to host memory:
+
+```python
+from moe_infinity import MoE
+
+model = MoE("zai-org/GLM-5.2-FP8", {
+    "offload_path": "/ssd/moe-infinity/glm-5.2",
+    "device_memory_ratio": 0.5,
+})
+```
+
+> **Memory note:** dequant-on-load expands the ~753 GB of FP8 experts to ~1.5 TB in host RAM. On hosts with limited RAM, prefer the fp8-in-store path (keeps experts FP8 in the store) once available. Requires `transformers` >= 5.12.
 
 ### Benchmarking
 
