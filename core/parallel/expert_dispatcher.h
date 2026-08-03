@@ -10,7 +10,9 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -110,6 +112,8 @@ class ExpertDispatcher : public base::noncopyable {
     pending_.store(expected_pending);
   }
 
+  void SetScales(const std::map<std::string, torch::Tensor>& scales);
+
   std::vector<CallResult> WaitExpert() { return Wait(); }
   torch::Tensor WaitHiddenStates();
 
@@ -177,6 +181,9 @@ class ExpertDispatcher : public base::noncopyable {
   int num_threads_ = 1;
 
   std::vector<MoEMLP*> modules_;
+
+  bool fp8_in_store_ = false;
+  std::vector<std::vector<std::vector<torch::Tensor>>> fp8_scales_;
 };
 
 #define SET_TENSORS_AND_MODULE_FROM_BLOB(cls, module, node, device, \

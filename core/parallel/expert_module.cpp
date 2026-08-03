@@ -4,10 +4,13 @@
 // EfficientMoE Team
 
 #include "expert_module.h"
-// #include "memory/caching_allocator.h"
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
 #include "kernel/fused_moe_mlp.h"
+
+extern void fp8_dequant_blockwise_cuda(const void* weight, const void* scale,
+                                       void* out, int N, int K,
+                                       cudaStream_t stream);
 
 static const int64_t kMaxTokens = 256;
 
@@ -221,4 +224,32 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
     return;
   }
   DLOG_FATAL("MoEMLP::forward: expert_type not supported", expert_type_);
+}
+
+void MoEMLP::SetFp8Scales(const std::vector<torch::Tensor>& scales) {
+  fp8_scales_ = scales;
+  has_fp8_scales_ = !scales.empty();
+}
+
+void MoEMLP::DequantFp8Params(cudaStream_t stream) {
+  if (!has_fp8_scales_) return;
+  int device = at::cuda::current_device();
+  for (size_t i = 0; i < fp8_scales_.size() && i < param_.size(); ++i) {
+    auto& w = param_[i];
+    if (!w.defined()) continue;
+    auto wdtype = w.scalar_type();
+    if (wdtype != torch::kFloat8_e4m3fn && wdtype != torch::kUInt8) continue;
+    auto& s = fp8_scales_[i];
+    if (!s.defined()) continue;
+    auto s_gpu = s.to(torch::kFloat32).to(CUDA_DEVICE(device));
+    int N = w.size(0);
+    int K = w.size(1);
+    auto out = torch::empty(
+        {N, K},
+        torch::TensorOptions().dtype(torch::kBFloat16).device(CUDA_DEVICE(device)));
+    auto w_u8 = w.view(torch::kUInt8).contiguous();
+    fp8_dequant_blockwise_cuda(w_u8.data_ptr(), s_gpu.data_ptr(), out.data_ptr(),
+                               N, K, stream);
+    param_[i] = out;
+  }
 }

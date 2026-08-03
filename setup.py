@@ -221,6 +221,7 @@ _STORE_SOURCES = [
     "extensions/kernel/fused_moe_mlp.cu",
     "extensions/kernel/activation_kernels.cu",
     "extensions/kernel/topk_softmax_kernels.cu",
+    "extensions/kernel/v4_fp4/fp8_dequant.cu",
     # Python binding
     "core/python/py_archer_prefetch.cpp",
 ]

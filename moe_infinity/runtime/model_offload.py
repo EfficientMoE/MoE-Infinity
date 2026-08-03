@@ -766,6 +766,7 @@ class OffloadEngine(object):
                             if _fp8_in_store:
                                 from moe_infinity.utils.fp8_store import (
                                     extract_fp8_scales,
+                                    strip_scale_tensors,
                                 )
 
                                 if not hasattr(self, "_glm_fp8_scales"):
@@ -773,6 +774,7 @@ class OffloadEngine(object):
                                 self._glm_fp8_scales.update(
                                     extract_fp8_scales(state_dict)
                                 )
+                                strip_scale_tensors(state_dict)
                             else:
                                 from moe_infinity.utils.fp8 import (
                                     dequant_fp8_blockwise,
@@ -954,6 +956,7 @@ class OffloadEngine(object):
                         module_idx += 1
 
                 self.setup_archer_hooks(model)
+                self.deliver_fp8_scales_to_dispatcher()
                 return model
 
             return archer_from_pretrained

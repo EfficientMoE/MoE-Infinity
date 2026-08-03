@@ -15,7 +15,7 @@ SUPPORTED_QUANT_METHODS = frozenset({"gptq", "awq"})
 
 # MXFP4 has its own runtime path (utils/mxfp4.py); excluded here so
 # validate_quantization_support() does not reject GPT-OSS as "unsupported".
-_HANDLED_ELSEWHERE_METHODS = frozenset({"mxfp4"})
+_HANDLED_ELSEWHERE_METHODS = frozenset({"mxfp4", "fp8"})
 
 _QUANT_TENSOR_SUFFIXES = frozenset(
     {
