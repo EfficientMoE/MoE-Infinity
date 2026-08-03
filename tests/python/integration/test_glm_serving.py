@@ -69,28 +69,77 @@ def test_glm_serving_completions(tmp_path):
         proc.wait()
         pytest.fail("GLM serving did not become healthy within 120s")
 
-    payload = json.dumps(
-        {"model": model_dir, "prompt": "hello", "max_tokens": 8}
-    ).encode()
-    req = urllib.request.Request(
-        f"http://localhost:{port}/v1/completions",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-    )
     try:
+        payload = json.dumps(
+            {"model": model_dir, "prompt": "hello", "max_tokens": 8}
+        ).encode()
+        req = urllib.request.Request(
+            f"http://localhost:{port}/v1/completions",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
         with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read())
-    except Exception as exc:
+
+        assert "choices" in result, f"No choices in response: {result}"
+        assert len(result["choices"]) > 0
+        text = result["choices"][0].get("text", "")
+        assert isinstance(text, str) and len(text) > 0, (
+            f"Expected non-empty text, got: {result}"
+        )
+
+        chat_payload = json.dumps(
+            {
+                "model": model_dir,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 8,
+            }
+        ).encode()
+        chat_req = urllib.request.Request(
+            f"http://localhost:{port}/v1/chat/completions",
+            data=chat_payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(chat_req, timeout=60) as resp:
+            chat_result = json.loads(resp.read())
+
+        assert "choices" in chat_result, f"No choices in chat response: {chat_result}"
+        assert len(chat_result["choices"]) > 0
+        msg = chat_result["choices"][0].get("message", {})
+        assert isinstance(msg.get("content"), str) and len(msg["content"]) > 0, (
+            f"Expected non-empty message content, got: {chat_result}"
+        )
+        assert "finish_reason" in chat_result["choices"][0], (
+            f"Missing finish_reason: {chat_result}"
+        )
+
+        stream_payload = json.dumps(
+            {
+                "model": model_dir,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 8,
+                "stream": True,
+            }
+        ).encode()
+        stream_req = urllib.request.Request(
+            f"http://localhost:{port}/v1/chat/completions",
+            data=stream_payload,
+            headers={"Content-Type": "application/json"},
+        )
+        data_chunks = []
+        with urllib.request.urlopen(stream_req, timeout=60) as resp:
+            deadline_stream = time.monotonic() + 30
+            for raw_line in resp:
+                if time.monotonic() > deadline_stream:
+                    break
+                line = raw_line.decode("utf-8").strip()
+                if line.startswith("data:"):
+                    chunk = line[len("data:"):].strip()
+                    if chunk and chunk != "[DONE]":
+                        data_chunks.append(chunk)
+
+        assert len(data_chunks) > 0, "No SSE data chunks received from streaming endpoint"
+
+    finally:
         proc.kill()
         proc.wait()
-        pytest.fail(f"Completion request failed: {exc}")
-
-    proc.kill()
-    proc.wait()
-
-    assert "choices" in result, f"No choices in response: {result}"
-    assert len(result["choices"]) > 0
-    text = result["choices"][0].get("text", "")
-    assert isinstance(text, str) and len(text) > 0, (
-        f"Expected non-empty text, got: {result}"
-    )
