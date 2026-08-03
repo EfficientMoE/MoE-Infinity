@@ -19,7 +19,7 @@ def build_tiny_glm(save_dir: str) -> str:
     cfg.num_experts_per_tok = 2
     cfg.num_attention_heads = 8
     cfg.num_key_value_heads = 8
-    cfg.first_k_dense_replace = 1
+    cfg.first_k_dense_replace = 3
     cfg.num_nextn_predict_layers = 1
 
     if hasattr(cfg, "kv_lora_rank"):

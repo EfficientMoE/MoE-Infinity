@@ -1079,7 +1079,6 @@ class OffloadEngine(object):
         for name, _ in model.named_parameters(recurse=True):
             match = re.search(r"\d+", name)
             if name not in self.name_id_map:
-                print("param not in self.name_id_map", name)
                 continue
             if match:
                 if "expert" in name and "shared_experts" not in name:
@@ -1263,7 +1262,7 @@ class OffloadEngine(object):
                 )
 
         expert_layer_id = 0
-        if "deepseek" in self.model_name:
+        if "deepseek" in self.model_name or "glm" in self.model_name.lower():
             expert_layer_id = self.config.first_k_dense_replace
 
         output_device_index = None

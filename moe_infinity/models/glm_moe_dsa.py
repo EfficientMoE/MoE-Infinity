@@ -45,6 +45,15 @@ class SyncGlmMoeDsaMoEBlock(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
 
         self.gate = GlmMoeDsaTopkRouter(config)
+        self.experts = nn.ModuleList(
+            [
+                GlmMoeDsaMLP(
+                    config=config,
+                    intermediate_size=config.moe_intermediate_size,
+                )
+                for _ in range(config.n_routed_experts)
+            ]
+        )
         self.shared_experts = GlmMoeDsaMLP(
             config=config,
             intermediate_size=config.moe_intermediate_size * config.n_shared_experts,
