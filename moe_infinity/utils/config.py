@@ -98,6 +98,12 @@ class ArcherConfig:
             "help": "Attention backend name. 'default' = no-op PlaceholderAttentionBackend."
         },
     )
+    glm_fp8_in_store: bool = field(
+        default=False,
+        metadata={
+            "help": "Keep GLM-5.2-FP8 expert weights as FP8 in the host store instead of dequantizing to BF16 on load. Default False (dequant-on-load). Set True to halve host-RAM usage (~753GB vs ~1.5TB). Requires native fp8-in-store extension (T15)."
+        },
+    )
 
     @classmethod
     def load_from_file(cls, config_path: Union[str, os.PathLike]):

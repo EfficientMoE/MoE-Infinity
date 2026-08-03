@@ -371,6 +371,25 @@ class OffloadEngine(object):
         """Register a KVCacheManager for KV cache offloading."""
         self._kv_cache_manager = manager
 
+    def deliver_fp8_scales_to_dispatcher(self):
+        if not getattr(self.archer_config, "glm_fp8_in_store", False):
+            return
+        scales = getattr(self, "_glm_fp8_scales", None)
+        if not scales:
+            return
+        dispatcher = getattr(self, "expert_dispatcher", None)
+        set_scales = getattr(dispatcher, "set_scales", None)
+        if callable(set_scales):
+            set_scales(scales)
+        else:
+            warnings.warn(
+                "glm_fp8_in_store=True but native set_scales is unavailable; "
+                "build the extension with fp8-in-store support (T15). "
+                "Falling back to keeping FP8 weights without native dequant.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     def init(
         self,
         cls: Type[PreTrainedModel],
@@ -738,24 +757,40 @@ class OffloadEngine(object):
                             and _has_fp8_blockwise(self.config)
                         )
                         if is_glm_fp8:
-                            from moe_infinity.utils.fp8 import (
-                                dequant_fp8_blockwise,
+                            _fp8_in_store = getattr(
+                                self.archer_config,
+                                "glm_fp8_in_store",
+                                False,
                             )
-
-                            fp8_pairs = _identify_fp8_blockwise_pairs(
-                                list(state_dict.keys())
-                            )
-                            for base_key, scale_key in fp8_pairs:
-                                w = state_dict.get(base_key)
-                                s = state_dict.get(scale_key)
-                                if w is None or s is None:
-                                    continue
-                                if w.dtype != torch.float8_e4m3fn:
-                                    continue
-                                state_dict[base_key] = dequant_fp8_blockwise(
-                                    w, s, dtype=torch.bfloat16, block_size=128
+                            if _fp8_in_store:
+                                from moe_infinity.utils.fp8_store import (
+                                    extract_fp8_scales,
                                 )
-                                del state_dict[scale_key]
+
+                                if not hasattr(self, "_glm_fp8_scales"):
+                                    self._glm_fp8_scales = {}
+                                self._glm_fp8_scales.update(
+                                    extract_fp8_scales(state_dict)
+                                )
+                            else:
+                                from moe_infinity.utils.fp8 import (
+                                    dequant_fp8_blockwise,
+                                )
+
+                                fp8_pairs = _identify_fp8_blockwise_pairs(
+                                    list(state_dict.keys())
+                                )
+                                for base_key, scale_key in fp8_pairs:
+                                    w = state_dict.get(base_key)
+                                    s = state_dict.get(scale_key)
+                                    if w is None or s is None:
+                                        continue
+                                    if w.dtype != torch.float8_e4m3fn:
+                                        continue
+                                    state_dict[base_key] = dequant_fp8_blockwise(
+                                        w, s, dtype=torch.bfloat16, block_size=128
+                                    )
+                                    del state_dict[scale_key]
 
                         self._offload_state_dict(state_dict, empty_state_dict)
 
