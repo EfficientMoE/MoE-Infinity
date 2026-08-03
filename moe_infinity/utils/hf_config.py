@@ -106,6 +106,11 @@ def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
         num_decoder_layers = config.num_hidden_layers
         num_layers = config.num_hidden_layers
         num_experts = config.num_experts
+    elif "glmmoedsa" in arch:
+        num_encoder_layers = 0
+        num_decoder_layers = config.num_hidden_layers
+        num_layers = config.num_hidden_layers
+        num_experts = config.n_routed_experts
     elif "deepseek" in arch:
         num_encoder_layers = 0
         num_decoder_layers = config.num_hidden_layers
@@ -126,7 +131,7 @@ def parse_expert_id(
     param_name: str, config: PretrainedConfig
 ) -> Tuple[Optional[int], Optional[int]]:
     arch = (config.architectures or [""])[0].lower()
-    _, _, num_encoder_layers = parse_moe_param(config)
+    num_layers, _, num_encoder_layers = parse_moe_param(config)
     result = None
     layer_type = ""
     layer_id = 0
@@ -184,6 +189,19 @@ def parse_expert_id(
             layer_id, expert_id = result[0]
             layer_id = int(layer_id)
             expert_id = int(expert_id)
+    elif "glmmoedsa" in arch:
+        decoder_sparse_step = 1
+        layer_type = "decoder"
+
+        # example "model.layers.10.mlp.experts.3.gate_proj.weight"
+        result = re.findall(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.", param_name)
+        if result:
+            layer_id, expert_id = result[0]
+            layer_id = int(layer_id)
+            expert_id = int(expert_id)
+            # MTP layer guard: GLM has a MTP layer at index num_hidden_layers (78)
+            if layer_id >= num_layers:
+                return None, None
     elif "deepseek" in arch or "qwen3" in arch:
         decoder_sparse_step = 1
         layer_type = "decoder"
