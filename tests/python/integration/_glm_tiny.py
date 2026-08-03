@@ -6,7 +6,7 @@ import torch
 
 def build_tiny_glm(save_dir: str) -> str:
     os.environ.setdefault("HF_HUB_CACHE", "/mnt/raid0nvme0/public/huggingface/hub")
-    from transformers import AutoConfig
+    from transformers import AutoConfig, AutoTokenizer
     from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
 
     cfg = AutoConfig.from_pretrained("zai-org/GLM-5.2-FP8", trust_remote_code=True)
@@ -55,4 +55,10 @@ def build_tiny_glm(save_dir: str) -> str:
     model = GlmMoeDsaForCausalLM(cfg).to(torch.bfloat16)
     model.save_pretrained(save_dir, safe_serialization=True)
     cfg.save_pretrained(save_dir)
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        "zai-org/GLM-5.2-FP8", trust_remote_code=True
+    )
+    tokenizer.save_pretrained(save_dir)
+
     return save_dir
