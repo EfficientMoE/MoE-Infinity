@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 import warnings
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -84,6 +85,7 @@ class GlmMtpSpeculator:
         self.hf_model = hf_model
         self.device = _infer_device(hf_model)
         self.dtype = _infer_dtype(hf_model)
+        self.last_stats: Dict[str, Any] = {}
 
         cfg = hf_model.config
         self._build_mtp_layer(cfg)
@@ -163,6 +165,10 @@ class GlmMtpSpeculator:
         seq = input_ids.clone()
         generated = 0
 
+        _steps = 0
+        _accepted = 0
+        _per_step_accepted: List[int] = []
+
         while generated < max_new_tokens:
             logits, last_hidden = self._forward(seq)
             next_tok = self._greedy_token(logits)
@@ -170,6 +176,8 @@ class GlmMtpSpeculator:
             if int(next_tok.item()) in stops:
                 seq = torch.cat([seq, next_tok], dim=1)
                 generated += 1
+                _steps += 1
+                _per_step_accepted.append(0)
                 break
 
             tok_embed = embed_tokens(next_tok)
@@ -183,16 +191,50 @@ class GlmMtpSpeculator:
             verify_logits, _ = self._forward(verify_seq)
             verify_tok = self._greedy_token(verify_logits)
 
+            _steps += 1
             if int(proposed_tok.item()) == int(verify_tok.item()) and generated + 2 <= max_new_tokens:
                 seq = torch.cat([seq, next_tok, proposed_tok], dim=1)
                 generated += 2
+                _accepted += 1
+                _per_step_accepted.append(1)
                 if int(proposed_tok.item()) in stops:
                     break
             else:
                 seq = torch.cat([seq, next_tok], dim=1)
                 generated += 1
+                _per_step_accepted.append(0)
+
+        _expert_fetch_events = None
+        if os.environ.get("MOE_INFINITY_PROFILE_IO") == "1":
+            try:
+                from moe_infinity.profiling.io_profiler import IOProfiler
+                profiler = IOProfiler.instance()
+                _expert_fetch_events = {
+                    "cpu_to_gpu": getattr(profiler, "cpu_to_gpu_count", None),
+                    "expert_compute": getattr(profiler, "expert_compute_count", None),
+                }
+            except Exception:
+                pass
+
+        self.last_stats = {
+            "steps": _steps,
+            "accepted": _accepted,
+            "mean_accept_len": 1.0 + (_accepted / _steps if _steps > 0 else 0.0),
+            "per_step_accepted": _per_step_accepted,
+            "expert_fetch_events": _expert_fetch_events,
+        }
 
         return seq
 
 
-__all__ = ["GlmMtpSpeculator"]
+def run_glm_mtp_instrumented(
+    model: Any,
+    input_ids: torch.Tensor,
+    max_new_tokens: int = 64,
+) -> Dict[str, Any]:
+    spec = GlmMtpSpeculator(model)
+    spec.generate(input_ids, max_new_tokens=max_new_tokens, temperature=0.0)
+    return spec.last_stats
+
+
+__all__ = ["GlmMtpSpeculator", "run_glm_mtp_instrumented"]
