@@ -154,7 +154,7 @@ class MoE:
         # Qwen3.5-MoE interleaves linear (GatedDeltaNet) and full attention; the
         # native paged-KV engine assumes uniform full attention across layers, so
         # Phase 1 drives generation through HF's own forward instead.
-        if getattr(model_config, "model_type", "") == "qwen3_5_moe":
+        if getattr(model_config, "model_type", "") in ("qwen3_5_moe", "glm_moe_dsa"):
             self.use_native_engine = False
         default_max_seq_length = getattr(
             model_config, "max_position_embeddings", None

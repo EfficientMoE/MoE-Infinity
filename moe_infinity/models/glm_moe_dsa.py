@@ -52,6 +52,9 @@ class SyncGlmMoeDsaMoEBlock(nn.Module):
         self._hf_route_tokens = GlmMoeDsaMoE.route_tokens_to_experts
 
     def _route(self, hidden_flat: torch.Tensor):
+        dev = hidden_flat.device
+        if self.gate.e_score_correction_bias.device != dev:
+            self.gate.e_score_correction_bias = self.gate.e_score_correction_bias.to(dev)
         router_logits = self.gate(hidden_flat)
         return self._hf_route_tokens(self, router_logits)
 

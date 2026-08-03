@@ -577,11 +577,12 @@ class OffloadEngine(object):
             SyncJambaMoEBlock
         )
 
-        transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe = transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE
+        _dsv2_mod = transformers.models.deepseek_v2.modeling_deepseek_v2
+        _dsv2_cls = getattr(_dsv2_mod, "DeepseekV2MoE", None) or getattr(_dsv2_mod, "DeepseekV2Moe", None)
+        _dsv2_mod._old_deepseek_v2_moe = _dsv2_cls
+        _dsv2_attr = "DeepseekV2MoE" if hasattr(_dsv2_mod, "DeepseekV2MoE") else "DeepseekV2Moe"
+        setattr(_dsv2_mod, _dsv2_attr, SyncDeepseekV2MoEBlock)
         transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
-        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = (
-            SyncDeepseekV2MoEBlock
-        )
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = (
             SyncDeepseekV3MoEBlock
         )
@@ -1751,7 +1752,9 @@ class OffloadEngine(object):
             transformers.models.jamba.modeling_jamba._old_jamba_moe
         )
 
-        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe
+        _dsv2_mod2 = transformers.models.deepseek_v2.modeling_deepseek_v2
+        _dsv2_attr2 = "DeepseekV2MoE" if hasattr(_dsv2_mod2, "DeepseekV2MoE") else "DeepseekV2Moe"
+        setattr(_dsv2_mod2, _dsv2_attr2, _dsv2_mod2._old_deepseek_v2_moe)
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe
         transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
             transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
