@@ -354,6 +354,7 @@ if cuda_available:
             sources=[
                 "extensions/kernel/v4_fp4/v4_fp4_binding.cpp",
                 "extensions/kernel/v4_fp4/v4_fp4_dequant.cu",
+                "extensions/kernel/v4_fp4/fp8_dequant.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17", "-fPIC"],
