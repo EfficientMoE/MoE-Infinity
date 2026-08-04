@@ -255,6 +255,10 @@ an issue first.
 - **Multi-node distributed inference.** The current distributed module only
   supports single-host multi-GPU via NCCL; cross-host RPC scaffolding exists
   but is not production-tested.
+- **Block-diffusion (dflash) serving.** A design proposal for serving
+  block-diffusion LLMs on the offloading runtime — dflash kernels, PD-dflash
+  scheduling, and an expert-prefetch lookahead — lives in
+  [`docs/design/pd-dflash-moe-serving.md`](./docs/design/pd-dflash-moe-serving.md).
 
 ## 7. Where to Look When …
 
