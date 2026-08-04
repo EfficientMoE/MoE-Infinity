@@ -89,8 +89,12 @@ void ArcherPrefetchHandle::CleanUpResources() {
 }
 
 void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
-                                         torch::Tensor& buffer) {
-  auto tensor_id = kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
+                                         torch::Tensor& buffer,
+                                         std::uint32_t explicit_id) {
+  auto tensor_id =
+      (explicit_id != UINT32_MAX)
+          ? explicit_id
+          : kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
   void* old_ptr = (void*)buffer.data_ptr();
   DLOG_TRACE("Acquire tensor ", tensor_id, old_ptr);
 
@@ -135,8 +139,12 @@ void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
   kArcherTensorHandle->UpdateTensorMap(old_ptr, (void*)buffer.data_ptr());
 }
 void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
-                                         torch::Tensor& buffer) {
-  auto tensor_id = kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
+                                         torch::Tensor& buffer,
+                                         std::uint32_t explicit_id) {
+  auto tensor_id =
+      (explicit_id != UINT32_MAX)
+          ? explicit_id
+          : kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
   void* old_ptr = (void*)buffer.data_ptr();
   DLOG_TRACE("Release tensor ", tensor_id, old_ptr);
 

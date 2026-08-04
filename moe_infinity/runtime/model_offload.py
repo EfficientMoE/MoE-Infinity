@@ -1249,6 +1249,7 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             self.archer_engine.register(param.data, self.name_id_map[name])
+            param.ar_id = self.name_id_map[name]
             self.offload_set.add(param.data.data_ptr())
 
             if "shared" in name:
@@ -1258,6 +1259,7 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             self.archer_engine.register(buffer.data, self.name_id_map[name])
+            buffer.ar_id = self.name_id_map[name]
             self.offload_set.add(buffer.data.data_ptr())
 
         topo = self.get_topology(model)
@@ -1682,7 +1684,7 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                self.archer_engine.begin(self.request_id, param)
+                self.archer_engine.begin(self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF))
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
@@ -1694,7 +1696,7 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.begin(self.request_id, buf)
+                self.archer_engine.begin(self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF))
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.data.device)
@@ -1719,7 +1721,7 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                self.archer_engine.end(self.request_id, param)
+                self.archer_engine.end(self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF))
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
@@ -1729,7 +1731,7 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.end(self.request_id, buf)
+                self.archer_engine.end(self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF))
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.device)
