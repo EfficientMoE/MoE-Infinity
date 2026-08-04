@@ -6,7 +6,7 @@ import os
 import torch
 
 
-def build_tiny_glm_fp8(save_dir: str) -> str:
+def build_tiny_glm_fp8(save_dir: str, quantize_shared: bool = False) -> str:
     os.environ.setdefault("HF_HUB_CACHE", "/mnt/raid0nvme0/public/huggingface/hub")
     from transformers import AutoConfig, AutoTokenizer
     from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
@@ -80,7 +80,7 @@ def build_tiny_glm_fp8(save_dir: str) -> str:
 
     expert_weight_suffixes = ("gate_proj.weight", "up_proj.weight", "down_proj.weight")
     for name, param in list(model.named_parameters(recurse=True)):
-        if "shared_expert" in name:
+        if "shared_expert" in name and not quantize_shared:
             continue
         if not any(name.endswith(sfx) for sfx in expert_weight_suffixes):
             continue

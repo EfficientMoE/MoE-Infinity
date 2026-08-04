@@ -2,12 +2,7 @@ import warnings
 
 import torch
 
-from moe_infinity.utils.config import ArcherConfig
 from moe_infinity.utils.fp8_store import extract_fp8_scales, strip_scale_tensors
-
-
-def test_flag_default_off():
-    assert getattr(ArcherConfig(), "glm_fp8_in_store", None) is False
 
 
 def test_extract_fp8_scales():

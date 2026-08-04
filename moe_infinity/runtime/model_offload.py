@@ -372,8 +372,6 @@ class OffloadEngine(object):
         self._kv_cache_manager = manager
 
     def deliver_fp8_scales_to_dispatcher(self):
-        if not getattr(self.archer_config, "glm_fp8_in_store", False):
-            return
         scales = getattr(self, "_glm_fp8_scales", None)
         if not scales:
             return
@@ -383,9 +381,10 @@ class OffloadEngine(object):
             set_scales(scales)
         else:
             warnings.warn(
-                "glm_fp8_in_store=True but native set_scales is unavailable; "
-                "build the extension with fp8-in-store support (T15). "
-                "Falling back to keeping FP8 weights without native dequant.",
+                "GLM-5.2-FP8 routed experts are kept FP8 in the store but the "
+                "native set_scales dispatcher API is unavailable; build the "
+                "moe_infinity._v4_fp4 extension with fp8-in-store support. "
+                "Routed experts will not be dequantized correctly.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -758,42 +757,37 @@ class OffloadEngine(object):
                             and _has_fp8_blockwise(self.config)
                         )
                         if is_glm_fp8:
-                            _fp8_in_store = getattr(
-                                self.archer_config,
-                                "glm_fp8_in_store",
-                                False,
+                            from moe_infinity.utils.fp8 import (
+                                dequant_fp8_blockwise,
                             )
-                            if _fp8_in_store:
-                                from moe_infinity.utils.fp8_store import (
-                                    extract_fp8_scales,
-                                    strip_scale_tensors,
-                                )
 
-                                if not hasattr(self, "_glm_fp8_scales"):
-                                    self._glm_fp8_scales = {}
-                                self._glm_fp8_scales.update(
-                                    extract_fp8_scales(state_dict)
+                            if not hasattr(self, "_glm_fp8_scales"):
+                                self._glm_fp8_scales = {}
+                            fp8_pairs = _identify_fp8_blockwise_pairs(
+                                list(state_dict.keys())
+                            )
+                            for base_key, scale_key in fp8_pairs:
+                                w = state_dict.get(base_key)
+                                s = state_dict.get(scale_key)
+                                if w is None or s is None:
+                                    continue
+                                if w.dtype != torch.float8_e4m3fn:
+                                    continue
+                                _, expert_id = parse_expert_id(
+                                    base_key, self.config
                                 )
-                                strip_scale_tensors(state_dict)
-                            else:
-                                from moe_infinity.utils.fp8 import (
-                                    dequant_fp8_blockwise,
-                                )
-
-                                fp8_pairs = _identify_fp8_blockwise_pairs(
-                                    list(state_dict.keys())
-                                )
-                                for base_key, scale_key in fp8_pairs:
-                                    w = state_dict.get(base_key)
-                                    s = state_dict.get(scale_key)
-                                    if w is None or s is None:
-                                        continue
-                                    if w.dtype != torch.float8_e4m3fn:
-                                        continue
+                                if expert_id is not None:
+                                    # Routed expert: keep FP8 in the host store;
+                                    # the dispatcher dequantizes on-device.
+                                    self._glm_fp8_scales[base_key] = s
+                                else:
+                                    # Required by the model: attention, dense MLP
+                                    # and shared experts run in PyTorch (not the
+                                    # dispatcher), so dequantize them to BF16.
                                     state_dict[base_key] = dequant_fp8_blockwise(
                                         w, s, dtype=torch.bfloat16, block_size=128
                                     )
-                                    del state_dict[scale_key]
+                                del state_dict[scale_key]
 
                         self._offload_state_dict(state_dict, empty_state_dict)
 
@@ -825,6 +819,14 @@ class OffloadEngine(object):
                     # load the name_id_map
                     with open(name_id_map_file, "r") as f:
                         self.name_id_map = json.load(f)
+
+                    _arch0_reload = (
+                        getattr(self.config, "architectures", None) or [""]
+                    )[0]
+                    if "GlmMoeDsa" in _arch0_reload and _has_fp8_blockwise(
+                        self.config
+                    ):
+                        self._rebuild_glm_fp8_scales_from_ckpt()
 
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
@@ -955,6 +957,12 @@ class OffloadEngine(object):
 
                         module_idx += 1
 
+                if getattr(self.config, "model_type", "") == "glm_moe_dsa":
+                    self._load_resident_shared_experts(model)
+                    for _name in list(self.name_id_map.keys()):
+                        if self._is_shared_expert_param(_name):
+                            del self.name_id_map[_name]
+
                 self.setup_archer_hooks(model)
                 self.deliver_fp8_scales_to_dispatcher()
                 return model
@@ -1036,6 +1044,20 @@ class OffloadEngine(object):
             return
 
         remaining = set(wanted)
+        from moe_infinity.utils.fp8 import dequant_fp8_blockwise
+
+        def _resolve(param, name, weight, scale):
+            if weight.dtype == torch.float8_e4m3fn:
+                if scale is None:
+                    raise RuntimeError(
+                        f"FP8 shared-expert weight {name!r} is missing its "
+                        "_scale_inv; cannot dequantize resident shared experts."
+                    )
+                weight = dequant_fp8_blockwise(
+                    weight, scale, dtype=param.dtype, block_size=128
+                )
+            return weight.to(dtype=param.dtype, device="cpu").contiguous()
+
         for ckpt in self.ckpt_files:
             if not remaining:
                 break
@@ -1046,10 +1068,14 @@ class OffloadEngine(object):
                         if name not in keys:
                             continue
                         param = wanted[name]
-                        param.data = (
-                            f.get_tensor(name)
-                            .to(dtype=param.dtype, device="cpu")
-                            .contiguous()
+                        scale_key = name + "_scale_inv"
+                        scale = (
+                            f.get_tensor(scale_key)
+                            if scale_key in keys
+                            else None
+                        )
+                        param.data = _resolve(
+                            param, name, f.get_tensor(name), scale
                         )
                         param.requires_grad_(False)
                         param._moe_infinity_resident = True
@@ -1060,10 +1086,8 @@ class OffloadEngine(object):
                     if name not in state:
                         continue
                     param = wanted[name]
-                    param.data = (
-                        state[name]
-                        .to(dtype=param.dtype, device="cpu")
-                        .contiguous()
+                    param.data = _resolve(
+                        param, name, state[name], state.get(name + "_scale_inv")
                     )
                     param.requires_grad_(False)
                     param._moe_infinity_resident = True
@@ -1074,6 +1098,25 @@ class OffloadEngine(object):
             raise RuntimeError(
                 f"Missing shared_experts weights: {sorted(remaining)[:5]}"
             )
+
+    def _rebuild_glm_fp8_scales_from_ckpt(self):
+        # Reload-from-store path: FP8 block scales are NOT persisted in the store,
+        # so rebuild them from the checkpoint. Deliver every scale (superset): the
+        # dispatcher only applies a scale to a weight that is actually stored FP8,
+        # so scales for BF16-dequantized weights are simply ignored. This keeps
+        # reload compatible with stores whose non-routed weights are still FP8.
+        self._glm_fp8_scales = {}
+        for ckpt in self.ckpt_files:
+            if not ckpt.endswith(".safetensors"):
+                continue
+            with safe_open(ckpt, framework="pt", device="cpu") as f:
+                keys = set(f.keys())
+                for k in keys:
+                    if not k.endswith("_scale_inv"):
+                        continue
+                    base = k[: -len("_scale_inv")]
+                    if base in keys:
+                        self._glm_fp8_scales[base] = f.get_tensor(k)
 
     def get_topology(self, model):
         name_lst = []

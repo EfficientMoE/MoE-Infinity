@@ -253,7 +253,7 @@ torchrun --nproc-per-node 4 examples/deepseek_v4_flash_example.py \
 
 ### GLM-5.2 (FP8 Expert Offloading)
 
-GLM-5.2 (`zai-org/GLM-5.2-FP8`) runs through the drop-in `MoE` class. Its FP8 block-scaled routed experts are dequantized to BF16 on load and offloaded to host memory:
+GLM-5.2 (`zai-org/GLM-5.2-FP8`) runs through the drop-in `MoE` class:
 
 ```python
 from moe_infinity import MoE
@@ -264,7 +264,7 @@ model = MoE("zai-org/GLM-5.2-FP8", {
 })
 ```
 
-> **Memory note:** dequant-on-load expands the ~753 GB of FP8 experts to ~1.5 TB in host RAM. On hosts with limited RAM, prefer the fp8-in-store path (keeps experts FP8 in the store) once available. Requires `transformers` >= 5.12.
+> **Memory note:** the FP8 block-scaled routed experts are kept FP8 in the host store (~753 GB) and dequantized on-device by the expert dispatcher, which requires the native `moe_infinity._v4_fp4` extension. Weights that run in PyTorch rather than the dispatcher — MLA attention, the DSA indexer, the dense-layer MLPs, and the shared expert — are dequantized to BF16 on load. Requires `transformers` >= 5.12.
 
 ### Benchmarking
 

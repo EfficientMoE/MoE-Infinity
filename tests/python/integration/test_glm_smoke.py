@@ -5,31 +5,15 @@ import pytest
 pytestmark = pytest.mark.gpu
 
 
-def _host_ram_available_gb():
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) / (1024 ** 2)
-    except OSError:
-        return 0.0
-    return 0.0
-
-
 @pytest.mark.skipif(
     os.environ.get("MOE_GLM_SMOKE") != "1",
-    reason="Set MOE_GLM_SMOKE=1 to run the heavy GLM-5.2 end-to-end smoke (dequant-on-load needs ~1.5TB host RAM).",
+    reason="Set MOE_GLM_SMOKE=1 to run the heavy GLM-5.2 end-to-end smoke.",
 )
 def test_glm_generate_smoke(tmp_path):
     import torch
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
-    if _host_ram_available_gb() < 1600:
-        pytest.skip(
-            f"insufficient host RAM ({_host_ram_available_gb():.0f}GB free); "
-            "dequant-on-load needs ~1.5TB"
-        )
 
     from transformers import AutoTokenizer
 
@@ -51,15 +35,13 @@ def test_glm_generate_smoke(tmp_path):
 
 @pytest.mark.skipif(
     os.environ.get("MOE_GLM_SMOKE") != "1",
-    reason="Set MOE_GLM_SMOKE=1 for the heavy GLM-5.2 32k-prefill test (needs ~1.5TB host RAM).",
+    reason="Set MOE_GLM_SMOKE=1 for the heavy GLM-5.2 32k-prefill test.",
 )
 def test_glm_long_context_prefill(tmp_path):
     import torch
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
-    if _host_ram_available_gb() < 1600:
-        pytest.skip("insufficient host RAM for dequant-on-load")
     from moe_infinity import MoE
 
     model = MoE(
