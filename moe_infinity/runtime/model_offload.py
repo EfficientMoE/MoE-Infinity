@@ -1233,14 +1233,15 @@ class OffloadEngine(object):
                 ret_dict[i] = list(ret_dict[i].values())
 
         topology = list(ret_dict.items())
-        # Canonicalize each node's tensor_ids to ascending id == store/offload
-        # order. The C++ node loaders pack the host buffer and create per-slot
-        # views in tensor_ids order, so it MUST match the physical store layout;
-        # otherwise a dense node spanning a partition boundary rebinds the wrong
-        # slot (e.g. q_a_layernorm.weight[2048] <- router bias[256]).
+        # Canonicalize DENSE nodes' tensor_ids to ascending id == store/offload
+        # order so the C++ per-slot views match the physical store layout (fixes
+        # q_a_layernorm[2048] <- router[256] mis-map when a dense node spans a
+        # partition). Expert nodes carry positional [gate,up,down] tensors the
+        # fused MoE kernel reads by slot, so they must KEEP their order.
         for _stored_name, id_groups in topology:
-            for id_list in id_groups:
-                id_list.sort()
+            if len(id_groups) != 1:
+                continue
+            id_groups[0].sort()
         return topology
 
     def setup_archer_hooks(self, model):
