@@ -71,7 +71,7 @@ prototype. Pairs that **MoE-Infinity already supports as targets**:
 
 > **Relatives (not DFlash):** *native* block-diffusion LLMs — Fast-dLLM v2, BD3LM,
 > and the diffusion-MoE **LLaDA-MoE** — generate by iterative denoising *as the
-> decode itself*. They are a harder, separate serving regime (see §9); DFlash
+> decode itself*. They are a harder, separate serving regime (see §11); DFlash
 > instead confines diffusion to a **drafter** and keeps AR-style verification.
 
 ```mermaid
@@ -278,7 +278,84 @@ expert set → fetch), so the design should carry across these unchanged.
 bound)** — showing the co-design approaches resident-expert throughput *without*
 holding the target's experts resident.
 
-## 9. Related work
+## 9. Prototype path (Python-first)
+
+A working prototype needs **no C++ changes** — every hook already exists:
+
+1. **Draft/verify loop.** Wire a `z-lab` DFlash draft to the offloaded target via the
+   existing `spec_decode/dflash.py` `DFlashSpeculator` (pure Python; wraps the draft's
+   `spec_generate()`, `dflash.py:96,135`). Keep the draft resident.
+2. **Route-ahead router.** After the draft proposes the `B`-token block, run the target
+   gate on those tokens and call `sglang_topk_softmax(gating_output, k, Eℓ)`
+   (`kernel/sglang_adapter.py:6`) — or Triton `launch_fused_softmax_topk_nobias`
+   (`kernel/router.py:109`) — per layer to get the **exact** `topk` expert IDs. The
+   gate projection is a small matmul; the top-k-softmax kernel already exists
+   (`extensions/kernel/topk_softmax_kernels.cu`).
+3. **Issue prefetch.** Feed those IDs to `ExpertPrefetcher.prefetch_experts_list(layer_id,
+   expert_ids)` (`memory/expert_prefetcher.py:50`), which calls native
+   `enqueue_prefetch(tensor_id, gpu_id)` (`core/python/py_archer_prefetch.cpp:85`). The
+   C++ side already runs the H2D on a **non-blocking fetch stream**
+   (`core/parallel/expert_dispatcher.cpp:115-117`), so it overlaps draft/verify compute
+   with no new plumbing.
+4. **Verify + correct.** The width-`B` verify reuses the prefill path
+   (`serving/batch.py` `split_prefill_decode_batch`); any expert not resident at verify
+   time is filled by the existing `correct_prefetch()` (`expert_prefetcher.py:138`). The
+   existing `speculative_prefetch(layer_idx, router_logits)` (`:106`) and its trigger in
+   `distributed/expert_executor.py:79-83` are the seam to extend.
+5. **Scheduler.** Start with DRAFT/VERIFY states + the deficit budget as **Python** in
+   `serving/scheduler.py`; harden only if it shows overhead (§10).
+
+This is enough to run the **§8 gating experiment** (route-ahead coverage, acceptance
+`a`, rejected-token waste) on `Qwen3-Coder-30B-A3B` / `gpt-oss-20b` — Python-only.
+
+## 10. Implementation path: Python vs C++ (benchmark-gated)
+
+The route-ahead window (`t_draft + t_router`) is **small**, so prefetch-issue latency
+matters. Rule: **start in Python; move a hop to C++ only when a benchmark shows the
+window is not hidden.** C++ wiring is performance-oriented and must be justified by a
+paired A/B benchmark on the RTX PRO 6000 — never adopted speculatively.
+
+| Component | Layer today | Change | Perf-critical? | Justifying benchmark |
+|---|---|---|---|---|
+| DFlash draft/verify loop | Python `spec_decode/dflash.py:96` | wire `z-lab` draft | No (correctness) | acceptance `a` sanity |
+| Route-ahead router on draft block | Python + CUDA `topk_softmax` | new call site | No — gate matmul ≪ expert MLP | BM1 |
+| **Prefetch issuance** | Python loop → C++ `enqueue_prefetch` per expert (`expert_prefetcher.py:50`) | **batch it** | **YES** | BM2 |
+| **Prefetch priority** | C++ `priority=1` (`archer_prefetch_handle.cpp:226-238`); `NUM_PRIORITY=20` (`task_scheduler.h:24`); on-demand `0` | **new "route-ahead" band** | **YES** | BM3 |
+| Fetch stream / overlap | C++ non-blocking fetch + H2D streams (`expert_dispatcher.cpp:115`, `core/memory/stream_pool.h`) | none | — | BM4 |
+| Width-`B` verify attention | reuses prefill kernel | none / tune | maybe | verify latency vs `B` |
+| Scheduler (DRAFT/VERIFY, 2-D deficit) | Python `serving/scheduler.py` | Python first | maybe | scheduler-tick cost |
+
+**The two likely C++ changes** (both in the native prefetch engine, both benchmark-gated):
+1. **Batched prefetch issuance.** `prefetch_experts_list` makes **one Python→C++
+   `enqueue_prefetch` call per expert**; a *saturated* block touches ≈`Eℓ` experts × `L`
+   layers → hundreds–thousands of pybind round-trips per round. Add a batched pybind
+   (extend `prefetch_tensors`, `py_archer_prefetch.cpp:82`) taking the whole
+   `(layer, expert_ids)` set in one call. **BM2** decides whether Python batching
+   suffices or issuance must move fully into C++.
+2. **A dedicated route-ahead priority band.** Route-ahead fetches should preempt
+   background prefetch but yield to true on-demand misses — a priority level between
+   on-demand (`0`) and background prefetch (`1`) in the task scheduler. **BM3** decides
+   if it matters.
+
+**Benchmarks (add to §8; RTX PRO 6000, FP4 experts):**
+- **BM1 — router-ahead cost:** (gate proj + `topk_softmax`) on a `B`-token block vs
+  `t_verify`; confirms route-ahead is cheap vs what it saves.
+- **BM2 — issuance micro-bench:** enqueue latency for a saturated block (`Eℓ≈128 × L`):
+  Python per-expert vs batched pybind vs C++-internal; report µs and whether
+  `≤ t_draft + t_router`.
+- **BM3 — priority ablation:** exposed-fetch time + tokens/s with route-ahead at default
+  `priority=1` vs a dedicated band vs on-demand `0`.
+- **BM4 — overlap trace (nsys/CUPTI):** fraction of expert-H2D bytes overlapped with
+  draft+verify compute — the ground truth for "is the fetch hidden?".
+- **BM5 — end-to-end:** tokens/s + prefetch coverage, **Python-issue vs C++-issue**, on
+  `Qwen3-Coder-30B-A3B` and `gpt-oss-20b`.
+
+> Bottom line: the **prototype is Python** and answers the science question (coverage,
+> `a`, waste); the **C++ wiring is an optimization** (batched issuance + a priority
+> band), and each hop ships only if BM2/BM3/BM4 show the route-ahead window is otherwise
+> exposed. **No C++ change ships without its benchmark.**
+
+## 11. Related work
 
 - **DFlash** (Z Lab; Chen, Liang, Liu; arXiv:2602.06036) — block-diffusion drafter +
   KV-injected target features; SGLang (`--speculative-algorithm DFLASH`) & vLLM
@@ -295,7 +372,7 @@ holding the target's experts resident.
   rounds with an expert-bandwidth budget.
 - **MoE-Infinity** (arXiv:2401.14361) — expert offloading substrate this extends.
 
-## 10. Symbol table
+## 12. Symbol table
 
 | Symbol | Meaning |
 |---|---|
@@ -313,7 +390,7 @@ holding the target's experts resident.
 | `τ`, `β` | per-iteration token / expert-byte budgets |
 | `D_τ`, `D_β`, `D_max` | carried deficits and the deficit cap |
 
-## 11. Open questions
+## 13. Open questions
 
 - **Gating experiment:** measure **route-ahead prefetch coverage** and **rejected-
   position waste** vs. acceptance `a` on `Qwen3-Coder-30B-A3B` + `gpt-oss-20b` with
