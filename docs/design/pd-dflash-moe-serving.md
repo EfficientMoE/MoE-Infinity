@@ -1,336 +1,326 @@
-# PD-dflash-MoE: Serving Block-Diffusion LLMs on an Expert-Offloading MoE System
+# PD-DFlash-MoE: Expert-Offload-Aware DFlash Speculative Decoding for MoE Targets
 
 > **Status:** Draft — design/architecture proposal. **No implementation**; this
-> document motivates and sketches a design, and states the one experiment that
-> gates it.
-> **Anchor example:** dense Qwen block-diffusion ("dflash", e.g. Fast-dLLM v2 /
-> BD3LM) is used to teach the mechanics; the real target is the **MoE × diffusion**
-> intersection (e.g. LLaDA-MoE) where MoE-Infinity's expert offloading applies.
+> document motivates and sketches a design and states the experiment that gates it.
+> **What "DFlash" is here:** the **DFlash** method of *Chen, Liang, Liu — "DFlash:
+> Block Diffusion for Flash Speculative Decoding"* (Z Lab, [z-lab.ai](https://z-lab.ai/projects/dflash/),
+> arXiv:2602.06036). DFlash is a **speculative-decoding** method: a lightweight
+> (~0.8 B) **block-diffusion draft model** proposes a whole block of tokens in a
+> single parallel forward pass; the large **target model verifies** them in
+> parallel (lossless — the target's output distribution is preserved).
+> **Target hardware:** a single **sm_120 / RTX PRO 6000 (Blackwell)** GPU, available
+> locally; MoE target experts are **offloaded** (host RAM / SSD) with the native
+> FP4 path (`moe_infinity._v4_fp4`).
 
 ## TL;DR / Thesis
 
-Autoregressive (AR) serving stacks — including MoE-Infinity — assume **(i)**
-single-query causal decode attention and **(ii)** prefill-once + an append-only KV
-cache reused token-by-token. Block-diffusion LLMs ("dflash") break **both**: they
-generate a *block* of tokens by running **N parallel denoising steps** over a
-*bidirectionally-attended* block, with **KV that must be refreshed in place** each
-step. Every block boundary becomes a **recurring re-prefill**, which makes
-prefill/decode (PD) scheduling qualitatively harder ("PD-dflash scheduling").
+Speculative decoding hides an autoregressive (AR) target's latency by having a cheap
+**drafter** propose tokens that the target **verifies** in parallel. For a
+**Mixture-of-Experts target whose experts are offloaded**, the bottleneck is not
+draft quality — it is **fetching the target's experts** for each verification step.
+MoE-Infinity's whole value is hiding that fetch.
 
-**The MoE-specific insight (the differentiator).** For an *expert-offloading*
-system, block-diffusion is not merely harder — it exposes a **structural prefetch
-lookahead** that AR decoding lacks. Because the *same* block is re-denoised N times
-over *fixed* positions, step 1's routing largely reveals the expert working set
-that steps 2..N re-touch. Diffusion therefore hands the prefetcher an **N-step
-lookahead window over a stable working set**, converting diffusion's "wider,
-burstier" expert working set from a **cost** into an **amortization advantage**:
-one wide expert fetch is hidden under the block's N-step compute window. This is
-exactly the memory-constrained regime MoE-Infinity exists to serve.
+**The insight (why DFlash × expert-offloading is synergistic).** A DFlash draft
+proposes the **entire block of candidate tokens before the target verifies them**.
+Those candidate token IDs *determine* which target experts the verification will
+touch — via the target's (cheap) router. So we can **run the target router on the
+draft block, get the exact expert set, and prefetch those experts during the draft
+forward**, so they are resident when the expensive width-`B` verification MLPs run.
+This is a **route-ahead prefetch**: not a *speculative* guess (as in AR decode or
+native diffusion), but a **near-exact** prediction of the verification's expert
+working set, computed one step ahead of the fetch that dominates offloaded-MoE cost.
 
-> **The whole thesis reduces to one measurable number** — the per-step expert
-> *churn* `q` (§6, §8). Run that measurement first; if it fails, pivot to the
-> speculative-decoding framing (§9).
+> DFlash turns MoE-Infinity's hardest problem — hiding target expert transfer — into
+> a *scheduled, near-exact prefetch*, because the drafted block reveals the target's
+> expert working set before the target needs it.
 
-## 1. Background: block-diffusion "dflash"
+**Existing seed:** MoE-Infinity already ships `spec_decode/dflash.py`
+(`DFlashSpeculator`, `spec_generate()`). This design **extends that seed** with
+expert-offload-aware route-ahead prefetch + scheduling; it is a re-composition, not
+a rewrite.
 
-**Concrete Qwen instances that exist today.**
-- **Fast-dLLM v2** (adapts Qwen2.5-1.5B / 7B-Instruct into block-diffusion decoders
-  with ~1B tokens of fine-tuning). Hierarchical cache: a **block-level cache**
-  (clean prefix) + a **sub-block DualCache** (refreshed per step). ~2.5× over AR
-  decode.
-- **BD3LM** (`Qwen3-0.6B-diffusion-bd3lm`, `Qwen2.5-Coder-diffusion-bd3lm`):
-  `block_size=32`, an explicit number of denoising `steps`, `low_confidence`
-  remasking.
-- **MoE × diffusion intersection:** **LLaDA-MoE** (diffusion + MoE) is the concrete
-  target class; a Qwen-MoE-diffusion would be the ideal fit for MoE-Infinity.
+## 1. Background: DFlash speculative decoding
 
-**Decode mechanics (per block).**
-1. Append a masked block of `B` tokens after the clean prefix.
-2. Run `N` denoising steps. Each step is one forward pass over the block with
-   **bidirectional** attention inside the block + causal attention to the clean
-   prefix; all masked positions are predicted in parallel.
-3. **Remasking:** commit a subset of positions (e.g. highest-confidence), re-mask
-   the rest, iterate.
-4. When the block resolves, it becomes clean prefix; move to the next block.
+**Mechanics (per speculation round).**
+1. **Draft.** A small block-diffusion model proposes `B` candidate tokens in a
+   single parallel forward (block sizes 8–16; often **a single denoising step**).
+   The draft is conditioned on the target's hidden features via **KV injection**
+   into every draft layer, and reuses the target's embedding + LM head — only a few
+   intermediate layers are trained (~0.8 B params).
+2. **Verify.** The **target** runs **one width-`B` forward** over the `B` candidates
+   and accepts the longest correct prefix (acceptance length `a ≤ B`; reported
+   `a ≈ 6–8` at `B=16`).
+3. **Advance.** Accepted tokens extend the sequence (append-only KV, as in AR); the
+   next round drafts from the last accepted token.
 
-**Why AR KV caching breaks.** Committing a token *shifts* the KV activations of the
-other in-block tokens (bidirectional attention), so exact AR caching is impossible.
-Systems use **approximate caching** (Fast-dLLM DualCache, dKV-Cache) that refreshes
-KV and reuses it across intervening steps. At the serving layer this means dLLM
-**decodes are block-sized**, **prefills recur** (cache-refresh re-prefills at block
-boundaries), and **bidirectional attention precludes chunked prefill** — so the AR
-stall-free colocated-batching trick does not apply.
+DFlash reports up to **~6× lossless** speedup on Qwen3-8B (~2.5× over EAGLE-3), and
+**3.0–3.5×** on the MoE **Qwen3-Coder-30B-A3B**. Because drafting is a single
+parallel forward, its cost is ~flat in block size — so `B` can be large.
+
+**Ready-made draft/target pairs (`z-lab`, HuggingFace).** No training required to
+prototype. Pairs that **MoE-Infinity already supports as targets**:
+
+| Target (MoE-Infinity supported) | DFlash draft (`z-lab/…`) |
+|---|---|
+| `openai/gpt-oss-20b` | `z-lab/gpt-oss-20b-DFlash` |
+| `openai/gpt-oss-120b` | `z-lab/gpt-oss-120b-DFlash` |
+| `Qwen/Qwen3-Coder-30B-A3B` (MoE) | `z-lab/Qwen3-Coder-30B-A3B-DFlash` |
+| `Qwen/Qwen3.5-35B-A3B` (MoE) | `z-lab/Qwen3.5-35B-A3B-DFlash` |
+| `Qwen/Qwen3.5-122B-A10B` (MoE) | `z-lab/Qwen3.5-122B-A10B-DFlash` |
+| DeepSeek-V4-Flash | *"coming soon"* (z-lab) |
+
+> **Relatives (not DFlash):** *native* block-diffusion LLMs — Fast-dLLM v2, BD3LM,
+> and the diffusion-MoE **LLaDA-MoE** — generate by iterative denoising *as the
+> decode itself*. They are a harder, separate serving regime (see §9); DFlash
+> instead confines diffusion to a **drafter** and keeps AR-style verification.
 
 ```mermaid
 flowchart LR
-  P["Clean prefix KV<br/>(append-only)"] --> M["Append masked block<br/>B tokens"]
-  M --> S1["Denoise step 1<br/>(B-wide, bidirectional)"]
-  S1 --> C1{"commit c tokens<br/>(confidence)"}
-  C1 -->|re-mask rest| S2["Denoise step 2..N<br/>(DualCache refresh)"]
-  S2 --> C2{"block resolved?"}
-  C2 -->|no| S2
-  C2 -->|yes| F["Finalize block →<br/>becomes clean prefix"]
-  F --> M
+  D["DFlash draft (small, resident)<br/>propose B candidate tokens<br/>(1 parallel forward)"]
+  D --> R["target ROUTER on draft block<br/>(gates only — cheap)"]
+  R --> PF["route-ahead PREFETCH<br/>target experts (host→GPU)"]
+  D -. overlap .-> PF
+  PF --> V["target VERIFY<br/>width-B forward (offloaded MoE MLPs)"]
+  V --> A["accept prefix a ≤ B<br/>(append-only KV)"]
+  A -->|next round| D
 ```
 
-## 2. MoE-Infinity baseline and the mismatch
+## 2. MoE-Infinity baseline and where DFlash plugs in
 
-MoE-Infinity = **expert offloading** (weights on CPU/SSD, fetched just-in-time; an
-activation-aware cache; a tracer → predictor → prefetcher that hides transfer cost),
-plus a production continuous-batching server. Each relevant layer and its exact
-mismatch with dflash:
+MoE-Infinity = **expert offloading** (target expert weights on CPU/SSD, fetched
+just-in-time; activation-aware cache; tracer → predictor → prefetcher) + a
+continuous-batching server. DFlash integration surface:
 
-| Layer | Today (AR) | dflash needs | Code |
+| Concern | Today (AR) | DFlash needs | Code |
 |---|---|---|---|
-| Sequence state | WAITING / PREFILL / DECODE | + **DENOISE** (block re-prefill) | `serving/sequence.py` (`SequenceStatus`) |
-| Scheduler | separate `prefill`/`decode` batches; clean split | recurring re-prefill; block-sized decodes; no chunking | `serving/scheduler.py` |
-| Batch PD split | `split_prefill_decode_batch()` (mixed already supported) | reuse; "prefill" now = a width-`B` denoise step | `serving/batch.py` |
-| Attention | `_prefill_forward` / `_decode_forward`; decode = single-query causal | **block-parallel** mask (block-diagonal + causal-prefix) | `runtime/attention_backend.py` |
-| KV cache | **append-only** paged (slot_mapping) | **refresh-in-place** DualCache over the live block | `serving/kv_cache.py` |
-| Router / MoE MLP | fused topk-softmax + fused MoE MLP; decode-width | width `B` every step, **N× per block** | `core/parallel/expert_dispatcher.cpp` |
-| Expert memory | tracer on **AR token trajectories**; predictor; prefetcher | tracer on **block-diffusion trajectories**; lookahead | `memory/{expert_tracer,expert_predictor,expert_prefetcher}.py` |
-| Budget | expert-vs-KV split (static-ish) | rebalance **per denoising step** | `memory/memory_coordinator.py` |
-| **Existing seed** | `DFlashSpeculator` (block-parallel drafter) | the hook this generalizes | `spec_decode/dflash.py` |
+| Loop | token-by-token decode | **draft → verify** rounds (accept `a≤B`) | `spec_decode/dflash.py` (`DFlashSpeculator`) |
+| Verify step | single-query causal decode | **width-`B`** target forward (mini-prefill) | `runtime/attention_backend.py`, `serving/batch.py` (`split_prefill_decode_batch`) |
+| KV | append-only paged | append-only for target (unchanged); draft uses **KV injection** | `serving/kv_cache.py` |
+| Router / MoE MLP | decode-width | **width-`B`** verification; router run **ahead** on draft block | `core/parallel/expert_dispatcher.cpp`, fused topk-softmax |
+| Expert prefetch | AR token-trajectory speculation | **route-ahead** (exact set from draft block) | `memory/{expert_tracer,expert_predictor,expert_prefetcher}.py` |
+| Budget | expert-vs-KV split | rebalance around bursty width-`B` verify | `memory/memory_coordinator.py` |
+| Scheduling | PREFILL/DECODE queues | **DRAFT/VERIFY** rounds, variable acceptance | `serving/scheduler.py` |
 
-**Takeaway:** MoE-Infinity already has the primitives (PD split, paged KV, expert
-prefetch, a `dflash` seed). This is a **re-composition**, not a rewrite.
+**Draft placement.** The DFlash draft is small and dense → keep it **resident** on
+the sm_120 GPU (it reuses the target embedding + LM head). Only the **target MoE
+experts** are offloaded — exactly MoE-Infinity's job.
 
 ## 3. Three coupled axes
 
-1. **Kernels (§4)** — a block-parallel attention kernel + a two-level cache.
-2. **PD-dflash scheduling (§5)** — recurring re-prefills under a deficit budget.
-3. **Expert-prefetch lookahead (§6)** — the differentiator, unique to offloading MoE.
+1. **Verification kernels (§4)** — the target forward is width-`B`, not width-1.
+2. **Draft/verify PD scheduling (§5)** — variable acceptance, bursty verify steps.
+3. **Route-ahead expert prefetch (§6)** — the differentiator, unique to offloaded MoE.
 
-They are coupled: the lookahead (§6) changes the scheduler's admission unit (§5),
-and the kernel's fixed-N mode (§4) makes the lookahead more predictable.
+They couple: the draft (axis 2) produces the block that lets the router predict and
+prefetch the verify experts (axis 3), which must be resident before the width-`B`
+verification kernel (axis 1) runs.
 
-## 4. Kernel design
+## 4. Verification & draft kernels
 
-**Mask.** Each of the `B` live-block queries attends to `[clean-prefix(P) :
-block(B)]`: full attention to the finalized prefix + an **all-ones (bidirectional)**
-`B×B` block. This is a **block-diagonal(bidirectional) + dense-prefix** mask —
-distinct from AR prefill (growing lower-triangular) and AR decode (single query row).
+**Target verification = a width-`B` mini-prefill.** Verifying `B` candidates is one
+causal forward over `B` new positions against the append-only KV prefix — this
+already maps onto MoE-Infinity's prefill path (`split_prefill_decode_batch`), *not*
+the single-query decode kernel. The MoE MLPs run at **width `B`** (the expert-heavy,
+offload-bound part).
 
-**Two-level cache.**
-- **Block-level cache = clean-prefix KV** — append-only; lives in the existing
-  `PagedKVCache`; grows by `B` only when a block *finalizes*. No new machinery.
-- **Sub-block DualCache = KV of the `B` live positions** — **mutable**, refreshed
-  each step, size `O(B × layers)`; kept **outside** the paged pool as a fixed-size
-  scratch buffer, cleanly sidestepping the append-only mismatch.
+**Draft forward.** Block-diffusion, single (or few) parallel denoising step(s) over
+`B` masked positions with **KV-injected** target features. Small and dense → cheap,
+resident; no offload. (If a draft variant uses multi-step denoising, the intra-block
+bidirectional mask + a small mutable sub-block cache from the *native*-diffusion
+design apply — but single-step DFlash avoids this entirely.)
 
-**Fusion.** Fuse into one kernel: prefix-attention read (block-level cache) +
-intra-block bidirectional attention (sub-block scratch) + write refreshed sub-block
-KV — because the sub-block K/V is read *and* written per step and reused across
-steps. Keep **routing** (topk-softmax) and **remasking** (top-k/threshold) as
-separate, reused kernels.
-
-**CUDA-graph capture (the sharp edge).** Decode-graph capture is shape-static;
-dflash breaks it via variable `N` and variable committed-count. Two modes, a knob:
-- **fixed-N (capturable):** commit exactly `c = ⌈B/N⌉` tokens/step → static shapes →
-  one captured graph per prefix-length bucket, replayed `N×`. Slight quality cost.
-- **confidence-adaptive (eager):** variable commit → no capture → best quality.
-
-Fixed-N is doubly attractive for offloading: capturable **and** it makes the
-step-to-step expert set more predictable (better lookahead, §6).
+**CUDA-graph capture (sm_120).** Verification width `B` is fixed per config →
+**capturable**; capture one graph per prefix-length bucket, as the AR decode path
+already does. Acceptance length `a` varies but only changes how many tokens are
+*appended* after verification, not the verify forward's shape. On Blackwell the
+native FP4 expert path (`moe_infinity._v4_fp4`) is auto-selected (1.5–3.2× faster
+than the fallback).
 
 ```mermaid
 flowchart TB
-  subgraph Cache["Two-level KV cache"]
-    BL["Block-level cache<br/>clean prefix, append-only<br/>(PagedKVCache)"]
-    SB["Sub-block DualCache<br/>B live rows, refresh-in-place<br/>(scratch, outside pool)"]
+  subgraph GPU["sm_120 / RTX PRO 6000 (single GPU)"]
+    DR["DFlash draft (resident, dense)"]
+    RT["target router (gates)"]
+    EX["target expert MLPs (width B)<br/>weights OFFLOADED"]
+    KV["append-only paged KV (target)"]
   end
-  Q["B live-block queries"] --> K["Fused block-parallel attention<br/>prefix(full) + block(bidirectional)"]
-  BL --> K
-  SB --> K
-  K --> W["write refreshed sub-block KV"] --> SB
-  K --> R["router (topk-softmax)"] --> MoE["fused MoE MLP<br/>width B, N× per block"]
-  K --> RM["confidence remasking"]
+  HOST["host RAM / SSD<br/>FP4 expert store"] -->|route-ahead prefetch| EX
+  DR --> RT --> EX
+  KV --> EX
+  RT -.exact expert set.-> HOST
 ```
 
-## 5. PD-dflash scheduling
+## 5. PD-DFlash scheduling (draft/verify rounds)
 
-**Why the clean split breaks.** Every block boundary is a **re-prefill**, so requests
-cross the PD boundary repeatedly and the prefill/decode work ratio depends on each
-request's *progress*. **Bidirectional attention precludes chunked prefill**, so you
-cannot split a denoise step to keep co-batched decodes stall-free. Static PD
-disaggregation therefore **strands capacity**.
+**Why it differs from AR PD.** A round is **draft (cheap, resident) + verify
+(width-`B`, expert-heavy, offload-bound)**. The verify step is a bursty mini-prefill;
+acceptance `a` is variable, so KV growth and per-round work vary. Batching many
+requests means interleaving many verify steps, each demanding a wide target expert
+fetch.
 
-**Design.** Add a **DENOISE** sequence state; schedule a denoise step like a width-`B`
-mini-prefill that also carries decode-like SLOs. Adopt a **deficit token-budget**
-scheduler: seat in-flight decode/denoise first (never displaced), admit a whole
-indivisible re-prefill/denoise-step only when budget + carried deficit fits →
-**amortized** stall-free batching *without* chunking (the only substitute once
-chunked prefill is unavailable).
-
-**Two-budget deficit (composition with §6).** Model expert bandwidth as a *second*
-deficit dimension → a **2-D deficit-round-robin over {tokens, expert-bytes}**. Admit
-a **new block** only if both a token test and a **fetch-hiding test** pass
-(§7). Steps 2..N are nearly free once step 1 pre-warms the block (§6), so **the real
-gate is block admission, not per-step** — the lookahead moves the decision from
-per-token (AR) to per-block (dflash). In-flight denoise + its lookahead prefetch are
-**seated with priority** (symmetric to "decodes never displaced"), guaranteeing
-liveness. The only feasibility constraint is `D_max ≥ max-single-item cost` per
-dimension.
+**Design.** Add **DRAFT** / **VERIFY** round states. Schedule verify steps under a
+**deficit token-budget** (seat in-flight verifies first; admit new rounds when
+budget + carried deficit fits) — amortized stall-free without needing to chunk the
+indivisible width-`B` verify. Extend to a **2-D deficit over {tokens, expert-bytes}**:
+admit a round's verify only when its **route-ahead fetch can be hidden** under the
+draft/router window (§7). In-flight verifies **and their route-ahead prefetch are
+seated with priority** (never displaced), guaranteeing liveness; the only feasibility
+constraint is `D_max ≥ max-single-item cost` per dimension.
 
 ```mermaid
 flowchart TB
-  subgraph Iter["Each scheduler iteration"]
-    A["1. Seat all in-flight decode/denoise<br/>+ their lookahead prefetch (PRIORITY)"]
-    B["2. Admit waiting re-prefill / new-block<br/>iff tok(w) ≤ τ' AND fetch(w) ≤ β'"]
-    C["3. Carry unused as deficit D_τ, D_β<br/>(clamped to D_max)"]
+  subgraph Round["Per scheduler iteration"]
+    A["1. Seat in-flight verifies<br/>+ their route-ahead prefetch (PRIORITY)"]
+    B["2. Admit new draft→verify rounds iff<br/>tok(verify) ≤ τ' AND fetch(verify) ≤ β'"]
+    C["3. Carry unused as deficit D_τ, D_β (≤ D_max)"]
     A --> B --> C
   end
-  C -->|next iter| A
+  C -->|next| A
 ```
 
-## 6. Expert-prefetch lookahead (the differentiator)
+## 6. Route-ahead expert prefetch (the differentiator)
 
-**Mechanism.** At step `t`, a position's router input drifts as its neighbors commit.
-Early (mostly-masked) positions are **prefix-dominated** → routing is homogeneous and
-stable, and the routed *union* is **widest**. Late (mostly-committed) positions
-individuate → routing churns, but the union is **narrow** (few masked positions
-remain).
+**Mechanism.** The draft yields the `B` candidate token IDs **before** verification.
+Run the target **router** (gates only — cheap vs. the expert MLPs) on those tokens to
+obtain the **exact** set of experts the width-`B` verify will read; issue the fetch
+(host→GPU) **during** the draft forward + router compute, so experts are resident
+when the verify MLPs run.
 
-**Falsifiable prediction (drift model).** With fixed-N, committed fraction
-`ρ(t)=t/N`, and saturation `s=B·k/Eℓ` (§7), the routed-union width is flat then
-linearly decreasing with a **knee at `ρ*=1−1/s`**; and `J(1,t)=W(t)/W(1)` (Jaccard
-vs step 1) stays 1 until the knee, then `= (1−ρ(t))·s`. Introduce **`q`** = fraction
-of a masked position's experts that swap out of `U(1)` per step; then **prefetch
-coverage ≈ 1 − q** and residual traffic `= q·Σ_t W(t)·w_e`. **The whole thesis
-reduces to measuring `q`** (§8).
+**Why this beats AR / native-diffusion lookahead.** AR decode has ≈one token of
+lookahead and must *speculate* the next expert set; native diffusion re-denoises and
+suffers routing *drift*. DFlash gives the **actual candidate tokens** → a
+**deterministic** router decision → the **exact** expert set, one step ahead. The
+only imperfection is **rejection**: positions beyond acceptance `a` were prefetched
+but unused. Because a width-`B` block *saturates* the expert set (§7) and experts are
+shared across positions, rejected-position waste is small — the prefetched set is
+essentially "the block's experts," which the accepted prefix needs anyway.
 
-**Why AR can't do this.** AR decode touches a small per-token expert set with ≈one
-token of lookahead and is memory-bound → transfer is exposed. dflash's `N·t_step`
-window is the extra slack, and the block's fixed positions make the working set
-predictable.
+**Graceful degradation (never regress below baseline).**
+- *Tier 1 — route-ahead prefetch* of the exact router set for the draft block.
+- *Tier 2 — correct-on-miss* (`correct_prefetch()`) for any expert not yet resident.
+- *Modulation:* if drafts are frequently rejected early (low `a`), shrink the
+  route-ahead horizon to the first few positions; worst case = AR correct-on-miss →
+  **no regression** below today's MoE-Infinity behavior, upside when `a` is high.
 
-**Graceful degradation (never regress below baseline).** Two tiers:
-- *Tier 1 — lookahead prefetch:* at step 1, speculatively fetch the predicted
-  step-2..N union (superset heuristic, refined by a stability prior).
-- *Tier 2 — correct-on-miss:* reuse the existing `correct_prefetch()` for drifted
-  positions.
-- *Online modulation:* track realized coverage (`≈1−q`); shrink the speculative
-  fetch when `q` is high (avoid bandwidth waste/thrash), widen it (and prefetch the
-  next block) when low. Worst case degrades to AR correct-on-miss — **no regression
-  below today's MoE-Infinity behavior**.
+**Overlap budget.** The hideable window is `t_draft + t_router`. Because the draft is
+resident and cheap and the router is gates-only, this window is small — so the design
+also **prefetches the *next* round's likely experts** during the current verify
+(hot-expert reuse across rounds), widening the window.
 
 ## 7. Analytical cost model
 
-Let `M = L·Eℓ·w_e` be total routed-expert bytes, `s = min(1, B·k/Eℓ)` saturation,
-`r` resident fraction, `BW` expert bandwidth, `t_step` one width-`B` forward.
+Let `M = L·Eℓ·w_e` be total target routed-expert bytes, `s = min(1, B·k/Eℓ)`
+saturation, `r` resident fraction, `BW` host→GPU expert bandwidth (PCIe5-class on
+sm_120), `t_verify` the width-`B` target forward, `t_draft`+`t_router` the route-ahead
+window.
 
-**Saturation fact (it helps).** For realistic settings a block *saturates*:
-Qwen3-30B-A3B-style `Eℓ=128, k=8, B=32` → `B·k=256 ≥ 128` ⇒ `s=1`; a single block
-activates ~the entire expert set of every layer. So (a) naive per-step fetching is
-prohibitive, and (b) the step-1 union ≈ the whole set → the superset hypothesis
-becomes near-trivially true. Saturation **strengthens** the lookahead.
+**Saturation (it helps).** Verifying `B` candidates routes `B·k` experts/layer; for
+`Eℓ=128, k=8, B=16` → `B·k=128 ≈ Eℓ` ⇒ `s≈1`: a verify step touches ~the whole
+expert set. So the route-ahead fetch is essentially "prefetch the block's experts,"
+and the accepted prefix reuses them → **rejection waste is small**.
 
-**Amortization / hiding inequality (the analytical heart).** The wide step-1 fetch is
-fully hidden iff
-
+**Route-ahead hiding inequality.** The verify fetch is hidden iff
 ```
-(1 − r) · s · M / BW  ≤  N · t_step
+(1 − r) · s · M / BW  ≤  t_draft + t_router + overlap_with_prev_verify
 ```
+Unlike native diffusion (where the window is `N·t_step` but the set drifts), here the
+set is **exact** and the window is the draft+router time (plus cross-round overlap).
 
-Speedup over naive (transfer-bound) ≈ `(1−r)·s·M / (BW·t_step)` — larger when `M`
-big, `BW` small, cache cold (MoE-Infinity's niche).
+**Per accepted token.** A round fetches ≈`(1−r)·s·M` bytes and yields `a` accepted
+tokens ⇒ **`(1−r)·s·M / a`** bytes/accepted-token; larger `a` (DFlash reports 6–8)
+directly amortizes the offload cost. Baseline AR-offload fetches per *single* decoded
+token with ≈one-token lookahead → transfer exposed. **DFlash wins in the
+memory-constrained regime** (offloaded experts, cold cache) and is honest elsewhere.
 
-**dflash vs AR, bytes per committed token.** Ratio `dflash/AR = 1 / (s · missrate_AR)`
-— dflash fetches **fewer** bytes/token exactly when the block **saturates** *and* AR
-is in a **high-miss (memory-constrained)** regime. When AR hits cache well, AR wins —
-the claim is **regime-scoped and honest**, not universal.
-
-**Worked example (illustrative, order-of-magnitude).** `L=48, Eℓ=128, k=8, w_e≈2.4 MB
-(FP4)` ⇒ `M≈14 GB`; `B=32,N=8,s=1,r=0.5` ⇒ block fetch `≈7 GB`; `BW≈20 GB/s` ⇒
-`0.35 s`; `t_step≈60 ms` ⇒ `N·t_step≈0.48 s > 0.35 s` ⇒ **fetch hidden** ⇒ ≈15
-ms/token vs ≈2.8 s naive (~6× better); ~2× fewer bytes/token than AR at `missrate≈0.5`.
-*(Numbers illustrative — §8 measures the real ones.)*
+**Worked example (illustrative — sm_120 / RTX PRO 6000).** `L=48, Eℓ=128, k=8,
+w_e≈2.4 MB (FP4)` ⇒ `M≈14 GB`; `B=16,s≈1,r=0.5` ⇒ round fetch `≈7 GB`; PCIe5-class
+`BW≈50 GB/s` ⇒ `≈0.14 s`. With `a≈8`, that is `≈18 ms/accepted-token` of exposed
+fetch *if unhidden*; route-ahead + cross-round overlap targets hiding most of it under
+draft+verify compute. *(Numbers illustrative; §8 measures the real ones on the
+device.)*
 
 ## 8. Evaluation plan
 
-**Claim → experiment.**
-- C1 (lookahead exists) → prefetch coverage, lookahead ON vs OFF.
-- C2 (strongest where fetch is widest) → per-step-index plot of union-width,
-  `J(1,t)`, coverage; expect the §6 knee.
-- C3 (offloading-diffusion beats naive) → goodput vs request rate.
-- C4 (co-design beats either half) → 2×2 {deficit sched} × {lookahead}.
+**Hardware.** Single **RTX PRO 6000 (sm_120, Blackwell)**, local; target MoE experts
+FP4-offloaded to host RAM via `moe_infinity._v4_fp4`; DFlash draft resident.
 
-**Baselines** (each isolates one thing): **B0** AR MoE on MoE-Infinity; **B1** dflash
-+ unchanged AR prefetcher (*isolates offloading contribution*); **B2** dflash +
-deficit scheduler, no expert coupling (*isolates co-design*); **B3** non-offloading
-diffusion (resident experts, *upper bound*).
+**Claims → experiments.**
+- C1 (route-ahead is near-exact) → **prefetch coverage** = fraction of verify experts
+  resident, route-ahead ON vs OFF; expect ≫ AR speculation.
+- C2 (offloading contribution) → **goodput** with DFlash + route-ahead vs DFlash +
+  unchanged AR prefetcher.
+- C3 (end-to-end) → **tokens/s and speedup vs AR-offload baseline** at concurrency
+  1..32.
 
-**Metrics:** TTFT; TBT / per-block latency; goodput@SLO; expert cache hit rate;
-prefetch coverage; effective committed tokens/step; expert-vs-KV occupancy; **wasted
-prefetch bytes** (speculation cost).
+**Baselines.** **B0** AR MoE on MoE-Infinity (offloaded, no spec) — the reference;
+**B1** DFlash + unchanged AR prefetcher (*isolates route-ahead*); **B2** DFlash +
+deficit scheduler, no expert coupling (*isolates co-design*); **B3** target with
+experts **resident** (no offload) — upper bound (may not fit 96 GB for 120 B → shows
+the point of offloading).
 
-**Ablations:** lookahead on/off; fixed-N vs adaptive (report quality delta); per-step
-`memory_coordinator` rebalance; strong vs approximate DualCache; `B` and `N` sweeps
-(shapes predicted by §7).
+**Metrics.** Output tokens/s; **acceptance length `a`**; TTFT; per-round latency;
+goodput@SLO; **expert cache hit rate**; **route-ahead prefetch coverage**; **wasted
+prefetch bytes** (rejected-position experts); expert-vs-KV occupancy.
 
-**Run first — the stability study (gates everything):** for a real diffusion-MoE
-(LLaDA-MoE), measure `J(1,t)` and union-width vs `t`, per layer, across
-temperature/`cfg_scale` — i.e. measure `q`. **If it fails, pivot** to the speculative
-framing (§9).
+**Ablations.** route-ahead ON/OFF; **block size `B`** (8 vs 16) and its effect on `a`
+and saturation; per-round `memory_coordinator` rebalance; cross-round next-expert
+prefetch ON/OFF; FP4 native path vs fallback.
 
-**Money plot:** goodput vs request rate with four curves (B3 upper bound, full
-system, B2 scheduler-only, B1 prefetch-off) — showing the co-design approaches the
-resident-expert upper bound *without* holding experts resident.
+**Generalization (must-cover targets).** Run the same design unchanged on **≥ Qwen
+and GPT-OSS** MoE targets with `z-lab` DFlash drafts: **`Qwen3-Coder-30B-A3B`**,
+**`Qwen3.5-35B-A3B`**, **`gpt-oss-20b`**, **`gpt-oss-120b`** (the 120 B especially
+exercises offloading on a single 96 GB card). DeepSeek-V4-Flash when its DFlash draft
+lands. Route-ahead prefetch is architecture-agnostic at the MoE level (router →
+expert set → fetch), so the design should carry across these unchanged.
 
-**Threats to validity:** single-model locality (test ≥2 checkpoints); fixed-N quality
-regression (always report quality); synthetic traces (use ShareGPT + arXiv); "free
-lunch" (report wasted prefetch bytes).
+**Money plot.** tokens/s (or goodput) vs request rate: **B0 (AR-offload)** < **B1
+(DFlash, AR prefetch)** < **our route-ahead co-design** → **B3 (resident upper
+bound)** — showing the co-design approaches resident-expert throughput *without*
+holding the target's experts resident.
 
 ## 9. Related work
 
-- **Sangam** — serving diffusion LLMs on the AR stack: block-sized decodes, recurring
-  prefills, deficit token-budget scheduling, hybrid overflow. *Delta:* we add the
-  **expert-offloading** dimension (a 2-D deficit over tokens **and** expert-bytes).
-- **Fast-dLLM v1 / v2**, **BD3LM / dLLM** — block-diffusion adaptation of AR LLMs +
-  DualCache. *Delta:* we treat their caches/kernels as the substrate and design the
-  **serving + offloading** layer.
-- **dKV-Cache** — approximate KV caching for bidirectional attention. *Delta:* used as
-  the sub-block cache primitive.
-- **DistServe / Splitwise / Mooncake / TetriInfer** — AR PD-disaggregation.
-  **Nexus** — intra-GPU PD disaggregation. **Kairos** — prefill deflection.
-  **Adrenaline** — attention disaggregation. *Delta:* these assume AR PD structure;
-  dflash's recurring re-prefill + no-chunking changes the scheduling regime.
-- **LLaDA-MoE** — the concrete diffusion-MoE target. *Delta:* the model; we are the
-  serving/offloading system.
-- **MoE-Infinity** — this repo (expert offloading, tracer/predictor/prefetcher). *Delta:*
-  we extend its prefetch + scheduler for block-diffusion.
+- **DFlash** (Z Lab; Chen, Liang, Liu; arXiv:2602.06036) — block-diffusion drafter +
+  KV-injected target features; SGLang (`--speculative-algorithm DFLASH`) & vLLM
+  (`method: dflash`). *This work:* adds the **expert-offloading** layer for MoE
+  targets (route-ahead prefetch + 2-D deficit scheduling) on sm_120.
+- **EAGLE-3**, **MTP** (Qwen built-in) — AR drafters; DFlash's parallel drafting
+  beats them. *Baselines.*
+- **Fast-dLLM v1/v2, BD3LM/dLLM, LLaDA-MoE** — *native* block-diffusion (diffusion is
+  the decode). **Sangam** — serving *native* dLLMs (recurring re-prefill, deficit
+  budget). *Alternative regime;* our native-diffusion analysis is retained in the
+  appendix for the day a diffusion-MoE target is served directly.
+- **DistServe / Splitwise / Mooncake / TetriInfer / Nexus / Kairos / Adrenaline** —
+  AR prefill/decode disaggregation & scheduling. *Delta:* we schedule draft/verify
+  rounds with an expert-bandwidth budget.
+- **MoE-Infinity** (arXiv:2401.14361) — expert offloading substrate this extends.
 
 ## 10. Symbol table
 
 | Symbol | Meaning |
 |---|---|
-| `L` | number of layers |
-| `Eℓ` | routed experts per layer |
-| `k` | top-k routed experts per token |
-| `w_e` | bytes for one expert's weights (one layer), offloaded dtype (FP4/FP8) |
-| `M = L·Eℓ·w_e` | total routed-expert bytes |
-| `B` | block size (tokens) |
-| `N` | denoising steps per block |
-| `c = B/N` | committed tokens per step (fixed-N) |
-| `BW` | effective host→GPU expert fetch bandwidth |
-| `t_step` | compute time of one width-`B` forward (attn + MoE MLP) |
-| `r` | resident fraction of experts already cached |
-| `s = min(1, B·k/Eℓ)` | per-step expert-set saturation |
-| `ρ(t) = t/N` | committed fraction at step `t` |
-| `ρ* = 1 − 1/s` | drift-model knee (union-width inflection) |
-| `W(t)` | routed-union width at step `t` |
-| `J(1,t)` | Jaccard overlap of routed union at step `t` vs step 1 |
-| `q` | per-step expert churn out of the step-1 union (coverage ≈ 1−q) |
+| `L` | number of target layers |
+| `Eℓ` | routed experts per layer (target) |
+| `k` | top-k routed experts per token (target) |
+| `w_e` | bytes for one expert's weights (one layer), FP4/FP8 offloaded dtype |
+| `M = L·Eℓ·w_e` | total target routed-expert bytes |
+| `B` | draft block size (candidate tokens per round) |
+| `a` | acceptance length (accepted tokens per round, `a ≤ B`) |
+| `s = min(1, B·k/Eℓ)` | per-verify expert-set saturation |
+| `r` | resident fraction of target experts already cached |
+| `BW` | host→GPU expert fetch bandwidth (PCIe5-class, sm_120) |
+| `t_draft`, `t_router`, `t_verify` | draft forward / target router / width-`B` verify times |
 | `τ`, `β` | per-iteration token / expert-byte budgets |
 | `D_τ`, `D_β`, `D_max` | carried deficits and the deficit cap |
 
 ## 11. Open questions
 
-- **Gating experiment:** measure `q` / the `ρ*` knee on LLaDA-MoE before investing
-  further. If the working set churns (`q` large), the lookahead advantage collapses →
-  pivot to §9's speculative framing (the `DFlashSpeculator` seed).
-- **Framing:** native diffusion serving vs speculative-decode framing as the primary
-  contribution.
-- **Kernel default:** fixed-N (capturable, prefetch-friendly) vs confidence-adaptive
-  (higher quality) as the shipped default; expose as a knob either way.
-- **Target model/hardware** for a first prototype.
+- **Gating experiment:** measure **route-ahead prefetch coverage** and **rejected-
+  position waste** vs. acceptance `a` on `Qwen3-Coder-30B-A3B` + `gpt-oss-20b` with
+  `z-lab` DFlash drafts, on the RTX PRO 6000. If coverage is high and waste low, the
+  thesis holds.
+- **Router-ahead cost:** is running the target router on the draft block cheap enough
+  relative to the fetch it saves? (Expected yes — gates ≪ expert MLPs — but measure.)
+- **Draft residency vs target KV budget** on a single 96 GB card for the 120 B target.
+- **Block size `B`** default (8 for concurrency, 16 for accept length) as a knob.
+- **DeepSeek-V4-Flash** target once its `z-lab` DFlash draft is released.
