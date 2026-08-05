@@ -32,7 +32,6 @@ def main() -> None:
     parser.add_argument("--out", default="dflash_agreement.json")
     args = parser.parse_args()
 
-    import torch
     from transformers import AutoTokenizer
 
     from moe_infinity import MoE
@@ -54,15 +53,17 @@ def main() -> None:
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids
         n_prompt = input_ids.shape[1]
 
+        # Both sides go through the native engine: plain greedy (no drafter)
+        # vs the DFlash strategy attached via speculative_draft (per-call).
         baseline = moe.generate(
             input_ids, max_new_tokens=args.max_new_tokens, do_sample=False
         )[0].tolist()
-        with torch.inference_mode():
-            speculative = speculator.generate(
-                input_ids,
-                max_new_tokens=args.max_new_tokens,
-                temperature=0.0,
-            )[0].tolist()
+        speculative = moe.generate(
+            input_ids,
+            max_new_tokens=args.max_new_tokens,
+            do_sample=False,
+            speculative_draft=speculator,
+        )[0].tolist()
 
         agreement = token_agreement_rate(
             baseline[n_prompt:], speculative[n_prompt:]

@@ -713,6 +713,39 @@ class MoE:
         for module in self.engine.expert_layer_modules:
             module.seq_id_list = self.seq_id_list
 
+    def _resolve_spec_strategy(self, speculative_draft):
+        """Attach/detach the DFlash speculator on the native engine per call.
+
+        ``speculative_draft`` may be a drafter checkpoint path (loaded via
+        ``DFlashSpeculator``), an already-built ``DFlashSpeculator``, or an
+        instantiated draft module (wrapped via ``from_models``). Construction
+        is memoized by the passed value; ``None``/``False`` detaches so the
+        standard path runs, without discarding the memoized speculator.
+        """
+        engine = self._native_generation_engine
+        if not speculative_draft:
+            engine.spec_strategy = None
+            return
+        cached = getattr(self, "_dflash_speculator", None)
+        source = getattr(self, "_dflash_speculator_source", None)
+        same = source is speculative_draft or (
+            isinstance(source, str)
+            and isinstance(speculative_draft, (str, os.PathLike))
+            and source == str(speculative_draft)
+        )
+        if cached is None or not same:
+            from moe_infinity.spec_decode import DFlashSpeculator
+
+            if isinstance(speculative_draft, DFlashSpeculator):
+                cached = speculative_draft
+            elif isinstance(speculative_draft, (str, os.PathLike)):
+                cached = DFlashSpeculator(self, str(speculative_draft))
+            else:
+                cached = DFlashSpeculator.from_models(self, speculative_draft)
+            self._dflash_speculator = cached
+            self._dflash_speculator_source = speculative_draft
+        engine.spec_strategy = cached
+
     def generate(self, input_ids: torch.LongTensor, **kwargs) -> Any:
         """
         Generates sequences for models with a language modeling head. The method currently supports greedy decoding,
@@ -722,6 +755,11 @@ class MoE:
             input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
                 The sequence used as a prompt for the generation. If `past` is used, only `bos_token_id` is used as
                 prompt.
+            speculative_draft: optional DFlash drafter (checkpoint path,
+                `DFlashSpeculator`, or draft module). When given, greedy
+                batch-1 decoding routes through the native speculative
+                strategy on the engine; omitted/`None`/`False` uses the
+                standard path (per-call, never sticky).
             **kwargs: Additional arguments for the generation method. Check the HuggingFace documentation of the model's
                 `generate` method for the supported arguments.
 
@@ -739,12 +777,24 @@ class MoE:
                 stacklevel=2,
             )
 
+        speculative_draft = kwargs.pop("speculative_draft", None)
+
         if (
             not self.use_native_engine
             or self._native_generation_engine is None
             or input_ids.ndim != 2
             or input_ids.shape[0] != 1
         ):
+            if speculative_draft:
+                if input_ids.ndim == 2 and input_ids.shape[0] != 1:
+                    raise NotImplementedError(
+                        "speculative_draft (DFlash) v1 supports batch==1 "
+                        f"only; got batch size {input_ids.shape[0]}"
+                    )
+                raise ValueError(
+                    "speculative_draft (DFlash) requires the MoE-Infinity "
+                    "native engine (use_native_engine=True)"
+                )
             self._configure_hook(input_ids)
             self.model.eval()
             with torch.no_grad():
@@ -752,6 +802,7 @@ class MoE:
 
         from moe_infinity.engine.types import SamplingParams
 
+        self._resolve_spec_strategy(speculative_draft)
         self._configure_hook(input_ids)
         self._cached_past_key_values = None
         self.model.eval()
