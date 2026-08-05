@@ -232,7 +232,11 @@ class NativeStepTrace(NamedTuple):
     """
 
     prev_start: int  # cached_len at step entry
-    accept: int  # accepted draft count, in [0, block_size - 1]
+    # accepted drafts actually committed this step, in [0, block_size - 1];
+    # smaller than the accept-rule result when the step is truncated by a
+    # stop token or the max_new_tokens budget (drafts beyond the cut are
+    # dropped), so ``start == prev_start + accept + 1`` holds in every branch
+    accept: int
     start: int  # cached_len after commit == prev_start + accept + 1
     emitted_len: int  # generated tokens emitted so far (accepted drafts + bonus)
     target_cache_len: int  # target_kv.get_seq_length() after crop
@@ -419,20 +423,30 @@ class DFlashSpeculator:
         both KV caches back to the committed prefix. The bonus token is
         emitted but NOT cached -- it becomes the next step's anchor, so
         ``cached_len`` (``start``) always trails the emitted count by one.
+
+        Stop handling: ``stop_token_ids`` (falling back to the target
+        config's ``eos_token_id``) truncates the emitted output at the first
+        stop id, inclusive, and ends the loop; ``max_new_tokens`` truncates a
+        block that would overshoot the remaining budget. Neither cache is
+        allowed past the last kept token: keeping ``k`` of a step's
+        ``accept + 1`` emitted tokens (``k - 1`` is the stop index) commits
+        ``min(k, accept) + 1`` cached tokens -- the anchor plus the first
+        ``min(k, accept)`` drafts -- because the verify forward only
+        produced KV for block tokens, never for the bonus.
         """
-        if input_ids.ndim != 2 or input_ids.shape[0] != 1:
+        if input_ids.ndim != 2:
             raise ValueError(
                 f"DFlashSpeculator.generate expects input_ids of shape [1, seq], got {tuple(input_ids.shape)}"
+            )
+        if input_ids.shape[0] != 1:
+            raise NotImplementedError(
+                "DFlashSpeculator v1 supports batch==1 only; got input_ids "
+                f"with batch size {input_ids.shape[0]}"
             )
         if float(temperature) > 0:
             raise ValueError(
                 "DFlashSpeculator v1 is greedy-only (temperature=0.0); "
                 "sampled speculative decoding is out of scope"
-            )
-        if stop_token_ids is not None:
-            raise NotImplementedError(
-                "stop_token_ids / EOS-mid-block handling is Task 7 scope; "
-                "the native loop currently decodes to max_new_tokens"
             )
 
         from transformers import DynamicCache
@@ -452,11 +466,24 @@ class DFlashSpeculator:
         anchor = int(logits[:, -1, :].argmax(dim=-1).item())
         context_feature = extract_context_feature(hidden_states, layer_ids)
 
+        stop_ids = set(_resolve_stop_ids(self.target, stop_token_ids))
+
         emitted: List[int] = [anchor]
         start = num_prompt_tokens
         draft_kv = DynamicCache() if self._drafter_has_kv_cache else None
 
         self.step_trace = []
+        if stop_ids and anchor in stop_ids and max_new_tokens >= 1:
+            # The prefill anchor is itself a stop token: emit it and halt
+            # before any block is drafted (nothing past EOS may be emitted
+            # or cached; the anchor/bonus is never cached).
+            self.last_target_cache = target_kv
+            self.last_draft_cache = draft_kv
+            new_ids = torch.tensor(
+                [emitted], dtype=torch.long, device=input_ids.device
+            )
+            return torch.cat([input_ids, new_ids], dim=1)
+
         while len(emitted) < max_new_tokens:
             prev_start = start
             block = build_block(anchor, self.config.mask_token_id, block_size).to(
@@ -487,16 +514,52 @@ class DFlashSpeculator:
             accept = acceptance_length(block, posterior)
             committed = committed_tokens(block, posterior, accept)
 
-            emitted.extend(int(t) for t in committed.emitted[0].tolist())
-            start = prev_start + accept + 1
+            # This step's emitted tokens are [d_1 .. d_accept, bonus]; the
+            # verify forward produced KV only for [anchor, d_1 .. d_accept].
+            # Keeping k emitted tokens (stop index k - 1) therefore commits
+            # min(k, accept) + 1 cached tokens: the anchor plus the first
+            # min(k, accept) drafts. The bonus is never cached, so a cut at
+            # the bonus still commits the full accept + 1 block prefix.
+            step_tokens = [int(t) for t in committed.emitted[0].tolist()]
+            keep = accept + 1
+            stop = False
+            if stop_ids:
+                for j, tok in enumerate(step_tokens):
+                    if tok in stop_ids:
+                        keep = j + 1
+                        stop = True
+                        break
+            remaining = max_new_tokens - len(emitted)
+            if keep > remaining:
+                keep = remaining
+                stop = True
+
+            emitted.extend(step_tokens[:keep])
+            cache_committed = min(keep, accept) + 1
+            start = prev_start + cache_committed
             rollback_target_cache(
                 target_kv,
                 sliding_snaps,
                 prev_start=prev_start,
-                committed=accept + 1,
+                committed=cache_committed,
                 block_size=block_size,
             )
             assert int(target_kv.get_seq_length()) == start
+
+            self.step_trace.append(
+                NativeStepTrace(
+                    prev_start=prev_start,
+                    accept=cache_committed - 1,
+                    start=start,
+                    emitted_len=len(emitted),
+                    target_cache_len=int(target_kv.get_seq_length()),
+                    draft_cache_len=(
+                        int(draft_kv.get_seq_length()) if draft_kv is not None else None
+                    ),
+                )
+            )
+            if stop:
+                break
 
             suffix = extract_context_feature(hidden_states, layer_ids)[
                 :, : accept + 1, :
@@ -507,18 +570,6 @@ class DFlashSpeculator:
                 context_feature = torch.cat([context_feature, suffix], dim=1)
 
             anchor = int(committed.bonus[0, 0].item())
-            self.step_trace.append(
-                NativeStepTrace(
-                    prev_start=prev_start,
-                    accept=accept,
-                    start=start,
-                    emitted_len=len(emitted),
-                    target_cache_len=int(target_kv.get_seq_length()),
-                    draft_cache_len=(
-                        int(draft_kv.get_seq_length()) if draft_kv is not None else None
-                    ),
-                )
-            )
 
         self.last_target_cache = target_kv
         self.last_draft_cache = draft_kv
