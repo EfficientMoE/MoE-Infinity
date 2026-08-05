@@ -176,6 +176,17 @@ def _identify_fp8_blockwise_pairs(keys):
     return pairs
 
 
+_ROUTED_EXPERT_RE = re.compile(r"\.mlp\.experts\.\d+\.")
+
+
+def _is_routed_expert_key(key: str) -> bool:
+    # Routed experts (including the MTP layer's, which parse_expert_id drops via
+    # its layer_id >= num_layers guard) are dequantized on-device by the
+    # dispatcher, so they stay FP8 in the store. Matches ".mlp.experts.<id>."
+    # but not ".mlp.shared_experts." or dense ".mlp.<proj>".
+    return _ROUTED_EXPERT_RE.search(key) is not None
+
+
 def _has_fp8_blockwise(config: object) -> bool:
     qcfg = getattr(config, "quantization_config", None)
     if qcfg is None:
@@ -773,10 +784,7 @@ class OffloadEngine(object):
                                     continue
                                 if w.dtype != torch.float8_e4m3fn:
                                     continue
-                                _, expert_id = parse_expert_id(
-                                    base_key, self.config
-                                )
-                                if expert_id is not None:
+                                if _is_routed_expert_key(base_key):
                                     # Routed expert: keep FP8 in the host store;
                                     # the dispatcher dequantizes on-device.
                                     self._glm_fp8_scales[base_key] = s
