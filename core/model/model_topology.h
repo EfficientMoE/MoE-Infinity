@@ -174,6 +174,11 @@ class ArcherTopologyHandle : public base::noncopyable {
           std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
           topology);
 
+  void InitializeTopologyV2(
+      const std::vector<
+          std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
+                     std::vector<std::uint64_t>>>& topology);
+
   void EnableTrace() noexcept { trace_enabled_ = true; }
   void DisableTrace() noexcept { trace_enabled_ = false; }
 
@@ -194,6 +199,13 @@ class ArcherTopologyHandle : public base::noncopyable {
   }
 
  private:
+  struct StageSpec {
+    bool is_sparse = false;
+    const std::vector<std::vector<TensorID>>* tensor_groups = nullptr;
+    std::vector<std::uint64_t> corr_ids;
+  };
+  void BuildTopologyFromSpecs(const std::vector<StageSpec>& specs);
+
   Pipeline pipeline_;
   std::unordered_set<HashID> visited_;
   std::unordered_map<HashID, std::uint64_t> last_active_stage_;
