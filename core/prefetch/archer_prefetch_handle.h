@@ -41,10 +41,7 @@ class ArcherPrefetchHandle {
   torch::Tensor GetHitRate();
   void SetTrace(const torch::Tensor& trace);
   void TraceRequest(const std::uint64_t request_id, const TensorID tensor_id);
-  void SetTopology(const std::vector<
-                   std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
-                       topology);
-  void SetTopologyV2(
+  void SetTopology(
       const std::vector<
           std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
                      std::vector<std::uint64_t>>>& topology);

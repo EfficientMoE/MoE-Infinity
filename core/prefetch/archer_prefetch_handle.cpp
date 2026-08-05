@@ -347,16 +347,9 @@ void ArcherPrefetchHandle::TraceRequest(const std::uint64_t request_id,
 
 void ArcherPrefetchHandle::SetTopology(
     const std::vector<
-        std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
-        topology) {
-  kTopologyHandle->InitializeTopology(topology);
-}
-
-void ArcherPrefetchHandle::SetTopologyV2(
-    const std::vector<
         std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
                    std::vector<std::uint64_t>>>& topology) {
-  kTopologyHandle->InitializeTopologyV2(topology);
+  kTopologyHandle->InitializeTopology(topology);
 }
 
 bool ArcherPrefetchHandle::IsTensorOffloaded(const std::uint32_t tensor_id) {

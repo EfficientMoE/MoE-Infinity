@@ -171,11 +171,6 @@ class ArcherTopologyHandle : public base::noncopyable {
 
   void InitializeTopology(
       const std::vector<
-          std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
-          topology);
-
-  void InitializeTopologyV2(
-      const std::vector<
           std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
                      std::vector<std::uint64_t>>>& topology);
 
