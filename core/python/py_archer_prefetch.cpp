@@ -64,6 +64,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                const std::vector<std::tuple<
                    std::string, std::vector<std::vector<TensorID>>>>&)) &
                ArcherPrefetchHandle::SetTopology)
+      .def("set_topology_v2",
+           (void(ArcherPrefetchHandle::*)(
+               const std::vector<std::tuple<
+                   std::string, bool, std::vector<std::vector<TensorID>>,
+                   std::vector<std::uint64_t>>>&)) &
+               ArcherPrefetchHandle::SetTopologyV2)
       .def("update_tensor_map",
            (void(ArcherPrefetchHandle::*)(std::uint64_t, std::uint64_t)) &
                ArcherPrefetchHandle::UpdateTensorMap)

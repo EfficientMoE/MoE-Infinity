@@ -352,6 +352,13 @@ void ArcherPrefetchHandle::SetTopology(
   kTopologyHandle->InitializeTopology(topology);
 }
 
+void ArcherPrefetchHandle::SetTopologyV2(
+    const std::vector<
+        std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
+                   std::vector<std::uint64_t>>>& topology) {
+  kTopologyHandle->InitializeTopologyV2(topology);
+}
+
 bool ArcherPrefetchHandle::IsTensorOffloaded(const std::uint32_t tensor_id) {
   std::unique_lock<std::mutex> lock(mutex_);
   auto it = kTensorIndex->find(tensor_id);
