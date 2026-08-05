@@ -11,6 +11,37 @@ import moe_infinity
 warnings.filterwarnings("ignore")
 
 
+def extract_context_feature(hidden_states, layer_ids=(1, 9, 17, 25, 33)):
+    """Concatenate post-layer hidden states for DFlash drafter conditioning.
+
+    Args:
+        hidden_states: Per-layer hidden states from an HF forward with
+            ``output_hidden_states=True``. Index 0 is the embedding output, so
+            decoder layer ``layer_id``'s output lives at ``layer_id + 1``.
+        layer_ids: Decoder layers to concatenate; defaults to the gpt-oss-120b
+            DFlash contract ``(1, 9, 17, 25, 33)``.
+
+    Returns:
+        Tensor ``[batch, seq_len, len(layer_ids) * hidden_size]`` on the same
+        device/dtype as the inputs (e.g. ``[B, L, 14400]`` for 120B).
+    """
+    if hidden_states is None or len(hidden_states) == 0:
+        raise ValueError(
+            "hidden_states must be a non-empty tuple; "
+            "run the forward with output_hidden_states=True"
+        )
+    selected = []
+    for layer_id in layer_ids:
+        idx = int(layer_id) + 1
+        if idx >= len(hidden_states):
+            raise ValueError(
+                f"layer_id {layer_id} maps to hidden_states[{idx}], but only "
+                f"{len(hidden_states)} entries were returned"
+            )
+        selected.append(hidden_states[idx])
+    return torch.cat(selected, dim=-1)
+
+
 class MoE:
     """
     Loads a (potentially sharded) checkpoint inside a model, potentially sending weights to a given device as they are
@@ -537,6 +568,106 @@ class MoE:
         if logits.ndim == 2:
             return logits.detach().to("cpu")
         raise RuntimeError(f"unexpected logits shape: {tuple(logits.shape)}")
+
+    def _native_model_forward_rich(
+        self,
+        token_ids: list[int],
+        _attention_metadata: object = None,
+        logits_to_keep: int = 0,
+    ) -> tuple[torch.Tensor, tuple, object]:
+        """On-device forward for speculative decoding: hidden-state capture.
+
+        Single HF forward with ``output_hidden_states=True`` returning
+        ``(logits, hidden_states, past_key_values)`` on the model device —
+        unlike `_native_model_forward`, nothing is detached to CPU. The cache
+        contract mirrors the baseline (non-paged path reads/writes
+        ``self._cached_past_key_values``) so callers can roll the returned
+        ``DynamicCache`` back via ``crop()``.
+
+        ``logits_to_keep`` passthrough: ``1`` for the anchor/prefill step
+        (last-position logits only); ``0`` (the default) keeps full logits and
+        MUST be used for the verify step. Experts flow through the exact same
+        ``self.model(...)`` call as the baseline path, so the standard
+        ExpertExecutor dispatch (and its ``speculative_prefetch`` hook) is
+        preserved — nothing here bypasses expert dispatch.
+        """
+        input_tensor = torch.tensor([token_ids], dtype=torch.long)
+        if torch.cuda.is_available():
+            input_tensor = input_tensor.to("cuda:0")
+        else:
+            model_device = getattr(self.model, "device", None)
+            if isinstance(
+                model_device, torch.device
+            ) and model_device.type not in ("meta", "cpu"):
+                input_tensor = input_tensor.to(model_device)
+
+        is_prefill = True
+        if _attention_metadata is not None:
+            is_prefill = bool(getattr(_attention_metadata, "is_prefill", True))
+
+        paged_attention_classes = self._get_paged_attention_classes()
+        use_paged_context = bool(
+            paged_attention_classes
+            and _attention_metadata is not None
+            and getattr(self, "_native_attention_backend", None) is not None
+        )
+
+        extra_kwargs: dict = {"output_hidden_states": True}
+        if logits_to_keep:
+            extra_kwargs["logits_to_keep"] = int(logits_to_keep)
+
+        if not use_paged_context:
+            # Same HF KV-cache contract as the baseline: prefill captures
+            # past_key_values; decode steps consume the cached KV.
+            extra_kwargs["use_cache"] = True
+            if not is_prefill:
+                cached_kv = getattr(self, "_cached_past_key_values", None)
+                if cached_kv is not None:
+                    extra_kwargs["past_key_values"] = cached_kv
+        else:
+            if not is_prefill and _attention_metadata is not None:
+                seq_lens = getattr(_attention_metadata, "seq_lens", None)
+                if seq_lens is not None and seq_lens.numel() > 0:
+                    current_pos = int(seq_lens[0].item()) - 1
+                    extra_kwargs["position_ids"] = torch.tensor(
+                        [[current_pos]], device=input_tensor.device
+                    )
+
+        with torch.no_grad():
+            if not use_paged_context:
+                outputs = self.model(input_tensor, **extra_kwargs)
+            else:
+                backend = self._native_attention_backend
+                for attn_cls in paged_attention_classes:
+                    attn_cls.set_paged_context(backend, _attention_metadata)
+                try:
+                    outputs = self.model(input_tensor, **extra_kwargs)
+                finally:
+                    for attn_cls in paged_attention_classes:
+                        attn_cls.clear_paged_context()
+
+        if not use_paged_context:
+            past_kv = getattr(outputs, "past_key_values", None)
+            if past_kv is not None:
+                self._cached_past_key_values = past_kv
+
+        logits = getattr(outputs, "logits", None)
+        if logits is None and isinstance(outputs, tuple) and outputs:
+            logits = outputs[0]
+        if logits is None:
+            raise RuntimeError("model forward did not return logits")
+        if not isinstance(logits, torch.Tensor):
+            raise RuntimeError("model logits must be a torch.Tensor")
+
+        hidden_states = getattr(outputs, "hidden_states", None)
+        if hidden_states is None:
+            raise RuntimeError(
+                "model forward did not return hidden_states; "
+                "output_hidden_states=True is required"
+            )
+
+        past_key_values = getattr(outputs, "past_key_values", None)
+        return logits, hidden_states, past_key_values
 
     def _get_paged_attention_classes(self) -> list[type[Any]]:
         paged_class_names = {
