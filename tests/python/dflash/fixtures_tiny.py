@@ -69,7 +69,7 @@ def make_tiny_target_config(
         num_local_experts=4,
         num_experts_per_tok=2,
         max_position_embeddings=64,
-        sliding_window=8,
+        sliding_window=128,
         attn_implementation="eager",
         tie_word_embeddings=False,
         rope_scaling={"rope_type": "default"},
