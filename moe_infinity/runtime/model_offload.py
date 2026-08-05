@@ -770,18 +770,29 @@ class OffloadEngine(object):
                             self.name_id_map.pop(name_without_prefix)
                     param.ar_id = self.name_id_map.get(name, None)
 
-                # the case for NLLB MoE
+                # Tied embeddings: lm_head.weight shares storage with the
+                # input embeddings, so it never got its own tensor id in the
+                # loop above. Register it under whichever embedding submodule
+                # this architecture actually has -- encoder/decoder for
+                # encoder-decoder models (NLLB-MoE), a single embed_tokens
+                # for decoder-only ones (Mixtral, Qwen3-MoE, etc.).
                 if "lm_head.weight" not in self.name_id_map:
                     print(
                         "lm_head.weight not in name_id_map, add it as embed_tokens"
                     )
                     self.name_id_map["lm_head.weight"] = 0
-                    self.name_id_map["encoder.embed_tokens.weight"] = 0
-                    self.name_id_map["decoder.embed_tokens.weight"] = 0
-
                     model.lm_head.weight.ar_id = 0
-                    model.model.encoder.embed_tokens.weight.ar_id = 0
-                    model.model.decoder.embed_tokens.weight.ar_id = 0
+
+                    if hasattr(model.model, "encoder") and hasattr(
+                        model.model, "decoder"
+                    ):
+                        self.name_id_map["encoder.embed_tokens.weight"] = 0
+                        self.name_id_map["decoder.embed_tokens.weight"] = 0
+                        model.model.encoder.embed_tokens.weight.ar_id = 0
+                        model.model.decoder.embed_tokens.weight.ar_id = 0
+                    else:
+                        self.name_id_map["embed_tokens.weight"] = 0
+                        model.model.embed_tokens.weight.ar_id = 0
 
                 self.expert_tensor_map = dict()
                 for name, id in self.name_id_map.items():
