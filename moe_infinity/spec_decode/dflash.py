@@ -47,6 +47,10 @@ def read_dflash_config(draft_hf_config: Any) -> DFlashConfig:
     )
 
 
+DFLASH_BLOCK_SIZE = 10
+DFLASH_TARGET_LAYER_IDS = [1, 9, 17, 25, 33]
+
+
 def validate_pairing(draft_cfg: DFlashConfig, target_hf_config: Any) -> None:
     target_text = _get(target_hf_config, "text_config", target_hf_config)
     t_hidden = int(_get(target_text, "hidden_size"))
@@ -57,9 +61,21 @@ def validate_pairing(draft_cfg: DFlashConfig, target_hf_config: Any) -> None:
         raise ValueError(
             f"DFlash drafter hidden_size {draft_cfg.hidden_size} != target hidden_size {t_hidden}"
         )
+    if draft_cfg.vocab_size != t_vocab:
+        raise ValueError(
+            f"DFlash drafter vocab_size {draft_cfg.vocab_size} != target vocab_size {t_vocab}"
+        )
     if draft_cfg.mask_token_id >= t_vocab:
         raise ValueError(
             f"DFlash mask_token_id {draft_cfg.mask_token_id} is outside target vocab_size {t_vocab}"
+        )
+    if draft_cfg.block_size != DFLASH_BLOCK_SIZE:
+        raise ValueError(
+            f"DFlash block_size {draft_cfg.block_size} != expected {DFLASH_BLOCK_SIZE}"
+        )
+    if draft_cfg.target_layer_ids != DFLASH_TARGET_LAYER_IDS:
+        raise ValueError(
+            f"DFlash target_layer_ids {draft_cfg.target_layer_ids} != expected {DFLASH_TARGET_LAYER_IDS}"
         )
     highest_capture = max(draft_cfg.target_layer_ids) + 1
     if highest_capture > t_layers:
@@ -67,6 +83,71 @@ def validate_pairing(draft_cfg: DFlashConfig, target_hf_config: Any) -> None:
             f"DFlash target_layer_ids reference target layer {max(draft_cfg.target_layer_ids)} "
             f"(capture index {highest_capture}) but target has only {t_layers} layers"
         )
+
+
+def validate_drafter_module(draft_model: Any, draft_cfg: DFlashConfig) -> None:
+    fc = _get(draft_model, "fc")
+    if fc is None:
+        raise ValueError(
+            "DFlash drafter is missing the required `fc` projection layer "
+            "(expected a Linear consuming the concatenated 5-layer hidden feature)"
+        )
+    in_features = _get(fc, "in_features")
+    expected = len(draft_cfg.target_layer_ids) * draft_cfg.hidden_size
+    if in_features != expected:
+        raise ValueError(
+            f"DFlash drafter fc.in_features {in_features} != expected {expected} "
+            f"({len(draft_cfg.target_layer_ids)} * hidden_size {draft_cfg.hidden_size})"
+        )
+
+
+def validate_drafter(
+    draft_model: Any,
+    target_hf_config: Any,
+    draft_cfg: Optional[DFlashConfig] = None,
+) -> DFlashConfig:
+    if draft_cfg is None:
+        draft_cfg = read_dflash_config(_get(draft_model, "config"))
+    validate_pairing(draft_cfg, target_hf_config)
+    validate_drafter_module(draft_model, draft_cfg)
+    return draft_cfg
+
+
+def _resolve_input_embeddings(target: Any) -> Any:
+    getter = getattr(target, "get_input_embeddings", None)
+    if callable(getter):
+        emb = getter()
+        if emb is not None:
+            return emb
+    inner = getattr(target, "model", target)
+    emb = getattr(inner, "embed_tokens", None)
+    if emb is not None:
+        return emb
+    raise ValueError(
+        "could not resolve target embed_tokens for DFlash drafter weight sharing"
+    )
+
+
+def _resolve_output_embeddings(target: Any) -> Any:
+    getter = getattr(target, "get_output_embeddings", None)
+    if callable(getter):
+        head = getter()
+        if head is not None:
+            return head
+    head = getattr(target, "lm_head", None)
+    if head is not None:
+        return head
+    raise ValueError(
+        "could not resolve target lm_head for DFlash drafter weight sharing"
+    )
+
+
+def bind_shared_weights(draft_model: Any, target: Any) -> tuple[Any, Any]:
+    embed_tokens = _resolve_input_embeddings(target)
+    lm_head = _resolve_output_embeddings(target)
+    draft_model.embed_tokens = embed_tokens
+    draft_model.lm_head = lm_head
+    return embed_tokens, lm_head
 
 
 def _infer_cuda_device(model: Any) -> str:
@@ -121,7 +202,8 @@ class DFlashSpeculator:
             )
 
         self.config = read_dflash_config(self.draft.config)
-        validate_pairing(self.config, self.target.config)
+        validate_drafter(self.draft, self.target.config, draft_cfg=self.config)
+        self.embed_tokens, self.lm_head = bind_shared_weights(self.draft, self.target)
 
     def _configure_target_hooks(self, input_ids: torch.Tensor) -> None:
         configure = getattr(self.moe, "_configure_hook", None)
@@ -162,4 +244,7 @@ __all__ = [
     "DFlashSpeculator",
     "read_dflash_config",
     "validate_pairing",
+    "validate_drafter",
+    "validate_drafter_module",
+    "bind_shared_weights",
 ]
