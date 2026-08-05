@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional
 
 import torch
 
@@ -13,6 +13,10 @@ from moe_infinity.spec_decode._dflash_ops import (
     build_block,
     committed_tokens,
 )
+
+if TYPE_CHECKING:
+    from moe_infinity.engine.generation_loop import GenerationEngine
+    from moe_infinity.engine.types import SamplingParams
 
 
 @dataclass
@@ -578,6 +582,39 @@ class DFlashSpeculator:
             [emitted[:max_new_tokens]], dtype=torch.long, device=input_ids.device
         )
         return torch.cat([input_ids, new_ids], dim=1)
+
+    def run(
+        self,
+        *,
+        engine: GenerationEngine,
+        prompt_token_ids: List[int],
+        sampling_params: SamplingParams,
+        request_id: Optional[str] = None,
+    ) -> List[int]:
+        """``SpecDecodeStrategy`` adapter: engine list contract -> native loop.
+
+        The engine calls this only after its greedy gate applied (batch==1,
+        temperature==0, top_p==1, top_k==0). Target forwards route through
+        this speculator's OWN ``self.moe`` rich helper -- never through
+        ``engine`` -- so the standard expert dispatch is preserved.
+        ``max_new_tokens`` comes from ``sampling_params.max_tokens`` and the
+        stop ids from ``engine.eos_token_id`` (the native loop falls back to
+        the target config's eos when the engine has none). Returns ONLY the
+        newly generated token ids (prompt stripped); the engine wraps them in
+        a ``GenerationResult`` and ``MoE.generate`` re-prepends the prompt.
+        """
+        del request_id  # protocol-conformance parameter; the loop is stateless
+        input_ids = torch.tensor([list(prompt_token_ids)], dtype=torch.long)
+        max_new_tokens = int(getattr(sampling_params, "max_tokens", 256))
+        eos = getattr(engine, "eos_token_id", None)
+        stop_ids = [int(eos)] if isinstance(eos, int) and eos >= 0 else None
+        output = self.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=0.0,
+            stop_token_ids=stop_ids,
+        )
+        return [int(t) for t in output[0, len(prompt_token_ids) :].tolist()]
 
 
 __all__ = [

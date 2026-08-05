@@ -39,9 +39,14 @@ def main() -> None:
 
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
 
+    # Engine path: greedy batch-1 generate with a drafter routes through
+    # GenerationEngine.spec_strategy (the native DFlash loop).
     start = time.time()
-    output_ids = speculator.generate(
-        input_ids, max_new_tokens=args.max_new_tokens, temperature=0.0
+    output_ids = model.generate(
+        input_ids,
+        max_new_tokens=args.max_new_tokens,
+        do_sample=False,
+        speculative_draft=speculator,
     )
     elapsed = time.time() - start
 
