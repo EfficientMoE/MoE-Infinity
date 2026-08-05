@@ -1079,6 +1079,24 @@ class OffloadEngine(object):
         topology = list(ret_dict.items())
         return topology
 
+    def _build_topology_v2(self, topo):
+        mask32 = 0xFFFFFFFF
+        num_stages = len(topo)
+        topo_v2 = []
+        for stage_idx, (name, groups) in enumerate(topo):
+            is_sparse = len(groups) > 1
+            is_last_stage = stage_idx == num_stages - 1
+            # corr_id mirrors C++ InitializeTopology bit-packing: low 32 bits =
+            # stage index, high 32 bits = group index, except the last stage
+            # whose high 32 bits are the 0xFFFFFFFF end-of-pipeline marker.
+            corr_ids = [
+                (stage_idx & mask32)
+                | ((mask32 if is_last_stage else group_idx & mask32) << 32)
+                for group_idx in range(len(groups))
+            ]
+            topo_v2.append((name, is_sparse, groups, corr_ids))
+        return topo_v2
+
     def setup_archer_hooks(self, model):
         for name, param in model.named_parameters(recurse=True):
             if name not in self.name_id_map:
@@ -1103,7 +1121,7 @@ class OffloadEngine(object):
             f"TOPO: {len(topo)} stages, {sparse_count} sparse",
             flush=True,
         )
-        self.archer_engine.set_topology(topo)
+        self.archer_engine.set_topology_v2(self._build_topology_v2(topo))
         print("TOPO: set_topology done", flush=True)
 
         @torch.no_grad()
