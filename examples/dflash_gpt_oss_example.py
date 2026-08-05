@@ -1,3 +1,31 @@
+"""Native DFlash speculative decoding for gpt-oss-120b (v1: greedy, resident).
+
+Drives the **native** DFlash draft->verify->rollback loop through the
+MoE-Infinity engine: a greedy, batch-1 ``model.generate(..., speculative_draft=...)``
+routes through ``GenerationEngine.spec_strategy`` (the native loop in
+``moe_infinity/spec_decode/dflash.py``). The drafter (``z-lab/gpt-oss-120b-DFlash``)
+loads via ``trust_remote_code=True`` and reuses the target's ``embed_tokens`` +
+``lm_head``. Omit ``speculative_draft`` (or use a non-greedy config / batch>1) and
+``generate`` uses the standard autoregressive path, byte-identical to before.
+
+v1 scope (everything else is deferred):
+  * Greedy only (``do_sample=False``); sampled speculative decoding is deferred.
+  * Resident by default. Expert offload is a tunable knob (``device_memory_ratio``);
+    v1 does not couple expert prefetch to the speculative loop.
+  * Sync path only; the async serving path is not spec-enabled.
+  * batch == 1.
+
+Hardware: gpt-oss-120b is validated resident with TP=2 on Blackwell/SM120
+(RTX PRO 6000). Correctness is proven autonomously on a tiny CPU model
+(``tests/python/dflash/test_native_e2e.py``: native == plain greedy,
+token-identical); the 120B agreement-rate / acceptance-length / tok-s harness is
+GPU-gated (``tests/python/dflash/test_gpu_120b.py``, enabled via ``MOE_DFLASH_GPU=1``
+with the checkpoints cached). See ``docs/dflash.md``.
+
+Run:
+    python examples/dflash_gpt_oss_example.py --offload_dir /ssd/moe-infinity/gpt-oss-120b
+"""
+
 from __future__ import annotations
 
 import argparse
