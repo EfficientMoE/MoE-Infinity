@@ -975,9 +975,7 @@ class OffloadEngine(object):
         # keep them resident. MXFP4 packed weights stay uint8 output-major
         # ([E, N, K//2] blocks, [E, N, K//32] scales) - the layout the fused
         # kernel consumes without transposition.
-        modules = [
-            m for m in model.modules() if isinstance(m, SyncGptOssMLP)
-        ]
+        modules = [m for m in model.modules() if isinstance(m, SyncGptOssMLP)]
         if not modules:
             return
 
