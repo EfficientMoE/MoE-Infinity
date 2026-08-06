@@ -39,6 +39,11 @@ def extract_context_feature(hidden_states, layer_ids=(1, 9, 17, 25, 33)):
                 f"{len(hidden_states)} entries were returned"
             )
         selected.append(hidden_states[idx])
+    # Multi-GPU (TP>1): the target's layers can span devices, so the selected
+    # per-layer states may live on different GPUs. Gather them onto one device
+    # before concatenating (no-op on a single device).
+    gather_device = selected[0].device
+    selected = [state.to(gather_device) for state in selected]
     return torch.cat(selected, dim=-1)
 
 
