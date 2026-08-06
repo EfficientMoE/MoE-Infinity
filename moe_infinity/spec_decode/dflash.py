@@ -468,7 +468,9 @@ class DFlashSpeculator:
             input_ids, past_key_values=None, logits_to_keep=1
         )
         anchor = int(logits[:, -1, :].argmax(dim=-1).item())
-        context_feature = extract_context_feature(hidden_states, layer_ids)
+        context_feature = extract_context_feature(hidden_states, layer_ids).to(
+            self.device
+        )
 
         stop_ids = set(_resolve_stop_ids(self.target, stop_token_ids))
 
@@ -513,7 +515,7 @@ class DFlashSpeculator:
             logits, hidden_states, target_kv = self._forward_target(
                 block, past_key_values=target_kv, logits_to_keep=0
             )
-            posterior = logits.argmax(dim=-1)
+            posterior = logits.argmax(dim=-1).to(self.device)
 
             accept = acceptance_length(block, posterior)
             committed = committed_tokens(block, posterior, accept)
@@ -565,9 +567,9 @@ class DFlashSpeculator:
             if stop:
                 break
 
-            suffix = extract_context_feature(hidden_states, layer_ids)[
-                :, : accept + 1, :
-            ]
+            suffix = extract_context_feature(hidden_states, layer_ids).to(
+                self.device
+            )[:, : accept + 1, :]
             if self._drafter_has_kv_cache:
                 context_feature = suffix
             else:
