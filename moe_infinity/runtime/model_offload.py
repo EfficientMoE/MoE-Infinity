@@ -849,6 +849,9 @@ class OffloadEngine(object):
 
                         module_idx += 1
 
+                if getattr(self.config, "model_type", "") == "gpt_oss":
+                    self._load_resident_gpt_oss(model)
+
                 self.setup_archer_hooks(model)
                 return model
 
@@ -960,6 +963,146 @@ class OffloadEngine(object):
             raise RuntimeError(
                 f"Missing shared_experts weights: {sorted(remaining)[:5]}"
             )
+
+    @torch.no_grad()
+    def _load_resident_gpt_oss(self, model):
+        # GPT-OSS is not wired into the C++ expert dispatcher (see the
+        # SyncGptOssMLP guards in setup_archer_hooks / register_expert): its
+        # SyncGptOssMLP.forward runs a resident Python expert loop reading the
+        # _PackedExperts params directly. The Archer empty-init replaces those
+        # params with [1] placeholders and never materializes them, so load the
+        # real MXFP4 blocks/scales, biases, router, and attention sinks here and
+        # keep them resident. MXFP4 packed weights stay uint8 output-major
+        # ([E, N, K//2] blocks, [E, N, K//32] scales) - the layout the fused
+        # kernel consumes without transposition.
+        modules = [
+            m for m in model.modules() if isinstance(m, SyncGptOssMLP)
+        ]
+        if not modules:
+            return
+
+        num_devices = torch.cuda.device_count()
+        target = get_device(num_devices - 1) if num_devices else "cpu"
+
+        def _set(param, tensor, *, cast_dtype=None):
+            data = tensor
+            if cast_dtype is not None:
+                data = data.to(cast_dtype)
+            param.requires_grad_(False)
+            param.data = data.to(device=target).contiguous()
+            param._moe_infinity_resident = True
+
+        loaded_names = set()
+
+        def _reshape_blocks(t):
+            if t.dim() == 4:
+                E, N, G, B = t.shape
+                return t.reshape(E, N, G * B)
+            return t
+
+        for module in modules:
+            layer_id = module.layer_id
+            prefix = f"model.layers.{layer_id}"
+            experts = f"{prefix}.mlp.experts"
+            wanted = {
+                f"{experts}.gate_up_proj_blocks": (
+                    module.experts.gate_up_proj,
+                    _reshape_blocks,
+                    None,
+                ),
+                f"{experts}.gate_up_proj_scales": (
+                    module.experts.gate_up_proj_scales,
+                    None,
+                    None,
+                ),
+                f"{experts}.gate_up_proj_bias": (
+                    module.experts.gate_up_proj_bias,
+                    None,
+                    self.dtype_cls,
+                ),
+                f"{experts}.down_proj_blocks": (
+                    module.experts.down_proj,
+                    _reshape_blocks,
+                    None,
+                ),
+                f"{experts}.down_proj_scales": (
+                    module.experts.down_proj_scales,
+                    None,
+                    None,
+                ),
+                f"{experts}.down_proj_bias": (
+                    module.experts.down_proj_bias,
+                    None,
+                    self.dtype_cls,
+                ),
+                f"{prefix}.mlp.router.weight": (
+                    module.router.weight,
+                    None,
+                    self.dtype_cls,
+                ),
+                f"{prefix}.mlp.router.bias": (
+                    module.router.bias,
+                    None,
+                    self.dtype_cls,
+                ),
+            }
+            remaining = dict(wanted)
+            for ckpt in self.ckpt_files:
+                if not remaining or not ckpt.endswith(".safetensors"):
+                    continue
+                with safe_open(ckpt, framework="pt", device="cpu") as f:
+                    keys = set(f.keys())
+                    for name in list(remaining):
+                        if name not in keys:
+                            continue
+                        param, transform, cast_dtype = remaining[name]
+                        t = f.get_tensor(name)
+                        if transform is not None:
+                            t = transform(t)
+                        _set(param, t, cast_dtype=cast_dtype)
+                        loaded_names.add(name)
+                        del remaining[name]
+
+            if remaining:
+                raise RuntimeError(
+                    f"Missing gpt-oss resident weights: {sorted(remaining)[:5]}"
+                )
+
+        sink_params = {
+            name: param
+            for name, param in model.named_parameters(recurse=True)
+            if name.endswith("self_attn.sinks")
+        }
+        sink_remaining = dict(sink_params)
+        for ckpt in self.ckpt_files:
+            if not sink_remaining or not ckpt.endswith(".safetensors"):
+                continue
+            with safe_open(ckpt, framework="pt", device="cpu") as f:
+                keys = set(f.keys())
+                for name in list(sink_remaining):
+                    lookup = name
+                    if lookup not in keys and name.startswith(
+                        model.base_model_prefix + "."
+                    ):
+                        lookup = name[len(model.base_model_prefix) + 1 :]
+                    if lookup not in keys:
+                        continue
+                    _set(
+                        sink_remaining[name],
+                        f.get_tensor(lookup),
+                        cast_dtype=self.dtype_cls,
+                    )
+                    loaded_names.add(name)
+                    loaded_names.add(lookup)
+                    del sink_remaining[name]
+        if sink_remaining:
+            raise RuntimeError(
+                f"Missing gpt-oss attention sinks: {sorted(sink_remaining)[:5]}"
+            )
+
+        for name in loaded_names:
+            for candidate in (name, f"{model.base_model_prefix}.{name}"):
+                self.name_id_map.pop(candidate, None)
 
     def get_topology(self, model):
         name_lst = []
