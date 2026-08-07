@@ -114,10 +114,13 @@ def test_verify_forward_uses_full_logits():
     seam_calls = []
     orig_forward_target = spec._forward_target
 
-    def seam_spy(input_ids, past_key_values=None, logits_to_keep=0):
+    def seam_spy(input_ids, past_key_values=None, logits_to_keep=0, **fwd_kwargs):
         seam_calls.append(int(logits_to_keep))
         return orig_forward_target(
-            input_ids, past_key_values=past_key_values, logits_to_keep=logits_to_keep
+            input_ids,
+            past_key_values=past_key_values,
+            logits_to_keep=logits_to_keep,
+            **fwd_kwargs,
         )
 
     spec._forward_target = seam_spy

@@ -18,8 +18,9 @@ target-argmax overrides:
     overshoot is truncated to the remaining budget and the loop stops; the
     return is exactly ``max_new_tokens`` new tokens and the cache is cropped
     to the truncated ``start``.
-(f) batch > 1 — raises ``NotImplementedError`` naming the batch==1
-    constraint (v1 is single-sequence).
+(f) batch > 1 — supported since Track C: a two-row batch produces the
+    single-sequence result row by row (token-identical to plain greedy).
+    Batched raggedness edge cases live in ``test_batched_spec.py``.
 
 State accounting: ``committed.emitted = [d_1 .. d_accept, bonus]`` while the
 verify-forward KV covers ``[anchor, d_1 .. d_accept]`` only. Keeping ``k``
@@ -326,10 +327,18 @@ def test_max_new_tokens_truncates_at_block_boundary(monkeypatch):
     assert int(spec.last_target_cache.get_seq_length()) == PROMPT_LEN + max_new
 
 
-# (f) batch > 1 guard
-def test_batch_greater_than_one_raises_not_implemented():
-    spec, _ = _tiny_spec()
+# (f) batch > 1 -- supported since Track C; the guard is gone. The batched
+# result must equal the single-sequence runs row by row (and plain greedy).
+def test_batch_greater_than_one_matches_single_sequence_path():
+    spec, target = _tiny_spec()
     batched = torch.cat([PROMPT, PROMPT], dim=0)
     assert batched.shape[0] == 2
-    with pytest.raises(NotImplementedError, match="batch==1"):
-        spec.generate(batched, max_new_tokens=4)
+
+    out = spec.generate(batched, max_new_tokens=4)
+    single = spec.generate(PROMPT, max_new_tokens=4)
+    plain = plain_greedy_decode(target, PROMPT, max_new_tokens=4)
+
+    assert tuple(out.shape) == (2, PROMPT_LEN + 4)
+    for b in range(2):
+        assert torch.equal(out[b : b + 1], single)
+        assert torch.equal(out[b : b + 1], plain)

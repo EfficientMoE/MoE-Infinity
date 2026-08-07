@@ -3,16 +3,34 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Union,
+)
 
 import torch
 
 from moe_infinity.entrypoints.big_modeling import extract_context_feature
 from moe_infinity.spec_decode._dflash_ops import (
     acceptance_length,
+    acceptance_lengths,
     build_block,
+    build_block_with_prefixes,
     committed_tokens,
+    committed_tokens_ragged,
 )
+from moe_infinity.spec_decode._dflash_sample_ops import (
+    acceptance_sampled,
+    committed_tokens_sampled,
+    warped_probs,
+)
+from moe_infinity.spec_decode._route_ahead_ctx import route_ahead_context
+from moe_infinity.spec_decode._route_ahead_stats import RouteAheadStats
 
 if TYPE_CHECKING:
     from moe_infinity.engine.generation_loop import GenerationEngine
@@ -82,13 +100,15 @@ def validate_pairing(draft_cfg: DFlashConfig, target_hf_config: Any) -> None:
         raise ValueError(
             f"DFlash mask_token_id {draft_cfg.mask_token_id} is outside target vocab_size {t_vocab}"
         )
-    if draft_cfg.block_size != DFLASH_BLOCK_SIZE:
+    if draft_cfg.block_size < 2:
         raise ValueError(
-            f"DFlash block_size {draft_cfg.block_size} != expected {DFLASH_BLOCK_SIZE}"
+            f"DFlash block_size {draft_cfg.block_size} must be >= 2 (anchor + >=1 draft token)"
         )
-    if draft_cfg.target_layer_ids != DFLASH_TARGET_LAYER_IDS:
+    if not draft_cfg.target_layer_ids or any(
+        i < 0 for i in draft_cfg.target_layer_ids
+    ):
         raise ValueError(
-            f"DFlash target_layer_ids {draft_cfg.target_layer_ids} != expected {DFLASH_TARGET_LAYER_IDS}"
+            f"DFlash target_layer_ids {draft_cfg.target_layer_ids} must be non-empty and non-negative"
         )
     highest_capture = max(draft_cfg.target_layer_ids) + 1
     if highest_capture > t_layers:
@@ -335,6 +355,27 @@ class DFlashSpeculator:
         self.step_trace: List[NativeStepTrace] = []
         self.last_target_cache: Any = None
         self.last_draft_cache: Any = None
+        # Per-row new-token counts set by the batched path (its ragged rows
+        # are right-padded in the returned rectangle). None on the batch==1
+        # path, whose output is never padded.
+        self.last_generated_lengths: Optional[List[int]] = None
+        # Track A5 metrics handle; None (default) = instrumentation off, zero
+        # overhead. Set via ``enable_route_ahead_stats``.
+        self.route_ahead_stats: Optional[RouteAheadStats] = None
+
+    def enable_route_ahead_stats(self) -> RouteAheadStats:
+        """Opt in to Track A5 route-ahead coverage/waste instrumentation.
+
+        Creates (or resets) the ``RouteAheadStats`` recorder consumed by the
+        verify-time route-ahead context; read the counters back from
+        ``self.route_ahead_stats`` after ``generate()``. Pure observer --
+        enabling it never changes routing, prefetch, or emitted tokens.
+        """
+        if self.route_ahead_stats is None:
+            self.route_ahead_stats = RouteAheadStats()
+        else:
+            self.route_ahead_stats.reset()
+        return self.route_ahead_stats
 
     def _configure_target_hooks(self, input_ids: torch.Tensor) -> None:
         configure = getattr(self.moe, "_configure_hook", None)
@@ -349,12 +390,18 @@ class DFlashSpeculator:
         input_ids: torch.Tensor,
         past_key_values: Any = None,
         logits_to_keep: int = 0,
+        *,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Any, Any]:
         """Rich target forward -> on-device (logits, hidden_states, past_key_values).
 
         ``logits_to_keep=1`` slices to the last position and is for the
         prefill/anchor step only; the verify step MUST pass ``0`` (full
-        logits) or the acceptance rule breaks.
+        logits) or the acceptance rule breaks. ``attention_mask`` /
+        ``position_ids`` are the Track-C batched-path plumbing (left-padded
+        rows need explicit per-row RoPE positions); the batch==1 call sites
+        never pass them, so the single-sequence forward is byte-identical.
         """
         rich = getattr(self.moe, "_native_model_forward_rich", None)
         if callable(rich):
@@ -372,8 +419,74 @@ class DFlashSpeculator:
         }
         if logits_to_keep:
             kwargs["logits_to_keep"] = int(logits_to_keep)
+        if attention_mask is not None:
+            kwargs["attention_mask"] = attention_mask
+        if position_ids is not None:
+            kwargs["position_ids"] = position_ids
         outputs = self.target(input_ids, **kwargs)
         return outputs.logits, outputs.hidden_states, outputs.past_key_values
+
+    def _resolve_route_ahead_prefetcher(self) -> Any:
+        """Prefetcher handle bound to the verify-time route-ahead context.
+
+        Production MoE shell: ``moe.engine.expert_prefetcher``
+        (``runtime/model_offload.py:865``). Tiny fixtures / bare-HF targets
+        have no offload engine -> ``None``; the executor seam then falls back
+        to its own configured prefetcher and no-ops when none exists
+        (resident mode / ``speculative_prefetch`` config off).
+        """
+        engine = getattr(self.moe, "engine", None)
+        return getattr(engine, "expert_prefetcher", None)
+
+    def _verify_target_block(
+        self,
+        block: torch.Tensor,
+        target_kv: Any,
+        *,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Any, Any]:
+        """Verify forward under the Track A3 route-ahead context.
+
+        The context flags executor-backed MoE layers to pin + prefetch their
+        ACTUAL routed expert union before reading any expert weight
+        (cache warming only; routing/outputs unchanged). Token reset in
+        ``finally`` makes the activation exception-safe, so a failed verify
+        cannot leak route-ahead state into non-spec decode.
+
+        A4 audit: NO resident-only guard exists anywhere on the spec path --
+        ``_init_native_runtime``/``generate`` here,
+        ``big_modeling._resolve_spec_strategy`` (big_modeling.py:721), and
+        ``generation_loop._spec_strategy_applies`` (generation_loop.py:113)
+        gate only on batch size and greedy sampling, never on expert
+        residency -- so offloaded executor-backed models (DeepSeek/Qwen/
+        Mixtral) already run DFlash with this seam active. gpt-oss stays
+        excluded structurally, not by assertion: ``model_offload.py:954``
+        never wires ``expert_executor`` into ``SyncGptOssMLP`` (its forward
+        runs a resident Python expert loop), ``parse_expert_id`` yields no
+        per-expert ids for it (hf_config.py:216-223), and its experts are
+        force-resident (model_offload.py:1114-1123).
+
+        A5: when ``self.route_ahead_stats`` is set, the step's observations
+        are opened here (``begin_step``) and the handle is carried by the
+        context; ``generate`` commits the step after the accept rule.
+        """
+        stats = getattr(self, "route_ahead_stats", None)
+        if stats is not None:
+            stats.begin_step()
+        # The mask/position kwargs are forwarded only when set so the batch==1
+        # call keeps its exact pre-Track-C signature (test doubles wrap it).
+        kwargs: dict[str, Any] = {}
+        if attention_mask is not None:
+            kwargs["attention_mask"] = attention_mask
+        if position_ids is not None:
+            kwargs["position_ids"] = position_ids
+        with route_ahead_context(
+            self._resolve_route_ahead_prefetcher(), stats=stats
+        ):
+            return self._forward_target(
+                block, past_key_values=target_kv, logits_to_keep=0, **kwargs
+            )
 
     def _run_drafter(
         self,
@@ -414,11 +527,14 @@ class DFlashSpeculator:
     def generate(
         self,
         input_ids: torch.Tensor,
-        max_new_tokens: int = 256,
+        max_new_tokens: Union[int, Sequence[int]] = 256,
         temperature: float = 0.0,
         stop_token_ids: Optional[List[int]] = None,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Native greedy DFlash draft->verify->rollback loop (RFC 1.2).
+        """Native DFlash draft->verify->rollback loop (RFC 1.2).
 
         Per step: draft a block of ``block_size`` candidates with the
         non-causal drafter, verify the whole block in ONE target forward with
@@ -427,6 +543,17 @@ class DFlashSpeculator:
         both KV caches back to the committed prefix. The bonus token is
         emitted but NOT cached -- it becomes the next step's anchor, so
         ``cached_len`` (``start``) always trails the emitted count by one.
+
+        Sampling: ``temperature == 0`` is the greedy path above (byte-for-byte
+        the v1 contract). ``temperature > 0`` (optionally with ``top_k`` /
+        ``top_p``) runs the LOSSLESS speculative-sampling accept rule of
+        ``_dflash_sample_ops``: drafts are drawn from the drafter's warped
+        slot distributions and verified per slot against the identically
+        warped target conditionals (rejection sampling + residual
+        correction), so the emitted stream follows the exact distribution of
+        plain sampled generation from the target. Greedy-vs-sampled only
+        changes how tokens are CHOSEN; the commit/rollback bookkeeping below
+        is shared.
 
         Stop handling: ``stop_token_ids`` (falling back to the target
         config's ``eos_token_id``) truncates the emitted output at the first
@@ -437,21 +564,71 @@ class DFlashSpeculator:
         ``min(k, accept) + 1`` cached tokens -- the anchor plus the first
         ``min(k, accept)`` drafts -- because the verify forward only
         produced KV for block tokens, never for the bonus.
+
+        Batching (Track C): ``input_ids`` with batch > 1 dispatches to
+        ``_generate_batched`` -- greedy-only (``temperature`` must be 0),
+        bare-HF-target-only (the MoE rich-forward seam stays batch==1), with
+        LEFT-padded prompts described by ``attention_mask`` (omit it when all
+        prompts share one length) and a scalar or per-sequence
+        ``max_new_tokens``. The ragged per-row outputs are right-padded into
+        the returned rectangle; each row's true new-token count is exposed as
+        ``self.last_generated_lengths``. ``attention_mask`` is ignored on the
+        batch==1 path.
         """
         if input_ids.ndim != 2:
             raise ValueError(
-                f"DFlashSpeculator.generate expects input_ids of shape [1, seq], got {tuple(input_ids.shape)}"
+                f"DFlashSpeculator.generate expects input_ids of shape [batch, seq], got {tuple(input_ids.shape)}"
             )
-        if input_ids.shape[0] != 1:
-            raise NotImplementedError(
-                "DFlashSpeculator v1 supports batch==1 only; got input_ids "
-                f"with batch size {input_ids.shape[0]}"
+        if float(temperature) < 0:
+            raise ValueError(
+                f"DFlashSpeculator.generate: temperature must be >= 0, got {temperature}"
+            )
+        if input_ids.shape[0] == 1:
+            budget = max_new_tokens
+            if isinstance(budget, Sequence):
+                if len(budget) != 1:
+                    raise ValueError(
+                        f"per-sequence max_new_tokens has {len(budget)} entries "
+                        f"for batch size 1"
+                    )
+                budget = budget[0]
+            return self._generate_single(
+                input_ids,
+                max_new_tokens=int(budget),
+                temperature=float(temperature),
+                stop_token_ids=stop_token_ids,
+                top_k=top_k,
+                top_p=top_p,
             )
         if float(temperature) > 0:
-            raise ValueError(
-                "DFlashSpeculator v1 is greedy-only (temperature=0.0); "
-                "sampled speculative decoding is out of scope"
+            raise NotImplementedError(
+                "batched DFlash (batch > 1) is greedy-only for now; "
+                f"got temperature {temperature}"
             )
+        if callable(getattr(self.moe, "_native_model_forward_rich", None)):
+            raise NotImplementedError(
+                "batched DFlash (batch > 1) requires a bare HF target; the MoE "
+                "rich-forward seam is batch==1 (engine-gated) only"
+            )
+        return self._generate_batched(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            stop_token_ids=stop_token_ids,
+            attention_mask=attention_mask,
+        )
+
+    @torch.inference_mode()
+    def _generate_single(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float,
+        stop_token_ids: Optional[List[int]],
+        top_k: int,
+        top_p: float,
+    ) -> torch.Tensor:
+        """The v1 single-sequence loop (batch==1), byte-identical to pre-Track-C."""
+        sampled = float(temperature) > 0
 
         from transformers import DynamicCache
         from transformers.cache_utils import DynamicSlidingWindowLayer
@@ -467,7 +644,15 @@ class DFlashSpeculator:
         logits, hidden_states, target_kv = self._forward_target(
             input_ids, past_key_values=None, logits_to_keep=1
         )
-        anchor = int(logits[:, -1, :].argmax(dim=-1).item())
+        if sampled:
+            anchor = int(
+                torch.multinomial(
+                    warped_probs(logits[0, -1], temperature, top_k, top_p),
+                    num_samples=1,
+                ).item()
+            )
+        else:
+            anchor = int(logits[:, -1, :].argmax(dim=-1).item())
         context_feature = extract_context_feature(hidden_states, layer_ids).to(
             self.device
         )
@@ -479,6 +664,7 @@ class DFlashSpeculator:
         draft_kv = DynamicCache() if self._drafter_has_kv_cache else None
 
         self.step_trace = []
+        self.last_generated_lengths = None
         if stop_ids and anchor in stop_ids and max_new_tokens >= 1:
             # The prefill anchor is itself a stop token: emit it and halt
             # before any block is drafted (nothing past EOS may be emitted
@@ -498,7 +684,17 @@ class DFlashSpeculator:
 
             drafter_out = self._run_drafter(block, context_feature, start, draft_kv)
             draft_logits = self.lm_head(drafter_out)[:, -(block_size - 1) :, :]
-            block[:, 1:] = draft_logits.argmax(dim=-1)
+            draft_probs: Optional[torch.Tensor] = None
+            if sampled:
+                # The accept test divides by the drafter's OWN warped slot
+                # distributions, so drafts must be genuine draws from them --
+                # argmax drafts would void the losslessness proof.
+                draft_probs = warped_probs(draft_logits[0], temperature, top_k, top_p)
+                block[:, 1:] = torch.multinomial(
+                    draft_probs, num_samples=1
+                ).squeeze(-1)
+            else:
+                block[:, 1:] = draft_logits.argmax(dim=-1)
 
             # Snapshot sliding layers BEFORE the verify forward: its update
             # evicts all but the last ``sliding_window - 1`` tokens, so the
@@ -512,13 +708,25 @@ class DFlashSpeculator:
                         int(layer.cumulative_length),
                     )
 
-            logits, hidden_states, target_kv = self._forward_target(
-                block, past_key_values=target_kv, logits_to_keep=0
+            logits, hidden_states, target_kv = self._verify_target_block(
+                block, target_kv
             )
-            posterior = logits.argmax(dim=-1).to(self.device)
 
-            accept = acceptance_length(block, posterior)
-            committed = committed_tokens(block, posterior, accept)
+            if sampled:
+                assert draft_probs is not None
+                decision = acceptance_sampled(
+                    draft_probs,
+                    warped_probs(logits[0], temperature, top_k, top_p),
+                    block[0, 1:],
+                )
+                accept = decision.accept
+                committed = committed_tokens_sampled(
+                    block, decision.accept, decision.final_token
+                )
+            else:
+                posterior = logits.argmax(dim=-1).to(self.device)
+                accept = acceptance_length(block, posterior)
+                committed = committed_tokens(block, posterior, accept)
 
             # This step's emitted tokens are [d_1 .. d_accept, bonus]; the
             # verify forward produced KV only for [anchor, d_1 .. d_accept].
@@ -551,6 +759,11 @@ class DFlashSpeculator:
                 block_size=block_size,
             )
             assert int(target_kv.get_seq_length()) == start
+
+            if self.route_ahead_stats is not None:
+                # A5: finalize this verify step's coverage/waste accounting
+                # with the kept prefix the accept rule just fixed. Read-only.
+                self.route_ahead_stats.commit_step(kept_rows=cache_committed)
 
             self.step_trace.append(
                 NativeStepTrace(
@@ -585,6 +798,272 @@ class DFlashSpeculator:
         )
         return torch.cat([input_ids, new_ids], dim=1)
 
+    @torch.inference_mode()
+    def _generate_batched(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: Union[int, Sequence[int]],
+        stop_token_ids: Optional[List[int]],
+        attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Track-C batched loop: one prefill + one verify per step for all rows.
+
+        Greedy correctness rests on two facts: (1) the emitted stream of a
+        greedy verify step is always the target's argmax continuation given
+        the committed prefix -- accepted drafts matched the target by
+        definition and the bonus/correction IS the target's argmax -- so
+        drafts (and hence batching) can only change HOW MANY tokens a step
+        commits, never WHICH tokens are emitted; (2) a row's verify logits
+        depend only on its own cache row, block prefix, and RoPE positions,
+        which the left-pad ``attention_mask`` + per-row ``position_ids``
+        plumbing reproduce exactly.
+
+        Per-sequence rollback (C1): HF ``DynamicCache`` is dense -- one
+        ``cumulative_length`` per layer and slot-index-based causal/sliding
+        masks (``create_causal_mask`` reads ``q_offset`` from the cache, not
+        per-row positions) -- so rows cannot physically hold ragged lengths.
+        Instead every row rolls back to ``prev_start + min_cc`` where
+        ``min_cc`` is the SMALLEST per-row commit among still-active rows
+        (``rollback_target_cache`` is reused unchanged: the sliding-window
+        snapshot/rebuild is per-row inside the batched tensors). Rows that
+        committed more than ``min_cc`` carry the un-cached tail of their
+        already-emitted (hence target-true) tokens as the KNOWN PREFIX of
+        their next block (``build_block_with_prefixes``); the drafter only
+        fills the MASK slots past it, the verify re-caches the prefix, and
+        the prefix's re-confirmation tokens are skipped on emission
+        (``pending - 1`` of them). Slot distances equal true token distances
+        under this uniform-length scheme, so sliding-window masks stay exact.
+        """
+        from transformers import DynamicCache
+        from transformers.cache_utils import DynamicSlidingWindowLayer
+
+        batch, padded_prompt = int(input_ids.shape[0]), int(input_ids.shape[1])
+        block_size = int(self.config.block_size)
+        layer_ids = list(self.config.target_layer_ids)
+        mask_token_id = int(self.config.mask_token_id)
+
+        if isinstance(max_new_tokens, Sequence):
+            budgets = [int(x) for x in max_new_tokens]
+            if len(budgets) != batch:
+                raise ValueError(
+                    f"per-sequence max_new_tokens has {len(budgets)} entries "
+                    f"for batch size {batch}"
+                )
+        else:
+            budgets = [int(max_new_tokens)] * batch
+        if any(b < 0 for b in budgets):
+            raise ValueError(f"max_new_tokens must be >= 0, got {budgets}")
+
+        input_ids = input_ids.to(self.device)
+        self._configure_target_hooks(input_ids)
+
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        else:
+            attention_mask = attention_mask.to(device=self.device, dtype=torch.long)
+        if tuple(attention_mask.shape) != tuple(input_ids.shape):
+            raise ValueError(
+                f"attention_mask shape {tuple(attention_mask.shape)} != "
+                f"input_ids shape {tuple(input_ids.shape)}"
+            )
+        if attention_mask.min() < 0 or attention_mask.max() > 1:
+            raise ValueError("attention_mask must be 0/1 valued")
+        if int(attention_mask[:, -1].min()) != 1:
+            raise ValueError(
+                "batched DFlash requires LEFT-padded prompts: every row's last "
+                "token must be real (attention_mask[:, -1] == 1)"
+            )
+        steps = attention_mask[:, 1:] - attention_mask[:, :-1]
+        if int(steps.min()) < 0:
+            raise ValueError(
+                "batched DFlash requires LEFT-padded prompts: each "
+                "attention_mask row must be 0*1* (pads first, then real tokens)"
+            )
+        pads = padded_prompt - attention_mask.sum(dim=1)
+
+        prefill_position_ids = (attention_mask.cumsum(dim=-1) - 1).clamp_min(0)
+        logits, hidden_states, target_kv = self._forward_target(
+            input_ids,
+            past_key_values=None,
+            logits_to_keep=1,
+            attention_mask=attention_mask,
+            position_ids=prefill_position_ids,
+        )
+        anchors = logits[:, -1, :].argmax(dim=-1)
+        context_feature = extract_context_feature(hidden_states, layer_ids).to(
+            self.device
+        )
+        stop_ids = set(_resolve_stop_ids(self.target, stop_token_ids))
+
+        emitted: List[List[int]] = [[int(anchors[b])] for b in range(batch)]
+        finished: List[bool] = [
+            budgets[b] <= 0 or (bool(stop_ids) and int(anchors[b]) in stop_ids)
+            for b in range(batch)
+        ]
+        start = padded_prompt
+        draft_kv = DynamicCache() if self._drafter_has_kv_cache else None
+        self.step_trace = []
+
+        def active(b: int) -> bool:
+            return not finished[b] and len(emitted[b]) < budgets[b]
+
+        while any(active(b) for b in range(batch)):
+            prev_start = start
+            pendings = [
+                len(emitted[b]) - (start - padded_prompt) for b in range(batch)
+            ]
+            prefixes = [
+                emitted[b][start - padded_prompt :] if active(b) else []
+                for b in range(batch)
+            ]
+            block = build_block_with_prefixes(
+                prefixes, mask_token_id, block_size
+            ).to(self.device)
+
+            drafter_out = self._run_drafter(block, context_feature, start, draft_kv)
+            draft_logits = self.lm_head(drafter_out)[:, -(block_size - 1) :, :]
+            for b in range(batch):
+                if active(b) and pendings[b] < block_size:
+                    block[b, pendings[b] :] = draft_logits[b, pendings[b] - 1 :].argmax(
+                        dim=-1
+                    )
+
+            # Snapshot sliding layers BEFORE the verify forward (see
+            # _generate_single); the rebuild in rollback_target_cache is
+            # per-row inside the batched [batch, ...] tensors.
+            sliding_snaps: dict[int, tuple[torch.Tensor, torch.Tensor, int]] = {}
+            for i, layer in enumerate(target_kv.layers):
+                if isinstance(layer, DynamicSlidingWindowLayer):
+                    keys, values = layer.keys, layer.values
+                    assert keys is not None and values is not None
+                    sliding_snaps[i] = (
+                        keys.clone(),
+                        values.clone(),
+                        int(layer.cumulative_length),
+                    )
+
+            block_attention = torch.cat(
+                [
+                    attention_mask,
+                    torch.ones(
+                        batch,
+                        start - padded_prompt + block_size,
+                        dtype=attention_mask.dtype,
+                        device=self.device,
+                    ),
+                ],
+                dim=1,
+            )
+            block_position_ids = torch.arange(
+                start, start + block_size, device=self.device, dtype=torch.long
+            ).unsqueeze(0) - pads.unsqueeze(1)
+            logits, hidden_states, target_kv = self._verify_target_block(
+                block,
+                target_kv,
+                attention_mask=block_attention,
+                position_ids=block_position_ids,
+            )
+            posterior = logits.argmax(dim=-1).to(self.device)
+            accepts = acceptance_lengths(block, posterior)
+            step_committed = committed_tokens_ragged(block, posterior, accepts)
+
+            # Per-row emission with the re-fed prefix skipped: of this step's
+            # ``accept + 1`` emitted tokens the first ``pending - 1`` are
+            # re-confirmations of tokens already emitted (the known prefix),
+            # so row b newly emits ``step_tokens[pending - 1:]``. Keeping k of
+            # those commits ``min(pending - 1 + k, accept) + 1`` cached tokens
+            # (the v1 rule ``min(k, accept) + 1`` at pending == 1).
+            step_cc: dict[int, int] = {}
+            for b in range(batch):
+                if not active(b):
+                    continue
+                pending = pendings[b]
+                accept = accepts[b]
+                step_tokens = [
+                    int(t) for t in step_committed[b].emitted[0].tolist()
+                ]
+                new_tokens = step_tokens[pending - 1 :]
+                keep = len(new_tokens)
+                stop = False
+                if stop_ids:
+                    for j, tok in enumerate(new_tokens):
+                        if tok in stop_ids:
+                            keep = j + 1
+                            stop = True
+                            break
+                remaining = budgets[b] - len(emitted[b])
+                if keep > remaining:
+                    keep = remaining
+                    stop = True
+                emitted[b].extend(new_tokens[:keep])
+                step_cc[b] = min(pending - 1 + keep, accept) + 1
+                if stop or len(emitted[b]) >= budgets[b]:
+                    finished[b] = True
+
+            continuing = [b for b in step_cc if active(b)]
+            min_cc = (
+                min(step_cc[b] for b in continuing)
+                if continuing
+                else min(step_cc.values())
+            )
+            rollback_target_cache(
+                target_kv,
+                sliding_snaps,
+                prev_start=prev_start,
+                committed=min_cc,
+                block_size=block_size,
+            )
+            start = prev_start + min_cc
+            assert int(target_kv.get_seq_length()) == start
+
+            if self.route_ahead_stats is not None:
+                self.route_ahead_stats.commit_step(kept_rows=min_cc)
+
+            for b, cc_b in step_cc.items():
+                self.step_trace.append(
+                    NativeStepTrace(
+                        prev_start=prev_start,
+                        accept=cc_b - 1,
+                        start=start,
+                        emitted_len=len(emitted[b]),
+                        target_cache_len=int(target_kv.get_seq_length()),
+                        draft_cache_len=(
+                            int(draft_kv.get_seq_length())
+                            if draft_kv is not None
+                            else None
+                        ),
+                    )
+                )
+            if not continuing:
+                break
+
+            suffix = extract_context_feature(hidden_states, layer_ids).to(
+                self.device
+            )[:, :min_cc, :]
+            if self._drafter_has_kv_cache:
+                context_feature = suffix
+            else:
+                context_feature = torch.cat([context_feature, suffix], dim=1)
+
+        self.last_target_cache = target_kv
+        self.last_draft_cache = draft_kv
+
+        new_lengths = [min(len(emitted[b]), budgets[b]) for b in range(batch)]
+        self.last_generated_lengths = new_lengths
+        pad_id = _get(_get(self.target, "config", self.target), "pad_token_id")
+        pad_id = 0 if pad_id is None else int(pad_id)
+        width = max(new_lengths) if new_lengths else 0
+        new_ids = torch.full(
+            (batch, width), pad_id, dtype=torch.long, device=input_ids.device
+        )
+        for b in range(batch):
+            n = new_lengths[b]
+            if n:
+                new_ids[b, :n] = torch.tensor(
+                    emitted[b][:n], dtype=torch.long, device=input_ids.device
+                )
+        return torch.cat([input_ids, new_ids], dim=1)
+
     def run(
         self,
         *,
@@ -596,14 +1075,17 @@ class DFlashSpeculator:
         """``SpecDecodeStrategy`` adapter: engine list contract -> native loop.
 
         The engine calls this only after its greedy gate applied (batch==1,
-        temperature==0, top_p==1, top_k==0). Target forwards route through
-        this speculator's OWN ``self.moe`` rich helper -- never through
-        ``engine`` -- so the standard expert dispatch is preserved.
-        ``max_new_tokens`` comes from ``sampling_params.max_tokens`` and the
-        stop ids from ``engine.eos_token_id`` (the native loop falls back to
-        the target config's eos when the engine has none). Returns ONLY the
-        newly generated token ids (prompt stripped); the engine wraps them in
-        a ``GenerationResult`` and ``MoE.generate`` re-prepends the prompt.
+        temperature==0, top_p==1, top_k==0); the sampling params are
+        forwarded verbatim, so every production call takes the greedy path,
+        while direct ``generate()`` callers may opt into the lossless sampled
+        path. Target forwards route through this speculator's OWN
+        ``self.moe`` rich helper -- never through ``engine`` -- so the
+        standard expert dispatch is preserved. ``max_new_tokens`` comes from
+        ``sampling_params.max_tokens`` and the stop ids from
+        ``engine.eos_token_id`` (the native loop falls back to the target
+        config's eos when the engine has none). Returns ONLY the newly
+        generated token ids (prompt stripped); the engine wraps them in a
+        ``GenerationResult`` and ``MoE.generate`` re-prepends the prompt.
         """
         del request_id  # protocol-conformance parameter; the loop is stateless
         input_ids = torch.tensor([list(prompt_token_ids)], dtype=torch.long)
@@ -613,8 +1095,10 @@ class DFlashSpeculator:
         output = self.generate(
             input_ids,
             max_new_tokens=max_new_tokens,
-            temperature=0.0,
+            temperature=float(getattr(sampling_params, "temperature", 0.0)),
             stop_token_ids=stop_ids,
+            top_k=int(getattr(sampling_params, "top_k", 0) or 0),
+            top_p=float(getattr(sampling_params, "top_p", 1.0)),
         )
         return [int(t) for t in output[0, len(prompt_token_ids) :].tolist()]
 
