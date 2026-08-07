@@ -784,13 +784,13 @@ class MoE:
 
         speculative_draft = kwargs.pop("speculative_draft", None)
 
-        model_type = getattr(getattr(self.model, "config", None), "model_type", "")
+        model_type = getattr(
+            getattr(self.model, "config", None), "model_type", ""
+        )
         is_qwen35 = model_type == "qwen3_5_moe"
         do_sample = kwargs.get("do_sample", None)
         sampling_temperature = (
-            0.0
-            if do_sample is False
-            else float(kwargs.get("temperature", 1.0))
+            0.0 if do_sample is False else float(kwargs.get("temperature", 1.0))
         )
         is_greedy = (
             sampling_temperature == 0.0

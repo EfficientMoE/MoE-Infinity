@@ -19,11 +19,12 @@ from fixtures_tiny import (  # noqa: E402
     set_determinism,
 )
 
+from moe_infinity.entrypoints.big_modeling import MoE  # noqa: E402
 from moe_infinity.spec_decode import (  # noqa: E402
     DFlashSpeculator,
     read_dflash_config,
 )
-from moe_infinity.entrypoints.big_modeling import MoE  # noqa: E402
+from moe_infinity.spec_decode import dflash as dflash_module  # noqa: E402
 
 
 def _tiny_qwen35_target(seed: int = 0) -> Qwen3_5MoeForCausalLM:
@@ -149,3 +150,32 @@ def test_qwen35_hybrid_dflash_is_token_identical_to_plain_greedy() -> None:
     actual = spec.generate(prompt, max_new_tokens=32, temperature=0.0)
 
     assert actual.tolist() == plain.tolist()
+
+
+def test_snapshot_target_cache_copies_qwen35_linear_attention_state() -> None:
+    target = _tiny_qwen35_target()
+    prompt = torch.tensor([[3, 7, 11, 2, 5]], dtype=torch.long)
+    with torch.no_grad():
+        cache = target(prompt, use_cache=True).past_key_values
+
+    snapshot = dflash_module.snapshot_target_cache(cache)
+    layer = cache.layers[0]
+    saved = snapshot.linear[0]
+    expected_conv = layer.conv_states.clone()
+    expected_recurrent = layer.recurrent_states.clone()
+
+    layer.conv_states.add_(1)
+    layer.recurrent_states.add_(1)
+
+    assert torch.equal(saved.conv_states, expected_conv)
+    assert torch.equal(saved.recurrent_states, expected_recurrent)
+    assert saved.has_previous_state is True
+
+
+def test_snapshot_target_cache_rejects_partial_linear_cache_contract() -> None:
+    malformed = SimpleNamespace(
+        layers=[SimpleNamespace(conv_states=torch.zeros(1))]
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported transformers"):
+        dflash_module.snapshot_target_cache(malformed)
