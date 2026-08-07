@@ -854,6 +854,7 @@ class MoE:
         max_batch_size: int = 32,
         enable_prefix_caching: bool = False,
         offload_dir: Optional[str] = None,
+        speculative_draft: Optional[object] = None,
     ) -> None:
         """
         Start the OpenAI-compatible continuous batching server.
@@ -869,6 +870,8 @@ class MoE:
             max_batch_size: Maximum concurrent sequences (default: 32)
             enable_prefix_caching: Enable hash-based prefix caching (default: False)
             offload_dir: Path to offload directory (required)
+            speculative_draft: Optional DFlash checkpoint, speculator, or draft
+                module for greedy batch-1 serving.
         """
 
         if offload_dir is None:
@@ -877,6 +880,11 @@ class MoE:
         import importlib
 
         from moe_infinity.entrypoints.openai import api_server_v2
+
+        serving_speculator = None
+        if speculative_draft:
+            self._resolve_spec_strategy(speculative_draft)
+            serving_speculator = getattr(self, "_dflash_speculator", None)
 
         model_name = getattr(
             getattr(self.model, "config", None), "_name_or_path", None
@@ -890,6 +898,7 @@ class MoE:
             kv_cache_ratio=kv_cache_ratio,
             max_batch_size=max_batch_size,
             enable_prefix_caching=enable_prefix_caching,
+            speculative_draft=serving_speculator,
         )
 
         uvicorn = importlib.import_module("uvicorn")
