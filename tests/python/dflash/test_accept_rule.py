@@ -73,7 +73,9 @@ def test_build_block_mask_count_is_block_size_minus_one():
     assert (block[0] == MASK).sum().item() == BLOCK_SIZE - 1
 
 
-@pytest.mark.parametrize("anchor", [ANCHOR, _row([ANCHOR]), torch.tensor([[ANCHOR]])])
+@pytest.mark.parametrize(
+    "anchor", [ANCHOR, _row([ANCHOR]), torch.tensor([[ANCHOR]])]
+)
 def test_build_block_accepts_int_and_tensor_anchor(anchor):
     block = build_block(anchor, MASK, BLOCK_SIZE)
     assert block.shape == (1, BLOCK_SIZE)

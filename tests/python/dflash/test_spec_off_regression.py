@@ -53,7 +53,24 @@ GPT2_MAX_TOKENS = 16
 # Captured from the pre-refactor GenerationEngine standard loop (seed-7 tiny
 # GPT-2 fixture below). This is the identical baseline pinned by Task 1's
 # ``test_spec_seam.py``; the full DFlash integration must not move it.
-BASELINE_IDS = [61, 61, 108, 108, 108, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11]
+BASELINE_IDS = [
+    61,
+    61,
+    108,
+    108,
+    108,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+]
 
 
 def _build_cpu_gpt2_forward():

@@ -130,7 +130,9 @@ def _decode_all():
     shell, target = _build_engine_shell(seed=0)
     drafter = build_tiny_drafter(target, seed=1).to(DEVICE)
     config = read_dflash_config(make_tiny_drafter_config(target.config))
-    spec = DFlashSpeculator.from_models(shell, drafter, config=config, device=DEVICE)
+    spec = DFlashSpeculator.from_models(
+        shell, drafter, config=config, device=DEVICE
+    )
 
     results = []
     for prompt in PROMPTS:

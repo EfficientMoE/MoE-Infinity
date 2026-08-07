@@ -8,12 +8,12 @@ import torch
 
 
 def measure_tiny_glm(tmp_dir: str, gen_len: int = 16) -> dict:
-    from tests.python.integration._glm_tiny import build_tiny_glm
-    from moe_infinity import MoE
-    from moe_infinity.spec_decode.glm_mtp import GlmMtpSpeculator
     from benchmarks.performance_model.model_config import extract_model_params
     from benchmarks.performance_model.roofline import predict_decode
     from benchmarks.performance_model.types import WorkloadPoint
+    from moe_infinity import MoE
+    from moe_infinity.spec_decode.glm_mtp import GlmMtpSpeculator
+    from tests.python.integration._glm_tiny import build_tiny_glm
 
     ckpt_dir = os.path.join(tmp_dir, "tiny_glm_ckpt")
     off_dir = os.path.join(tmp_dir, "tiny_glm_off")
@@ -85,15 +85,26 @@ def measure_tiny_glm(tmp_dir: str, gen_len: int = 16) -> dict:
 def run(out_csv: str, quick: bool = True, gen_len: int = 16) -> None:
     import tempfile
 
-    os.makedirs(os.path.dirname(out_csv) if os.path.dirname(out_csv) else ".", exist_ok=True)
+    os.makedirs(
+        os.path.dirname(out_csv) if os.path.dirname(out_csv) else ".",
+        exist_ok=True,
+    )
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         row = measure_tiny_glm(tmp_dir, gen_len=gen_len)
 
     fieldnames = [
-        "model", "batch", "seq_len", "gen_len",
-        "decode_tok_s", "mtp_tok_s", "mean_accept_len", "peak_mem_bytes",
-        "pred_flops_per_token", "pred_hbm_bytes_per_token", "pred_bound",
+        "model",
+        "batch",
+        "seq_len",
+        "gen_len",
+        "decode_tok_s",
+        "mtp_tok_s",
+        "mean_accept_len",
+        "peak_mem_bytes",
+        "pred_flops_per_token",
+        "pred_hbm_bytes_per_token",
+        "pred_bound",
     ]
 
     with open(out_csv, "w", newline="") as f:

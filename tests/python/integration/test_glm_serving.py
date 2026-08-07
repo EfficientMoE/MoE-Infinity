@@ -84,9 +84,9 @@ def test_glm_serving_completions(tmp_path):
         assert "choices" in result, f"No choices in response: {result}"
         assert len(result["choices"]) > 0
         text = result["choices"][0].get("text", "")
-        assert isinstance(text, str) and len(text) > 0, (
-            f"Expected non-empty text, got: {result}"
-        )
+        assert (
+            isinstance(text, str) and len(text) > 0
+        ), f"Expected non-empty text, got: {result}"
 
         chat_payload = json.dumps(
             {
@@ -103,15 +103,17 @@ def test_glm_serving_completions(tmp_path):
         with urllib.request.urlopen(chat_req, timeout=60) as resp:
             chat_result = json.loads(resp.read())
 
-        assert "choices" in chat_result, f"No choices in chat response: {chat_result}"
+        assert (
+            "choices" in chat_result
+        ), f"No choices in chat response: {chat_result}"
         assert len(chat_result["choices"]) > 0
         msg = chat_result["choices"][0].get("message", {})
-        assert isinstance(msg.get("content"), str) and len(msg["content"]) > 0, (
-            f"Expected non-empty message content, got: {chat_result}"
-        )
-        assert "finish_reason" in chat_result["choices"][0], (
-            f"Missing finish_reason: {chat_result}"
-        )
+        assert (
+            isinstance(msg.get("content"), str) and len(msg["content"]) > 0
+        ), f"Expected non-empty message content, got: {chat_result}"
+        assert (
+            "finish_reason" in chat_result["choices"][0]
+        ), f"Missing finish_reason: {chat_result}"
 
         stream_payload = json.dumps(
             {
@@ -134,11 +136,13 @@ def test_glm_serving_completions(tmp_path):
                     break
                 line = raw_line.decode("utf-8").strip()
                 if line.startswith("data:"):
-                    chunk = line[len("data:"):].strip()
+                    chunk = line[len("data:") :].strip()
                     if chunk and chunk != "[DONE]":
                         data_chunks.append(chunk)
 
-        assert len(data_chunks) > 0, "No SSE data chunks received from streaming endpoint"
+        assert (
+            len(data_chunks) > 0
+        ), "No SSE data chunks received from streaming endpoint"
 
     finally:
         proc.kill()

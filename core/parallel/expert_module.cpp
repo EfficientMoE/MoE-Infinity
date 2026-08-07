@@ -244,12 +244,12 @@ void MoEMLP::DequantFp8Params(cudaStream_t stream) {
     auto s_gpu = s.to(torch::kFloat32).to(CUDA_DEVICE(device));
     int N = w.size(0);
     int K = w.size(1);
-    auto out = torch::empty(
-        {N, K},
-        torch::TensorOptions().dtype(torch::kBFloat16).device(CUDA_DEVICE(device)));
+    auto out = torch::empty({N, K}, torch::TensorOptions()
+                                        .dtype(torch::kBFloat16)
+                                        .device(CUDA_DEVICE(device)));
     auto w_u8 = w.view(torch::kUInt8).contiguous();
-    fp8_dequant_blockwise_cuda(w_u8.data_ptr(), s_gpu.data_ptr(), out.data_ptr(),
-                               N, K, stream);
+    fp8_dequant_blockwise_cuda(w_u8.data_ptr(), s_gpu.data_ptr(),
+                               out.data_ptr(), N, K, stream);
     param_[i] = out;
   }
 }

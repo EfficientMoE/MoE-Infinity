@@ -8,7 +8,10 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from moe_infinity.utils.fp8 import FP8_BLOCK, dequant_fp8_blockwise  # noqa: F401
+from moe_infinity.utils.fp8 import (  # noqa: F401
+    FP8_BLOCK,
+    dequant_fp8_blockwise,
+)
 
 
 def fp8_shared_expert_forward(

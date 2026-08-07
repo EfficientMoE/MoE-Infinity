@@ -1,5 +1,6 @@
-import pytest
 from types import SimpleNamespace
+
+import pytest
 
 pytest.importorskip(
     "transformers.models.glm_moe_dsa.modeling_glm_moe_dsa",
@@ -31,9 +32,10 @@ _MLA_NAMES = [
 
 @pytest.mark.parametrize("name", _MLA_NAMES)
 def test_mla_and_indexer_not_experts(name):
-    assert parse_expert_id(name, GLM) == (None, None), (
-        f"MLA tensor misrouted as expert: {name}"
-    )
+    assert parse_expert_id(name, GLM) == (
+        None,
+        None,
+    ), f"MLA tensor misrouted as expert: {name}"
 
 
 def test_shared_expert_not_routed():
@@ -42,11 +44,15 @@ def test_shared_expert_not_routed():
 
 
 def test_real_expert_still_routed():
-    assert parse_expert_id("model.layers.5.mlp.experts.7.gate_proj.weight", GLM) == (5, 7)
+    assert parse_expert_id(
+        "model.layers.5.mlp.experts.7.gate_proj.weight", GLM
+    ) == (5, 7)
 
 
 def test_real_expert_layer_0():
-    assert parse_expert_id("model.layers.0.mlp.experts.0.up_proj.weight", GLM) == (0, 0)
+    assert parse_expert_id(
+        "model.layers.0.mlp.experts.0.up_proj.weight", GLM
+    ) == (0, 0)
 
 
 def test_real_expert_last_layer():

@@ -52,9 +52,13 @@ def test_fp8_store_reproducible():
     from tests.python.integration._glm_tiny import build_tiny_glm_fp8
 
     with tempfile.TemporaryDirectory() as tmp:
-        ckpt = build_tiny_glm_fp8(os.path.join(tmp, "tiny"), quantize_shared=True)
+        ckpt = build_tiny_glm_fp8(
+            os.path.join(tmp, "tiny"), quantize_shared=True
+        )
 
         out_a = _generate_in_subprocess(ckpt, os.path.join(tmp, "off_a"))
         out_b = _generate_in_subprocess(ckpt, os.path.join(tmp, "off_b"))
 
-        assert out_a == out_b, f"Independent fresh stores diverged: {out_a} vs {out_b}"
+        assert (
+            out_a == out_b
+        ), f"Independent fresh stores diverged: {out_a} vs {out_b}"

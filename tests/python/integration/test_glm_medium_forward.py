@@ -67,6 +67,6 @@ def test_medium_glm_resident_weight_forward(tmp_path):
         "medium GLM forward did not complete; resident-weight mis-map likely.\n"
         f"returncode={proc.returncode}\n{combined[-3000:]}"
     )
-    assert "QALN_LASTDIM=2048" in proc.stdout, (
-        f"q_a_layernorm loaded with wrong last dim.\n{combined[-2000:]}"
-    )
+    assert (
+        "QALN_LASTDIM=2048" in proc.stdout
+    ), f"q_a_layernorm loaded with wrong last dim.\n{combined[-2000:]}"

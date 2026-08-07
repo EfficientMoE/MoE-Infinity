@@ -10,13 +10,17 @@ import torch
 
 
 def build_medium_glm_fp8(save_dir: str) -> str:
-    os.environ.setdefault("HF_HUB_CACHE", "/mnt/raid0nvme0/public/huggingface/hub")
+    os.environ.setdefault(
+        "HF_HUB_CACHE", "/mnt/raid0nvme0/public/huggingface/hub"
+    )
     from transformers import AutoConfig, AutoTokenizer
     from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
         GlmMoeDsaForCausalLM,
     )
 
-    cfg = AutoConfig.from_pretrained("zai-org/GLM-5.2-FP8", trust_remote_code=True)
+    cfg = AutoConfig.from_pretrained(
+        "zai-org/GLM-5.2-FP8", trust_remote_code=True
+    )
 
     # INVARIANT: do NOT shrink these two — the mis-map needs q_a_layernorm[2048]
     # to collide with a router tensor sized [n_routed_experts]=[256].
@@ -85,7 +89,11 @@ def build_medium_glm_fp8(save_dir: str) -> str:
         q_fp8 = q.to(torch.float8_e4m3fn)
         return q_fp8, scale_inv
 
-    expert_weight_suffixes = ("gate_proj.weight", "up_proj.weight", "down_proj.weight")
+    expert_weight_suffixes = (
+        "gate_proj.weight",
+        "up_proj.weight",
+        "down_proj.weight",
+    )
     for name, param in list(model.named_parameters(recurse=True)):
         if "shared_expert" in name:
             continue
@@ -130,9 +138,9 @@ def _assert_checkpoint_qaln(save_dir: str, expected: int = 2048) -> None:
         for k, meta in hdr.items():
             if k.endswith("q_a_layernorm.weight"):
                 shape = meta.get("shape")
-                assert shape == [expected], (
-                    f"checkpoint {k} has shape {shape}, expected [{expected}]"
-                )
+                assert shape == [
+                    expected
+                ], f"checkpoint {k} has shape {shape}, expected [{expected}]"
                 print(f"[medium] checkpoint {k} shape={shape} OK")
                 return
     raise AssertionError("no q_a_layernorm.weight found in checkpoint shards")

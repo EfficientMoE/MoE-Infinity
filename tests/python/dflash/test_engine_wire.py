@@ -200,9 +200,7 @@ def test_no_drafter_uses_standard_path():
 
     engine._generate_standard = standard_spy
 
-    out = _moe_generate(
-        shell, do_sample=False, max_new_tokens=MAX_NEW_TOKENS
-    )
+    out = _moe_generate(shell, do_sample=False, max_new_tokens=MAX_NEW_TOKENS)
 
     assert engine.spec_strategy is None
     assert len(standard_calls) == 1

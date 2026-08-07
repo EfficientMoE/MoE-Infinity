@@ -43,13 +43,17 @@ def test_read_dflash_config_missing_fields_raises():
 
 def test_validate_pairing_accepts_matching_target():
     cfg = read_dflash_config(_draft_config_stub())
-    target = SimpleNamespace(hidden_size=2880, vocab_size=201088, num_hidden_layers=36)
+    target = SimpleNamespace(
+        hidden_size=2880, vocab_size=201088, num_hidden_layers=36
+    )
     validate_pairing(cfg, target)
 
 
 def test_validate_pairing_rejects_hidden_mismatch():
     cfg = read_dflash_config(_draft_config_stub())
-    target = SimpleNamespace(hidden_size=4096, vocab_size=201088, num_hidden_layers=36)
+    target = SimpleNamespace(
+        hidden_size=4096, vocab_size=201088, num_hidden_layers=36
+    )
     with pytest.raises(ValueError):
         validate_pairing(cfg, target)
 
@@ -63,7 +67,9 @@ def test_validate_pairing_rejects_mask_outside_vocab():
         hidden_size=2880,
         vocab_size=201088,
     )
-    target = SimpleNamespace(hidden_size=2880, vocab_size=1000, num_hidden_layers=36)
+    target = SimpleNamespace(
+        hidden_size=2880, vocab_size=1000, num_hidden_layers=36
+    )
     with pytest.raises(ValueError):
         validate_pairing(cfg, target)
 
@@ -77,7 +83,9 @@ def test_validate_pairing_rejects_layer_out_of_range():
         hidden_size=2880,
         vocab_size=201088,
     )
-    target = SimpleNamespace(hidden_size=2880, vocab_size=201088, num_hidden_layers=36)
+    target = SimpleNamespace(
+        hidden_size=2880, vocab_size=201088, num_hidden_layers=36
+    )
     with pytest.raises(ValueError):
         validate_pairing(cfg, target)
 
@@ -86,8 +94,12 @@ def test_validate_pairing_rejects_layer_out_of_range():
 def test_checkpoint_config_matches_expected():
     transformers = pytest.importorskip("transformers")
     try:
-        draft_cfg = transformers.AutoConfig.from_pretrained(DRAFT, trust_remote_code=True)
-        target_cfg = transformers.AutoConfig.from_pretrained(TARGET, trust_remote_code=True)
+        draft_cfg = transformers.AutoConfig.from_pretrained(
+            DRAFT, trust_remote_code=True
+        )
+        target_cfg = transformers.AutoConfig.from_pretrained(
+            TARGET, trust_remote_code=True
+        )
     except Exception as exc:
         pytest.skip(f"checkpoint configs unavailable: {exc}")
 

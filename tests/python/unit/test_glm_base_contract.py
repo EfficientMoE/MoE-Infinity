@@ -36,7 +36,7 @@ def test_glm_parse_moe_param_and_expert_id():
 
 
 def test_glm_wrapper_and_offload_importable():
-    from moe_infinity.models import SyncGlmMoeDsaMoEBlock
     import moe_infinity.runtime.model_offload  # noqa: F401
+    from moe_infinity.models import SyncGlmMoeDsaMoEBlock
 
     assert SyncGlmMoeDsaMoEBlock is not None

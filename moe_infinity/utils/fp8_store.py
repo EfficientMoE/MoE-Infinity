@@ -5,7 +5,9 @@ from typing import Dict
 import torch
 
 
-def extract_fp8_scales(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+def extract_fp8_scales(
+    state_dict: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
     scales = {}
     for k in list(state_dict.keys()):
         if k.endswith("_scale_inv"):

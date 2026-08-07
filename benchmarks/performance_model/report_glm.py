@@ -1,4 +1,5 @@
 """GLM performance model validation report generator."""
+
 import argparse
 import csv
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Summarize
 # ---------------------------------------------------------------------------
+
 
 def summarize(csv_path: str) -> dict:
     rows = []
@@ -24,11 +26,13 @@ def summarize(csv_path: str) -> dict:
             r["pred_hbm_bytes_per_token"] = float(r["pred_hbm_bytes_per_token"])
             r["arithmetic_intensity"] = (
                 r["pred_flops_per_token"] / r["pred_hbm_bytes_per_token"]
-                if r["pred_hbm_bytes_per_token"] > 0 else 0.0
+                if r["pred_hbm_bytes_per_token"] > 0
+                else 0.0
             )
             r["mtp_speedup"] = (
                 r["mtp_tok_s"] / r["decode_tok_s"]
-                if r["decode_tok_s"] > 0 else 0.0
+                if r["decode_tok_s"] > 0
+                else 0.0
             )
             rows.append(r)
 
@@ -56,11 +60,14 @@ def summarize(csv_path: str) -> dict:
 # Plots
 # ---------------------------------------------------------------------------
 
-def make_plots(csv_path: str, out_dir: str) -> list:
-    sys.path.insert(0, "/home/leyang/.config/opencode/skills/conference-plot/scripts")
-    from plot_utils import paper_style, WONG_PALETTE, HATCHES, save_dual_output
 
+def make_plots(csv_path: str, out_dir: str) -> list:
+    sys.path.insert(
+        0, "/home/leyang/.config/opencode/skills/conference-plot/scripts"
+    )
     import matplotlib
+    from plot_utils import HATCHES, WONG_PALETTE, paper_style, save_dual_output
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
@@ -80,12 +87,26 @@ def make_plots(csv_path: str, out_dir: str) -> list:
 
     with paper_style(width=max(3.3, len(rows) * 1.5), height=2.8):
         fig, ax = plt.subplots()
-        bars1 = ax.bar(x - w / 2, decode_vals, w, label="Decode (no MTP)",
-                       color=WONG_PALETTE[2], edgecolor="black", linewidth=0.4,
-                       hatch=HATCHES[0])
-        bars2 = ax.bar(x + w / 2, mtp_vals, w, label="MTP",
-                       color=WONG_PALETTE[1], edgecolor="black", linewidth=0.4,
-                       hatch=HATCHES[1])
+        bars1 = ax.bar(
+            x - w / 2,
+            decode_vals,
+            w,
+            label="Decode (no MTP)",
+            color=WONG_PALETTE[2],
+            edgecolor="black",
+            linewidth=0.4,
+            hatch=HATCHES[0],
+        )
+        bars2 = ax.bar(
+            x + w / 2,
+            mtp_vals,
+            w,
+            label="MTP",
+            color=WONG_PALETTE[1],
+            edgecolor="black",
+            linewidth=0.4,
+            hatch=HATCHES[1],
+        )
         ax.set_xticks(x)
         ax.set_xticklabels(labels, fontsize=6)
         ax.set_ylabel("Throughput (tok/s)")
@@ -105,18 +126,32 @@ def make_plots(csv_path: str, out_dir: str) -> list:
 
     with paper_style(width=3.5, height=2.8):
         fig, ax = plt.subplots()
-        for i, (ai, tput, bound, row) in enumerate(zip(ai_vals, tput_vals, bound_labels, rows)):
+        for i, (ai, tput, bound, row) in enumerate(
+            zip(ai_vals, tput_vals, bound_labels, rows)
+        ):
             color = WONG_PALETTE[5] if bound == "compute" else WONG_PALETTE[6]
-            ax.scatter(ai, tput, color=color, s=60, zorder=5,
-                       marker="o", edgecolors="black", linewidths=0.4)
+            ax.scatter(
+                ai,
+                tput,
+                color=color,
+                s=60,
+                zorder=5,
+                marker="o",
+                edgecolors="black",
+                linewidths=0.4,
+            )
             ax.annotate(
                 f"{bound}\n({row['model']})",
                 (ai, tput),
-                textcoords="offset points", xytext=(6, 4), fontsize=6,
+                textcoords="offset points",
+                xytext=(6, 4),
+                fontsize=6,
             )
 
         # Draw reference lines
-        ai_range = np.linspace(max(0.1, min(ai_vals) * 0.5), max(ai_vals) * 2, 100)
+        ai_range = np.linspace(
+            max(0.1, min(ai_vals) * 0.5), max(ai_vals) * 2, 100
+        )
         # Roofline: HBM-bound slope (arbitrary scale for illustration)
         hbm_bw_ref = 900e9  # H100 HBM BW bytes/s (illustrative)
         compute_roof = 312e12  # H100 FP16 TFLOPS (illustrative)
@@ -126,11 +161,17 @@ def make_plots(csv_path: str, out_dir: str) -> list:
             hbm_roof_toks = hbm_bw_ref / ref_row["pred_hbm_bytes_per_token"]
             compute_roof_toks = compute_roof / ref_row["pred_flops_per_token"]
             roof_vals = np.minimum(
-                ai_range * (hbm_roof_toks / ai_range[0]),
-                compute_roof_toks
+                ai_range * (hbm_roof_toks / ai_range[0]), compute_roof_toks
             )
-            ax.plot(ai_range, roof_vals, "--", color=WONG_PALETTE[0],
-                    linewidth=0.8, label="Roofline (H100 ref)", alpha=0.5)
+            ax.plot(
+                ai_range,
+                roof_vals,
+                "--",
+                color=WONG_PALETTE[0],
+                linewidth=0.8,
+                label="Roofline (H100 ref)",
+                alpha=0.5,
+            )
 
         ax.set_xlabel("Arithmetic Intensity (FLOP/byte)")
         ax.set_ylabel("Decode Throughput (tok/s)")
@@ -149,6 +190,7 @@ def make_plots(csv_path: str, out_dir: str) -> list:
 # Report
 # ---------------------------------------------------------------------------
 
+
 def write_report(csv_path: str, plots_dir: str, out_md: str) -> None:
     summary = summarize(csv_path)
     rows = summary["rows"]
@@ -166,8 +208,12 @@ def write_report(csv_path: str, plots_dir: str, out_md: str) -> None:
     lines.append(f"**CSV source:** `{csv_abs}`  ")
     lines.append(f"**Rows:** {summary['n_rows']}  ")
     lines.append("")
-    lines.append("> **Note:** Results use `MOE_GLM_TINY=1` (tiny model). Absolute throughput is")
-    lines.append("> illustrative only. The deliverable is the pipeline + bound classification methodology.")
+    lines.append(
+        "> **Note:** Results use `MOE_GLM_TINY=1` (tiny model). Absolute throughput is"
+    )
+    lines.append(
+        "> illustrative only. The deliverable is the pipeline + bound classification methodology."
+    )
     lines.append("")
 
     # --- Measured + Predicted table ---
@@ -267,6 +313,7 @@ def write_report(csv_path: str, plots_dir: str, out_md: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="GLM perf model report")
     parser.add_argument("--csv", required=True, help="Path to bench CSV")
@@ -276,9 +323,11 @@ def main():
 
     print(f"Summarizing {args.csv} ...")
     s = summarize(args.csv)
-    print(f"  {s['n_rows']} rows, avg decode={s['avg_decode_tok_s']:.1f} tok/s, "
-          f"avg mtp={s['avg_mtp_tok_s']:.1f} tok/s, "
-          f"avg speedup={s['avg_mtp_speedup']:.3f}x")
+    print(
+        f"  {s['n_rows']} rows, avg decode={s['avg_decode_tok_s']:.1f} tok/s, "
+        f"avg mtp={s['avg_mtp_tok_s']:.1f} tok/s, "
+        f"avg speedup={s['avg_mtp_speedup']:.3f}x"
+    )
 
     print(f"Generating plots in {args.out_dir} ...")
     saved = make_plots(args.csv, args.out_dir)

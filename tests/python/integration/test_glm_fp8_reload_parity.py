@@ -52,7 +52,9 @@ def test_fp8_reload_parity():
     from tests.python.integration._glm_tiny import build_tiny_glm_fp8
 
     with tempfile.TemporaryDirectory() as tmp:
-        ckpt = build_tiny_glm_fp8(os.path.join(tmp, "tiny"), quantize_shared=True)
+        ckpt = build_tiny_glm_fp8(
+            os.path.join(tmp, "tiny"), quantize_shared=True
+        )
         store = os.path.join(tmp, "store")
 
         fresh = _generate_in_subprocess(ckpt, store)

@@ -1,14 +1,15 @@
 import os
+
 import pytest
 
-from benchmarks.performance_model.types import ModelParams, WorkloadPoint
 from benchmarks.performance_model.roofline import (
+    classify_bound,
     decode_flops_per_token,
     decode_hbm_bytes_per_token,
     dtype_bytes,
-    classify_bound,
     predict_decode,
 )
+from benchmarks.performance_model.types import ModelParams, WorkloadPoint
 
 GLM_SYNTHETIC = ModelParams(
     name="glm-synthetic",

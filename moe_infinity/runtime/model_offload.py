@@ -588,9 +588,15 @@ class OffloadEngine(object):
         )
 
         _dsv2_mod = transformers.models.deepseek_v2.modeling_deepseek_v2
-        _dsv2_cls = getattr(_dsv2_mod, "DeepseekV2MoE", None) or getattr(_dsv2_mod, "DeepseekV2Moe", None)
+        _dsv2_cls = getattr(_dsv2_mod, "DeepseekV2MoE", None) or getattr(
+            _dsv2_mod, "DeepseekV2Moe", None
+        )
         _dsv2_mod._old_deepseek_v2_moe = _dsv2_cls
-        _dsv2_attr = "DeepseekV2MoE" if hasattr(_dsv2_mod, "DeepseekV2MoE") else "DeepseekV2Moe"
+        _dsv2_attr = (
+            "DeepseekV2MoE"
+            if hasattr(_dsv2_mod, "DeepseekV2MoE")
+            else "DeepseekV2Moe"
+        )
         setattr(_dsv2_mod, _dsv2_attr, SyncDeepseekV2MoEBlock)
         transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = (
@@ -608,6 +614,7 @@ class OffloadEngine(object):
 
         try:
             import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
+
             _glm_mod._old_glm_moe_dsa_moe = _glm_mod.GlmMoeDsaMoE
             _glm_mod.GlmMoeDsaMoE = SyncGlmMoeDsaMoEBlock
         except (ImportError, AttributeError):
@@ -792,8 +799,13 @@ class OffloadEngine(object):
                                     # Required by the model: attention, dense MLP
                                     # and shared experts run in PyTorch (not the
                                     # dispatcher), so dequantize them to BF16.
-                                    state_dict[base_key] = dequant_fp8_blockwise(
-                                        w, s, dtype=torch.bfloat16, block_size=128
+                                    state_dict[base_key] = (
+                                        dequant_fp8_blockwise(
+                                            w,
+                                            s,
+                                            dtype=torch.bfloat16,
+                                            block_size=128,
+                                        )
                                     )
                                 del state_dict[scale_key]
 
@@ -1015,6 +1027,7 @@ class OffloadEngine(object):
 
         try:
             import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
+
             if hasattr(_glm_mod, "_old_glm_moe_dsa_moe"):
                 _glm_mod.GlmMoeDsaMoE = _glm_mod._old_glm_moe_dsa_moe
         except (ImportError, AttributeError):
@@ -1121,9 +1134,7 @@ class OffloadEngine(object):
         # keep them resident. MXFP4 packed weights stay uint8 output-major
         # ([E, N, K//2] blocks, [E, N, K//32] scales) - the layout the fused
         # kernel consumes without transposition.
-        modules = [
-            m for m in model.modules() if isinstance(m, SyncGptOssMLP)
-        ]
+        modules = [m for m in model.modules() if isinstance(m, SyncGptOssMLP)]
         if not modules:
             return
 
@@ -1562,8 +1573,7 @@ class OffloadEngine(object):
                     continue
 
                 if is_glm_fp8_ckpt and (
-                    k.endswith("_scale_inv")
-                    or v.dtype == torch.float8_e4m3fn
+                    k.endswith("_scale_inv") or v.dtype == torch.float8_e4m3fn
                 ):
                     state_dict[k] = v.to("cpu")
                     continue
@@ -1835,7 +1845,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                self.archer_engine.begin(self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF))
+                self.archer_engine.begin(
+                    self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
@@ -1847,7 +1859,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.begin(self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF))
+                self.archer_engine.begin(
+                    self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.data.device)
@@ -1872,7 +1886,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                self.archer_engine.end(self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF))
+                self.archer_engine.end(
+                    self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
@@ -1882,7 +1898,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.end(self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF))
+                self.archer_engine.end(
+                    self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.device)
@@ -1960,7 +1978,11 @@ class OffloadEngine(object):
         )
 
         _dsv2_mod2 = transformers.models.deepseek_v2.modeling_deepseek_v2
-        _dsv2_attr2 = "DeepseekV2MoE" if hasattr(_dsv2_mod2, "DeepseekV2MoE") else "DeepseekV2Moe"
+        _dsv2_attr2 = (
+            "DeepseekV2MoE"
+            if hasattr(_dsv2_mod2, "DeepseekV2MoE")
+            else "DeepseekV2Moe"
+        )
         setattr(_dsv2_mod2, _dsv2_attr2, _dsv2_mod2._old_deepseek_v2_moe)
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe
         transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
