@@ -213,11 +213,6 @@ void ArcherPrefetchHandle::ReplaceCacheCandidates(
   std::vector<NodePtr> candidates;
   for (std::uint32_t tensor_id : tensor_ids) {
     auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
-    {
-      auto expected = NodeExecState::IDLE;
-      node->exec_state.compare_exchange_strong(
-          expected, NodeExecState::FETCHING, std::memory_order_acq_rel);
-    }
     candidates.push_back(node);
   }
 
