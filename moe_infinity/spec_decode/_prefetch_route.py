@@ -23,14 +23,18 @@ LogitsLike = Union[torch.Tensor, np.ndarray, Sequence[Sequence[float]]]
 IdsLike = Union[torch.Tensor, np.ndarray, Sequence[int]]
 
 
-def _as_2d_tensor(x: Union[torch.Tensor, np.ndarray, Sequence[object]], name: str) -> torch.Tensor:
+def _as_2d_tensor(
+    x: Union[torch.Tensor, np.ndarray, Sequence[object]], name: str
+) -> torch.Tensor:
     """Coerce ``x`` to a 2-D torch tensor without changing device/dtype semantics."""
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
     elif not torch.is_tensor(x):
         x = torch.tensor(x)
     if x.dim() != 2:
-        raise ValueError(f"{name} must be 2-D [num_tokens, num_experts]; got shape {tuple(x.shape)}")
+        raise ValueError(
+            f"{name} must be 2-D [num_tokens, num_experts]; got shape {tuple(x.shape)}"
+        )
     return x
 
 
@@ -60,7 +64,9 @@ def union_experts_from_mask(router_mask: MaskLike) -> list[int]:
     return sorted(int(i) for i in routed)
 
 
-def union_experts_from_logits(router_logits: LogitsLike, top_k: int) -> list[int]:
+def union_experts_from_logits(
+    router_logits: LogitsLike, top_k: int
+) -> list[int]:
     """Sorted union of per-token ``top_k`` experts from ``[num_tokens, num_experts]`` logits.
 
     Applies ``torch.topk`` row-wise and unions the selected indices. Softmax is
@@ -96,7 +102,9 @@ def prefetch_coverage(predicted_ids: IdsLike, actual_ids: IdsLike) -> float:
     return len(predicted & actual) / len(actual)
 
 
-def rejected_expert_ids(full_union_ids: IdsLike, kept_union_ids: IdsLike) -> list[int]:
+def rejected_expert_ids(
+    full_union_ids: IdsLike, kept_union_ids: IdsLike
+) -> list[int]:
     r"""Sorted set-difference ``full \ kept`` -- the wasted prefetch set.
 
     ``full_union_ids`` is the union prefetched over the whole speculative block;

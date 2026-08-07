@@ -120,7 +120,9 @@ def test_mask_union_matches_executor_derivation():
     # Same input, computed the way dispatch_local does it (expert_executor.py:101-111).
     mask = _mask_from_topk(LOGITS, TOP_K)
     num_expert = mask.shape[-1]
-    expert_count = torch.sum(mask.view((-1, num_expert)), dim=0).cpu().numpy().flatten()
+    expert_count = (
+        torch.sum(mask.view((-1, num_expert)), dim=0).cpu().numpy().flatten()
+    )
     executor_list = np.arange(num_expert).astype(int)[expert_count > 0].tolist()
     assert union_experts_from_mask(mask) == executor_list == UNION_TOP2
 
@@ -154,7 +156,9 @@ def test_logits_union_topk1_is_per_token_argmax():
 
 
 def test_logits_union_full_k_is_all_experts():
-    assert union_experts_from_logits(LOGITS, NUM_EXPERTS) == list(range(NUM_EXPERTS))
+    assert union_experts_from_logits(LOGITS, NUM_EXPERTS) == list(
+        range(NUM_EXPERTS)
+    )
 
 
 def test_logits_union_single_token():
@@ -168,10 +172,14 @@ def test_logits_union_zero_tokens_is_empty():
 def test_logits_union_matches_mask_union_when_topk_matches_routing():
     # The plan's core invariant: logits-derived union == mask-derived union.
     mask = _mask_from_topk(LOGITS, TOP_K)
-    assert union_experts_from_logits(LOGITS, TOP_K) == union_experts_from_mask(mask)
+    assert union_experts_from_logits(LOGITS, TOP_K) == union_experts_from_mask(
+        mask
+    )
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float64])
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.bfloat16, torch.float64]
+)
 def test_logits_union_dtype_robust(dtype):
     out = union_experts_from_logits(LOGITS.to(dtype), TOP_K)
     assert out == UNION_TOP2

@@ -205,7 +205,10 @@ def test_acceptance_sampled_full_accept_draws_bonus_from_last_target_row():
     drafts = torch.tensor([1, 3, 0])
 
     decision = acceptance_sampled(
-        draft_probs, target_probs, drafts, generator=torch.Generator().manual_seed(0)
+        draft_probs,
+        target_probs,
+        drafts,
+        generator=torch.Generator().manual_seed(0),
     )
     assert decision.accept == num_drafts
     assert decision.final_token == 2
@@ -222,7 +225,10 @@ def test_acceptance_sampled_immediate_reject_emits_residual_correction():
     drafts = torch.tensor([0, 3])
 
     decision = acceptance_sampled(
-        draft_probs, target_probs, drafts, generator=torch.Generator().manual_seed(0)
+        draft_probs,
+        target_probs,
+        drafts,
+        generator=torch.Generator().manual_seed(0),
     )
     assert decision.accept == 0
     assert decision.final_token == 1
@@ -343,9 +349,7 @@ def _plain_sampled_decode(
     nxt = _reference_sample(out.logits[0, -1], temperature, top_k, top_p)
     tokens = [nxt]
     for _ in range(max_new_tokens - 1):
-        out = model(
-            torch.tensor([[nxt]]), past_key_values=past, use_cache=True
-        )
+        out = model(torch.tensor([[nxt]]), past_key_values=past, use_cache=True)
         past = out.past_key_values
         nxt = _reference_sample(out.logits[0, -1], temperature, top_k, top_p)
         tokens.append(nxt)
@@ -362,14 +366,20 @@ def _build_spec(vocab_size=None, mask_token_id=None):
     else:
         # Small-vocab parity fixtures: the default mask id (63) is outside
         # the vocab, so the drafter is built with an explicit in-vocab mask.
-        ns = make_tiny_drafter_config(target.config, mask_token_id=mask_token_id)
+        ns = make_tiny_drafter_config(
+            target.config, mask_token_id=mask_token_id
+        )
         config = read_dflash_config(ns)
         set_determinism(1)
         drafter = TinyDFlashDrafter(
-            config, target.get_input_embeddings(), target.get_output_embeddings()
+            config,
+            target.get_input_embeddings(),
+            target.get_output_embeddings(),
         ).to(torch.float32)
         drafter.eval()
-    spec = DFlashSpeculator.from_models(target, drafter, config=config, device="cpu")
+    spec = DFlashSpeculator.from_models(
+        target, drafter, config=config, device="cpu"
+    )
     return spec, target
 
 
@@ -378,9 +388,27 @@ def _build_spec(vocab_size=None, mask_token_id=None):
 # ---------------------------------------------------------------------------
 
 PARITY_CONFIGS = [
-    {"name": "temp0.8", "temperature": 0.8, "top_k": 0, "top_p": 1.0, "runs": 500},
-    {"name": "top_p0.9", "temperature": 1.0, "top_k": 0, "top_p": 0.9, "runs": 500},
-    {"name": "top_k5", "temperature": 1.2, "top_k": 5, "top_p": 1.0, "runs": 500},
+    {
+        "name": "temp0.8",
+        "temperature": 0.8,
+        "top_k": 0,
+        "top_p": 1.0,
+        "runs": 500,
+    },
+    {
+        "name": "top_p0.9",
+        "temperature": 1.0,
+        "top_k": 0,
+        "top_p": 0.9,
+        "runs": 500,
+    },
+    {
+        "name": "top_k5",
+        "temperature": 1.2,
+        "top_k": 5,
+        "top_p": 1.0,
+        "runs": 500,
+    },
 ]
 
 
@@ -545,7 +573,9 @@ def test_sampled_generate_is_seed_deterministic():
     torch.manual_seed(99)
     first = spec.generate(PROMPT, max_new_tokens=16, temperature=0.8, top_p=0.9)
     torch.manual_seed(99)
-    second = spec.generate(PROMPT, max_new_tokens=16, temperature=0.8, top_p=0.9)
+    second = spec.generate(
+        PROMPT, max_new_tokens=16, temperature=0.8, top_p=0.9
+    )
     assert torch.equal(first, second)
 
 

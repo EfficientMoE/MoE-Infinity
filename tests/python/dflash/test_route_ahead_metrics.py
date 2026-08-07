@@ -291,7 +291,9 @@ def test_speculator_metrics_default_off():
     target = build_tiny_target(seed=0)
     drafter = build_tiny_drafter(target, seed=1)
     config = read_dflash_config(make_tiny_drafter_config(target.config))
-    spec = DFlashSpeculator.from_models(target, drafter, config=config, device="cpu")
+    spec = DFlashSpeculator.from_models(
+        target, drafter, config=config, device="cpu"
+    )
 
     assert spec.route_ahead_stats is None
     spec.generate(PROMPT, max_new_tokens=4, stop_token_ids=[])
@@ -303,7 +305,9 @@ def test_enable_route_ahead_stats_returns_reset_recorder():
     target = build_tiny_target(seed=0)
     drafter = build_tiny_drafter(target, seed=1)
     config = read_dflash_config(make_tiny_drafter_config(target.config))
-    spec = DFlashSpeculator.from_models(target, drafter, config=config, device="cpu")
+    spec = DFlashSpeculator.from_models(
+        target, drafter, config=config, device="cpu"
+    )
 
     stats = spec.enable_route_ahead_stats()
     assert spec.route_ahead_stats is stats
@@ -342,7 +346,9 @@ def _e2e_masks() -> dict[int, torch.Tensor]:
         [1 if j in (i % 8, (i + 3) % 8) else 0 for j in range(8)]
         for i in range(10)
     ]
-    rows_b = [[1 if j == (2 * i) % 8 else 0 for j in range(8)] for i in range(10)]
+    rows_b = [
+        [1 if j == (2 * i) % 8 else 0 for j in range(8)] for i in range(10)
+    ]
     return {
         0: torch.tensor(rows_a, dtype=torch.bool),
         2: torch.tensor(rows_b, dtype=torch.bool),
@@ -373,7 +379,10 @@ class _OffloadedExecutorShell:
     ):
         input_tensor = torch.tensor([token_ids], dtype=torch.long)
         is_prefill = _attention_metadata is None
-        kwargs: dict[str, Any] = {"use_cache": True, "output_hidden_states": True}
+        kwargs: dict[str, Any] = {
+            "use_cache": True,
+            "output_hidden_states": True,
+        }
         if logits_to_keep:
             kwargs["logits_to_keep"] = int(logits_to_keep)
         if not is_prefill:
@@ -398,7 +407,9 @@ def _offloaded_spec(*, with_stats: bool):
     prefetcher, engine = _make_real_prefetcher()
     executor = _make_executor(prefetcher=prefetcher)
     shell = _OffloadedExecutorShell(target, executor, prefetcher, _e2e_masks())
-    spec = DFlashSpeculator.from_models(shell, drafter, config=config, device="cpu")
+    spec = DFlashSpeculator.from_models(
+        shell, drafter, config=config, device="cpu"
+    )
     if with_stats:
         spec.enable_route_ahead_stats()
     return spec, engine
@@ -431,7 +442,9 @@ def test_generate_offloaded_executor_route_ahead_e2e():
 
     # Route-ahead fired on every layer of every step: perfect coverage.
     masks = _e2e_masks()
-    per_step_actual = sum(len(union_experts_from_mask(m)) for m in masks.values())
+    per_step_actual = sum(
+        len(union_experts_from_mask(m)) for m in masks.values()
+    )
     assert per_step_actual == 12
     assert stats.actual_experts == steps * per_step_actual
     assert stats.predicted_experts == stats.actual_experts
@@ -476,5 +489,7 @@ def test_generate_offloaded_metrics_match_step_trace_accepts():
     expected_kept = 0
     for rec in spec.step_trace:
         for mask in masks.values():
-            expected_kept += len(union_experts_from_mask(mask[: rec.accept + 1]))
+            expected_kept += len(
+                union_experts_from_mask(mask[: rec.accept + 1])
+            )
     assert stats.kept_experts == expected_kept

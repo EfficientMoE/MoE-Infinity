@@ -91,6 +91,9 @@ def test_truncate_target_composes_with_kv_truncate() -> None:
     acc = state.record_verify(block_len=block_len, committed=committed)
     cache.truncate_tokens(0, acc.truncate_target)
 
-    assert cache._sequence_tables[0].num_computed_tokens() == prompt_len + committed
+    assert (
+        cache._sequence_tables[0].num_computed_tokens()
+        == prompt_len + committed
+    )
     assert acc.truncate_target == prompt_len + committed
     assert state.invariant_holds()

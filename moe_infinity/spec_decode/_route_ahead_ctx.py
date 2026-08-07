@@ -26,8 +26,8 @@ route_ahead_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "dflash_route_ahead_active", default=False
 )
 route_ahead_prefetcher: contextvars.ContextVar[Optional[Any]] = (
-    contextvars.ContextVar("dflash_route_ahead_prefetcher", default=None
-))
+    contextvars.ContextVar("dflash_route_ahead_prefetcher", default=None)
+)
 # A5 metrics handle: a ``RouteAheadStats`` (``_route_ahead_stats``) when the
 # speculator opted in, else None. Typed ``Any`` to keep this module a leaf.
 route_ahead_stats: contextvars.ContextVar[Optional[Any]] = (

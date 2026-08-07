@@ -79,21 +79,27 @@ def _tiny_spec():
         _TARGET = build_tiny_target(seed=0)
         _DRAFTER = build_tiny_drafter(_TARGET, seed=1)
     config = read_dflash_config(make_tiny_drafter_config(_TARGET.config))
-    spec = DFlashSpeculator.from_models(_TARGET, _DRAFTER, config=config, device="cpu")
+    spec = DFlashSpeculator.from_models(
+        _TARGET, _DRAFTER, config=config, device="cpu"
+    )
     return spec, _TARGET
 
 
 def _left_pad(prompts, pad_id=0):
     width = max(len(p) for p in prompts)
     ids = torch.tensor([[pad_id] * (width - len(p)) + list(p) for p in prompts])
-    mask = torch.tensor([[0] * (width - len(p)) + [1] * len(p) for p in prompts])
+    mask = torch.tensor(
+        [[0] * (width - len(p)) + [1] * len(p) for p in prompts]
+    )
     return ids, mask, width
 
 
 def _batched_new_tokens(out, spec, width):
     lengths = spec.last_generated_lengths
     assert lengths is not None
-    return [out[b, width : width + lengths[b]].tolist() for b in range(out.shape[0])]
+    return [
+        out[b, width : width + lengths[b]].tolist() for b in range(out.shape[0])
+    ]
 
 
 def _plain_new(target, prompt, max_new):
@@ -287,7 +293,9 @@ def test_build_block_with_prefixes_contents_and_shape():
 def test_build_block_with_prefixes_rejects_overlong_prefix():
     with pytest.raises(ValueError, match="exceeds block_size"):
         build_block_with_prefixes(
-            [[1] * (TINY_BLOCK_SIZE + 1)], mask_token_id=200, block_size=TINY_BLOCK_SIZE
+            [[1] * (TINY_BLOCK_SIZE + 1)],
+            mask_token_id=200,
+            block_size=TINY_BLOCK_SIZE,
         )
 
 
@@ -380,9 +388,7 @@ def test_mixed_accept_lengths_in_one_block(monkeypatch):
     assert two_row_steps, "expected steps with both rows active"
     for records in two_row_steps:
         assert sorted(rec.accept for rec in records) == [0, TINY_BLOCK_SIZE - 1]
-    assert all(
-        recs[0].start - prev == 1 for prev, recs in by_step.items()
-    )
+    assert all(recs[0].start - prev == 1 for prev, recs in by_step.items())
     _assert_batched_trace_invariants(spec)
 
 
@@ -408,7 +414,10 @@ def test_per_seq_eos_mid_block_ragged_completion(monkeypatch):
     ids, mask, width = _left_pad(prompts)
 
     out = spec.generate(
-        ids, max_new_tokens=max_new, attention_mask=mask, stop_token_ids=[EOS_ID]
+        ids,
+        max_new_tokens=max_new,
+        attention_mask=mask,
+        stop_token_ids=[EOS_ID],
     )
     batched = _batched_new_tokens(out, spec, width)
 
@@ -449,7 +458,10 @@ def test_per_seq_eos_as_accepted_draft_stops_only_that_row(monkeypatch):
     ids, mask, width = _left_pad(prompts)
 
     out = spec.generate(
-        ids, max_new_tokens=max_new, attention_mask=mask, stop_token_ids=[EOS_ID]
+        ids,
+        max_new_tokens=max_new,
+        attention_mask=mask,
+        stop_token_ids=[EOS_ID],
     )
     batched = _batched_new_tokens(out, spec, width)
 
@@ -500,7 +512,9 @@ def test_batch_one_via_batched_path_with_stop_ids_equals_legacy():
     prompt = torch.tensor([PROMPT_A])
     max_new = 24
 
-    legacy = spec.generate(prompt, max_new_tokens=max_new, stop_token_ids=[EOS_ID])
+    legacy = spec.generate(
+        prompt, max_new_tokens=max_new, stop_token_ids=[EOS_ID]
+    )
     batched = spec._generate_batched(
         prompt,
         max_new_tokens=max_new,

@@ -32,7 +32,9 @@ class SpecDecodeState:
         if self.cached_len < 0:
             self.cached_len = self.prompt_len
 
-    def record_verify(self, block_len: int, committed: int) -> VerifyStepAccounting:
+    def record_verify(
+        self, block_len: int, committed: int
+    ) -> VerifyStepAccounting:
         """Reconcile counters after a verify step that appended ``block_len``.
 
         The verify forward transiently writes KV for all ``block_len`` block

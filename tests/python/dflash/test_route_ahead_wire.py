@@ -152,8 +152,7 @@ def test_active_context_prefetches_exact_union_for_current_layer():
     first_read = next(i for i, e in enumerate(events) if e[0] == "enqueue")
     assert events.index(("lock", LAYER_ID, UNION)) < first_read
     assert (
-        next(i for i, e in enumerate(events) if e[0] == "prefetch")
-        < first_read
+        next(i for i, e in enumerate(events) if e[0] == "prefetch") < first_read
     )
     # Routing untouched: exactly the union experts are dispatched to compute.
     assert [e[1] for e in events if e[0] == "enqueue"] == UNION
@@ -173,9 +172,13 @@ def test_active_context_falls_back_to_executor_prefetcher():
     engine.replace_cache_candidates.assert_called_once_with(
         [300, 301, 302, 305, 307]
     )
-    assert [
-        c.args[0] for c in engine.enqueue_prefetch.call_args_list
-    ] == [300, 301, 302, 305, 307]
+    assert [c.args[0] for c in engine.enqueue_prefetch.call_args_list] == [
+        300,
+        301,
+        302,
+        305,
+        307,
+    ]
     assert prefetcher._last_speculative_prediction == set(UNION)
     trigger_spy.assert_not_called()
     assert executor._pending_prefetch == (prefetcher, LAYER_ID, UNION, None)
@@ -184,9 +187,13 @@ def test_active_context_falls_back_to_executor_prefetcher():
     # recorded prediction IS the actual union; nothing further is enqueued.
     executor.wait_dispatch_local()
     engine.replace_cache_candidates.assert_called_once()
-    assert [
-        c.args[0] for c in engine.enqueue_prefetch.call_args_list
-    ] == [300, 301, 302, 305, 307]
+    assert [c.args[0] for c in engine.enqueue_prefetch.call_args_list] == [
+        300,
+        301,
+        302,
+        305,
+        307,
+    ]
     assert prefetcher._last_speculative_prediction == set()
 
 
@@ -380,7 +387,9 @@ def test_verify_target_block_resets_context_on_forward_error():
 
     speculator._forward_target = boom
     with pytest.raises(RuntimeError, match="verify boom"):
-        speculator._verify_target_block(torch.zeros(1, 2, dtype=torch.long), "kv")
+        speculator._verify_target_block(
+            torch.zeros(1, 2, dtype=torch.long), "kv"
+        )
     assert not is_active() and current_prefetcher() is None
 
 

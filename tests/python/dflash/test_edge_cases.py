@@ -70,7 +70,9 @@ def _tiny_spec():
         _TARGET = build_tiny_target(seed=0)
         _DRAFTER = build_tiny_drafter(_TARGET, seed=1)
     config = read_dflash_config(make_tiny_drafter_config(_TARGET.config))
-    spec = DFlashSpeculator.from_models(_TARGET, _DRAFTER, config=config, device="cpu")
+    spec = DFlashSpeculator.from_models(
+        _TARGET, _DRAFTER, config=config, device="cpu"
+    )
     return spec, _TARGET
 
 
@@ -132,7 +134,9 @@ def _force_target_argmax(monkeypatch, spec, *, prefill=None, verify=None):
 
     def wrapped(input_ids, past_key_values=None, logits_to_keep=0):
         logits, hidden, kv = orig(
-            input_ids, past_key_values=past_key_values, logits_to_keep=logits_to_keep
+            input_ids,
+            past_key_values=past_key_values,
+            logits_to_keep=logits_to_keep,
         )
         rows = prefill if int(logits_to_keep) == 1 else verify
         if rows:
@@ -225,7 +229,12 @@ def test_eos_mid_block_accepted_draft_truncates_and_stops(monkeypatch):
     other = 40  # forced posterior at the position after EOS (never emitted)
     # d1, d2 = greedy (accepted); d3 = EOS (accepted via forced posterior);
     # d4 forced to mismatch so accept == 3.
-    drafts = [full[PROMPT_LEN + 1], full[PROMPT_LEN + 2], EOS_ID, (other + 1) % TINY_VOCAB]
+    drafts = [
+        full[PROMPT_LEN + 1],
+        full[PROMPT_LEN + 2],
+        EOS_ID,
+        (other + 1) % TINY_VOCAB,
+    ]
     drafts += [0] * (TINY_BLOCK_SIZE - 1 - len(drafts))
     _install_scripted_drafter(monkeypatch, spec, lambda step: drafts)
     _force_target_argmax(monkeypatch, spec, verify={2: EOS_ID, 3: other})
@@ -240,7 +249,12 @@ def test_eos_mid_block_accepted_draft_truncates_and_stops(monkeypatch):
     # Emitted ends exactly at EOS: the forced bonus and further blocks are
     # never emitted despite the large max_new_tokens budget.
     new_ids = out[0, PROMPT_LEN:].tolist()
-    assert new_ids == [full[PROMPT_LEN], full[PROMPT_LEN + 1], full[PROMPT_LEN + 2], EOS_ID]
+    assert new_ids == [
+        full[PROMPT_LEN],
+        full[PROMPT_LEN + 1],
+        full[PROMPT_LEN + 2],
+        EOS_ID,
+    ]
     assert other not in new_ids
 
     # cache length == start_at_EOS: anchor + 3 drafts (the EOS draft DID go
@@ -271,7 +285,12 @@ def test_eos_bonus_token_truncates_and_stops(monkeypatch):
     assert rec.accept == 2
 
     new_ids = out[0, PROMPT_LEN:].tolist()
-    assert new_ids == [full[PROMPT_LEN], full[PROMPT_LEN + 1], full[PROMPT_LEN + 2], EOS_ID]
+    assert new_ids == [
+        full[PROMPT_LEN],
+        full[PROMPT_LEN + 1],
+        full[PROMPT_LEN + 2],
+        EOS_ID,
+    ]
 
     # The bonus is never forwarded, so the cache covers anchor + 2 accepted
     # drafts only: exactly one behind the emitted sequence.

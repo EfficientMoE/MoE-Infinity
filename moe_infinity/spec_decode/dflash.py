@@ -58,9 +58,15 @@ def read_dflash_config(draft_hf_config: Any) -> DFlashConfig:
     text_config = _get(draft_hf_config, "text_config", draft_hf_config)
 
     block_size = _get(draft_hf_config, "block_size", _get(dflash, "block_size"))
-    mask_token_id = _get(dflash, "mask_token_id", _get(draft_hf_config, "mask_token_id"))
-    target_layer_ids = _get(dflash, "target_layer_ids", _get(draft_hf_config, "target_layer_ids"))
-    num_target_layers = _get(draft_hf_config, "num_target_layers", _get(dflash, "num_target_layers"))
+    mask_token_id = _get(
+        dflash, "mask_token_id", _get(draft_hf_config, "mask_token_id")
+    )
+    target_layer_ids = _get(
+        dflash, "target_layer_ids", _get(draft_hf_config, "target_layer_ids")
+    )
+    num_target_layers = _get(
+        draft_hf_config, "num_target_layers", _get(dflash, "num_target_layers")
+    )
 
     if block_size is None or mask_token_id is None or target_layer_ids is None:
         raise ValueError(
@@ -72,7 +78,9 @@ def read_dflash_config(draft_hf_config: Any) -> DFlashConfig:
         block_size=int(block_size),
         mask_token_id=int(mask_token_id),
         target_layer_ids=[int(x) for x in target_layer_ids],
-        num_target_layers=int(num_target_layers) if num_target_layers is not None else -1,
+        num_target_layers=int(num_target_layers)
+        if num_target_layers is not None
+        else -1,
         hidden_size=int(_get(text_config, "hidden_size")),
         vocab_size=int(_get(text_config, "vocab_size")),
     )
@@ -196,7 +204,9 @@ def _infer_cuda_device(model: Any) -> str:
     return "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
-def _resolve_stop_ids(target: Any, stop_token_ids: Optional[List[int]]) -> List[int]:
+def _resolve_stop_ids(
+    target: Any, stop_token_ids: Optional[List[int]]
+) -> List[int]:
     if stop_token_ids is not None:
         return list(stop_token_ids)
     eos = _get(_get(target, "config", target), "eos_token_id")
@@ -262,9 +272,13 @@ class NativeStepTrace(NamedTuple):
     # dropped), so ``start == prev_start + accept + 1`` holds in every branch
     accept: int
     start: int  # cached_len after commit == prev_start + accept + 1
-    emitted_len: int  # generated tokens emitted so far (accepted drafts + bonus)
+    emitted_len: (
+        int  # generated tokens emitted so far (accepted drafts + bonus)
+    )
     target_cache_len: int  # target_kv.get_seq_length() after crop
-    draft_cache_len: Optional[int]  # context-KV length after crop (KV drafter only)
+    draft_cache_len: Optional[
+        int
+    ]  # context-KV length after crop (KV drafter only)
 
 
 class DFlashSpeculator:
@@ -291,7 +305,9 @@ class DFlashSpeculator:
 
         self.config = read_dflash_config(self.draft.config)
         validate_drafter(self.draft, self.target.config, draft_cfg=self.config)
-        self.embed_tokens, self.lm_head = bind_shared_weights(self.draft, self.target)
+        self.embed_tokens, self.lm_head = bind_shared_weights(
+            self.draft, self.target
+        )
         self._init_native_runtime()
 
     @classmethod
@@ -312,7 +328,9 @@ class DFlashSpeculator:
         """
         self = cls.__new__(cls)
         self.moe = moe
-        on_moe_engine = callable(getattr(moe, "_native_model_forward_rich", None))
+        on_moe_engine = callable(
+            getattr(moe, "_native_model_forward_rich", None)
+        )
         self.target = moe.model if on_moe_engine else moe
         if device is None:
             if on_moe_engine:
@@ -330,7 +348,9 @@ class DFlashSpeculator:
             config = read_dflash_config(_get(self.draft, "config"))
         self.config = config
         validate_drafter_module(self.draft, self.config)
-        self.embed_tokens, self.lm_head = bind_shared_weights(self.draft, self.target)
+        self.embed_tokens, self.lm_head = bind_shared_weights(
+            self.draft, self.target
+        )
         self._init_native_runtime()
         return self
 
@@ -339,7 +359,8 @@ class DFlashSpeculator:
         # maintains a DynamicCache of projected context KV; stateless drafters
         # (tiny fixtures) take ``(block_ids, context_feature)`` instead.
         self._drafter_has_kv_cache = (
-            "noise_embedding" in inspect.signature(self.draft.forward).parameters
+            "noise_embedding"
+            in inspect.signature(self.draft.forward).parameters
         )
         # Sliding-window targets retain only the last ``sliding_window - 1``
         # tokens per cache update; the verify block must fit in that span or
@@ -678,18 +699,22 @@ class DFlashSpeculator:
 
         while len(emitted) < max_new_tokens:
             prev_start = start
-            block = build_block(anchor, self.config.mask_token_id, block_size).to(
-                self.device
-            )
+            block = build_block(
+                anchor, self.config.mask_token_id, block_size
+            ).to(self.device)
 
-            drafter_out = self._run_drafter(block, context_feature, start, draft_kv)
+            drafter_out = self._run_drafter(
+                block, context_feature, start, draft_kv
+            )
             draft_logits = self.lm_head(drafter_out)[:, -(block_size - 1) :, :]
             draft_probs: Optional[torch.Tensor] = None
             if sampled:
                 # The accept test divides by the drafter's OWN warped slot
                 # distributions, so drafts must be genuine draws from them --
                 # argmax drafts would void the losslessness proof.
-                draft_probs = warped_probs(draft_logits[0], temperature, top_k, top_p)
+                draft_probs = warped_probs(
+                    draft_logits[0], temperature, top_k, top_p
+                )
                 block[:, 1:] = torch.multinomial(
                     draft_probs, num_samples=1
                 ).squeeze(-1)
@@ -699,7 +724,9 @@ class DFlashSpeculator:
             # Snapshot sliding layers BEFORE the verify forward: its update
             # evicts all but the last ``sliding_window - 1`` tokens, so the
             # prefix must be captured here to rebuild after a partial accept.
-            sliding_snaps: dict[int, tuple[torch.Tensor, torch.Tensor, int]] = {}
+            sliding_snaps: dict[
+                int, tuple[torch.Tensor, torch.Tensor, int]
+            ] = {}
             for i, layer in enumerate(target_kv.layers):
                 if isinstance(layer, DynamicSlidingWindowLayer):
                     sliding_snaps[i] = (
@@ -773,7 +800,9 @@ class DFlashSpeculator:
                     emitted_len=len(emitted),
                     target_cache_len=int(target_kv.get_seq_length()),
                     draft_cache_len=(
-                        int(draft_kv.get_seq_length()) if draft_kv is not None else None
+                        int(draft_kv.get_seq_length())
+                        if draft_kv is not None
+                        else None
                     ),
                 )
             )
@@ -794,7 +823,9 @@ class DFlashSpeculator:
         self.last_draft_cache = draft_kv
 
         new_ids = torch.tensor(
-            [emitted[:max_new_tokens]], dtype=torch.long, device=input_ids.device
+            [emitted[:max_new_tokens]],
+            dtype=torch.long,
+            device=input_ids.device,
         )
         return torch.cat([input_ids, new_ids], dim=1)
 
@@ -860,7 +891,9 @@ class DFlashSpeculator:
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
         else:
-            attention_mask = attention_mask.to(device=self.device, dtype=torch.long)
+            attention_mask = attention_mask.to(
+                device=self.device, dtype=torch.long
+            )
         if tuple(attention_mask.shape) != tuple(input_ids.shape):
             raise ValueError(
                 f"attention_mask shape {tuple(attention_mask.shape)} != "
@@ -920,18 +953,22 @@ class DFlashSpeculator:
                 prefixes, mask_token_id, block_size
             ).to(self.device)
 
-            drafter_out = self._run_drafter(block, context_feature, start, draft_kv)
+            drafter_out = self._run_drafter(
+                block, context_feature, start, draft_kv
+            )
             draft_logits = self.lm_head(drafter_out)[:, -(block_size - 1) :, :]
             for b in range(batch):
                 if active(b) and pendings[b] < block_size:
-                    block[b, pendings[b] :] = draft_logits[b, pendings[b] - 1 :].argmax(
-                        dim=-1
-                    )
+                    block[b, pendings[b] :] = draft_logits[
+                        b, pendings[b] - 1 :
+                    ].argmax(dim=-1)
 
             # Snapshot sliding layers BEFORE the verify forward (see
             # _generate_single); the rebuild in rollback_target_cache is
             # per-row inside the batched [batch, ...] tensors.
-            sliding_snaps: dict[int, tuple[torch.Tensor, torch.Tensor, int]] = {}
+            sliding_snaps: dict[
+                int, tuple[torch.Tensor, torch.Tensor, int]
+            ] = {}
             for i, layer in enumerate(target_kv.layers):
                 if isinstance(layer, DynamicSlidingWindowLayer):
                     keys, values = layer.keys, layer.values

@@ -44,14 +44,18 @@ def _skip_reason() -> Optional[str]:
         return "MOE_DFLASH_GPU unset (GPU-gated 20B DFlash harness)"
     if not torch.cuda.is_available():
         return "CUDA unavailable (GPU-gated 20B DFlash harness)"
-    missing = [r for r in (TARGET_REPO, DRAFTER_REPO) if not _checkpoint_present(r)]
+    missing = [
+        r for r in (TARGET_REPO, DRAFTER_REPO) if not _checkpoint_present(r)
+    ]
     if missing:
         return "checkpoints not present in $HF_HOME: " + ", ".join(missing)
     return None
 
 
 SKIP_REASON = _skip_reason()
-pytestmark = pytest.mark.skipif(SKIP_REASON is not None, reason=SKIP_REASON or "gpu-gated")
+pytestmark = pytest.mark.skipif(
+    SKIP_REASON is not None, reason=SKIP_REASON or "gpu-gated"
+)
 
 
 def _greedy(model, input_ids, spec=None) -> list[int]:
@@ -59,7 +63,7 @@ def _greedy(model, input_ids, spec=None) -> list[int]:
     if spec is not None:
         kwargs["speculative_draft"] = spec
     out = model.generate(input_ids, **kwargs)
-    return [int(t) for t in out[0, input_ids.shape[1]:].tolist()]
+    return [int(t) for t in out[0, input_ids.shape[1] :].tolist()]
 
 
 def test_20b_native_dflash_losslessness() -> None:
@@ -75,7 +79,9 @@ def test_20b_native_dflash_losslessness() -> None:
     ratio = float(os.environ.get("MOE_DFLASH_MEM_RATIO", "0.9"))
 
     tok = AutoTokenizer.from_pretrained(TARGET_REPO, trust_remote_code=True)
-    model = MoE(TARGET_REPO, {"offload_path": offload, "device_memory_ratio": ratio})
+    model = MoE(
+        TARGET_REPO, {"offload_path": offload, "device_memory_ratio": ratio}
+    )
     spec = DFlashSpeculator(model, DRAFTER_REPO)
 
     assert spec.config.block_size == 8
@@ -92,7 +98,9 @@ def test_20b_native_dflash_losslessness() -> None:
     dfl = _greedy(model, ids, spec=spec)
     dfl_s = time.time() - t0
 
-    assert dfl == plain, "native DFlash greedy must be token-identical to plain greedy"
+    assert (
+        dfl == plain
+    ), "native DFlash greedy must be token-identical to plain greedy"
 
     trace = getattr(spec, "step_trace", []) or []
     accepts = [getattr(tr, "accept", 0) + 1 for tr in trace]

@@ -106,7 +106,11 @@ class RouteAheadStats:
         already on CPU) so the kept-prefix waste can be computed later, once
         the accept length is known. Read-only: the mask is never modified.
         """
-        mask = router_mask if torch.is_tensor(router_mask) else torch.tensor(router_mask)
+        mask = (
+            router_mask
+            if torch.is_tensor(router_mask)
+            else torch.tensor(router_mask)
+        )
         if mask.dim() != 2:
             raise ValueError(
                 "router_mask must be 2-D [num_tokens, num_experts]; "

@@ -36,7 +36,9 @@ def _skip_reason() -> str | None:
         return "MOE_DFLASH_GPU unset (GPU-gated serving DFlash harness)"
     if not torch.cuda.is_available():
         return "CUDA unavailable (GPU-gated serving DFlash harness)"
-    missing = [r for r in (TARGET_REPO, DRAFTER_REPO) if not _checkpoint_present(r)]
+    missing = [
+        r for r in (TARGET_REPO, DRAFTER_REPO) if not _checkpoint_present(r)
+    ]
     if missing:
         return "checkpoints not present in $HF_HOME: " + ", ".join(missing)
     return None
@@ -44,7 +46,11 @@ def _skip_reason() -> str | None:
 
 def _model_int(config: object, *names: str) -> int:
     get_text = getattr(config, "get_text_config", None)
-    text_config = get_text() if callable(get_text) else getattr(config, "text_config", None)
+    text_config = (
+        get_text()
+        if callable(get_text)
+        else getattr(config, "text_config", None)
+    )
     for candidate in (config, text_config):
         if candidate is None:
             continue
@@ -56,7 +62,9 @@ def _model_int(config: object, *names: str) -> int:
 
 
 SKIP_REASON = _skip_reason()
-pytestmark = pytest.mark.skipif(SKIP_REASON is not None, reason=SKIP_REASON or "gpu-gated")
+pytestmark = pytest.mark.skipif(
+    SKIP_REASON is not None, reason=SKIP_REASON or "gpu-gated"
+)
 
 
 def test_serving_dflash_matches_sync_generate() -> None:
@@ -73,8 +81,12 @@ def test_serving_dflash_matches_sync_generate() -> None:
     os.makedirs(offload, exist_ok=True)
     ratio = float(os.environ.get("MOE_DFLASH_MEM_RATIO", "0.9"))
 
-    tokenizer = AutoTokenizer.from_pretrained(TARGET_REPO, trust_remote_code=True)
-    model = MoE(TARGET_REPO, {"offload_path": offload, "device_memory_ratio": ratio})
+    tokenizer = AutoTokenizer.from_pretrained(
+        TARGET_REPO, trust_remote_code=True
+    )
+    model = MoE(
+        TARGET_REPO, {"offload_path": offload, "device_memory_ratio": ratio}
+    )
     spec = DFlashSpeculator(model, DRAFTER_REPO)
     input_ids = tokenizer(PROMPT, return_tensors="pt").input_ids.to("cuda:0")
 
@@ -96,7 +108,9 @@ def test_serving_dflash_matches_sync_generate() -> None:
         "max_batch_size": 1,
         "max_tokens_per_step": 2048,
         "block_size": block_size,
-        "num_layers": _model_int(model_config, "num_hidden_layers", "num_layers"),
+        "num_layers": _model_int(
+            model_config, "num_hidden_layers", "num_layers"
+        ),
         "num_kv_heads": _model_int(
             model_config,
             "num_key_value_heads",

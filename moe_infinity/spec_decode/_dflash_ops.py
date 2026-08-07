@@ -24,12 +24,20 @@ AnchorLike = Union[int, torch.Tensor]
 
 
 class Committed(NamedTuple):
-    emitted: torch.Tensor  # [B, accept+1] accepted drafts ++ bonus; appended to output
-    block_prefix: torch.Tensor  # [B, accept+1] anchor ++ accepted drafts; KV kept (start += accept+1)
-    bonus: torch.Tensor  # [B, 1] posterior[:, accept]; emitted-but-NOT-cached, next anchor
+    emitted: (
+        torch.Tensor
+    )  # [B, accept+1] accepted drafts ++ bonus; appended to output
+    block_prefix: (
+        torch.Tensor
+    )  # [B, accept+1] anchor ++ accepted drafts; KV kept (start += accept+1)
+    bonus: (
+        torch.Tensor
+    )  # [B, 1] posterior[:, accept]; emitted-but-NOT-cached, next anchor
 
 
-def build_block(anchor: AnchorLike, mask_token_id: int, block_size: int) -> torch.Tensor:
+def build_block(
+    anchor: AnchorLike, mask_token_id: int, block_size: int
+) -> torch.Tensor:
     """Return ``[anchor, MASK x (block_size - 1)]`` as an int64 ``[B, block_size]``."""
     if not torch.is_tensor(anchor):
         anchor = torch.tensor(anchor)
@@ -43,7 +51,9 @@ def build_block(anchor: AnchorLike, mask_token_id: int, block_size: int) -> torc
     return torch.cat([anchor, masks], dim=1)
 
 
-def acceptance_length(candidates: torch.Tensor, target_predict: torch.Tensor) -> int:
+def acceptance_length(
+    candidates: torch.Tensor, target_predict: torch.Tensor
+) -> int:
     """Number of leading draft tokens the target agrees with (RFC 1.2).
 
     ``accept = cumprod(candidates[:, 1:] == target_predict[:, :-1]).sum()`` --
@@ -127,7 +137,9 @@ def committed_tokens_ragged(
             f"accepts has {len(accepts)} rows but block has batch {block.shape[0]}"
         )
     return [
-        committed_tokens(block[b : b + 1], posterior[b : b + 1], int(accepts[b]))
+        committed_tokens(
+            block[b : b + 1], posterior[b : b + 1], int(accepts[b])
+        )
         for b in range(int(block.shape[0]))
     ]
 

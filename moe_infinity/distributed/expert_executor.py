@@ -139,7 +139,9 @@ class DistributedExpertExecutor:
             # into one pin would evict candidates the next layer's dispatch
             # still needs. Never batch pins across layers; never pin the
             # empty set (short-circuited above).
-            route_prefetcher.fetch_experts_lock_cache(layer_id, union_expert_ids)
+            route_prefetcher.fetch_experts_lock_cache(
+                layer_id, union_expert_ids
+            )
             route_prefetcher.speculative_prefetch(
                 layer_id,
                 expert_ids=union_expert_ids,

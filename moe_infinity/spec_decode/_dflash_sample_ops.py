@@ -150,7 +150,9 @@ def acceptance_sampled(
             generator=generator,
         )
         return SampledAcceptance(accept=i, final_token=int(correction))
-    bonus = torch.multinomial(target_probs[-1], num_samples=1, generator=generator)
+    bonus = torch.multinomial(
+        target_probs[-1], num_samples=1, generator=generator
+    )
     return SampledAcceptance(accept=num_drafts, final_token=int(bonus))
 
 
