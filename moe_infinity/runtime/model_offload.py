@@ -964,6 +964,13 @@ class OffloadEngine(object):
     def get_topology(self, model):
         name_lst = []
         ret_dict = {}
+        is_qwen3_5 = "qwen3_5" in _arch_name(self.config)
+
+        def is_routed_expert(name):
+            if is_qwen3_5:
+                _, expert_id = parse_expert_id(name, self.config)
+                return expert_id is not None
+            return "expert" in name and "shared_experts" not in name
 
         for name, _ in model.named_parameters(recurse=True):
             match = re.search(r"\d+", name)
@@ -971,7 +978,7 @@ class OffloadEngine(object):
                 print("param not in self.name_id_map", name)
                 continue
             if match:
-                if "expert" in name and "shared_experts" not in name:
+                if is_routed_expert(name):
                     match = re.match(r"(.*experts)", name)
                     assert match, "Not correct expert name!"
                     stored_name = match.group(1)
@@ -1028,7 +1035,7 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             if match:
-                if "expert" in name and "shared_experts" not in name:
+                if is_routed_expert(name):
                     match = re.match(r"(.*experts)", name)
                     assert match, "Not correct expert name!"
                     stored_name = match.group(1)
