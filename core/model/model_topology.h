@@ -171,8 +171,15 @@ class ArcherTopologyHandle : public base::noncopyable {
 
   void InitializeTopology(
       const std::vector<
+          std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
+          topology);
+
+  void InitializeTopologyV2(
+      const std::vector<
           std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
                      std::vector<std::uint64_t>>>& topology);
+
+  std::vector<std::tuple<std::uint64_t, bool, int>> GetTopologySnapshot();
 
   void EnableTrace() noexcept { trace_enabled_ = true; }
   void DisableTrace() noexcept { trace_enabled_ = false; }

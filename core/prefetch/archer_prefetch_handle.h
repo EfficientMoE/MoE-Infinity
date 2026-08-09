@@ -43,8 +43,13 @@ class ArcherPrefetchHandle {
   void TraceRequest(const std::uint64_t request_id, const TensorID tensor_id);
   void SetTopology(
       const std::vector<
+          std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
+          topology);
+  void SetTopologyV2(
+      const std::vector<
           std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
                      std::vector<std::uint64_t>>>& topology);
+  std::vector<std::tuple<std::uint64_t, bool, int>> GetTopologySnapshot();
   void UpdateTensorMap(std::uint64_t old_ptr, std::uint64_t new_ptr);
   bool IsTensorIndexInitialized() const;
   bool IsTensorOnDevice(const torch::Tensor& tensor) const;

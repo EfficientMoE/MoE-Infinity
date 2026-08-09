@@ -1116,7 +1116,7 @@ class OffloadEngine(object):
             f"TOPO: {len(topo)} stages, {sparse_count} sparse",
             flush=True,
         )
-        self.archer_engine.set_topology(build_topology_specs(topo))
+        self.archer_engine.set_topology_v2(build_topology_specs(topo))
         print("TOPO: set_topology done", flush=True)
 
         @torch.no_grad()

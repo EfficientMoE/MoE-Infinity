@@ -727,6 +727,33 @@ void ArcherTopologyHandle::BuildTopologyFromSpecs(
 
 void ArcherTopologyHandle::InitializeTopology(
     const std::vector<
+        std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
+        topology) {
+  std::vector<StageSpec> specs;
+  specs.reserve(topology.size());
+  for (std::size_t layer_id = 0; layer_id < topology.size(); ++layer_id) {
+    const auto& stage_tensors = std::get<1>(topology[layer_id]);
+    StageSpec spec;
+    spec.is_sparse = stage_tensors.size() > 1;
+    spec.tensor_groups = &stage_tensors;
+    spec.corr_ids.reserve(stage_tensors.size());
+    for (std::size_t expert_id = 0; expert_id < stage_tensors.size();
+         ++expert_id) {
+      spec.corr_ids.push_back((layer_id & 0xFFFFFFFF) |
+                              ((expert_id & 0xFFFFFFFF) << 32));
+    }
+    specs.push_back(std::move(spec));
+  }
+  if (!specs.empty()) {
+    for (auto& corr_id : specs.back().corr_ids) {
+      corr_id = (corr_id & 0xFFFFFFFF) | (UINT64_MAX << 32);
+    }
+  }
+  BuildTopologyFromSpecs(specs);
+}
+
+void ArcherTopologyHandle::InitializeTopologyV2(
+    const std::vector<
         std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
                    std::vector<std::uint64_t>>>& topology) {
   std::vector<StageSpec> specs;
@@ -738,12 +765,26 @@ void ArcherTopologyHandle::InitializeTopology(
     spec.corr_ids = std::get<3>(stage);
     if (spec.corr_ids.size() != spec.tensor_groups->size()) {
       DLOG_ERROR(
-          "InitializeTopology: corr_ids count {} != tensor group count {}",
+          "InitializeTopologyV2: corr_ids count {} != tensor group count {}",
           spec.corr_ids.size(), spec.tensor_groups->size());
     }
     specs.push_back(std::move(spec));
   }
   BuildTopologyFromSpecs(specs);
+}
+
+std::vector<std::tuple<std::uint64_t, bool, int>>
+ArcherTopologyHandle::GetTopologySnapshot() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<std::tuple<std::uint64_t, bool, int>> snapshot;
+  for (const auto& stage : pipeline_.stages) {
+    for (const auto& node_body : stage->nodes) {
+      const auto& node = node_body->node;
+      snapshot.emplace_back(static_cast<std::uint64_t>(node->corr_id),
+                            node->is_sparse, node->default_device.index());
+    }
+  }
+  return snapshot;
 }
 
 NodePtr ArcherTopologyHandle::GetNodeFromTensorID(const TensorID& tensor_id) {
