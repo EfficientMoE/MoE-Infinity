@@ -6,8 +6,6 @@ from typing import Any, Callable, Dict, Optional, Union
 
 import torch
 
-import moe_infinity
-
 warnings.filterwarnings("ignore")
 
 
@@ -187,10 +185,10 @@ class MoE:
         self.use_native_engine = bool(
             getattr(engine_config, "use_native_engine", True)
         )
-        # Qwen3.5-MoE interleaves linear (GatedDeltaNet) and full attention; the
-        # native paged-KV engine assumes uniform full attention across layers, so
-        # Phase 1 drives generation through HF's own forward instead.
-        if getattr(model_config, "model_type", "") in ("qwen3_5_moe", "glm_moe_dsa"):
+        # GLM-DSA remains unsupported by the native engine. Qwen3.5 builds the
+        # native components, but generate() below admits them only for greedy,
+        # batch-1 DFlash; ordinary generation still uses HF's hybrid-cache path.
+        if getattr(model_config, "model_type", "") == "glm_moe_dsa":
             self.use_native_engine = False
         default_max_seq_length = getattr(
             model_config, "max_position_embeddings", None
@@ -728,6 +726,11 @@ class MoE:
         standard path runs, without discarding the memoized speculator.
         """
         engine = self._native_generation_engine
+        if engine is None:
+            raise RuntimeError(
+                "cannot configure speculative decoding without a native "
+                "generation engine"
+            )
         if not speculative_draft:
             engine.spec_strategy = None
             return
@@ -739,7 +742,12 @@ class MoE:
             and source == str(speculative_draft)
         )
         if cached is None or not same:
-            from moe_infinity.spec_decode import DFlashSpeculator
+            import importlib
+
+            DFlashSpeculator = getattr(
+                importlib.import_module("moe_infinity.spec_decode.dflash"),
+                "DFlashSpeculator",
+            )
 
             if isinstance(speculative_draft, DFlashSpeculator):
                 cached = speculative_draft
@@ -784,17 +792,41 @@ class MoE:
 
         speculative_draft = kwargs.pop("speculative_draft", None)
 
-        if (
-            not self.use_native_engine
-            or self._native_generation_engine is None
-            or input_ids.ndim != 2
-            or input_ids.shape[0] != 1
-        ):
+        model_type = getattr(
+            getattr(self.model, "config", None), "model_type", ""
+        )
+        is_qwen35 = model_type == "qwen3_5_moe"
+        do_sample = kwargs.get("do_sample", None)
+        sampling_temperature = (
+            0.0 if do_sample is False else float(kwargs.get("temperature", 1.0))
+        )
+        is_greedy = (
+            sampling_temperature == 0.0
+            and float(kwargs.get("top_p", 1.0)) == 1.0
+            and int(kwargs.get("top_k", 0)) == 0
+        )
+        qwen35_dflash = bool(speculative_draft) and is_greedy
+        native_engine = self._native_generation_engine
+        native_for_call = (
+            self.use_native_engine
+            and native_engine is not None
+            and input_ids.ndim == 2
+            and input_ids.shape[0] == 1
+            and (not is_qwen35 or qwen35_dflash)
+        )
+
+        if not native_for_call:
             if speculative_draft:
                 if input_ids.ndim == 2 and input_ids.shape[0] != 1:
                     raise NotImplementedError(
                         "speculative_draft (DFlash) v1 supports batch==1 "
                         f"only; got batch size {input_ids.shape[0]}"
+                    )
+                if is_qwen35 and not is_greedy:
+                    raise ValueError(
+                        "qwen3_5_moe speculative_draft (DFlash) requires "
+                        "greedy decoding (do_sample=False or temperature=0, "
+                        "top_p=1, top_k=0)"
                     )
                 raise ValueError(
                     "speculative_draft (DFlash) requires the MoE-Infinity "
@@ -804,6 +836,11 @@ class MoE:
             self.model.eval()
             with torch.no_grad():
                 return self.model.generate(input_ids, **kwargs)
+
+        if native_engine is None:
+            raise RuntimeError(
+                "native generation engine unexpectedly unavailable"
+            )
 
         from moe_infinity.engine.types import SamplingParams
 
@@ -819,11 +856,6 @@ class MoE:
             )
 
         max_tokens = kwargs.get("max_new_tokens", kwargs.get("max_tokens", 256))
-        do_sample = kwargs.get("do_sample", None)
-        if do_sample is False:
-            sampling_temperature = 0.0
-        else:
-            sampling_temperature = float(kwargs.get("temperature", 1.0))
         sampling_params = SamplingParams(
             temperature=sampling_temperature,
             top_p=float(kwargs.get("top_p", 1.0)),
@@ -831,7 +863,7 @@ class MoE:
             max_tokens=int(max_tokens) if max_tokens is not None else 256,
         )
         try:
-            result = self._native_generation_engine.generate(
+            result = native_engine.generate(
                 prompt_token_ids=prompt_token_ids,
                 sampling_params=sampling_params,
             )
@@ -854,6 +886,7 @@ class MoE:
         max_batch_size: int = 32,
         enable_prefix_caching: bool = False,
         offload_dir: Optional[str] = None,
+        speculative_draft: Optional[object] = None,
     ) -> None:
         """
         Start the OpenAI-compatible continuous batching server.
@@ -869,6 +902,8 @@ class MoE:
             max_batch_size: Maximum concurrent sequences (default: 32)
             enable_prefix_caching: Enable hash-based prefix caching (default: False)
             offload_dir: Path to offload directory (required)
+            speculative_draft: Optional DFlash checkpoint, speculator, or draft
+                module for greedy batch-1 serving.
         """
 
         if offload_dir is None:
@@ -877,6 +912,11 @@ class MoE:
         import importlib
 
         from moe_infinity.entrypoints.openai import api_server_v2
+
+        serving_speculator = None
+        if speculative_draft:
+            self._resolve_spec_strategy(speculative_draft)
+            serving_speculator = getattr(self, "_dflash_speculator", None)
 
         model_name = getattr(
             getattr(self.model, "config", None), "_name_or_path", None
@@ -890,6 +930,7 @@ class MoE:
             kv_cache_ratio=kv_cache_ratio,
             max_batch_size=max_batch_size,
             enable_prefix_caching=enable_prefix_caching,
+            speculative_draft=serving_speculator,
         )
 
         uvicorn = importlib.import_module("uvicorn")

@@ -36,8 +36,7 @@ class SpecDecodeStrategy(Protocol):
         prompt_token_ids: list[int],
         sampling_params: SamplingParams,
         request_id: Optional[str] = None,
-    ) -> list[int]:
-        ...
+    ) -> list[int]: ...
 
 
 class GenerationEngine:

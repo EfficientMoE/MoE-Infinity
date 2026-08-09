@@ -28,8 +28,8 @@ extern void fp8_dequant_blockwise_cuda(const void* weight, const void* scale,
                                        cudaStream_t stream);
 
 static torch::Tensor _fp8_dequant_on_device(const torch::Tensor& w_fp8,
-                                             const torch::Tensor& scale,
-                                             cudaStream_t stream) {
+                                            const torch::Tensor& scale,
+                                            cudaStream_t stream) {
   int N = w_fp8.size(0);
   int K = w_fp8.size(1);
   auto out = torch::empty(

@@ -33,9 +33,9 @@ def test_glmmoedsa_class_not_none():
 
     cls = MODEL_MAPPING_NAMES["glmmoedsa"]
     assert cls is not None, "MODEL_MAPPING_NAMES['glmmoedsa'] must not be None"
-    assert hasattr(cls, "__name__"), (
-        "MODEL_MAPPING_NAMES['glmmoedsa'] must have __name__"
-    )
+    assert hasattr(
+        cls, "__name__"
+    ), "MODEL_MAPPING_NAMES['glmmoedsa'] must have __name__"
     assert cls.__name__ == "GlmMoeDsaForCausalLM"
 
 
@@ -45,13 +45,14 @@ def test_parse_expert_type_glmmoedsa():
 
     config = SimpleNamespace(architectures=["GlmMoeDsaForCausalLM"])
     result = parse_expert_type(cast(Any, config))
-    assert result == 5, (
-        f"parse_expert_type with GlmMoeDsaForCausalLM expected 5, got {result}"
-    )
+    assert (
+        result == 5
+    ), f"parse_expert_type with GlmMoeDsaForCausalLM expected 5, got {result}"
 
 
 def test_guarded_import_does_not_crash_when_unavailable():
     import importlib
+
     import moe_infinity.common.constants as _mod
 
     with patch.dict(sys.modules, {"transformers": None}):
@@ -61,15 +62,17 @@ def test_guarded_import_does_not_crash_when_unavailable():
     import transformers as _tf
 
     if not hasattr(_tf, glm_cls_name):
-        pytest.skip(f"transformers does not export {glm_cls_name} — guard path not reachable in this env")
+        pytest.skip(
+            f"transformers does not export {glm_cls_name} — guard path not reachable in this env"
+        )
 
-    assert hasattr(_mod, "GlmMoeDsaForCausalLM"), (
-        "constants module must expose GlmMoeDsaForCausalLM (or None) at module level"
-    )
+    assert hasattr(
+        _mod, "GlmMoeDsaForCausalLM"
+    ), "constants module must expose GlmMoeDsaForCausalLM (or None) at module level"
 
 
 def test_glmmoedsa_substring_match():
     arch_lower = "GlmMoeDsaForCausalLM".lower()
-    assert "glmmoedsa" in arch_lower, (
-        f"Key 'glmmoedsa' is not a substring of '{arch_lower}'"
-    )
+    assert (
+        "glmmoedsa" in arch_lower
+    ), f"Key 'glmmoedsa' is not a substring of '{arch_lower}'"

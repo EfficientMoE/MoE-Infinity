@@ -35,7 +35,9 @@ import time
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name_or_path", default="openai/gpt-oss-120b")
-    parser.add_argument("--draft_model_path", default="z-lab/gpt-oss-120b-DFlash")
+    parser.add_argument(
+        "--draft_model_path", default="z-lab/gpt-oss-120b-DFlash"
+    )
     parser.add_argument("--offload_dir", required=True)
     parser.add_argument("--device_memory_ratio", type=float, default=0.75)
     parser.add_argument("--max_new_tokens", type=int, default=64)

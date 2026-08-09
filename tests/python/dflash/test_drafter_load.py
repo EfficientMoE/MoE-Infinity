@@ -53,7 +53,9 @@ def _fake_drafter(*, fc_in_features=14400, **cfg_kwargs):
     )
 
 
-def _fake_target_config(*, hidden_size=2880, vocab_size=201088, num_hidden_layers=36):
+def _fake_target_config(
+    *, hidden_size=2880, vocab_size=201088, num_hidden_layers=36
+):
     return SimpleNamespace(
         hidden_size=hidden_size,
         vocab_size=vocab_size,
@@ -73,7 +75,9 @@ def test_validate_drafter_accepts_when_config_precomputed():
 
 def test_validate_drafter_rejects_fc_in_features_mismatch():
     with pytest.raises(ValueError, match="in_features"):
-        validate_drafter(_fake_drafter(fc_in_features=9999), _fake_target_config())
+        validate_drafter(
+            _fake_drafter(fc_in_features=9999), _fake_target_config()
+        )
 
 
 def test_validate_drafter_requires_fc_projection():
@@ -94,16 +98,25 @@ def test_validate_pairing_rejects_mask_ge_vocab():
         validate_pairing(cfg, _fake_target_config())
 
 
-def test_validate_pairing_rejects_block_size_mismatch():
-    cfg = read_dflash_config(_fake_draft_config(block_size=8))
+def test_validate_pairing_accepts_non_120b_contract():
+    cfg = read_dflash_config(
+        _fake_draft_config(block_size=8, target_layer_ids=[1, 6, 11, 16, 21])
+    )
+    validate_pairing(cfg, _fake_target_config(num_hidden_layers=24))
+
+
+def test_validate_pairing_rejects_block_size_below_two():
+    cfg = read_dflash_config(_fake_draft_config(block_size=1))
     with pytest.raises(ValueError, match="block_size"):
         validate_pairing(cfg, _fake_target_config())
 
 
-def test_validate_pairing_rejects_target_layer_ids_mismatch():
-    cfg = read_dflash_config(_fake_draft_config(target_layer_ids=[1, 9, 17, 25, 34]))
-    with pytest.raises(ValueError, match="target_layer_ids"):
-        validate_pairing(cfg, _fake_target_config())
+def test_validate_pairing_rejects_target_layer_ids_out_of_range():
+    cfg = read_dflash_config(
+        _fake_draft_config(target_layer_ids=[1, 9, 17, 25, 40])
+    )
+    with pytest.raises(ValueError, match="target has only"):
+        validate_pairing(cfg, _fake_target_config(num_hidden_layers=36))
 
 
 def test_validate_pairing_rejects_vocab_mismatch():

@@ -7,11 +7,17 @@ import torch
 
 
 def build_tiny_glm_fp8(save_dir: str, quantize_shared: bool = False) -> str:
-    os.environ.setdefault("HF_HUB_CACHE", "/mnt/raid0nvme0/public/huggingface/hub")
+    os.environ.setdefault(
+        "HF_HUB_CACHE", "/mnt/raid0nvme0/public/huggingface/hub"
+    )
     from transformers import AutoConfig, AutoTokenizer
-    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+        GlmMoeDsaForCausalLM,
+    )
 
-    cfg = AutoConfig.from_pretrained("zai-org/GLM-5.2-FP8", trust_remote_code=True)
+    cfg = AutoConfig.from_pretrained(
+        "zai-org/GLM-5.2-FP8", trust_remote_code=True
+    )
 
     cfg.num_hidden_layers = 4
     cfg.hidden_size = 256
@@ -78,7 +84,11 @@ def build_tiny_glm_fp8(save_dir: str, quantize_shared: bool = False) -> str:
         q_fp8 = q.to(torch.float8_e4m3fn)
         return q_fp8, scale_inv
 
-    expert_weight_suffixes = ("gate_proj.weight", "up_proj.weight", "down_proj.weight")
+    expert_weight_suffixes = (
+        "gate_proj.weight",
+        "up_proj.weight",
+        "down_proj.weight",
+    )
     for name, param in list(model.named_parameters(recurse=True)):
         if "shared_expert" in name and not quantize_shared:
             continue
@@ -114,11 +124,17 @@ def build_tiny_glm_fp8(save_dir: str, quantize_shared: bool = False) -> str:
 
 
 def build_tiny_glm(save_dir: str) -> str:
-    os.environ.setdefault("HF_HUB_CACHE", "/mnt/raid0nvme0/public/huggingface/hub")
+    os.environ.setdefault(
+        "HF_HUB_CACHE", "/mnt/raid0nvme0/public/huggingface/hub"
+    )
     from transformers import AutoConfig, AutoTokenizer
-    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+        GlmMoeDsaForCausalLM,
+    )
 
-    cfg = AutoConfig.from_pretrained("zai-org/GLM-5.2-FP8", trust_remote_code=True)
+    cfg = AutoConfig.from_pretrained(
+        "zai-org/GLM-5.2-FP8", trust_remote_code=True
+    )
 
     cfg.num_hidden_layers = 4
     cfg.hidden_size = 256

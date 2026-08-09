@@ -10,7 +10,9 @@ pytest.importorskip(
 
 
 def _tiny_config():
-    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaConfig
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+        GlmMoeDsaConfig,
+    )
 
     return GlmMoeDsaConfig(
         n_routed_experts=8,
@@ -34,15 +36,18 @@ def test_no_handrolled_softmax():
 
 
 def test_exported():
-    from moe_infinity.models import SyncGlmMoeDsaMoEBlock
     import moe_infinity.models as m
+    from moe_infinity.models import SyncGlmMoeDsaMoEBlock
 
     assert SyncGlmMoeDsaMoEBlock is not None
     assert "SyncGlmMoeDsaMoEBlock" in m.__all__
 
 
 def test_routing_parity():
-    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaMoE
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+        GlmMoeDsaMoE,
+    )
+
     from moe_infinity.models.glm_moe_dsa import SyncGlmMoeDsaMoEBlock
 
     cfg = _tiny_config()

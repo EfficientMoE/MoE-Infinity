@@ -1,13 +1,17 @@
 import os
+
 import pytest
 
 pytestmark = pytest.mark.gpu
 
 
-@pytest.mark.skipif(os.environ.get("MOE_GLM_TINY") != "1", reason="set MOE_GLM_TINY=1")
+@pytest.mark.skipif(
+    os.environ.get("MOE_GLM_TINY") != "1", reason="set MOE_GLM_TINY=1"
+)
 def test_glm_bench_writes_csv(tmp_path):
-    import torch
     import csv
+
+    import torch
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")

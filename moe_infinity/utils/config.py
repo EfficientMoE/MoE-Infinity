@@ -115,9 +115,7 @@ class ArcherConfig:
                 stacklevel=2,
             )
             config_json = {
-                k: v
-                for k, v in config_json.items()
-                if k != "glm_fp8_in_store"
+                k: v for k, v in config_json.items() if k != "glm_fp8_in_store"
             }
         parser = HfArgumentParser(cls)
         config = parser.parse_dict(config_json)[0]

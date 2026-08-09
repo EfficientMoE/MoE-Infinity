@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Literal
 
-from benchmarks.performance_model.types import DemandResult, ModelParams, WorkloadPoint
+from benchmarks.performance_model.types import (
+    DemandResult,
+    ModelParams,
+    WorkloadPoint,
+)
 
 
 def dtype_bytes(dtype: str) -> float:
@@ -18,11 +22,15 @@ def decode_flops_per_token(p: ModelParams) -> int:
     # K: hidden -> num_kv_heads * head_dim
     # V: hidden -> num_kv_heads * head_dim
     # O: num_attn_heads * head_dim -> hidden
-    attn_qkv_o = 2 * p.hidden_size * (
-        p.num_attn_heads * p.head_dim  # Q
-        + p.num_kv_heads * p.head_dim  # K
-        + p.num_kv_heads * p.head_dim  # V
-        + p.num_attn_heads * p.head_dim  # O
+    attn_qkv_o = (
+        2
+        * p.hidden_size
+        * (
+            p.num_attn_heads * p.head_dim  # Q
+            + p.num_kv_heads * p.head_dim  # K
+            + p.num_kv_heads * p.head_dim  # V
+            + p.num_attn_heads * p.head_dim  # O
+        )
     )
     attn_flops = p.num_layers * attn_qkv_o
 
@@ -48,8 +56,12 @@ def decode_flops_per_token(p: ModelParams) -> int:
     return attn_flops + dense_flops + moe_flops
 
 
-def decode_hbm_bytes_per_token(p: ModelParams, dtype_override: str | None = None) -> int:
-    expert_bw = dtype_bytes(dtype_override if dtype_override else p.expert_dtype)
+def decode_hbm_bytes_per_token(
+    p: ModelParams, dtype_override: str | None = None
+) -> int:
+    expert_bw = dtype_bytes(
+        dtype_override if dtype_override else p.expert_dtype
+    )
     attn_bw = dtype_bytes(p.attn_dtype)
 
     # Attention weight bytes per layer (Q, K, V, O projections)
@@ -72,20 +84,30 @@ def decode_hbm_bytes_per_token(p: ModelParams, dtype_override: str | None = None
     moe_layers = p.num_layers - p.first_k_dense
 
     # Routed expert weight bytes: top_k active experts per MoE layer
-    routed_expert_bytes_per_layer = expert_bw * p.top_k * (
-        p.hidden_size * p.expert_intermediate_size  # gate
-        + p.hidden_size * p.expert_intermediate_size  # up
-        + p.expert_intermediate_size * p.hidden_size  # down
+    routed_expert_bytes_per_layer = (
+        expert_bw
+        * p.top_k
+        * (
+            p.hidden_size * p.expert_intermediate_size  # gate
+            + p.hidden_size * p.expert_intermediate_size  # up
+            + p.expert_intermediate_size * p.hidden_size  # down
+        )
     )
 
     # Shared expert weight bytes (always bf16 / attn_bw)
-    shared_expert_bytes_per_layer = attn_bw * p.shared_experts * (
-        p.hidden_size * p.expert_intermediate_size
-        + p.hidden_size * p.expert_intermediate_size
-        + p.expert_intermediate_size * p.hidden_size
+    shared_expert_bytes_per_layer = (
+        attn_bw
+        * p.shared_experts
+        * (
+            p.hidden_size * p.expert_intermediate_size
+            + p.hidden_size * p.expert_intermediate_size
+            + p.expert_intermediate_size * p.hidden_size
+        )
     )
 
-    moe_bytes = moe_layers * (routed_expert_bytes_per_layer + shared_expert_bytes_per_layer)
+    moe_bytes = moe_layers * (
+        routed_expert_bytes_per_layer + shared_expert_bytes_per_layer
+    )
 
     return int(attn_bytes + dense_bytes + moe_bytes)
 
@@ -104,7 +126,11 @@ def classify_bound(
 ) -> Literal["compute", "hbm", "pcie"]:
     t_compute = flops / peak_flops
     t_hbm = hbm_bytes / (hbm_gbps * 1e9)
-    t_pcie = pcie_bytes / (pcie_gbps * 1e9) if pcie_gbps > 0 and pcie_bytes > 0 else 0.0
+    t_pcie = (
+        pcie_bytes / (pcie_gbps * 1e9)
+        if pcie_gbps > 0 and pcie_bytes > 0
+        else 0.0
+    )
 
     bottleneck = max(t_compute, t_hbm, t_pcie)
     if bottleneck == t_pcie and t_pcie > 0:
@@ -126,7 +152,9 @@ def predict_decode(
     pcie_bytes = 0
 
     ai = arithmetic_intensity(flops, hbm_bytes)
-    bound = classify_bound(flops, hbm_bytes, pcie_bytes, peak_flops, hbm_gbps, pcie_gbps)
+    bound = classify_bound(
+        flops, hbm_bytes, pcie_bytes, peak_flops, hbm_gbps, pcie_gbps
+    )
 
     return DemandResult(
         flops_per_token=flops,

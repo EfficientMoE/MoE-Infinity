@@ -62,4 +62,4 @@ class Qwen3MoEBlock(nn.Module):
             batch_size, sequence_length, hidden_dim
         ).to(hidden_states.dtype)
 
-        return final_hidden_states, router_logits
+        return final_hidden_states

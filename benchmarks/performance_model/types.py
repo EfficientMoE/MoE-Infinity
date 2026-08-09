@@ -19,7 +19,7 @@ class ModelParams:
     expert_intermediate_size: int
     first_k_dense: int
     expert_dtype: str  # "fp8" | "bf16"
-    attn_dtype: str    # "bf16" | "fp16" | "fp32"
+    attn_dtype: str  # "bf16" | "fp16" | "fp32"
     kv_lora_rank: Optional[int] = None
     q_lora_rank: Optional[int] = None
 

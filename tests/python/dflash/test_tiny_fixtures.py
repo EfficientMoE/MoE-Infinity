@@ -34,8 +34,12 @@ PROMPT = torch.tensor([[3, 7, 11, 2, 5]])
 
 
 def test_tiny_target_greedy_bit_reproducible_across_fresh_builds():
-    g1 = plain_greedy_decode(build_tiny_target(seed=0), PROMPT, max_new_tokens=32)
-    g2 = plain_greedy_decode(build_tiny_target(seed=0), PROMPT, max_new_tokens=32)
+    g1 = plain_greedy_decode(
+        build_tiny_target(seed=0), PROMPT, max_new_tokens=32
+    )
+    g2 = plain_greedy_decode(
+        build_tiny_target(seed=0), PROMPT, max_new_tokens=32
+    )
 
     assert g1.dtype == torch.long
     assert tuple(g1.shape) == (1, PROMPT.shape[1] + 32)
@@ -62,13 +66,17 @@ def test_tiny_drafter_shape_via_target_lm_head():
     feature = torch.randn(batch, ctx_len, feat_dim)
 
     anchor = 4
-    block = torch.tensor([[anchor] + [TINY_MASK_TOKEN_ID] * (TINY_BLOCK_SIZE - 1)])
+    block = torch.tensor(
+        [[anchor] + [TINY_MASK_TOKEN_ID] * (TINY_BLOCK_SIZE - 1)]
+    )
     assert tuple(block.shape) == (batch, TINY_BLOCK_SIZE)
 
     with torch.no_grad():
         drafter_out = drafter(block, feature)
         assert tuple(drafter_out.shape) == (batch, TINY_BLOCK_SIZE, TINY_HIDDEN)
-        draft_logits = target.lm_head(drafter_out)[:, -(TINY_BLOCK_SIZE - 1):, :]
+        draft_logits = target.lm_head(drafter_out)[
+            :, -(TINY_BLOCK_SIZE - 1) :, :
+        ]
 
     assert tuple(draft_logits.shape) == (batch, TINY_BLOCK_SIZE - 1, TINY_VOCAB)
     assert torch.isfinite(draft_logits).all()
@@ -78,7 +86,9 @@ def test_tiny_drafter_deterministic_and_non_causal():
     target = build_tiny_target(seed=0)
     drafter = build_tiny_drafter(target, seed=1)
 
-    feature = torch.randn(1, PROMPT.shape[1], len(TINY_TARGET_LAYER_IDS) * TINY_HIDDEN)
+    feature = torch.randn(
+        1, PROMPT.shape[1], len(TINY_TARGET_LAYER_IDS) * TINY_HIDDEN
+    )
     block = torch.tensor([[4] + [TINY_MASK_TOKEN_ID] * (TINY_BLOCK_SIZE - 1)])
 
     with torch.no_grad():
@@ -98,7 +108,9 @@ def test_target_exposes_five_layer_context_feature():
     # hidden_states[0] is the embedding output; layer i output is index i+1.
     assert len(out.hidden_states) == target.config.num_hidden_layers + 1
 
-    feat = context_feature_from_hidden_states(out.hidden_states, TINY_TARGET_LAYER_IDS)
+    feat = context_feature_from_hidden_states(
+        out.hidden_states, TINY_TARGET_LAYER_IDS
+    )
     assert tuple(feat.shape[:2]) == (1, PROMPT.shape[1])
     assert feat.shape[-1] == len(TINY_TARGET_LAYER_IDS) * TINY_HIDDEN
 

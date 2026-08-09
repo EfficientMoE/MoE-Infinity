@@ -194,7 +194,9 @@ def parse_expert_id(
         layer_type = "decoder"
 
         # example "model.layers.10.mlp.experts.3.gate_proj.weight"
-        result = re.findall(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.", param_name)
+        result = re.findall(
+            r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.", param_name
+        )
         if result:
             layer_id, expert_id = result[0]
             layer_id = int(layer_id)

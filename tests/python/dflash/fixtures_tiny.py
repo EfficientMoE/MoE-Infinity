@@ -110,7 +110,9 @@ def make_tiny_drafter_config(
         hidden_size=hidden_size if hidden_size is not None else TINY_HIDDEN,
         vocab_size=vocab_size if vocab_size is not None else TINY_VOCAB,
         num_target_layers=(
-            num_target_layers if num_target_layers is not None else TINY_NUM_LAYERS
+            num_target_layers
+            if num_target_layers is not None
+            else TINY_NUM_LAYERS
         ),
         dflash_config={
             "mask_token_id": mask_token_id,
@@ -153,7 +155,9 @@ class _NonCausalBlock(nn.Module):
         self.down_proj = nn.Linear(hidden_size, hidden_size, bias=False)
 
     def _heads(self, x: torch.Tensor, batch: int, length: int) -> torch.Tensor:
-        return x.view(batch, length, self.num_heads, self.head_dim).transpose(1, 2)
+        return x.view(batch, length, self.num_heads, self.head_dim).transpose(
+            1, 2
+        )
 
     def forward(self, noise: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
         batch, block, hidden = noise.shape
@@ -167,9 +171,16 @@ class _NonCausalBlock(nn.Module):
         v = self._heads(self.v_proj(kv_source), batch, ctx_len + block)
         scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
         weights = torch.softmax(scores, dim=-1)
-        attended = torch.matmul(weights, v).transpose(1, 2).reshape(batch, block, hidden)
+        attended = (
+            torch.matmul(weights, v)
+            .transpose(1, 2)
+            .reshape(batch, block, hidden)
+        )
         noise = noise + self.o_proj(attended)
-        gated = self.down_proj(F.silu(self.gate_proj(self.mlp_norm(noise))) * self.up_proj(self.mlp_norm(noise)))
+        gated = self.down_proj(
+            F.silu(self.gate_proj(self.mlp_norm(noise)))
+            * self.up_proj(self.mlp_norm(noise))
+        )
         return noise + gated
 
 
@@ -194,7 +205,9 @@ class TinyDFlashDrafter(nn.Module):
         # drafter submodules (they belong to, and are placed by, the target).
         object.__setattr__(self, "embed_tokens", embed_tokens)
         object.__setattr__(self, "lm_head", lm_head)
-        self.fc = nn.Linear(len(self.target_layer_ids) * hidden, hidden, bias=False)
+        self.fc = nn.Linear(
+            len(self.target_layer_ids) * hidden, hidden, bias=False
+        )
         self.hidden_norm = _RMSNorm(hidden)
         self.layers = nn.ModuleList(
             [_NonCausalBlock(hidden, num_heads) for _ in range(num_layers)]
@@ -238,7 +251,11 @@ def build_tiny_drafter(
 
     set_determinism(seed)
     drafter = TinyDFlashDrafter(
-        config, embed_tokens, lm_head, num_layers=num_layers, num_heads=num_heads
+        config,
+        embed_tokens,
+        lm_head,
+        num_layers=num_layers,
+        num_heads=num_heads,
     )
     return drafter.to(torch.float32).eval()
 
@@ -259,7 +276,9 @@ def plain_greedy_decode(
     generated = torch.cat([generated, next_token], dim=1)
 
     for _ in range(max_new_tokens - 1):
-        if eos_token_id is not None and int(next_token.item()) == int(eos_token_id):
+        if eos_token_id is not None and int(next_token.item()) == int(
+            eos_token_id
+        ):
             break
         output = model(next_token, past_key_values=past, use_cache=True)
         past = output.past_key_values

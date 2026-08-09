@@ -16,7 +16,24 @@ MAX_TOKENS = 16
 
 # Captured from the pre-refactor GenerationEngine (seed 7 tiny GPT-2 fixture below);
 # the seam refactor must leave the standard path byte-identical to this.
-BASELINE_IDS = [61, 61, 108, 108, 108, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11]
+BASELINE_IDS = [
+    61,
+    61,
+    108,
+    108,
+    108,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+]
 
 
 def _build_forward():
@@ -62,11 +79,15 @@ def _make_engine(spec_strategy=None, **engine_kwargs):
 
 
 def _greedy_params():
-    return SamplingParams(temperature=0.0, top_p=1.0, top_k=0, max_tokens=MAX_TOKENS)
+    return SamplingParams(
+        temperature=0.0, top_p=1.0, top_k=0, max_tokens=MAX_TOKENS
+    )
 
 
 class _ExplodingStrategy:
-    def run(self, *, engine, prompt_token_ids, sampling_params, request_id=None):
+    def run(
+        self, *, engine, prompt_token_ids, sampling_params, request_id=None
+    ):
         raise RuntimeError("spec strategy must not be called on this path")
 
 
@@ -75,7 +96,9 @@ class _RecordingStrategy:
         self._ids = ids
         self.calls = []
 
-    def run(self, *, engine, prompt_token_ids, sampling_params, request_id=None):
+    def run(
+        self, *, engine, prompt_token_ids, sampling_params, request_id=None
+    ):
         self.calls.append(
             {
                 "engine": engine,
@@ -125,7 +148,9 @@ def test_nongreedy_params_bypass_spec_strategy():
             prompt_token_ids=list(PROMPT), sampling_params=params
         )
 
-        assert guarded_result.output_token_ids == reference_result.output_token_ids
+        assert (
+            guarded_result.output_token_ids == reference_result.output_token_ids
+        )
         assert guarded_result.finish_reason == reference_result.finish_reason
 
 

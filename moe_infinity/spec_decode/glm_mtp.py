@@ -29,7 +29,9 @@ def _infer_dtype(model: Any) -> torch.dtype:
     return torch.bfloat16
 
 
-def _resolve_stop_ids(model: Any, stop_token_ids: Optional[List[int]]) -> List[int]:
+def _resolve_stop_ids(
+    model: Any, stop_token_ids: Optional[List[int]]
+) -> List[int]:
     if stop_token_ids is not None:
         return list(stop_token_ids)
     cfg = getattr(model, "config", None)
@@ -118,7 +120,9 @@ class GlmMtpSpeculator:
             mtp_cfg.indexer_types = orig
 
         torch.manual_seed(42)
-        self.mtp_layer = _GlmMtpLayer(mtp_cfg, mtp_layer_idx, self.dtype).to(self.device)
+        self.mtp_layer = _GlmMtpLayer(mtp_cfg, mtp_layer_idx, self.dtype).to(
+            self.device
+        )
         self.mtp_layer.eval()
 
     def _greedy_token(self, logits: torch.Tensor) -> torch.Tensor:
@@ -182,17 +186,26 @@ class GlmMtpSpeculator:
 
             tok_embed = embed_tokens(next_tok)
             seq_len = seq.shape[1] + 1
-            pos_ids = torch.tensor([[seq_len - 1]], device=self.device, dtype=torch.long)
-            mtp_hidden = self.mtp_layer(last_hidden[:, -1:, :], tok_embed, pos_ids, rotary_emb)
+            pos_ids = torch.tensor(
+                [[seq_len - 1]], device=self.device, dtype=torch.long
+            )
+            mtp_hidden = self.mtp_layer(
+                last_hidden[:, -1:, :], tok_embed, pos_ids, rotary_emb
+            )
             proposed_logits = lm_head(mtp_hidden)
-            proposed_tok = proposed_logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            proposed_tok = proposed_logits[:, -1, :].argmax(
+                dim=-1, keepdim=True
+            )
 
             verify_seq = torch.cat([seq, next_tok], dim=1)
             verify_logits, _ = self._forward(verify_seq)
             verify_tok = self._greedy_token(verify_logits)
 
             _steps += 1
-            if int(proposed_tok.item()) == int(verify_tok.item()) and generated + 2 <= max_new_tokens:
+            if (
+                int(proposed_tok.item()) == int(verify_tok.item())
+                and generated + 2 <= max_new_tokens
+            ):
                 seq = torch.cat([seq, next_tok, proposed_tok], dim=1)
                 generated += 2
                 _accepted += 1
@@ -208,10 +221,13 @@ class GlmMtpSpeculator:
         if os.environ.get("MOE_INFINITY_PROFILE_IO") == "1":
             try:
                 from moe_infinity.profiling.io_profiler import IOProfiler
+
                 profiler = IOProfiler.instance()
                 _expert_fetch_events = {
                     "cpu_to_gpu": getattr(profiler, "cpu_to_gpu_count", None),
-                    "expert_compute": getattr(profiler, "expert_compute_count", None),
+                    "expert_compute": getattr(
+                        profiler, "expert_compute_count", None
+                    ),
                 }
             except Exception:
                 pass
@@ -219,7 +235,8 @@ class GlmMtpSpeculator:
         self.last_stats = {
             "steps": _steps,
             "accepted": _accepted,
-            "mean_accept_len": 1.0 + (_accepted / _steps if _steps > 0 else 0.0),
+            "mean_accept_len": 1.0
+            + (_accepted / _steps if _steps > 0 else 0.0),
             "per_step_accepted": _per_step_accepted,
             "expert_fetch_events": _expert_fetch_events,
         }

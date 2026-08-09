@@ -51,7 +51,9 @@ def _tiny_spec(device: str = "cpu"):
     if device != "cpu":
         target = target.to(device)
         drafter = drafter.to(device)
-    spec = DFlashSpeculator.from_models(target, drafter, config=config, device=device)
+    spec = DFlashSpeculator.from_models(
+        target, drafter, config=config, device=device
+    )
     return spec, target, drafter
 
 
@@ -114,10 +116,15 @@ def test_verify_forward_uses_full_logits():
     seam_calls = []
     orig_forward_target = spec._forward_target
 
-    def seam_spy(input_ids, past_key_values=None, logits_to_keep=0):
+    def seam_spy(
+        input_ids, past_key_values=None, logits_to_keep=0, **fwd_kwargs
+    ):
         seam_calls.append(int(logits_to_keep))
         return orig_forward_target(
-            input_ids, past_key_values=past_key_values, logits_to_keep=logits_to_keep
+            input_ids,
+            past_key_values=past_key_values,
+            logits_to_keep=logits_to_keep,
+            **fwd_kwargs,
         )
 
     spec._forward_target = seam_spy
@@ -168,7 +175,10 @@ def test_native_multistep_greedy_matches_plain_greedy():
     # Multi-step actually ran, with consistent emitted-vs-cached accounting.
     assert len(spec.step_trace) >= 2
     _assert_step_invariants(spec)
-    assert int(spec.last_target_cache.get_seq_length()) == spec.step_trace[-1].start
+    assert (
+        int(spec.last_target_cache.get_seq_length())
+        == spec.step_trace[-1].start
+    )
 
     accepts = [rec.accept for rec in spec.step_trace]
     print(f"multistep steps={len(accepts)} accepts={accepts}")
@@ -207,7 +217,9 @@ def test_native_step_routes_through_moe_rich_forward():
                 ),
             }
         )
-        return orig_rich(token_ids, attention_metadata, logits_to_keep=logits_to_keep)
+        return orig_rich(
+            token_ids, attention_metadata, logits_to_keep=logits_to_keep
+        )
 
     shell._native_model_forward_rich = rich_spy
 
@@ -226,7 +238,10 @@ def test_native_step_routes_through_moe_rich_forward():
 
     _assert_step_invariants(spec)
     # The engine-side cache (same object the loop cropped) ends at start.
-    assert int(shell._cached_past_key_values.get_seq_length()) == spec.step_trace[-1].start
+    assert (
+        int(shell._cached_past_key_values.get_seq_length())
+        == spec.step_trace[-1].start
+    )
 
     # Parity against sequential greedy through the SAME rich helper.
     shell._cached_past_key_values = None
