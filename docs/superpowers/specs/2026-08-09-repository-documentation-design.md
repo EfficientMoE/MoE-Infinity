@@ -1,7 +1,7 @@
 # Repository Documentation Design
 
-**Date:** 2026-08-09  
-**Status:** Approved and implemented  
+**Date:** 2026-08-09
+**Status:** Approved and implemented
 **Scope:** Repository-wide documentation architecture, evidence standards, and maintenance controls
 
 ## 1. Purpose
