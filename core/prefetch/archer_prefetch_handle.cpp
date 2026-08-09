@@ -355,7 +355,7 @@ void ArcherPrefetchHandle::SetTopology(
 void ArcherPrefetchHandle::SetTopologyV2(
     const std::vector<
         std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
-                    std::vector<std::uint64_t>>>& topology) {
+                   std::vector<std::uint64_t>>>& topology) {
   kTopologyHandle->InitializeTopologyV2(topology);
 }
 

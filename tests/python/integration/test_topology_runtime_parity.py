@@ -82,7 +82,6 @@ def test_deepseek_v2_lite_v1_v2_topology_metadata_and_placement_match(
     assert legacy[-1][2] == 5
 
     first_six_sparse_devices = [
-        item[2]
-        for item in legacy[first_sparse_node : first_sparse_node + 6]
+        item[2] for item in legacy[first_sparse_node : first_sparse_node + 6]
     ]
     assert first_six_sparse_devices == [3, 4, 5, 0, 1, 2]
