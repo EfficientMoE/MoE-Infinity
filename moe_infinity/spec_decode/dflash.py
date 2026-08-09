@@ -395,9 +395,7 @@ def rollback_target_cache(
                     # copy_ on it raises a version-counter bump error, silently
                     # aborting the restore and breaking greedy losslessness.
                     setattr(layer, field, saved.clone())
-            layer.is_conv_states_initialized = (
-                linear.is_conv_states_initialized
-            )
+            layer.is_conv_states_initialized = linear.is_conv_states_initialized
             layer.is_recurrent_states_initialized = (
                 linear.is_recurrent_states_initialized
             )
@@ -607,9 +605,7 @@ class DFlashSpeculator:
                 else SimpleNamespace(is_prefill=False)
             )
             token_ids = [int(t) for t in input_ids[0].tolist()]
-            result = rich(
-                token_ids, metadata, logits_to_keep=logits_to_keep
-            )
+            result = rich(token_ids, metadata, logits_to_keep=logits_to_keep)
             if not isinstance(result, tuple) or len(result) != 3:
                 raise RuntimeError(
                     "_native_model_forward_rich must return "
@@ -617,7 +613,9 @@ class DFlashSpeculator:
                 )
             logits, hidden_states, past_key_values = result
             if not isinstance(logits, torch.Tensor):
-                raise RuntimeError("native rich forward logits must be a Tensor")
+                raise RuntimeError(
+                    "native rich forward logits must be a Tensor"
+                )
             return logits, hidden_states, past_key_values
         kwargs: dict[str, Any] = {
             "past_key_values": past_key_values,

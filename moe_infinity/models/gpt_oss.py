@@ -120,9 +120,7 @@ class SyncGptOssMLP(nn.Module):
         )
         return result
 
-    def _observe_resident_route_ahead(
-        self, router_mask: torch.Tensor
-    ) -> None:
+    def _observe_resident_route_ahead(self, router_mask: torch.Tensor) -> None:
         if self.expert_executor is not None:
             return
 

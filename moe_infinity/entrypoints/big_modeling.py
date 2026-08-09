@@ -838,7 +838,9 @@ class MoE:
                 return self.model.generate(input_ids, **kwargs)
 
         if native_engine is None:
-            raise RuntimeError("native generation engine unexpectedly unavailable")
+            raise RuntimeError(
+                "native generation engine unexpectedly unavailable"
+            )
 
         from moe_infinity.engine.types import SamplingParams
 

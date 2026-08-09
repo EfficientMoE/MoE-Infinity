@@ -9,17 +9,10 @@ import pytest
 import torch
 from transformers import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
 
-from tests.python.dflash.fixtures_tiny import (
-    build_tiny_drafter,
-    make_tiny_drafter_config,
-    plain_greedy_decode,
-    set_determinism,
-)
-
-from moe_infinity.entrypoints.big_modeling import MoE
 from moe_infinity.distributed.expert_executor import (
     DistributedExpertExecutor,
 )
+from moe_infinity.entrypoints.big_modeling import MoE
 from moe_infinity.models import SyncQwen3_5MoeSparseMoeBlock
 from moe_infinity.spec_decode import (
     DFlashSpeculator,
@@ -27,6 +20,12 @@ from moe_infinity.spec_decode import (
 )
 from moe_infinity.spec_decode import dflash as dflash_module
 from moe_infinity.utils import ArcherConfig
+from tests.python.dflash.fixtures_tiny import (
+    build_tiny_drafter,
+    make_tiny_drafter_config,
+    plain_greedy_decode,
+    set_determinism,
+)
 
 
 def _tiny_qwen35_target(seed: int = 0) -> Qwen3_5MoeForCausalLM:
@@ -72,9 +71,7 @@ def _qwen35_shell() -> tuple[MoE, MagicMock, MagicMock, MagicMock]:
     shell.model = model
     shell.use_native_engine = True
     engine = MagicMock()
-    engine.generate.return_value = SimpleNamespace(
-        output_token_ids=[8]
-    )
+    engine.generate.return_value = SimpleNamespace(output_token_ids=[8])
     shell._native_generation_engine = engine
     resolve_spec = MagicMock()
     shell._resolve_spec_strategy = resolve_spec
