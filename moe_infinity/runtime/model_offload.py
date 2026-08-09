@@ -1106,6 +1106,8 @@ class OffloadEngine(object):
             self.archer_engine.register(buffer.data, self.name_id_map[name])
             self.offload_set.add(buffer.data.data_ptr())
 
+        from moe_infinity.utils.topology import build_topology_specs
+
         topo = self.get_topology(model)
         sparse_count = sum(
             1 for _, t in topo if isinstance(t, list) and len(t) > 1
@@ -1114,7 +1116,7 @@ class OffloadEngine(object):
             f"TOPO: {len(topo)} stages, {sparse_count} sparse",
             flush=True,
         )
-        self.archer_engine.set_topology(topo)
+        self.archer_engine.set_topology_v2(build_topology_specs(topo))
         print("TOPO: set_topology done", flush=True)
 
         @torch.no_grad()
