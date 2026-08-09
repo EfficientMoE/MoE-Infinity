@@ -977,7 +977,10 @@ class OffloadEngine(object):
 
                         module_idx += 1
 
-                if getattr(self.config, "model_type", "") == "glm_moe_dsa":
+                if getattr(self.config, "model_type", "") in (
+                    "glm_moe_dsa",
+                    "qwen3_5_moe",
+                ):
                     self._load_resident_shared_experts(model)
                     for _name in list(self.name_id_map.keys()):
                         if self._is_shared_expert_param(_name):
@@ -1289,7 +1292,7 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             if match:
-                if "expert" in name and "shared_experts" not in name:
+                if _is_routed_expert_key(name):
                     match = re.match(r"(.*experts)", name)
                     assert match, "Not correct expert name!"
                     stored_name = match.group(1)
@@ -1346,7 +1349,7 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             if match:
-                if "expert" in name and "shared_experts" not in name:
+                if _is_routed_expert_key(name):
                     match = re.match(r"(.*experts)", name)
                     assert match, "Not correct expert name!"
                     stored_name = match.group(1)
