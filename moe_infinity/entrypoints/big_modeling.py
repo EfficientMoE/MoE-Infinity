@@ -6,8 +6,6 @@ from typing import Any, Callable, Dict, Optional, Union
 
 import torch
 
-import moe_infinity
-
 warnings.filterwarnings("ignore")
 
 
@@ -728,6 +726,11 @@ class MoE:
         standard path runs, without discarding the memoized speculator.
         """
         engine = self._native_generation_engine
+        if engine is None:
+            raise RuntimeError(
+                "cannot configure speculative decoding without a native "
+                "generation engine"
+            )
         if not speculative_draft:
             engine.spec_strategy = None
             return
@@ -739,7 +742,12 @@ class MoE:
             and source == str(speculative_draft)
         )
         if cached is None or not same:
-            from moe_infinity.spec_decode import DFlashSpeculator
+            import importlib
+
+            DFlashSpeculator = getattr(
+                importlib.import_module("moe_infinity.spec_decode.dflash"),
+                "DFlashSpeculator",
+            )
 
             if isinstance(speculative_draft, DFlashSpeculator):
                 cached = speculative_draft
@@ -798,9 +806,10 @@ class MoE:
             and int(kwargs.get("top_k", 0)) == 0
         )
         qwen35_dflash = bool(speculative_draft) and is_greedy
+        native_engine = self._native_generation_engine
         native_for_call = (
             self.use_native_engine
-            and self._native_generation_engine is not None
+            and native_engine is not None
             and input_ids.ndim == 2
             and input_ids.shape[0] == 1
             and (not is_qwen35 or qwen35_dflash)
@@ -828,6 +837,9 @@ class MoE:
             with torch.no_grad():
                 return self.model.generate(input_ids, **kwargs)
 
+        if native_engine is None:
+            raise RuntimeError("native generation engine unexpectedly unavailable")
+
         from moe_infinity.engine.types import SamplingParams
 
         self._resolve_spec_strategy(speculative_draft)
@@ -849,7 +861,7 @@ class MoE:
             max_tokens=int(max_tokens) if max_tokens is not None else 256,
         )
         try:
-            result = self._native_generation_engine.generate(
+            result = native_engine.generate(
                 prompt_token_ids=prompt_token_ids,
                 sampling_params=sampling_params,
             )

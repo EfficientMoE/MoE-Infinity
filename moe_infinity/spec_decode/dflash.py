@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     List,
     NamedTuple,
     Optional,
@@ -15,7 +16,6 @@ from typing import (
 
 import torch
 
-from moe_infinity.entrypoints.big_modeling import extract_context_feature
 from moe_infinity.spec_decode._dflash_ops import (
     acceptance_length,
     acceptance_lengths,
@@ -51,6 +51,16 @@ def _get(obj: Any, name: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(name, default)
     return getattr(obj, name, default)
+
+
+def _extract_context_feature(
+    hidden_states: Sequence[torch.Tensor], layer_ids: Sequence[int]
+) -> torch.Tensor:
+    # Lazy import avoids the package cycle big_modeling -> spec_decode -> dflash
+    # while preserving big_modeling.extract_context_feature as the one contract.
+    from moe_infinity.entrypoints.big_modeling import extract_context_feature
+
+    return extract_context_feature(hidden_states, layer_ids)
 
 
 def read_dflash_config(draft_hf_config: Any) -> DFlashConfig:
@@ -217,44 +227,208 @@ def _resolve_stop_ids(
     return [int(x) for x in eos]
 
 
+@dataclass(frozen=True)
+class SlidingWindowCacheSnapshot:
+    keys: torch.Tensor
+    values: torch.Tensor
+    cumulative_length: int
+
+
+@dataclass(frozen=True)
+class LinearAttentionCacheSnapshot:
+    conv_states: Optional[torch.Tensor]
+    recurrent_states: Optional[torch.Tensor]
+    is_conv_states_initialized: bool
+    is_recurrent_states_initialized: bool
+    has_previous_state: bool
+
+
+@dataclass(frozen=True)
+class TargetCacheSnapshot:
+    sliding: dict[int, SlidingWindowCacheSnapshot]
+    linear: dict[int, LinearAttentionCacheSnapshot]
+
+
+_LINEAR_CACHE_FIELDS = (
+    "conv_states",
+    "recurrent_states",
+    "is_conv_states_initialized",
+    "is_recurrent_states_initialized",
+    "has_previous_state",
+)
+
+
+def snapshot_target_cache(target_kv: Any) -> TargetCacheSnapshot:
+    """Clone rollback-sensitive state before a speculative verify forward."""
+    try:
+        from transformers.cache_utils import (
+            DynamicSlidingWindowLayer,
+            LinearAttentionCacheLayerMixin,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "unsupported transformers cache API: DFlash hybrid rollback "
+            "requires DynamicSlidingWindowLayer and "
+            "LinearAttentionCacheLayerMixin"
+        ) from exc
+
+    sliding: dict[int, SlidingWindowCacheSnapshot] = {}
+    linear: dict[int, LinearAttentionCacheSnapshot] = {}
+    for index, layer in enumerate(target_kv.layers):
+        present_linear_fields = [
+            field for field in _LINEAR_CACHE_FIELDS if hasattr(layer, field)
+        ]
+        is_linear = isinstance(layer, LinearAttentionCacheLayerMixin)
+        if is_linear or present_linear_fields:
+            if len(present_linear_fields) != len(_LINEAR_CACHE_FIELDS):
+                missing = sorted(
+                    field
+                    for field in _LINEAR_CACHE_FIELDS
+                    if field not in present_linear_fields
+                )
+                raise RuntimeError(
+                    "unsupported transformers linear-attention cache contract "
+                    f"for layer {index}: missing fields {missing}"
+                )
+            conv_states = layer.conv_states
+            recurrent_states = layer.recurrent_states
+            linear[index] = LinearAttentionCacheSnapshot(
+                conv_states=(
+                    conv_states.clone() if conv_states is not None else None
+                ),
+                recurrent_states=(
+                    recurrent_states.clone()
+                    if recurrent_states is not None
+                    else None
+                ),
+                is_conv_states_initialized=bool(
+                    layer.is_conv_states_initialized
+                ),
+                is_recurrent_states_initialized=bool(
+                    layer.is_recurrent_states_initialized
+                ),
+                has_previous_state=bool(layer.has_previous_state),
+            )
+
+        if isinstance(layer, DynamicSlidingWindowLayer):
+            keys = getattr(layer, "keys", None)
+            values = getattr(layer, "values", None)
+            cumulative_length = getattr(layer, "cumulative_length", None)
+            if keys is None or values is None or cumulative_length is None:
+                raise RuntimeError(
+                    "unsupported transformers sliding-window cache contract "
+                    f"for layer {index}: expected initialized keys, values, "
+                    "and cumulative_length"
+                )
+            sliding[index] = SlidingWindowCacheSnapshot(
+                keys=keys.clone(),
+                values=values.clone(),
+                cumulative_length=int(cumulative_length),
+            )
+
+    return TargetCacheSnapshot(sliding=sliding, linear=linear)
+
+
 def rollback_target_cache(
     target_kv: Any,
-    sliding_snaps: dict[int, tuple[torch.Tensor, torch.Tensor, int]],
+    snapshot: TargetCacheSnapshot,
     prev_start: int,
     committed: int,
     block_size: int,
+    *,
+    block: Optional[torch.Tensor] = None,
+    replay: Optional[Callable[[torch.Tensor, Any], Any]] = None,
 ) -> None:
-    """Roll the target KV cache back to ``prev_start + committed`` in place.
+    """Restore a partial verify and replay its committed prefix exactly."""
+    if committed < 0 or committed > block_size:
+        raise ValueError(
+            f"committed must be in [0, {block_size}], got {committed}"
+        )
+    if committed == block_size:
+        return
 
-    Slice-only rollback (``DynamicCache.crop``) is WRONG for sliding-window
-    layers: ``DynamicSlidingWindowLayer.update`` retains only the last
-    ``sliding_window - 1`` tokens, so the verify forward evicts prefix tokens
-    that a partial accept must restore (and ``crop`` itself raises once the
-    cumulative length reaches the window). Instead the sliding layers are
-    snapshotted before the verify forward (see ``generate``) and rebuilt here
-    as ``snapshot prefix ++ kept block tokens``, re-truncated to the window;
-    full-attention layers retain every token and crop cleanly. ``kv_offset``
-    is recomputed from ``cumulative_length``, so only ``keys`` / ``values`` /
-    ``cumulative_length`` are touched.
-    """
-    from transformers.cache_utils import DynamicSlidingWindowLayer
-
-    new_len = prev_start + committed
-    for i, layer in enumerate(target_kv.layers):
-        if isinstance(layer, DynamicSlidingWindowLayer):
-            old_k, old_v, old_len = sliding_snaps[i]
-            assert old_len == prev_start
+    # Legacy full/sliding-only callers (the batched path) remain slice based.
+    # Hybrid linear attention cannot use this branch because its recurrent
+    # state is not croppable; batch-1 callers provide replay below.
+    if replay is None:
+        if snapshot.linear:
+            raise RuntimeError(
+                "hybrid linear-attention cache rollback requires committed-"
+                "prefix replay; no replay callback was provided"
+            )
+        new_len = prev_start + committed
+        for index, layer in enumerate(target_kv.layers):
+            sliding = snapshot.sliding.get(index)
+            if sliding is None:
+                layer.crop(new_len)
+                continue
             block_k = layer.keys[:, :, -block_size:, :]
             block_v = layer.values[:, :, -block_size:, :]
-            keep_k = block_k[:, :, :committed, :]
-            keep_v = block_v[:, :, :committed, :]
-            full_k = torch.cat([old_k, keep_k], dim=-2)
-            full_v = torch.cat([old_v, keep_v], dim=-2)
+            full_k = torch.cat(
+                [sliding.keys, block_k[:, :, :committed, :]], dim=-2
+            )
+            full_v = torch.cat(
+                [sliding.values, block_v[:, :, :committed, :]], dim=-2
+            )
             layer.keys = full_k[:, :, -layer.sliding_window + 1 :, :]
             layer.values = full_v[:, :, -layer.sliding_window + 1 :, :]
             layer.cumulative_length = new_len
+        return
+
+    if block is None or block.ndim != 2 or int(block.shape[1]) != block_size:
+        raise ValueError(
+            "partial cache replay requires block with shape "
+            f"[batch, {block_size}]"
+        )
+
+    for index, layer in enumerate(target_kv.layers):
+        linear = snapshot.linear.get(index)
+        if linear is not None:
+            for field in ("conv_states", "recurrent_states"):
+                saved = getattr(linear, field)
+                if saved is None:
+                    setattr(layer, field, None)
+                else:
+                    # Reassign a fresh clone rather than in-place copy_: the
+                    # GatedDeltaNet state is an inference tensor (the target
+                    # forward runs under inference/no_grad), and an in-place
+                    # copy_ on it raises a version-counter bump error, silently
+                    # aborting the restore and breaking greedy losslessness.
+                    setattr(layer, field, saved.clone())
+            layer.is_conv_states_initialized = (
+                linear.is_conv_states_initialized
+            )
+            layer.is_recurrent_states_initialized = (
+                linear.is_recurrent_states_initialized
+            )
+            layer.has_previous_state = linear.has_previous_state
+
+        sliding = snapshot.sliding.get(index)
+        if sliding is not None:
+            if sliding.cumulative_length != prev_start:
+                raise RuntimeError(
+                    f"sliding cache layer {index} snapshot length "
+                    f"{sliding.cumulative_length} != expected {prev_start}"
+                )
+            layer.keys = sliding.keys.clone()
+            layer.values = sliding.values.clone()
+            layer.cumulative_length = sliding.cumulative_length
         else:
-            layer.crop(new_len)
+            crop = getattr(layer, "crop", None)
+            if callable(crop):
+                crop(prev_start)
+            elif linear is None:
+                raise RuntimeError(
+                    "unsupported transformers cache layer for DFlash rollback: "
+                    f"layer {index} is {type(layer).__name__}"
+                )
+
+    replayed_cache = replay(block[:, :committed], target_kv)
+    if replayed_cache is not None and replayed_cache is not target_kv:
+        raise RuntimeError(
+            "target replay replaced the DynamicCache object; in-place hybrid "
+            "rollback requires the original cache instance"
+        )
 
 
 class NativeStepTrace(NamedTuple):
@@ -347,6 +521,7 @@ class DFlashSpeculator:
         if config is None:
             config = read_dflash_config(_get(self.draft, "config"))
         self.config = config
+        validate_pairing(self.config, self.target.config)
         validate_drafter_module(self.draft, self.config)
         self.embed_tokens, self.lm_head = bind_shared_weights(
             self.draft, self.target
@@ -432,7 +607,18 @@ class DFlashSpeculator:
                 else SimpleNamespace(is_prefill=False)
             )
             token_ids = [int(t) for t in input_ids[0].tolist()]
-            return rich(token_ids, metadata, logits_to_keep=logits_to_keep)
+            result = rich(
+                token_ids, metadata, logits_to_keep=logits_to_keep
+            )
+            if not isinstance(result, tuple) or len(result) != 3:
+                raise RuntimeError(
+                    "_native_model_forward_rich must return "
+                    "(logits, hidden_states, past_key_values)"
+                )
+            logits, hidden_states, past_key_values = result
+            if not isinstance(logits, torch.Tensor):
+                raise RuntimeError("native rich forward logits must be a Tensor")
+            return logits, hidden_states, past_key_values
         kwargs: dict[str, Any] = {
             "past_key_values": past_key_values,
             "use_cache": True,
@@ -544,7 +730,7 @@ class DFlashSpeculator:
             return drafter_out
         return self.draft(block, context_feature)
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def generate(
         self,
         input_ids: torch.Tensor,
@@ -638,7 +824,7 @@ class DFlashSpeculator:
             attention_mask=attention_mask,
         )
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def _generate_single(
         self,
         input_ids: torch.Tensor,
@@ -652,7 +838,6 @@ class DFlashSpeculator:
         sampled = float(temperature) > 0
 
         from transformers import DynamicCache
-        from transformers.cache_utils import DynamicSlidingWindowLayer
 
         input_ids = input_ids.to(self.device)
         self._configure_target_hooks(input_ids)
@@ -674,7 +859,7 @@ class DFlashSpeculator:
             )
         else:
             anchor = int(logits[:, -1, :].argmax(dim=-1).item())
-        context_feature = extract_context_feature(hidden_states, layer_ids).to(
+        context_feature = _extract_context_feature(hidden_states, layer_ids).to(
             self.device
         )
 
@@ -721,19 +906,7 @@ class DFlashSpeculator:
             else:
                 block[:, 1:] = draft_logits.argmax(dim=-1)
 
-            # Snapshot sliding layers BEFORE the verify forward: its update
-            # evicts all but the last ``sliding_window - 1`` tokens, so the
-            # prefix must be captured here to rebuild after a partial accept.
-            sliding_snaps: dict[
-                int, tuple[torch.Tensor, torch.Tensor, int]
-            ] = {}
-            for i, layer in enumerate(target_kv.layers):
-                if isinstance(layer, DynamicSlidingWindowLayer):
-                    sliding_snaps[i] = (
-                        layer.keys.clone(),
-                        layer.values.clone(),
-                        int(layer.cumulative_length),
-                    )
+            cache_snapshot = snapshot_target_cache(target_kv)
 
             logits, hidden_states, target_kv = self._verify_target_block(
                 block, target_kv
@@ -780,10 +953,22 @@ class DFlashSpeculator:
             start = prev_start + cache_committed
             rollback_target_cache(
                 target_kv,
-                sliding_snaps,
+                cache_snapshot,
                 prev_start=prev_start,
                 committed=cache_committed,
                 block_size=block_size,
+                block=block,
+                replay=(
+                    (
+                        lambda prefix, cache: self._forward_target(
+                            prefix,
+                            past_key_values=cache,
+                            logits_to_keep=0,
+                        )[2]
+                    )
+                    if cache_snapshot.linear
+                    else None
+                ),
             )
             assert int(target_kv.get_seq_length()) == start
 
@@ -809,7 +994,7 @@ class DFlashSpeculator:
             if stop:
                 break
 
-            suffix = extract_context_feature(hidden_states, layer_ids).to(
+            suffix = _extract_context_feature(hidden_states, layer_ids).to(
                 self.device
             )[:, : accept + 1, :]
             if self._drafter_has_kv_cache:
@@ -829,7 +1014,7 @@ class DFlashSpeculator:
         )
         return torch.cat([input_ids, new_ids], dim=1)
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def _generate_batched(
         self,
         input_ids: torch.Tensor,
@@ -866,7 +1051,6 @@ class DFlashSpeculator:
         under this uniform-length scheme, so sliding-window masks stay exact.
         """
         from transformers import DynamicCache
-        from transformers.cache_utils import DynamicSlidingWindowLayer
 
         batch, padded_prompt = int(input_ids.shape[0]), int(input_ids.shape[1])
         block_size = int(self.config.block_size)
@@ -923,7 +1107,7 @@ class DFlashSpeculator:
             position_ids=prefill_position_ids,
         )
         anchors = logits[:, -1, :].argmax(dim=-1)
-        context_feature = extract_context_feature(hidden_states, layer_ids).to(
+        context_feature = _extract_context_feature(hidden_states, layer_ids).to(
             self.device
         )
         stop_ids = set(_resolve_stop_ids(self.target, stop_token_ids))
@@ -963,21 +1147,7 @@ class DFlashSpeculator:
                         b, pendings[b] - 1 :
                     ].argmax(dim=-1)
 
-            # Snapshot sliding layers BEFORE the verify forward (see
-            # _generate_single); the rebuild in rollback_target_cache is
-            # per-row inside the batched [batch, ...] tensors.
-            sliding_snaps: dict[
-                int, tuple[torch.Tensor, torch.Tensor, int]
-            ] = {}
-            for i, layer in enumerate(target_kv.layers):
-                if isinstance(layer, DynamicSlidingWindowLayer):
-                    keys, values = layer.keys, layer.values
-                    assert keys is not None and values is not None
-                    sliding_snaps[i] = (
-                        keys.clone(),
-                        values.clone(),
-                        int(layer.cumulative_length),
-                    )
+            cache_snapshot = snapshot_target_cache(target_kv)
 
             block_attention = torch.cat(
                 [
@@ -1045,7 +1215,7 @@ class DFlashSpeculator:
             )
             rollback_target_cache(
                 target_kv,
-                sliding_snaps,
+                cache_snapshot,
                 prev_start=prev_start,
                 committed=min_cc,
                 block_size=block_size,
@@ -1074,7 +1244,7 @@ class DFlashSpeculator:
             if not continuing:
                 break
 
-            suffix = extract_context_feature(hidden_states, layer_ids).to(
+            suffix = _extract_context_feature(hidden_states, layer_ids).to(
                 self.device
             )[:, :min_cc, :]
             if self._drafter_has_kv_cache:

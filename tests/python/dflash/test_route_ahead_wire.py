@@ -17,10 +17,9 @@ Autonomous correctness gate for Track A3 of
     the verify forward and resolves the prefetcher from the MoE offload
     engine, defaulting to ``None`` (executor fallback / resident no-op);
 (e) Track A4 offload coupling: consecutive dispatches pin exactly ONE layer
-    each (the global ``ReplaceCacheCandidates`` guard), and gpt-oss's
-    resident ``SyncGptOssMLP`` loop never reaches the route-ahead seam at
-    all -- the structural exclusion (model_offload.py:954), not an
-    assertion, is what keeps it force-resident.
+    each (the global ``ReplaceCacheCandidates`` guard), while gpt-oss's
+    force-resident ``SyncGptOssMLP`` loop reports read-only route-ahead
+    metrics without pinning or prefetching resident experts.
 
 Construction mirrors ``test_speculative_prefetch.py`` (A2) and
 ``tests/python/unit/test_distributed_smoke.py``: real Python objects with
@@ -362,6 +361,9 @@ def test_verify_target_block_activates_context_with_engine_prefetcher():
         input_ids: torch.Tensor,
         past_key_values: object = None,
         logits_to_keep: int = 0,
+        *,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, object, object]:
         observed.append((is_active(), current_prefetcher(), logits_to_keep))
         return logits, "hidden", past_key_values
@@ -381,6 +383,9 @@ def test_verify_target_block_resets_context_on_forward_error():
         input_ids: torch.Tensor,
         past_key_values: object = None,
         logits_to_keep: int = 0,
+        *,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, object, object]:
         assert is_active()
         raise RuntimeError("verify boom")
@@ -430,19 +435,8 @@ def test_consecutive_dispatches_each_pin_exactly_one_layer():
     ] == [300, 301, 302, 305, 307, 400, 401, 402, 405, 407]
 
 
-def test_gpt_oss_resident_loop_never_reaches_route_ahead_seam():
-    """A4: gpt-oss is excluded STRUCTURALLY, not by a resident-only assert.
-
-    ``model_offload.py:954`` never wires an ``expert_executor`` into
-    ``SyncGptOssMLP`` (and ``parse_expert_id`` yields no per-expert ids for
-    it, hf_config.py:216-223), so its forward runs the resident Python
-    expert loop: even under an active route-ahead context with a bound
-    prefetcher and an A5 stats handle, nothing is pinned, prefetched, or
-    observed. This is the offload-coupling boundary: DeepSeek/Qwen/Mixtral
-    blocks reach the seam through ``dispatch_local``; gpt-oss cannot.
-    """
+def _make_gpt_oss_mlp():
     from moe_infinity.models.gpt_oss import SyncGptOssMLP
-    from moe_infinity.spec_decode._route_ahead_stats import RouteAheadStats
 
     torch.manual_seed(0)
     module = SyncGptOssMLP(
@@ -456,8 +450,16 @@ def test_gpt_oss_resident_loop_never_reaches_route_ahead_seam():
     for param in module.parameters():
         torch.nn.init.normal_(param, std=0.02)
     module.eval()
-    # The model_offload wiring gate: gpt-oss is never given an executor.
+    module.layer_id = LAYER_ID
     assert module.expert_executor is None
+    return module
+
+
+def test_gpt_oss_resident_loop_observes_route_ahead_metrics():
+    """A2: resident gpt-oss reports its exact routed union as already covered."""
+    from moe_infinity.spec_decode._route_ahead_stats import RouteAheadStats
+
+    module = _make_gpt_oss_mlp()
 
     prefetcher = MagicMock(name="ExpertPrefetcher")
     stats = RouteAheadStats()
@@ -470,5 +472,29 @@ def test_gpt_oss_resident_loop_never_reaches_route_ahead_seam():
     assert router_logits.shape == (3, 4)
     prefetcher.fetch_experts_lock_cache.assert_not_called()
     prefetcher.speculative_prefetch.assert_not_called()
+    summary = stats.commit_step(kept_rows=1)
+    assert summary.layers == 1
+    assert stats.steps > 0
+    assert stats.layers_observed > 0
+    assert stats.coverage == 1.0
+
+
+def test_gpt_oss_resident_loop_does_not_observe_when_context_inactive(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Spec-off decode must return before resolving or updating metrics."""
+    from moe_infinity.spec_decode import _route_ahead_ctx as route_ahead_ctx
+    from moe_infinity.spec_decode._route_ahead_stats import RouteAheadStats
+
+    module = _make_gpt_oss_mlp()
+    stats = RouteAheadStats()
+    stats.begin_step()
+    current_stats = MagicMock(return_value=stats)
+    monkeypatch.setattr(route_ahead_ctx, "current_stats", current_stats)
+
+    with torch.no_grad():
+        module(torch.randn(1, 3, 16))
+
+    current_stats.assert_not_called()
     assert stats.commit_step(kept_rows=1).layers == 0
     assert stats.as_dict() == RouteAheadStats().as_dict()
