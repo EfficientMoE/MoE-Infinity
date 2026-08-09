@@ -40,6 +40,15 @@ C++ `InitializeTopology` then:
 
 Backward-compat option (decision for reviewer): add a **new** binding `set_topology_v2` and keep `set_topology` intact, so a stale `name_id_map`/older caller path still works. Default recommendation: add v2, route Python through v2, leave v1 in place unused (lower blast radius, easy rollback).
 
+### Final compatibility decision for PR #133
+
+PR #133 retains the original two-field `set_topology` binding as an unused,
+tested rollback path and exposes the enriched four-field contract as
+`set_topology_v2`. Production Python calls `set_topology_v2`. Both entry points
+lower to the same C++ `BuildTopologyFromSpecs` implementation. This deliberately
+reverses commit `d0ffd65`'s unreviewed removal of v1 and follows T9's lower-risk
+compatibility recommendation.
+
 ## 5. Step-by-step tasks (each independently verifiable)
 
 Ordering: C++ side first (compiles standalone), then Python switch, then verify.
