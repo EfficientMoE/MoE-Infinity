@@ -240,6 +240,15 @@ _STORE_EXTRA_LINK_ARGS = [
 if TORCH_LIB_DIR:
     _STORE_EXTRA_LINK_ARGS.append(f"-Wl,-rpath,{TORCH_LIB_DIR}")
 
+# libcuda (-lcuda) ships with the GPU driver, not the toolkit, so it is
+# missing on driverless build machines (CI). Link against the toolkit's stub
+# in lib64/stubs; its SONAME (libcuda.so.1) means the real driver is still
+# loaded at runtime on GPUs.
+_CUDA_STUBS_DIR = os.path.join(CUDA_HOME, "lib64", "stubs")
+_STORE_LIBRARY_DIRS = (
+    [_CUDA_STUBS_DIR] if os.path.isdir(_CUDA_STUBS_DIR) else []
+)
+
 # _engine extension: compute kernels (fused_glu + expert_gemm)
 _ENGINE_SOURCES = [
     "core/python/fused_glu_cuda.cu",
@@ -291,6 +300,7 @@ if cuda_available:
             name="moe_infinity._store",
             sources=_STORE_SOURCES,
             include_dirs=COMMON_INCLUDE_PATHS,
+            library_dirs=_STORE_LIBRARY_DIRS,
             extra_compile_args={
                 "cxx": COMMON_CXX_ARGS,
                 "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,
@@ -318,6 +328,7 @@ if cuda_available:
             name="moe_infinity._kv_cache",
             sources=_KV_CACHE_SOURCES,
             include_dirs=COMMON_INCLUDE_PATHS,
+            library_dirs=_STORE_LIBRARY_DIRS,
             extra_compile_args={
                 "cxx": COMMON_CXX_ARGS,
                 "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,

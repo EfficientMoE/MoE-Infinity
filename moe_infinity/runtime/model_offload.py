@@ -184,6 +184,9 @@ def _is_routed_expert_key(key: str) -> bool:
     # its layer_id >= num_layers guard) are dequantized on-device by the
     # dispatcher, so they stay FP8 in the store. Matches ".mlp.experts.<id>."
     # but not ".mlp.shared_experts." or dense ".mlp.<proj>".
+    # NOTE(#142): Mixtral names routed experts ".block_sparse_moe.experts.<id>."
+    # (see _remap_v5_batched_experts), which this regex does NOT match, so its
+    # routed experts are currently misclassified as non-routed. Tracked in #142.
     return _ROUTED_EXPERT_RE.search(key) is not None
 
 
@@ -897,18 +900,29 @@ class OffloadEngine(object):
                             self.name_id_map.pop(name_without_prefix)
                     param.ar_id = self.name_id_map.get(name, None)
 
-                # the case for NLLB MoE
+                # Tied embeddings: lm_head.weight shares storage with the
+                # input embeddings, so it never got its own tensor id in the
+                # loop above. Register it under whichever embedding submodule
+                # this architecture actually has -- encoder/decoder for
+                # encoder-decoder models (NLLB-MoE), a single embed_tokens
+                # for decoder-only ones (Mixtral, Qwen3-MoE, etc.).
                 if "lm_head.weight" not in self.name_id_map:
                     print(
                         "lm_head.weight not in name_id_map, add it as embed_tokens"
                     )
                     self.name_id_map["lm_head.weight"] = 0
-                    self.name_id_map["encoder.embed_tokens.weight"] = 0
-                    self.name_id_map["decoder.embed_tokens.weight"] = 0
-
                     model.lm_head.weight.ar_id = 0
-                    model.model.encoder.embed_tokens.weight.ar_id = 0
-                    model.model.decoder.embed_tokens.weight.ar_id = 0
+
+                    if hasattr(model.model, "encoder") and hasattr(
+                        model.model, "decoder"
+                    ):
+                        self.name_id_map["encoder.embed_tokens.weight"] = 0
+                        self.name_id_map["decoder.embed_tokens.weight"] = 0
+                        model.model.encoder.embed_tokens.weight.ar_id = 0
+                        model.model.decoder.embed_tokens.weight.ar_id = 0
+                    else:
+                        self.name_id_map["embed_tokens.weight"] = 0
+                        model.model.embed_tokens.weight.ar_id = 0
 
                 self.expert_tensor_map = dict()
                 for name, id in self.name_id_map.items():
@@ -1427,6 +1441,8 @@ class OffloadEngine(object):
             buffer.ar_id = self.name_id_map[name]
             self.offload_set.add(buffer.data.data_ptr())
 
+        from moe_infinity.utils.topology import build_topology_specs
+
         topo = self.get_topology(model)
         sparse_count = sum(
             1 for _, t in topo if isinstance(t, list) and len(t) > 1
@@ -1435,7 +1451,7 @@ class OffloadEngine(object):
             f"TOPO: {len(topo)} stages, {sparse_count} sparse",
             flush=True,
         )
-        self.archer_engine.set_topology(topo)
+        self.archer_engine.set_topology_v2(build_topology_specs(topo))
         print("TOPO: set_topology done", flush=True)
 
         @torch.no_grad()
