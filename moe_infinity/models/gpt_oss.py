@@ -99,12 +99,13 @@ class SyncGptOssMLP(nn.Module):
         down_scales = self.experts.down_proj_scales[expert_idx].to(device)
         down_b = self.experts.down_proj_bias[expert_idx].to(device)
 
-        # Checkpoint stores weights as [K, N//2] (input-major packed).
-        # The fused kernel expects [N, K//2] (output-major packed).
+        # Checkpoint stores each expert's packed weights output-major as
+        # [N, K//2] (blocks) and [N, K//32] (scales) - exactly the layout the
+        # fused kernel expects, so they are fed through unchanged.
         gate_up_out = fused_mxfp4_gemm(
             x,
-            gate_up_packed.t().contiguous(),
-            gate_up_scales.t().contiguous(),
+            gate_up_packed.contiguous(),
+            gate_up_scales.contiguous(),
             gate_up_b,
         )
 
@@ -113,8 +114,8 @@ class SyncGptOssMLP(nn.Module):
 
         result = fused_mxfp4_gemm(
             activated.to(torch.bfloat16),
-            down_packed.t().contiguous(),
-            down_scales.t().contiguous(),
+            down_packed.contiguous(),
+            down_scales.contiguous(),
             down_b,
         )
         return result
