@@ -481,6 +481,7 @@ def initialize_with_model(
     kv_cache_ratio: float = 0.25,
     max_batch_size: int = 32,
     enable_prefix_caching: bool = False,
+    speculative_draft: Optional[Any] = None,
 ) -> None:
     """Initialize the v2 server with a pre-loaded MoE model.
 
@@ -516,6 +517,7 @@ def initialize_with_model(
         engine=offload_engine,
         config=engine_config,
         tokenizer=tokenizer,
+        speculative_draft=speculative_draft,
     )
     if stream_manager is None:
         stream_manager = StreamManager()
@@ -1071,12 +1073,23 @@ async def _initialize_model() -> None:
 
         moe_model = moe_ctor(args.model, moe_config)
         engine_config = _build_engine_config(args=args, model=moe_model.model)
+        speculative_draft = None
+        draft_path = getattr(args, "speculative_draft", None)
+        if draft_path:
+            resolve_spec = getattr(moe_model, "_resolve_spec_strategy", None)
+            if not callable(resolve_spec):
+                raise RuntimeError("loaded MoE model cannot configure DFlash")
+            resolve_spec(str(draft_path))
+            speculative_draft = getattr(moe_model, "_dflash_speculator", None)
+            if speculative_draft is None:
+                raise RuntimeError("failed to configure DFlash speculator")
 
         initialized_engine = ContinuousBatchingEngine(
             model=moe_model.model,
             engine=moe_model.engine,
             config=engine_config,
             tokenizer=tokenizer,
+            speculative_draft=speculative_draft,
         )
         if stream_manager is None:
             stream_manager = StreamManager()
@@ -1841,6 +1854,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--offload-dir", type=str, required=True)
+    parser.add_argument(
+        "--speculative-draft",
+        type=str,
+        default=None,
+        help="DFlash drafter checkpoint for greedy batch-1 serving",
+    )
     parser.add_argument("--device-memory-ratio", type=float, default=0.75)
     parser.add_argument("--kv-cache-ratio", type=float, default=0.25)
     parser.add_argument("--max-batch-size", type=int, default=32)

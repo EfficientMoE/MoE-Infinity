@@ -6,9 +6,43 @@ from typing import Any, Callable, Dict, Optional, Union
 
 import torch
 
-import moe_infinity
-
 warnings.filterwarnings("ignore")
+
+
+def extract_context_feature(hidden_states, layer_ids=(1, 9, 17, 25, 33)):
+    """Concatenate post-layer hidden states for DFlash drafter conditioning.
+
+    Args:
+        hidden_states: Per-layer hidden states from an HF forward with
+            ``output_hidden_states=True``. Index 0 is the embedding output, so
+            decoder layer ``layer_id``'s output lives at ``layer_id + 1``.
+        layer_ids: Decoder layers to concatenate; defaults to the gpt-oss-120b
+            DFlash contract ``(1, 9, 17, 25, 33)``.
+
+    Returns:
+        Tensor ``[batch, seq_len, len(layer_ids) * hidden_size]`` on the same
+        device/dtype as the inputs (e.g. ``[B, L, 14400]`` for 120B).
+    """
+    if hidden_states is None or len(hidden_states) == 0:
+        raise ValueError(
+            "hidden_states must be a non-empty tuple; "
+            "run the forward with output_hidden_states=True"
+        )
+    selected = []
+    for layer_id in layer_ids:
+        idx = int(layer_id) + 1
+        if idx >= len(hidden_states):
+            raise ValueError(
+                f"layer_id {layer_id} maps to hidden_states[{idx}], but only "
+                f"{len(hidden_states)} entries were returned"
+            )
+        selected.append(hidden_states[idx])
+    # Multi-GPU (TP>1): the target's layers can span devices, so the selected
+    # per-layer states may live on different GPUs. Gather them onto one device
+    # before concatenating (no-op on a single device).
+    gather_device = selected[0].device
+    selected = [state.to(gather_device) for state in selected]
+    return torch.cat(selected, dim=-1)
 
 
 class MoE:
@@ -151,10 +185,10 @@ class MoE:
         self.use_native_engine = bool(
             getattr(engine_config, "use_native_engine", True)
         )
-        # Qwen3.5-MoE interleaves linear (GatedDeltaNet) and full attention; the
-        # native paged-KV engine assumes uniform full attention across layers, so
-        # Phase 1 drives generation through HF's own forward instead.
-        if getattr(model_config, "model_type", "") == "qwen3_5_moe":
+        # GLM-DSA remains unsupported by the native engine. Qwen3.5 builds the
+        # native components, but generate() below admits them only for greedy,
+        # batch-1 DFlash; ordinary generation still uses HF's hybrid-cache path.
+        if getattr(model_config, "model_type", "") == "glm_moe_dsa":
             self.use_native_engine = False
         default_max_seq_length = getattr(
             model_config, "max_position_embeddings", None
@@ -538,6 +572,106 @@ class MoE:
             return logits.detach().to("cpu")
         raise RuntimeError(f"unexpected logits shape: {tuple(logits.shape)}")
 
+    def _native_model_forward_rich(
+        self,
+        token_ids: list[int],
+        _attention_metadata: object = None,
+        logits_to_keep: int = 0,
+    ) -> tuple[torch.Tensor, tuple, object]:
+        """On-device forward for speculative decoding: hidden-state capture.
+
+        Single HF forward with ``output_hidden_states=True`` returning
+        ``(logits, hidden_states, past_key_values)`` on the model device —
+        unlike `_native_model_forward`, nothing is detached to CPU. The cache
+        contract mirrors the baseline (non-paged path reads/writes
+        ``self._cached_past_key_values``) so callers can roll the returned
+        ``DynamicCache`` back via ``crop()``.
+
+        ``logits_to_keep`` passthrough: ``1`` for the anchor/prefill step
+        (last-position logits only); ``0`` (the default) keeps full logits and
+        MUST be used for the verify step. Experts flow through the exact same
+        ``self.model(...)`` call as the baseline path, so the standard
+        ExpertExecutor dispatch (and its ``speculative_prefetch`` hook) is
+        preserved — nothing here bypasses expert dispatch.
+        """
+        input_tensor = torch.tensor([token_ids], dtype=torch.long)
+        if torch.cuda.is_available():
+            input_tensor = input_tensor.to("cuda:0")
+        else:
+            model_device = getattr(self.model, "device", None)
+            if isinstance(
+                model_device, torch.device
+            ) and model_device.type not in ("meta", "cpu"):
+                input_tensor = input_tensor.to(model_device)
+
+        is_prefill = True
+        if _attention_metadata is not None:
+            is_prefill = bool(getattr(_attention_metadata, "is_prefill", True))
+
+        paged_attention_classes = self._get_paged_attention_classes()
+        use_paged_context = bool(
+            paged_attention_classes
+            and _attention_metadata is not None
+            and getattr(self, "_native_attention_backend", None) is not None
+        )
+
+        extra_kwargs: dict = {"output_hidden_states": True}
+        if logits_to_keep:
+            extra_kwargs["logits_to_keep"] = int(logits_to_keep)
+
+        if not use_paged_context:
+            # Same HF KV-cache contract as the baseline: prefill captures
+            # past_key_values; decode steps consume the cached KV.
+            extra_kwargs["use_cache"] = True
+            if not is_prefill:
+                cached_kv = getattr(self, "_cached_past_key_values", None)
+                if cached_kv is not None:
+                    extra_kwargs["past_key_values"] = cached_kv
+        else:
+            if not is_prefill and _attention_metadata is not None:
+                seq_lens = getattr(_attention_metadata, "seq_lens", None)
+                if seq_lens is not None and seq_lens.numel() > 0:
+                    current_pos = int(seq_lens[0].item()) - 1
+                    extra_kwargs["position_ids"] = torch.tensor(
+                        [[current_pos]], device=input_tensor.device
+                    )
+
+        with torch.no_grad():
+            if not use_paged_context:
+                outputs = self.model(input_tensor, **extra_kwargs)
+            else:
+                backend = self._native_attention_backend
+                for attn_cls in paged_attention_classes:
+                    attn_cls.set_paged_context(backend, _attention_metadata)
+                try:
+                    outputs = self.model(input_tensor, **extra_kwargs)
+                finally:
+                    for attn_cls in paged_attention_classes:
+                        attn_cls.clear_paged_context()
+
+        if not use_paged_context:
+            past_kv = getattr(outputs, "past_key_values", None)
+            if past_kv is not None:
+                self._cached_past_key_values = past_kv
+
+        logits = getattr(outputs, "logits", None)
+        if logits is None and isinstance(outputs, tuple) and outputs:
+            logits = outputs[0]
+        if logits is None:
+            raise RuntimeError("model forward did not return logits")
+        if not isinstance(logits, torch.Tensor):
+            raise RuntimeError("model logits must be a torch.Tensor")
+
+        hidden_states = getattr(outputs, "hidden_states", None)
+        if hidden_states is None:
+            raise RuntimeError(
+                "model forward did not return hidden_states; "
+                "output_hidden_states=True is required"
+            )
+
+        past_key_values = getattr(outputs, "past_key_values", None)
+        return logits, hidden_states, past_key_values
+
     def _get_paged_attention_classes(self) -> list[type[Any]]:
         paged_class_names = {
             "DeepseekV2PagedAttention",
@@ -582,6 +716,49 @@ class MoE:
         for module in self.engine.expert_layer_modules:
             module.seq_id_list = self.seq_id_list
 
+    def _resolve_spec_strategy(self, speculative_draft):
+        """Attach/detach the DFlash speculator on the native engine per call.
+
+        ``speculative_draft`` may be a drafter checkpoint path (loaded via
+        ``DFlashSpeculator``), an already-built ``DFlashSpeculator``, or an
+        instantiated draft module (wrapped via ``from_models``). Construction
+        is memoized by the passed value; ``None``/``False`` detaches so the
+        standard path runs, without discarding the memoized speculator.
+        """
+        engine = self._native_generation_engine
+        if engine is None:
+            raise RuntimeError(
+                "cannot configure speculative decoding without a native "
+                "generation engine"
+            )
+        if not speculative_draft:
+            engine.spec_strategy = None
+            return
+        cached = getattr(self, "_dflash_speculator", None)
+        source = getattr(self, "_dflash_speculator_source", None)
+        same = source is speculative_draft or (
+            isinstance(source, str)
+            and isinstance(speculative_draft, (str, os.PathLike))
+            and source == str(speculative_draft)
+        )
+        if cached is None or not same:
+            import importlib
+
+            DFlashSpeculator = getattr(
+                importlib.import_module("moe_infinity.spec_decode.dflash"),
+                "DFlashSpeculator",
+            )
+
+            if isinstance(speculative_draft, DFlashSpeculator):
+                cached = speculative_draft
+            elif isinstance(speculative_draft, (str, os.PathLike)):
+                cached = DFlashSpeculator(self, str(speculative_draft))
+            else:
+                cached = DFlashSpeculator.from_models(self, speculative_draft)
+            self._dflash_speculator = cached
+            self._dflash_speculator_source = speculative_draft
+        engine.spec_strategy = cached
+
     def generate(self, input_ids: torch.LongTensor, **kwargs) -> Any:
         """
         Generates sequences for models with a language modeling head. The method currently supports greedy decoding,
@@ -591,6 +768,11 @@ class MoE:
             input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
                 The sequence used as a prompt for the generation. If `past` is used, only `bos_token_id` is used as
                 prompt.
+            speculative_draft: optional DFlash drafter (checkpoint path,
+                `DFlashSpeculator`, or draft module). When given, greedy
+                batch-1 decoding routes through the native speculative
+                strategy on the engine; omitted/`None`/`False` uses the
+                standard path (per-call, never sticky).
             **kwargs: Additional arguments for the generation method. Check the HuggingFace documentation of the model's
                 `generate` method for the supported arguments.
 
@@ -608,19 +790,61 @@ class MoE:
                 stacklevel=2,
             )
 
-        if (
-            not self.use_native_engine
-            or self._native_generation_engine is None
-            or input_ids.ndim != 2
-            or input_ids.shape[0] != 1
-        ):
+        speculative_draft = kwargs.pop("speculative_draft", None)
+
+        model_type = getattr(
+            getattr(self.model, "config", None), "model_type", ""
+        )
+        is_qwen35 = model_type == "qwen3_5_moe"
+        do_sample = kwargs.get("do_sample", None)
+        sampling_temperature = (
+            0.0 if do_sample is False else float(kwargs.get("temperature", 1.0))
+        )
+        is_greedy = (
+            sampling_temperature == 0.0
+            and float(kwargs.get("top_p", 1.0)) == 1.0
+            and int(kwargs.get("top_k", 0)) == 0
+        )
+        qwen35_dflash = bool(speculative_draft) and is_greedy
+        native_engine = self._native_generation_engine
+        native_for_call = (
+            self.use_native_engine
+            and native_engine is not None
+            and input_ids.ndim == 2
+            and input_ids.shape[0] == 1
+            and (not is_qwen35 or qwen35_dflash)
+        )
+
+        if not native_for_call:
+            if speculative_draft:
+                if input_ids.ndim == 2 and input_ids.shape[0] != 1:
+                    raise NotImplementedError(
+                        "speculative_draft (DFlash) v1 supports batch==1 "
+                        f"only; got batch size {input_ids.shape[0]}"
+                    )
+                if is_qwen35 and not is_greedy:
+                    raise ValueError(
+                        "qwen3_5_moe speculative_draft (DFlash) requires "
+                        "greedy decoding (do_sample=False or temperature=0, "
+                        "top_p=1, top_k=0)"
+                    )
+                raise ValueError(
+                    "speculative_draft (DFlash) requires the MoE-Infinity "
+                    "native engine (use_native_engine=True)"
+                )
             self._configure_hook(input_ids)
             self.model.eval()
             with torch.no_grad():
                 return self.model.generate(input_ids, **kwargs)
 
+        if native_engine is None:
+            raise RuntimeError(
+                "native generation engine unexpectedly unavailable"
+            )
+
         from moe_infinity.engine.types import SamplingParams
 
+        self._resolve_spec_strategy(speculative_draft)
         self._configure_hook(input_ids)
         self._cached_past_key_values = None
         self.model.eval()
@@ -632,11 +856,6 @@ class MoE:
             )
 
         max_tokens = kwargs.get("max_new_tokens", kwargs.get("max_tokens", 256))
-        do_sample = kwargs.get("do_sample", None)
-        if do_sample is False:
-            sampling_temperature = 0.0
-        else:
-            sampling_temperature = float(kwargs.get("temperature", 1.0))
         sampling_params = SamplingParams(
             temperature=sampling_temperature,
             top_p=float(kwargs.get("top_p", 1.0)),
@@ -644,7 +863,7 @@ class MoE:
             max_tokens=int(max_tokens) if max_tokens is not None else 256,
         )
         try:
-            result = self._native_generation_engine.generate(
+            result = native_engine.generate(
                 prompt_token_ids=prompt_token_ids,
                 sampling_params=sampling_params,
             )
@@ -667,6 +886,7 @@ class MoE:
         max_batch_size: int = 32,
         enable_prefix_caching: bool = False,
         offload_dir: Optional[str] = None,
+        speculative_draft: Optional[object] = None,
     ) -> None:
         """
         Start the OpenAI-compatible continuous batching server.
@@ -682,6 +902,8 @@ class MoE:
             max_batch_size: Maximum concurrent sequences (default: 32)
             enable_prefix_caching: Enable hash-based prefix caching (default: False)
             offload_dir: Path to offload directory (required)
+            speculative_draft: Optional DFlash checkpoint, speculator, or draft
+                module for greedy batch-1 serving.
         """
 
         if offload_dir is None:
@@ -690,6 +912,11 @@ class MoE:
         import importlib
 
         from moe_infinity.entrypoints.openai import api_server_v2
+
+        serving_speculator = None
+        if speculative_draft:
+            self._resolve_spec_strategy(speculative_draft)
+            serving_speculator = getattr(self, "_dflash_speculator", None)
 
         model_name = getattr(
             getattr(self.model, "config", None), "_name_or_path", None
@@ -703,6 +930,7 @@ class MoE:
             kv_cache_ratio=kv_cache_ratio,
             max_batch_size=max_batch_size,
             enable_prefix_caching=enable_prefix_caching,
+            speculative_draft=serving_speculator,
         )
 
         uvicorn = importlib.import_module("uvicorn")

@@ -89,12 +89,20 @@ void ArcherPrefetchHandle::CleanUpResources() {
 }
 
 void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
-                                         torch::Tensor& buffer) {
-  auto tensor_id = kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
+                                         torch::Tensor& buffer,
+                                         std::uint32_t explicit_id) {
+  auto tensor_id =
+      (explicit_id != UINT32_MAX)
+          ? explicit_id
+          : kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
   void* old_ptr = (void*)buffer.data_ptr();
   DLOG_TRACE("Acquire tensor ", tensor_id, old_ptr);
 
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
+  if (node == nullptr) {
+    DLOG_ERROR("AcquireTensor: no topology node for tensor_id ", tensor_id);
+    return;
+  }
   node->state = 1;
 
   // add node tensor_ids to node_id_to_tensor_ids_
@@ -135,12 +143,20 @@ void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
   kArcherTensorHandle->UpdateTensorMap(old_ptr, (void*)buffer.data_ptr());
 }
 void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
-                                         torch::Tensor& buffer) {
-  auto tensor_id = kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
+                                         torch::Tensor& buffer,
+                                         std::uint32_t explicit_id) {
+  auto tensor_id =
+      (explicit_id != UINT32_MAX)
+          ? explicit_id
+          : kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
   void* old_ptr = (void*)buffer.data_ptr();
   DLOG_TRACE("Release tensor ", tensor_id, old_ptr);
 
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
+  if (node == nullptr) {
+    DLOG_ERROR("ReleaseTensor: no topology node for tensor_id ", tensor_id);
+    return;
+  }
   // node->state = 1;
 
   if (node_id_to_tensor_ids_.find(node->id) == node_id_to_tensor_ids_.end()) {
@@ -159,7 +175,7 @@ void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
   // TraceRequest(request_id, tensor_id);
 
   auto current_layer_id = node->corr_id & 0xFFFFFFFF;
-  if (current_layer_id != last_layer_id_ &&
+  if (last_node_ != nullptr && current_layer_id != last_layer_id_ &&
       node_id_to_tensor_ids_[last_node_->id].size() != 0) {
     node_id_to_tensor_ids_[last_node_->id].clear();
     kTaskPool->StopExec(request_id,

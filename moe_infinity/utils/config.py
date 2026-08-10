@@ -107,6 +107,16 @@ class ArcherConfig:
 
     @classmethod
     def load_from_json(cls, config_json: dict):
+        if "glm_fp8_in_store" in config_json:
+            warnings.warn(
+                "glm_fp8_in_store is deprecated and ignored: GLM-5.2-FP8 routed "
+                "experts are always kept FP8 in the host store.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            config_json = {
+                k: v for k, v in config_json.items() if k != "glm_fp8_in_store"
+            }
         parser = HfArgumentParser(cls)
         config = parser.parse_dict(config_json)[0]
         return config
