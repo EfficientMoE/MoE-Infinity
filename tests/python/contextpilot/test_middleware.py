@@ -3,10 +3,17 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
 from _pytest.monkeypatch import MonkeyPatch
 
 import moe_infinity.serving.contextpilot_middleware as middleware_module
 from moe_infinity.serving.contextpilot_middleware import ContextPilotMiddleware
+
+# Skip (not fail) live-middleware tests that need the optional real package.
+requires_contextpilot = pytest.mark.skipif(
+    middleware_module.ContextPilot is None,
+    reason="contextpilot package not installed",
+)
 
 
 def test_process_chat_request_returns_messages(
@@ -185,6 +192,7 @@ def test_on_request_complete_doesnt_raise() -> None:
     middleware.on_request_complete("request-123")
 
 
+@requires_contextpilot
 def test_is_enabled_respects_flag() -> None:
     disabled = ContextPilotMiddleware(enabled=False)
     enabled = ContextPilotMiddleware(enabled=True)
@@ -246,6 +254,7 @@ def test_dedup_removes_duplicates(monkeypatch: MonkeyPatch) -> None:
     assert stats["total_tokens_saved"] > 0
 
 
+@requires_contextpilot
 def test_dedup_without_reorder() -> None:
     middleware = ContextPilotMiddleware(
         use_gpu=False,
@@ -270,6 +279,7 @@ def test_dedup_without_reorder() -> None:
     assert stats["total_tokens_saved"] > 0
 
 
+@requires_contextpilot
 def test_token_savings_tracked() -> None:
     middleware = ContextPilotMiddleware(
         use_gpu=False,
