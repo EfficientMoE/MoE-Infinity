@@ -491,18 +491,47 @@ class MoE:
             "generation_engine": generation_engine,
         }
 
-    def _native_model_forward(
-        self, token_ids: list[int], _attention_metadata: object
-    ) -> torch.Tensor:
-        input_tensor = torch.tensor([token_ids], dtype=torch.long)
-        if torch.cuda.is_available():
-            input_tensor = input_tensor.to("cuda:0")
-        else:
+    def _resolve_native_input_device(self) -> torch.device:
+        """Input device for the native forward (mirrors engine._resolve_device).
+
+        The OffloadEngine-managed backbone is resident on the LAST visible GPU,
+        so hard-coding ``cuda:0`` mismatches ``embed_tokens`` on multi-GPU runs.
+        """
+        if not torch.cuda.is_available():
             model_device = getattr(self.model, "device", None)
             if isinstance(
                 model_device, torch.device
             ) and model_device.type not in ("meta", "cpu"):
-                input_tensor = input_tensor.to(model_device)
+                return model_device
+            return torch.device("cpu")
+
+        get_embed = getattr(self.model, "get_input_embeddings", None)
+        if callable(get_embed):
+            try:
+                weight = getattr(get_embed(), "weight", None)
+                embed_device = getattr(weight, "device", None)
+            except Exception:
+                embed_device = None
+            if (
+                isinstance(embed_device, torch.device)
+                and embed_device.type == "cuda"
+            ):
+                return embed_device
+
+        model_device = getattr(self.model, "device", None)
+        if (
+            isinstance(model_device, torch.device)
+            and model_device.type == "cuda"
+        ):
+            return model_device
+
+        return torch.device(f"cuda:{torch.cuda.device_count() - 1}")
+
+    def _native_model_forward(
+        self, token_ids: list[int], _attention_metadata: object
+    ) -> torch.Tensor:
+        input_tensor = torch.tensor([token_ids], dtype=torch.long)
+        input_tensor = input_tensor.to(self._resolve_native_input_device())
 
         is_prefill = True
         if _attention_metadata is not None:
@@ -595,14 +624,7 @@ class MoE:
         preserved — nothing here bypasses expert dispatch.
         """
         input_tensor = torch.tensor([token_ids], dtype=torch.long)
-        if torch.cuda.is_available():
-            input_tensor = input_tensor.to("cuda:0")
-        else:
-            model_device = getattr(self.model, "device", None)
-            if isinstance(
-                model_device, torch.device
-            ) and model_device.type not in ("meta", "cpu"):
-                input_tensor = input_tensor.to(model_device)
+        input_tensor = input_tensor.to(self._resolve_native_input_device())
 
         is_prefill = True
         if _attention_metadata is not None:
