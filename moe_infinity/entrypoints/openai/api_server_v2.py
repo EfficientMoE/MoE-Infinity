@@ -143,6 +143,7 @@ _contextpilot_fallback_count: int = 0
 _contextpilot_last_fallback_count: int = 0
 
 _cp_logger = logging.getLogger("moe_infinity.contextpilot")
+_logger = logging.getLogger("moe_infinity.api_server")
 _cp_middleware: Optional[Any] = None
 _eviction_sync: Optional[Any] = None
 _cp_reorder_latencies: collections.deque[float] = collections.deque(maxlen=100)
@@ -1106,6 +1107,13 @@ async def _initialize_model() -> None:
             )
 
         _ensure_engine_loop_running()
+    except Exception as exc:
+        # A failed async init must surface as UNHEALTHY, not hang forever at
+        # STARTING: the exception is stored on the un-awaited init task and is
+        # otherwise never seen (issue #146 Bug 2).
+        _logger.exception("model initialization failed")
+        _health_state.set_unhealthy(f"model initialization failed: {exc}")
+        return
     finally:
         if _startup_watchdog is not None:
             _startup_watchdog.cancel()
