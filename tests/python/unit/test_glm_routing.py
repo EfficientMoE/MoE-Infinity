@@ -8,6 +8,16 @@ pytest.importorskip(
     reason="transformers >= 5.12 required",
 )
 
+from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (  # noqa: E402
+    GlmMoeDsaMoE as _GlmMoeDsaMoE,
+)
+
+if not hasattr(_GlmMoeDsaMoE, "route_tokens_to_experts"):
+    pytest.skip(
+        "transformers dropped GlmMoeDsaMoE.route_tokens_to_experts (5.15+)",
+        allow_module_level=True,
+    )
+
 
 def _tiny_config():
     from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
