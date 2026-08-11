@@ -59,7 +59,9 @@ class SyncGlmMoeDsaMoEBlock(nn.Module):
             intermediate_size=config.moe_intermediate_size
             * config.n_shared_experts,
         )
-        self._hf_route_tokens = GlmMoeDsaMoE.route_tokens_to_experts
+        self._hf_route_tokens = getattr(
+            GlmMoeDsaMoE, "route_tokens_to_experts", None
+        )
 
     def _route(self, hidden_flat: torch.Tensor):
         dev = hidden_flat.device
@@ -68,6 +70,11 @@ class SyncGlmMoeDsaMoEBlock(nn.Module):
                 self.gate.e_score_correction_bias.to(dev)
             )
         router_logits = self.gate(hidden_flat)
+        if self._hf_route_tokens is None:
+            raise RuntimeError(
+                "GLM-MoE-DSA routing requires a transformers build providing "
+                "GlmMoeDsaMoE.route_tokens_to_experts (removed in 5.15+)"
+            )
         return self._hf_route_tokens(self, router_logits)
 
     def _local_experts(self, hidden_flat, router_mask, routing_weights_mask):
