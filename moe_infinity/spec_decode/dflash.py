@@ -205,13 +205,28 @@ def _infer_cuda_device(model: Any) -> str:
     dev = getattr(model, "device", None)
     if isinstance(dev, torch.device) and dev.type == "cuda":
         return str(dev)
+    # Match the bound shared embed_tokens/lm_head device: an offloaded backbone
+    # is resident on the LAST visible GPU, so first-cuda-param/cuda:0 would put
+    # the drafter's block on a different GPU than its shared weights.
+    try:
+        embed = _resolve_input_embeddings(model)
+        embed_device = getattr(getattr(embed, "weight", None), "device", None)
+        if (
+            isinstance(embed_device, torch.device)
+            and embed_device.type == "cuda"
+        ):
+            return str(embed_device)
+    except Exception:
+        pass
     try:
         for param in model.parameters():
             if param.device.type == "cuda":
                 return str(param.device)
     except Exception:
         pass
-    return "cuda:0" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        return f"cuda:{torch.cuda.device_count() - 1}"
+    return "cpu"
 
 
 def _resolve_stop_ids(
