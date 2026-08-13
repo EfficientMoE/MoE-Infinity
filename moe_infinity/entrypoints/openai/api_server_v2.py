@@ -143,6 +143,7 @@ _contextpilot_fallback_count: int = 0
 _contextpilot_last_fallback_count: int = 0
 
 _cp_logger = logging.getLogger("moe_infinity.contextpilot")
+_logger = logging.getLogger("moe_infinity.api_server")
 _cp_middleware: Optional[Any] = None
 _eviction_sync: Optional[Any] = None
 _cp_reorder_latencies: collections.deque[float] = collections.deque(maxlen=100)
@@ -1106,6 +1107,13 @@ async def _initialize_model() -> None:
             )
 
         _ensure_engine_loop_running()
+    except Exception as exc:
+        # A failed async init must surface as UNHEALTHY, not hang forever at
+        # STARTING: the exception is stored on the un-awaited init task and is
+        # otherwise never seen (issue #146 Bug 2).
+        _logger.exception("model initialization failed")
+        _health_state.set_unhealthy(f"model initialization failed: {exc}")
+        return
     finally:
         if _startup_watchdog is not None:
             _startup_watchdog.cancel()
@@ -1775,34 +1783,41 @@ def _build_engine_config(
         raise RuntimeError(
             "model config is required to initialize serving engine"
         )
+    # Multimodal MoE checkpoints (e.g. Qwen3.5-MoE VL) nest the text backbone
+    # dimensions under text_config; get_text_config() returns self otherwise.
+    text_config = (
+        model_config.get_text_config()
+        if hasattr(model_config, "get_text_config")
+        else model_config
+    )
 
     num_layers = _resolve_int_attr(
-        model_config,
+        text_config,
         "num_hidden_layers",
         "num_layers",
         "n_layer",
     )
     num_attention_heads = _resolve_int_attr(
-        model_config,
+        text_config,
         "num_attention_heads",
         "n_head",
     )
     num_kv_heads = _resolve_int_attr(
-        model_config,
+        text_config,
         "num_key_value_heads",
         "num_kv_heads",
         "n_head_kv",
     )
-    hidden_size = _resolve_int_attr(model_config, "hidden_size", "n_embd")
+    hidden_size = _resolve_int_attr(text_config, "hidden_size", "n_embd")
     max_seq_length = _resolve_int_attr(
-        model_config,
+        text_config,
         "max_position_embeddings",
         "max_seq_len",
         "max_sequence_length",
         "n_positions",
         "model_max_length",
     )
-    head_dim = _resolve_int_attr(model_config, "head_dim")
+    head_dim = _resolve_int_attr(text_config, "head_dim")
 
     if num_layers is None:
         raise RuntimeError("unable to resolve model num_layers")
@@ -1819,7 +1834,11 @@ def _build_engine_config(
         model_config, "eos_token_id"
     )
     if eos_token_id is None:
-        config_eos = getattr(model_config, "eos_token_id", None)
+        eos_token_id = _resolve_int_attr(text_config, "eos_token_id")
+    if eos_token_id is None:
+        config_eos = getattr(model_config, "eos_token_id", None) or getattr(
+            text_config, "eos_token_id", None
+        )
         if (
             isinstance(config_eos, list)
             and config_eos
