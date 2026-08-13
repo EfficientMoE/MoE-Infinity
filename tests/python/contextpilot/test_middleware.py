@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 from _pytest.monkeypatch import MonkeyPatch
 
 import moe_infinity.serving.contextpilot_middleware as middleware_module
@@ -215,6 +217,36 @@ def test_process_completion_request_returns_string() -> None:
     output = middleware.process_completion_request("explain this")
 
     assert isinstance(output, str)
+
+
+def test_process_completion_request_survives_optimize_index_error(
+    monkeypatch: MonkeyPatch,
+    caplog: LogCaptureFixture,
+) -> None:
+    class IndexErrorCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+
+        def optimize(
+            self, contexts: list[str], query: str
+        ) -> list[dict[str, str]]:
+            _ = contexts
+            _ = query
+            raise IndexError("list index out of range")
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", IndexErrorCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+
+    with caplog.at_level(logging.WARNING):
+        output = middleware.process_completion_request(
+            "the capital of france is"
+        )
+
+    assert output == "the capital of france is"
+    assert not any(
+        "completion optimize failed" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_dedup_removes_duplicates(monkeypatch: MonkeyPatch) -> None:
