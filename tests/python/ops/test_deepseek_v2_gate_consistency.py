@@ -41,12 +41,23 @@ def _ensure_nvtx_stub_has_annotate() -> None:
 
 _ensure_nvtx_stub_has_annotate()
 
+import transformers.models.deepseek_v2.modeling_deepseek_v2 as _dsv2_mod
 from transformers import DeepseekV2Config
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
-    DeepseekV2MoE,
+
+DeepseekV2MoE = getattr(_dsv2_mod, "DeepseekV2Moe", None) or getattr(
+    _dsv2_mod, "DeepseekV2MoE", None
 )
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
-    DeepseekV2MoEGate as MoEGate,
+if DeepseekV2MoE is None:
+    raise ImportError(
+        "Neither 'DeepseekV2Moe' nor 'DeepseekV2MoE' found in "
+        "transformers.models.deepseek_v2.modeling_deepseek_v2"
+    )
+
+MoEGate = getattr(_dsv2_mod, "DeepseekV2MoEGate", None)
+
+requires_moe_gate = pytest.mark.skipif(
+    MoEGate is None,
+    reason="DeepseekV2MoEGate removed in this Transformers version",
 )
 
 from moe_infinity.models.deepseek import DeepseekMoEBlock, DeepseekMoEGate
@@ -132,6 +143,7 @@ class _LocalExpertExecutor:
 
 
 @requires_cuda
+@requires_moe_gate
 def test_v2_gate_equivalence(seed_everything):
     """V2-Lite config: native MoEGate and simplified DeepseekMoEGate must
     produce identical routing because topk_method='greedy' with
@@ -185,6 +197,7 @@ def test_v2_gate_equivalence(seed_everything):
 
 
 @requires_cuda
+@requires_moe_gate
 def test_v2_gate_group_limited_greedy(seed_everything):
     """V2-full config: simplified gate MUST differ from native gate because
     group_limited_greedy constrains which expert groups can be selected."""
