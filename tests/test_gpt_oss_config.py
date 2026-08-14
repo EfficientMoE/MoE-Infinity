@@ -37,37 +37,41 @@ def test_parse_moe_param_gpt_oss():
     assert num_encoder_layers == 0
 
 
-def test_parse_expert_id_gpt_oss_packed():
+def test_parse_expert_id_gpt_oss_gate_up_slice():
     from moe_infinity.utils.hf_config import parse_expert_id
 
     config = make_gpt_oss_config()
-    layer_id, expert_id = parse_expert_id(
-        "model.layers.5.mlp.experts.gate_up_proj_blocks", config
-    )
-    assert layer_id == 5
-    assert expert_id is None
+    assert parse_expert_id(
+        "model.layers.5.mlp.experts.17.gate_up_proj_blocks", config
+    ) == (5, 17)
+
+
+def test_parse_expert_id_gpt_oss_down_slice():
+    from moe_infinity.utils.hf_config import parse_expert_id
+
+    config = make_gpt_oss_config()
+    assert parse_expert_id(
+        "model.layers.11.mlp.experts.31.down_proj_bias", config
+    ) == (11, 31)
+
+
+def test_parse_expert_id_gpt_oss_rejects_out_of_range_expert():
+    from moe_infinity.utils.hf_config import parse_expert_id
+
+    config = make_gpt_oss_config()
+    assert parse_expert_id(
+        "model.layers.5.mlp.experts.32.gate_up_proj_blocks", config
+    ) == (None, None)
 
 
 def test_parse_expert_id_gpt_oss_router():
     from moe_infinity.utils.hf_config import parse_expert_id
 
     config = make_gpt_oss_config()
-    layer_id, expert_id = parse_expert_id(
-        "model.layers.5.mlp.router.weight", config
+    assert parse_expert_id("model.layers.5.mlp.router.weight", config) == (
+        None,
+        None,
     )
-    assert layer_id is None
-    assert expert_id is None
-
-
-def test_parse_expert_id_gpt_oss_down_proj():
-    from moe_infinity.utils.hf_config import parse_expert_id
-
-    config = make_gpt_oss_config()
-    layer_id, expert_id = parse_expert_id(
-        "model.layers.11.mlp.experts.down_proj_blocks", config
-    )
-    assert layer_id == 11
-    assert expert_id is None
 
 
 def test_parse_expert_dtype_gpt_oss_none():
