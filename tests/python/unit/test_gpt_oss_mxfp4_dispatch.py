@@ -77,9 +77,7 @@ def test_dequantized_option_a_matches_resident_expert_forward():
     )
     down_bias = torch.randn(hidden, dtype=torch.bfloat16, device="cuda")
 
-    resident_gate_up = fused_mxfp4_gemm(
-        x, gate_blocks, gate_scales, gate_bias
-    )
+    resident_gate_up = fused_mxfp4_gemm(x, gate_blocks, gate_scales, gate_bias)
     resident_gate, resident_up = (
         resident_gate_up[:, ::2],
         resident_gate_up[:, 1::2],
@@ -120,10 +118,15 @@ def test_dequantized_option_a_matches_resident_expert_forward():
 
     # Bound bf16 rounding by the down-GEMM magnitude instead of comparing two
     # cancellation-sensitive bf16 paths directly.
-    envelope = 8 * (2**-8) * (
-        golden_activated.abs() @ down_weight_f.abs().t()
-        + down_bias.float().abs()
-    ) + 1e-2
+    envelope = (
+        8
+        * (2**-8)
+        * (
+            golden_activated.abs() @ down_weight_f.abs().t()
+            + down_bias.float().abs()
+        )
+        + 1e-2
+    )
     assert ((option_a.float() - golden).abs() <= envelope).all()
     assert ((resident.float() - golden).abs() <= envelope).all()
 
@@ -151,25 +154,31 @@ def _native_dispatch(tmp_path, hidden_dtype):
     intermediate = Config.intermediate_size
     mlp = SyncGptOssMLP(Config())
     tensors = [
-        torch.randint(0, 256, (2 * intermediate, hidden // 2), dtype=torch.uint8),
-        torch.randint(120, 135, (2 * intermediate, hidden // 32), dtype=torch.uint8),
+        torch.randint(
+            0, 256, (2 * intermediate, hidden // 2), dtype=torch.uint8
+        ),
+        torch.randint(
+            120, 135, (2 * intermediate, hidden // 32), dtype=torch.uint8
+        ),
         torch.randn(2 * intermediate, dtype=torch.bfloat16),
         torch.randint(0, 256, (hidden, intermediate // 2), dtype=torch.uint8),
-        torch.randint(120, 135, (hidden, intermediate // 32), dtype=torch.uint8),
+        torch.randint(
+            120, 135, (hidden, intermediate // 32), dtype=torch.uint8
+        ),
         torch.randn(hidden, dtype=torch.bfloat16),
     ]
     mlp.experts.gate_up_proj.requires_grad_(False)
     mlp.experts.down_proj.requires_grad_(False)
     mlp.experts.gate_up_proj.data = tensors[0].unsqueeze(0).repeat(2, 1, 1)
-    mlp.experts.gate_up_proj_scales.data = tensors[1].unsqueeze(0).repeat(2, 1, 1)
+    mlp.experts.gate_up_proj_scales.data = (
+        tensors[1].unsqueeze(0).repeat(2, 1, 1)
+    )
     mlp.experts.gate_up_proj_bias.data = tensors[2].unsqueeze(0).repeat(2, 1)
     mlp.experts.down_proj.data = tensors[3].unsqueeze(0).repeat(2, 1, 1)
     mlp.experts.down_proj_scales.data = tensors[4].unsqueeze(0).repeat(2, 1, 1)
     mlp.experts.down_proj_bias.data = tensors[5].unsqueeze(0).repeat(2, 1)
 
-    hidden_states = torch.randn(
-        3, hidden, dtype=hidden_dtype, device="cuda:0"
-    )
+    hidden_states = torch.randn(3, hidden, dtype=hidden_dtype, device="cuda:0")
     expected = mlp._expert_forward_mxfp4(hidden_states, 0)
 
     engine = prefetch_lib.prefetch_handle(f"{tmp_path}/", 0.5)
@@ -178,9 +187,7 @@ def _native_dispatch(tmp_path, hidden_dtype):
         engine.offload(tensor, tensor_id)
     for tensor_id, tensor in zip(expert_tensor_ids[1], tensors):
         engine.offload(tensor, tensor_id)
-    dense_tensor_ids = list(
-        range(12, 12 + 2 * torch.cuda.device_count())
-    )
+    dense_tensor_ids = list(range(12, 12 + 2 * torch.cuda.device_count()))
     for tensor_id in dense_tensor_ids:
         engine.offload(torch.zeros(1, dtype=torch.bfloat16), tensor_id)
     split = len(dense_tensor_ids) // 2
@@ -237,10 +244,15 @@ def test_native_dispatcher_matches_resident_expert_forward(tmp_path):
         * torch.sigmoid(golden_gate.clamp(max=7) * 1.702)
     )
     golden = golden_activated @ down_weight.t() + tensors[5].cuda().float()
-    envelope = 8 * (2**-8) * (
-        golden_activated.abs() @ down_weight.abs().t()
-        + tensors[5].cuda().float().abs()
-    ) + 1e-2
+    envelope = (
+        8
+        * (2**-8)
+        * (
+            golden_activated.abs() @ down_weight.abs().t()
+            + tensors[5].cuda().float().abs()
+        )
+        + 1e-2
+    )
 
     assert ((actual.to(golden.device) - golden).abs() <= envelope).all()
     assert ((resident.float() - golden).abs() <= envelope).all()
