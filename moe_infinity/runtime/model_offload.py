@@ -164,6 +164,60 @@ def _remap_v5_batched_experts(
         del state_dict[down_key]
 
 
+_GPT_OSS_EXPERT_FIELDS = (
+    "gate_up_proj_blocks",
+    "gate_up_proj_scales",
+    "gate_up_proj_bias",
+    "down_proj_blocks",
+    "down_proj_scales",
+    "down_proj_bias",
+)
+
+
+def _expand_gpt_oss_packed_experts(state_dict, config):
+    if getattr(config, "model_type", "") != "gpt_oss":
+        return
+
+    layer_prefixes = sorted(
+        {
+            key.rsplit(".", 1)[0]
+            for key in state_dict
+            if key.endswith(".mlp.experts.gate_up_proj_blocks")
+        }
+    )
+    expected_experts = int(config.num_local_experts)
+    for prefix in layer_prefixes:
+        packed = {}
+        missing = []
+        for field in _GPT_OSS_EXPERT_FIELDS:
+            key = f"{prefix}.{field}"
+            if key not in state_dict:
+                missing.append(field)
+            else:
+                packed[field] = state_dict[key]
+        if missing:
+            raise ValueError(
+                f"Incomplete GPT-OSS packed expert layer {prefix}: {missing}"
+            )
+        for field, tensor in packed.items():
+            if tensor.shape[0] != expected_experts:
+                raise ValueError(
+                    f"{prefix}.{field} has {tensor.shape[0]} experts; "
+                    f"expected {expected_experts}"
+                )
+        for expert_idx in range(expected_experts):
+            expert_prefix = f"{prefix}.{expert_idx}"
+            for field in _GPT_OSS_EXPERT_FIELDS:
+                view = packed[field][expert_idx]
+                if not view.is_contiguous():
+                    raise ValueError(
+                        f"Non-contiguous GPT-OSS slice {expert_prefix}.{field}"
+                    )
+                state_dict[f"{expert_prefix}.{field}"] = view
+        for field in _GPT_OSS_EXPERT_FIELDS:
+            del state_dict[f"{prefix}.{field}"]
+
+
 def _compute_config_fingerprint(config: object) -> str:
     fields = [
         "model_type",
@@ -637,6 +691,9 @@ class OffloadEngine(object):
                             state_dict = torch.load(ckpt)
 
                         _remap_v5_batched_experts(state_dict, self.config)
+                        _expand_gpt_oss_packed_experts(
+                            state_dict, self.config
+                        )
 
                         is_gptq_ckpt = is_gptq_quantized(self.config)
                         self._cast_state_dict_tensors(
@@ -647,6 +704,7 @@ class OffloadEngine(object):
 
                         if (
                             is_mxfp4_ckpt
+                            and self.config.model_type != "gpt_oss"
                             and os.environ.get("MOE_INFINITY_MXFP4_DEQUANT", "")
                             == "1"
                         ):
