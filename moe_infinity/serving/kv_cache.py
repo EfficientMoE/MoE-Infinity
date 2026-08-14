@@ -255,6 +255,52 @@ class PagedKVCache:
         for _ in range(num_new_tokens):
             block_table.append_token()
 
+    def truncate_tokens(self, seq_id: int, new_len: int) -> None:
+        """Roll a sequence back to ``new_len`` tokens, freeing tail blocks.
+
+        Never grows (raises ``ValueError`` if ``new_len`` exceeds the current
+        length); no-op when unchanged. Rollback primitive for serving-path DFlash.
+        """
+        if new_len < 0:
+            raise ValueError(f"new_len must be >= 0, got {new_len}")
+        block_table = self._require_sequence(seq_id)
+        current = block_table.num_computed_tokens()
+        if new_len > current:
+            raise ValueError(
+                f"truncate_tokens cannot grow sequence {seq_id}: "
+                f"new_len {new_len} > current {current}"
+            )
+        if new_len == current:
+            return
+
+        block_size = self.block_size
+        blocks_needed = (new_len + block_size - 1) // block_size
+
+        current_block_ids = block_table.get_block_ids()
+        freed_block_ids = current_block_ids[blocks_needed:]
+        kept_block_ids = current_block_ids[:blocks_needed]
+        if freed_block_ids:
+            self.block_allocator.free(freed_block_ids)
+        block_table.restore_blocks(kept_block_ids, num_tokens=new_len)
+
+        # Keep swapped-out CPU buffer + token count consistent with the shrink.
+        if seq_id in self._swapped_out_sequences:
+            self._swapped_num_tokens[seq_id] = new_len
+            cpu_buffer = self._swapped_cpu_buffers.get(seq_id)
+            if cpu_buffer is not None:
+                if blocks_needed == 0:
+                    _ = self._swapped_cpu_buffers.pop(seq_id, None)
+                elif int(cpu_buffer.shape[1]) > blocks_needed:
+                    self._swapped_cpu_buffers[seq_id] = cpu_buffer[
+                        :, :blocks_needed, ...
+                    ].clone()
+
+        if freed_block_ids and self._cp_kv_manager is not None:
+            try:
+                self._cp_kv_manager.notify_blocks_freed(seq_id, freed_block_ids)
+            except Exception:
+                pass
+
     def free_sequence(self, seq_id: int) -> None:
         block_table = self._sequence_tables.pop(seq_id, None)
         if block_table is None:

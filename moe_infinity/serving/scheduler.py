@@ -169,6 +169,7 @@ class Scheduler:
         self,
         completed_seq_ids: list[int],
         new_decode_seq_ids: list[int],
+        committed_counts: dict[int, int] | None = None,
     ) -> None:
         completed = set(completed_seq_ids)
 
@@ -181,8 +182,13 @@ class Scheduler:
                 sequence.set_status(SequenceStatus.DECODE)
 
             if sequence.status is SequenceStatus.DECODE:
+                num_new = (
+                    1
+                    if committed_counts is None
+                    else committed_counts.get(seq_id, 1)
+                )
                 try:
-                    self.kv_cache.append_tokens(seq_id, num_new_tokens=1)
+                    self.kv_cache.append_tokens(seq_id, num_new_tokens=num_new)
                 except KeyError:
                     pass
 

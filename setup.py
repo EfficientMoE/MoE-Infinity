@@ -222,6 +222,7 @@ _STORE_SOURCES = [
     "extensions/kernel/activation_kernels.cu",
     "extensions/kernel/topk_softmax_kernels.cu",
     "extensions/kernel/v4_fp4/mxfp4_dequant.cu",
+    "extensions/kernel/v4_fp4/fp8_dequant.cu",
     # Python binding
     "core/python/py_archer_prefetch.cpp",
 ]
@@ -239,6 +240,15 @@ _STORE_EXTRA_LINK_ARGS = [
 
 if TORCH_LIB_DIR:
     _STORE_EXTRA_LINK_ARGS.append(f"-Wl,-rpath,{TORCH_LIB_DIR}")
+
+# libcuda (-lcuda) ships with the GPU driver, not the toolkit, so it is
+# missing on driverless build machines (CI). Link against the toolkit's stub
+# in lib64/stubs; its SONAME (libcuda.so.1) means the real driver is still
+# loaded at runtime on GPUs.
+_CUDA_STUBS_DIR = os.path.join(CUDA_HOME, "lib64", "stubs")
+_STORE_LIBRARY_DIRS = (
+    [_CUDA_STUBS_DIR] if os.path.isdir(_CUDA_STUBS_DIR) else []
+)
 
 # _engine extension: compute kernels (fused_glu + expert_gemm)
 _ENGINE_SOURCES = [
@@ -291,6 +301,7 @@ if cuda_available:
             name="moe_infinity._store",
             sources=_STORE_SOURCES,
             include_dirs=COMMON_INCLUDE_PATHS,
+            library_dirs=_STORE_LIBRARY_DIRS,
             extra_compile_args={
                 "cxx": COMMON_CXX_ARGS,
                 "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,
@@ -318,6 +329,7 @@ if cuda_available:
             name="moe_infinity._kv_cache",
             sources=_KV_CACHE_SOURCES,
             include_dirs=COMMON_INCLUDE_PATHS,
+            library_dirs=_STORE_LIBRARY_DIRS,
             extra_compile_args={
                 "cxx": COMMON_CXX_ARGS,
                 "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,
@@ -356,6 +368,7 @@ if cuda_available:
                 "extensions/kernel/v4_fp4/v4_fp4_binding.cpp",
                 "extensions/kernel/v4_fp4/v4_fp4_dequant.cu",
                 "extensions/kernel/v4_fp4/mxfp4_dequant.cu",
+                "extensions/kernel/v4_fp4/fp8_dequant.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17", "-fPIC"],

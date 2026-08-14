@@ -1,6 +1,6 @@
 # Contributing to MoE-Infinity
 
-Thank you for contributing to **MoE-Infinity** — a cost-effective MoE inference library for memory-constrained GPUs.
+Thank you for contributing to **MoE-Infinity**, a cost-effective MoE inference library for memory-constrained GPUs.
 
 We welcome contributions across Python, C++/CUDA extensions, tests, docs, and examples.
 
@@ -15,6 +15,7 @@ We welcome contributions across Python, C++/CUDA extensions, tests, docs, and ex
 - [Code Style, Linting, and Formatting](#code-style-linting-and-formatting)
 - [Running Tests](#running-tests)
 - [Pull Request Process (Fork-and-Pull)](#pull-request-process-fork-and-pull)
+  - [Documentation impact by change type](#documentation-impact-by-change-type)
 - [Commit Message Convention](#commit-message-convention)
 - [Contribution Tips for This Repo](#contribution-tips-for-this-repo)
 
@@ -108,7 +109,7 @@ Current lint/format stack includes:
 - `clang-format` (for C++/CUDA sources)
 - `codespell`
 
-The pinned tool versions in `.pre-commit-config.yaml` are the source of truth — CI runs the exact same versions. Always run formatting through `pre-commit` (which installs those pinned versions in isolated environments) rather than a system-wide `ruff`/`clang-format`, whose version may differ and produce mismatched formatting.
+The pinned tool versions in `.pre-commit-config.yaml` are the source of truth. CI runs the exact same versions, so always run formatting through `pre-commit` (which installs those pinned versions in isolated environments) rather than a system-wide `ruff` or `clang-format`, whose version may differ and produce mismatched formatting.
 
 Please run formatting/lint checks before opening a PR.
 
@@ -180,6 +181,21 @@ When applicable:
 - Bug fix PRs should include a regression test.
 - Feature PRs should include tests and an example or documentation update.
 - Performance PRs should include benchmark context (hardware, model, and before/after observations).
+
+### Documentation impact by change type
+
+A change can match more than one row. Satisfy every row that applies before opening the PR, and update the authoritative guide for each surface you changed. Update the [Documentation hub](./docs/README.md) only when adding, removing, or renaming a guide, or when changing documentation navigation.
+
+| Change type | Required docs | Concrete examples |
+| --- | --- | --- |
+| New user feature | [README](./README.md) discovery, the feature guide or API page, and [Changelog](./CHANGELOG.md) `Unreleased`. | Add a new section to `docs/serving.md`, link it from `README.md`, and add an `Unreleased` note. |
+| Model support | [Model compatibility matrix](./docs/model-compatibility.md), the model family guide, and [Changelog](./CHANGELOG.md) `Unreleased`. | Add the checkpoint row in `docs/model-compatibility.md`, then update `moe_infinity/models/deepseek_v4/README.md` or `docs/glm-5.2.md`. |
+| Config, CLI, or env | The config or env guide, [README](./README.md) discovery if the quick start changes, and [Changelog](./CHANGELOG.md) `Unreleased`. | Update `docs/configuration.md`, `docs/environment-variables.md`, and the matching README command. |
+| Architecture | [Architecture](./ARCHITECTURE.md) and [Changelog](./CHANGELOG.md) `Unreleased`. | Update the module map, request lifecycle, or public API boundary notes. |
+| Performance | [Benchmarking guide](./docs/benchmarking.md), the relevant reproduction or runbook page, and [Changelog](./CHANGELOG.md) `Unreleased`. | Add benchmark data with model, checkpoint, hardware, software, workload, baseline, and limitations. |
+| User-visible bug | The guide for the affected surface and [Changelog](./CHANGELOG.md) `Unreleased`. Add [README](./README.md) discovery when the fix changes the user entry point. | Update troubleshooting, serving, or model docs if the fix changes what users must do or expect. |
+
+If a change spans more than one row, satisfy every matching row. Do not rely on the README alone when a deeper guide exists.
 
 ## Commit Message Convention
 
