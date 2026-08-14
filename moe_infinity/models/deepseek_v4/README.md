@@ -1,5 +1,7 @@
 # DeepSeek-V4-Flash expert offloading for MoE-Infinity
 
+For the family matrix and cross-model notes, start at [docs/README.md](../../../docs/README.md) and [docs/model-compatibility.md](../../../docs/model-compatibility.md).
+
 Runs `deepseek-ai/DeepSeek-V4-Flash` with routed experts streamed from host
 memory, so the model fits where its ~132 GB of FP4 experts otherwise would not.
 
@@ -65,9 +67,8 @@ python convert.py --hf-ckpt-path <HF_CKPT> --save-path <OUT> \
   --n-experts 256 --model-parallel 4
 ```
 
-The official sparse-attention kernel is tuned for TP-sharded head counts; run
-with `--model-parallel 4` (16 heads/rank). mp1 (64 heads) exceeds the kernel's
-shared-memory limit on a single GPU.
+The validated mp4 e2e harness runs with `--model-parallel 4` (16 heads/rank);
+mp1 is not covered by repo tests for the sparse-attention path.
 
 ## Tests
 
@@ -103,9 +104,9 @@ model, store = load_offloaded_v4_flash(M, ckpt, cfg, dev, shard,
 #   MOE_DSV4_FORCE_NATIVE=0 (env) -> disable native auto-selection
 ```
 
-The native path is preferred because it is **1.5-3.2x faster than tilelang**
-and **2.3-3.6x faster than a fused Triton MXFP4 GEMM** (see benchmark below),
-while remaining bit-exact to the reference.
+Historical snapshot: the ratios below were captured in an internal run, but the
+commit, software stack, and capture date were not recorded in-repo, so treat
+them as illustrative rather than a current guarantee.
 
 It uses `moe_infinity._v4_fp4`:
 - `v4_fp4_dequant.cu` — FP4 E2M1 (packed uint8) + ue8m0 block-32 scale ->
@@ -131,10 +132,14 @@ The dequant + BF16 GEMM path avoids that bug, keeps host->GPU traffic quantized
 is the shipping native path. A fused FP4 MMA can replace it once the CUTLASS
 atom is fixed, behind the same `use_native` seam.
 
-## End-to-end validation & performance
+## End-to-end validation & historical snapshot
 
 Hardware: 4x RTX PRO 6000 Blackwell (SM120), mp4 tensor parallel, docker
 v4flash image. Prompt: "identity" (8-token prompt, 64 decode tokens).
+
+The throughput and memory numbers below are historical snapshot values only;
+they are not a current guarantee because the exact provenance was not recorded
+in-repo.
 
 ### Correctness
 - Native FP4 expert forward is **bit-exact** to the reference dequant path
@@ -181,9 +186,10 @@ error 0.0).
 | 64           |                     148 us |              210 us |             397 us |
 | 512 (prefill)|                     213 us |              323 us |             772 us |
 
-The native path (dequant once -> cuBLAS BF16 GEMM) is **1.5-3.2x faster than
-tilelang** (the `use_native=False` default) and **2.3-3.6x faster** than a fused
-Triton MXFP4 GEMM, because cuBLAS/cuBLASLt BF16 GEMM outperforms hand-written
-Triton GEMM and the dequant overhead is small. Recommendation: prefer
-`use_native=True`. (A fused FP4 MMA would beat dequant+GEMM on memory traffic,
-but the CUTLASS SM120 `mx_float4_t` atom is currently unusable, see above.)
+The native path (dequant once -> cuBLAS BF16 GEMM) was measured at **1.5-3.2x
+faster than the explicit tilelang comparison path (`use_native=False`)** and **2.3-3.6x faster**
+than a fused Triton MXFP4 GEMM in that snapshot, because cuBLAS/cuBLASLt BF16
+GEMM outperforms hand-written Triton GEMM and the dequant overhead is small.
+Recommendation in that snapshot: prefer `use_native=True`. (A fused FP4 MMA
+would beat dequant+GEMM on memory traffic, but the CUTLASS SM120 `mx_float4_t`
+atom is currently unusable, see above.)

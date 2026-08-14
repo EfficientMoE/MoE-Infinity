@@ -43,11 +43,13 @@ class _FakeRuntimeEngine:
         engine: object,
         config: dict[str, object],
         tokenizer: object,
+        speculative_draft: object = None,
     ) -> None:
         self.model = model
         self.engine = engine
         self.config = config
         self.tokenizer = tokenizer
+        self.speculative_draft = speculative_draft
 
 
 class _FakeMoE:

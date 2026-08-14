@@ -1,13 +1,30 @@
+from typing import Optional, Protocol
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP
 
 
-class Qwen3MoEBlock(nn.Module):
-    layer_id = None
+class _ExpertExecutor(Protocol):
+    def dispatch_local(
+        self,
+        layer_id: Optional[int],
+        hidden_states: torch.Tensor,
+        router_mask: torch.Tensor,
+        router_weights: torch.Tensor,
+        router_logits: Optional[torch.Tensor] = None,
+        prefetcher: object = None,
+    ) -> None: ...
 
-    def __init__(self, config):
+    def wait_dispatch_local(self) -> torch.Tensor: ...
+
+
+class Qwen3MoEBlock(nn.Module):
+    layer_id: Optional[int] = None
+
+    def __init__(self, config: Qwen3MoeConfig):
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
@@ -25,8 +42,8 @@ class Qwen3MoEBlock(nn.Module):
             ]
         )
 
-        self.expert_executor = None
-        self.lib = None
+        self.expert_executor: Optional[_ExpertExecutor] = None
+        self.lib: Optional[object] = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
@@ -49,17 +66,20 @@ class Qwen3MoEBlock(nn.Module):
         router_mask = torch.any(router_mask, dim=-1)
         routing_weights_mask = torch.sum(routing_weights_mask, dim=-1)
 
-        self.expert_executor.dispatch_local(
+        executor = self.expert_executor
+        if executor is None:
+            raise RuntimeError("Qwen3MoEBlock requires an expert executor")
+        executor.dispatch_local(
             self.layer_id,
             hidden_states,
             router_mask,
             routing_weights_mask,
             router_logits=router_logits,
         )
-        final_hidden_states = self.expert_executor.wait_dispatch_local()
+        final_hidden_states = executor.wait_dispatch_local()
 
         final_hidden_states = final_hidden_states.view(
             batch_size, sequence_length, hidden_dim
         ).to(hidden_states.dtype)
 
-        return final_hidden_states, router_logits
+        return final_hidden_states

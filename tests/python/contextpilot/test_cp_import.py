@@ -1,5 +1,9 @@
 import importlib
 
+import pytest
+
+pytest.importorskip("contextpilot", reason="contextpilot package not installed")
+
 
 def test_contextpilot_import_and_instantiation_with_moe_infinity():
     contextpilot = importlib.import_module("contextpilot")

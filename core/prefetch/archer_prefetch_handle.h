@@ -17,8 +17,10 @@ class ArcherPrefetchHandle {
 
   bool IsTensorOffloaded(const std::uint32_t tensor_id);
 
-  void AcquireTensor(std::uint64_t& request_id, torch::Tensor& buffer);
-  void ReleaseTensor(std::uint64_t& request_id, torch::Tensor& buffer);
+  void AcquireTensor(std::uint64_t& request_id, torch::Tensor& buffer,
+                     std::uint32_t explicit_id = UINT32_MAX);
+  void ReleaseTensor(std::uint64_t& request_id, torch::Tensor& buffer,
+                     std::uint32_t explicit_id = UINT32_MAX);
   void PrefetchTensors(std::uint64_t& request_id,
                        const std::vector<std::uint32_t>& buffer);
   void FetchTensors(std::uint64_t& request_id,
@@ -44,6 +46,11 @@ class ArcherPrefetchHandle {
   void SetTopology(const std::vector<
                    std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
                        topology);
+  void SetTopologyV2(
+      const std::vector<
+          std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
+                     std::vector<std::uint64_t>>>& topology);
+  std::vector<std::tuple<std::uint64_t, bool, int>> GetTopologySnapshot();
   void UpdateTensorMap(std::uint64_t old_ptr, std::uint64_t new_ptr);
   bool IsTensorIndexInitialized() const;
   bool IsTensorOnDevice(const torch::Tensor& tensor) const;
