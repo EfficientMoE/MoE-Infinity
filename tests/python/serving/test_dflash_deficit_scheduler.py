@@ -6,6 +6,7 @@ import types
 from pathlib import Path
 
 import pytest
+import torch
 
 ROOT = Path(__file__).resolve().parents[3]
 ROOT_STR = str(ROOT)
@@ -33,11 +34,11 @@ def _load_module(module_name: str, file_path: Path):
 _ensure_package("moe_infinity", ROOT / "moe_infinity")
 _ensure_package("moe_infinity.serving", ROOT / "moe_infinity" / "serving")
 
-_ = _load_module(
+_SEQUENCE_MODULE = _load_module(
     "moe_infinity.serving.sequence",
     ROOT / "moe_infinity" / "serving" / "sequence.py",
 )
-_ = _load_module(
+_KV_CACHE_MODULE = _load_module(
     "moe_infinity.serving.kv_cache",
     ROOT / "moe_infinity" / "serving" / "kv_cache.py",
 )
@@ -53,6 +54,44 @@ _SCHEDULER_MODULE = _load_module(
 Deficit2D = _SCHEDULER_MODULE.Deficit2D
 VerifyDemand = _SCHEDULER_MODULE.VerifyDemand
 admit_verify_demands = _SCHEDULER_MODULE.admit_verify_demands
+Scheduler = _SCHEDULER_MODULE.Scheduler
+PagedKVCache = _KV_CACHE_MODULE.PagedKVCache
+SamplingParams = _SEQUENCE_MODULE.SamplingParams
+SequenceData = _SEQUENCE_MODULE.SequenceData
+SequenceGroup = _SEQUENCE_MODULE.SequenceGroup
+
+
+def _make_cache(*, num_blocks: int = 8) -> object:
+    return PagedKVCache(
+        num_blocks=num_blocks,
+        block_size=4,
+        num_layers=1,
+        num_heads=2,
+        head_dim=8,
+        dtype=torch.float16,
+        device=torch.device("cpu"),
+    )
+
+
+def _make_group(request_id: str, seq_id: int, prompt_len: int) -> object:
+    sequence = SequenceData(
+        seq_id=seq_id,
+        prompt_token_ids=list(range(prompt_len)),
+        sampling_params=SamplingParams(),
+    )
+    return SequenceGroup(request_id=request_id, sequences=[sequence])
+
+
+def _verify_scheduler() -> object:
+    return Scheduler(
+        _make_cache(),
+        max_batch_size=8,
+        max_tokens_per_step=128,
+        verify_token_budget=64,
+        verify_expert_byte_budget=200,
+        verify_token_deficit_cap=64,
+        verify_expert_byte_deficit_cap=360,
+    )
 
 
 def test_inflight_is_seated_before_new_rounds() -> None:
@@ -187,3 +226,57 @@ def test_admission_is_side_effect_free() -> None:
     assert demands[0] == VerifyDemand(1, tokens=8, expert_bytes=40)
     assert budget == Deficit2D(16, 80)
     assert carried == Deficit2D(0, 0)
+
+
+def test_scheduler_admits_verify_demands_by_tokens_and_bytes() -> None:
+    scheduler = _verify_scheduler()
+    scheduler.set_verify_demand(1, tokens=16, expert_bytes=80, in_flight=True)
+    scheduler.set_verify_demand(2, tokens=16, expert_bytes=80, in_flight=False)
+    scheduler.set_verify_demand(3, tokens=16, expert_bytes=180, in_flight=False)
+
+    output = scheduler.schedule()
+
+    assert output.verify_seq_ids == [1, 2]
+    assert output.draft_seq_ids == [3]
+    assert output.num_verify_tokens == 32
+    assert output.num_verify_expert_bytes == 160
+    assert scheduler.carried_verify_deficit == Deficit2D(32, 40)
+
+
+def test_scheduler_verify_is_disabled_without_budgets() -> None:
+    scheduler = Scheduler(
+        _make_cache(), max_batch_size=8, max_tokens_per_step=128
+    )
+    scheduler.set_verify_demand(1, tokens=16, expert_bytes=80, in_flight=True)
+
+    output = scheduler.schedule()
+
+    assert output.verify_seq_ids == []
+    assert output.draft_seq_ids == []
+    assert output.num_verify_tokens == 0
+    assert output.num_verify_expert_bytes == 0
+
+
+def test_scheduler_clear_verify_demand_removes_it() -> None:
+    scheduler = _verify_scheduler()
+    scheduler.set_verify_demand(1, tokens=16, expert_bytes=80, in_flight=True)
+    scheduler.set_verify_demand(2, tokens=16, expert_bytes=80, in_flight=False)
+    scheduler.clear_verify_demand(2)
+
+    output = scheduler.schedule()
+
+    assert output.verify_seq_ids == [1]
+    assert output.draft_seq_ids == []
+
+
+def test_ordinary_prefill_output_has_empty_verify_lists() -> None:
+    scheduler = _verify_scheduler()
+    scheduler.add_request(_make_group("req-1", 1, 3))
+
+    output = scheduler.schedule()
+
+    assert output.prefill_seq_ids == [1]
+    assert output.draft_seq_ids == []
+    assert output.verify_seq_ids == []
+    assert output.num_verify_tokens == 0
+    assert output.num_verify_expert_bytes == 0

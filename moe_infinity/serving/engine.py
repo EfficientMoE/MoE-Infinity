@@ -132,6 +132,18 @@ class ContinuousBatchingEngine:
             max_tokens_per_step=self._get_int_config(
                 "max_tokens_per_step", 2048
             ),
+            verify_token_budget=self._get_optional_int_config(
+                "verify_token_budget"
+            ),
+            verify_expert_byte_budget=self._get_optional_int_config(
+                "verify_expert_byte_budget"
+            ),
+            verify_token_deficit_cap=self._get_optional_int_config(
+                "verify_token_deficit_cap"
+            ),
+            verify_expert_byte_deficit_cap=self._get_optional_int_config(
+                "verify_expert_byte_deficit_cap"
+            ),
         )
         self.model_runner = ModelRunner(model, engine, device=self.device)
         self.sampler = Sampler()
@@ -784,6 +796,16 @@ class ContinuousBatchingEngine:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{key} must be a float-compatible value")
         return float(value)
+
+    def _get_optional_int_config(self, key: str) -> Optional[int]:
+        if key not in self.config:
+            return None
+        value = self.config[key]
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{key} must be an integer value")
+        return value
 
     def _get_int_config(self, key: str, default: Optional[int] = None) -> int:
         if default is None:
