@@ -195,6 +195,8 @@ torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
   DLOG_FATAL_IF(batch_size > kMaxTokens || batch_size <= 0,
                 "batch_size should be (0,", kMaxTokens, "] , but got",
                 batch_size);
+  TORCH_CHECK(hidden_states.scalar_type() == input_.scalar_type(),
+              "hidden_states dtype must match expert input dtype");
 
   // Use async copy with the provided execution stream
   cudaMemcpyAsync(input_.data_ptr(), hidden_states.data_ptr(),
