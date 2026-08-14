@@ -1,7 +1,7 @@
 import importlib.machinery
 import sys
 import types
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import torch
 
@@ -32,6 +32,18 @@ def make_gpt_oss_config():
     cfg.head_dim = 16
     cfg.vocab_size = 256
     return cfg
+
+
+def _deterministic_mlp():
+    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+
+    torch.manual_seed(137)
+    mlp = SyncGptOssMLP(make_gpt_oss_config())
+    for parameter in mlp.parameters():
+        if parameter.numel():
+            torch.nn.init.normal_(parameter, std=0.01)
+    mlp.layer_id = 1
+    return mlp
 
 
 def test_sync_gpt_oss_mlp_instantiation():
@@ -104,3 +116,59 @@ def test_sync_gpt_oss_mlp_router_has_bias():
     assert mlp.router.bias.shape == (
         config.num_local_experts,
     ), f"Router bias shape must be ({config.num_local_experts},)"
+
+
+def test_sync_gpt_oss_mlp_dispatches_when_executor_is_injected():
+    mlp = _deterministic_mlp()
+    hidden = torch.randn(1, 2, 64)
+    expected = torch.randn(2, 64)
+    executor = Mock()
+    executor.wait_dispatch_local.return_value = expected
+    mlp.expert_executor = executor
+
+    output, router_logits = mlp(hidden)
+
+    assert output.shape == hidden.shape
+    assert torch.equal(output.view(2, 64), expected)
+    executor.dispatch_local.assert_called_once()
+    args = executor.dispatch_local.call_args
+    assert args.args[0] == 1
+    assert args.args[1].shape == (2, 64)
+    assert args.args[2].shape == (2, 4)
+    assert args.args[3].shape == (2, 4)
+    assert torch.equal(args.kwargs["router_logits"], router_logits)
+    executor.wait_dispatch_local.assert_called_once_with()
+
+
+def test_sync_gpt_oss_mlp_resident_path_matches_existing_forward():
+    mlp = _deterministic_mlp()
+    hidden = torch.randn(1, 2, 64)
+
+    with torch.no_grad():
+        output, router_logits = mlp(hidden)
+        hidden_flat = hidden.view(-1, hidden.shape[-1])
+        routing_weights = torch.softmax(
+            router_logits, dim=-1, dtype=torch.float32
+        )
+        routing_weights, selected_experts = torch.topk(
+            routing_weights, mlp.top_k, dim=-1
+        )
+        routing_weights = routing_weights / routing_weights.sum(
+            dim=-1, keepdim=True
+        )
+        expected = torch.zeros_like(hidden_flat)
+        for expert_idx in range(mlp.num_experts):
+            token_positions, topk_positions = torch.where(
+                selected_experts == expert_idx
+            )
+            if token_positions.numel() == 0:
+                continue
+            expert_output = mlp._expert_forward(
+                hidden_flat[token_positions], expert_idx
+            )
+            weights = routing_weights[token_positions, topk_positions].to(
+                hidden.dtype
+            )
+            expected[token_positions] += weights.unsqueeze(-1) * expert_output
+
+    assert torch.equal(output, expected.view_as(hidden))

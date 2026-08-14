@@ -174,6 +174,33 @@ _GPT_OSS_EXPERT_FIELDS = (
     "down_proj_bias",
 )
 
+_GPT_OSS_RESIDENT_RATIO = 0.9
+
+
+def _gpt_oss_offload_enabled(model_type, archer_config):
+    if model_type != "gpt_oss":
+        return True
+    return archer_config.device_memory_ratio < _GPT_OSS_RESIDENT_RATIO
+
+
+def _wire_expert_collaborators(
+    module,
+    enabled,
+    *,
+    expert_executor,
+    expert_prefetcher,
+    expert_tracer,
+    expert_predictor,
+    expert_tensor_map,
+):
+    if not enabled:
+        return
+    module.expert_executor = expert_executor
+    module.expert_prefetcher = expert_prefetcher
+    module.expert_tracer = expert_tracer
+    module.expert_predictor = expert_predictor
+    module.expert_tensor_map = expert_tensor_map
+
 
 def _expand_gpt_oss_packed_experts(state_dict, config):
     if getattr(config, "model_type", "") != "gpt_oss":
@@ -542,6 +569,9 @@ class OffloadEngine(object):
         )
 
         self.archer_config = _archer_config
+        self.gpt_oss_offload_enabled = _gpt_oss_offload_enabled(
+            getattr(self.config, "model_type", ""), self.archer_config
+        )
         if _archer_config.trace_path is not None:
             self.expert_tracer.load_trace(_archer_config.trace_path)
 
@@ -1078,12 +1108,19 @@ class OffloadEngine(object):
                         module.is_gptq = is_gptq_quantized(self.config)
                         self.expert_modules.append(module)
 
-                        if not isinstance(module, SyncGptOssMLP):
-                            module.expert_executor = self.expert_executor
-                            module.expert_prefetcher = self.expert_prefetcher
-                            module.expert_tracer = self.expert_tracer
-                            module.expert_predictor = self.expert_predictor
-                            module.expert_tensor_map = self.expert_tensor_map
+                        use_dispatcher = (
+                            not isinstance(module, SyncGptOssMLP)
+                            or self.gpt_oss_offload_enabled
+                        )
+                        _wire_expert_collaborators(
+                            module,
+                            use_dispatcher,
+                            expert_executor=self.expert_executor,
+                            expert_prefetcher=self.expert_prefetcher,
+                            expert_tracer=self.expert_tracer,
+                            expert_predictor=self.expert_predictor,
+                            expert_tensor_map=self.expert_tensor_map,
+                        )
 
                         module.lib = self.prefetch_lib
 
@@ -1101,7 +1138,10 @@ class OffloadEngine(object):
                         if self._is_shared_expert_param(_name):
                             del self.name_id_map[_name]
 
-                if getattr(self.config, "model_type", "") == "gpt_oss":
+                if (
+                    getattr(self.config, "model_type", "") == "gpt_oss"
+                    and not self.gpt_oss_offload_enabled
+                ):
                     self._load_resident_gpt_oss(model)
 
                 self.setup_archer_hooks(model)
