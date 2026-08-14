@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from dataclasses import dataclass
 from math import ceil
 from typing import Optional, Protocol
 
@@ -16,6 +17,93 @@ class CPAwareKVManager(Protocol):
     def predict_prefix_reuse(
         self, request_id: str, token_ids: list[int]
     ) -> float: ...
+
+
+@dataclass(frozen=True)
+class Deficit2D:
+    tokens: int
+    expert_bytes: int
+
+
+@dataclass(frozen=True)
+class VerifyDemand:
+    seq_id: int
+    tokens: int
+    expert_bytes: int
+    in_flight: bool = False
+
+
+@dataclass(frozen=True)
+class VerifyAdmission:
+    seated_ids: tuple[int, ...]
+    admitted_ids: tuple[int, ...]
+    carried: Deficit2D
+
+
+def _reject_negative(label: str, deficit: Deficit2D) -> None:
+    if deficit.tokens < 0 or deficit.expert_bytes < 0:
+        raise ValueError(
+            f"{label} dimensions must be non-negative; got {deficit}"
+        )
+
+
+def admit_verify_demands(
+    demands: list[VerifyDemand],
+    budget: Deficit2D,
+    carried: Deficit2D,
+    deficit_cap: Deficit2D,
+) -> VerifyAdmission:
+    _reject_negative("budget", budget)
+    _reject_negative("carried", carried)
+    _reject_negative("deficit_cap", deficit_cap)
+    for demand in demands:
+        if demand.tokens < 0 or demand.expert_bytes < 0:
+            raise ValueError(
+                f"demand {demand.seq_id} dimensions must be non-negative; "
+                f"got tokens={demand.tokens}, "
+                f"expert_bytes={demand.expert_bytes}"
+            )
+
+    if demands:
+        largest_tokens = max(demand.tokens for demand in demands)
+        largest_bytes = max(demand.expert_bytes for demand in demands)
+        if (
+            deficit_cap.tokens < largest_tokens
+            or deficit_cap.expert_bytes < largest_bytes
+        ):
+            raise ValueError(
+                "deficit_cap must be >= the largest single demand in each "
+                f"dimension; cap={deficit_cap}, largest_tokens="
+                f"{largest_tokens}, largest_expert_bytes={largest_bytes}"
+            )
+
+    seated_ids = tuple(demand.seq_id for demand in demands if demand.in_flight)
+    seated_tokens = sum(demand.tokens for demand in demands if demand.in_flight)
+    seated_bytes = sum(
+        demand.expert_bytes for demand in demands if demand.in_flight
+    )
+
+    pool_tokens = budget.tokens + carried.tokens - seated_tokens
+    pool_bytes = budget.expert_bytes + carried.expert_bytes - seated_bytes
+
+    admitted_ids: list[int] = []
+    for demand in demands:
+        if demand.in_flight:
+            continue
+        if demand.tokens <= pool_tokens and demand.expert_bytes <= pool_bytes:
+            pool_tokens -= demand.tokens
+            pool_bytes -= demand.expert_bytes
+            admitted_ids.append(demand.seq_id)
+
+    carried_out = Deficit2D(
+        tokens=min(max(0, pool_tokens), deficit_cap.tokens),
+        expert_bytes=min(max(0, pool_bytes), deficit_cap.expert_bytes),
+    )
+    return VerifyAdmission(
+        seated_ids=seated_ids,
+        admitted_ids=tuple(admitted_ids),
+        carried=carried_out,
+    )
 
 
 class Scheduler:
@@ -389,4 +477,11 @@ class Scheduler:
 RequestScheduler = Scheduler
 
 
-__all__ = ["Scheduler", "RequestScheduler"]
+__all__ = [
+    "Deficit2D",
+    "RequestScheduler",
+    "Scheduler",
+    "VerifyAdmission",
+    "VerifyDemand",
+    "admit_verify_demands",
+]
