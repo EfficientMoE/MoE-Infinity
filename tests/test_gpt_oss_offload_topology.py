@@ -4,6 +4,8 @@ import torch
 
 from moe_infinity.runtime.model_offload import (
     _expand_gpt_oss_packed_experts,
+    _gpt_oss_expert_groups,
+    _make_expert_tensor_map,
 )
 
 
@@ -84,3 +86,46 @@ def test_expansion_rejects_incomplete_layer():
         assert "down_proj_scales" in str(exc)
     else:
         raise AssertionError("incomplete GPT-OSS packed layer was accepted")
+
+
+def _synthetic_name_id_map(layers=2, experts=128):
+    mapping = {}
+    tensor_id = 100
+    for layer_id in range(layers):
+        for expert_idx in range(experts):
+            prefix = f"model.layers.{layer_id}.mlp.experts.{expert_idx}"
+            for field in (
+                "gate_up_proj_blocks",
+                "gate_up_proj_scales",
+                "gate_up_proj_bias",
+                "down_proj_blocks",
+                "down_proj_scales",
+                "down_proj_bias",
+            ):
+                mapping[f"{prefix}.{field}"] = tensor_id
+                tensor_id += 1
+    return mapping
+
+
+def test_gpt_oss_topology_has_six_ordered_ids_for_every_expert():
+    config = _config()
+    name_id_map = _synthetic_name_id_map()
+
+    groups = _gpt_oss_expert_groups(name_id_map, config)
+
+    assert len(groups) == 2
+    assert all(len(experts) == 128 for _, experts in groups)
+    assert all(len(ids) == 6 for _, experts in groups for ids in experts)
+    first_ids = groups[0][1][0]
+    assert first_ids == [100, 101, 102, 103, 104, 105]
+
+
+def test_expert_tensor_map_has_128_times_num_layers_entries():
+    config = _config()
+    name_id_map = _synthetic_name_id_map()
+
+    tensor_map = _make_expert_tensor_map(name_id_map, config)
+
+    assert len(tensor_map) == 128 * config.num_hidden_layers
+    assert tensor_map[(0, 0)] == 100
+    assert tensor_map[(1, 127)] == max(name_id_map.values()) - 5

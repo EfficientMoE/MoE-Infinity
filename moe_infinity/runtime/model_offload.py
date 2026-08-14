@@ -218,6 +218,53 @@ def _expand_gpt_oss_packed_experts(state_dict, config):
             del state_dict[f"{prefix}.{field}"]
 
 
+def _gpt_oss_expert_groups(name_id_map, config):
+    fields = {name: index for index, name in enumerate(_GPT_OSS_EXPERT_FIELDS)}
+    grouped = {}
+    for name, tensor_id in name_id_map.items():
+        layer_id, expert_id = parse_expert_id(name, config)
+        if layer_id is None or expert_id is None:
+            continue
+        field = name.rsplit(".", 1)[-1]
+        if field not in fields:
+            continue
+        slots = grouped.setdefault(
+            (layer_id, expert_id), [None] * len(_GPT_OSS_EXPERT_FIELDS)
+        )
+        slots[fields[field]] = tensor_id
+
+    topology = []
+    for layer_id in range(config.num_hidden_layers):
+        experts = []
+        for expert_id in range(config.num_local_experts):
+            ids = grouped.get((layer_id, expert_id))
+            if ids is None or any(tensor_id is None for tensor_id in ids):
+                raise ValueError(
+                    f"Missing GPT-OSS expert tensors for layer={layer_id}, "
+                    f"expert={expert_id}"
+                )
+            experts.append(ids)
+        topology.append((f"model.layers.{layer_id}.mlp.experts", experts))
+    return topology
+
+
+def _make_expert_tensor_map(name_id_map, config):
+    if getattr(config, "model_type", "") == "gpt_oss":
+        return {
+            (layer_id, expert_id): tensor_ids[0]
+            for layer_id, (_, experts) in enumerate(
+                _gpt_oss_expert_groups(name_id_map, config)
+            )
+            for expert_id, tensor_ids in enumerate(experts)
+        }
+    result = {}
+    for name, tensor_id in name_id_map.items():
+        layer_id, expert_id = parse_expert_id(name, config)
+        if expert_id is not None:
+            result[(layer_id, expert_id)] = tensor_id
+    return result
+
+
 def _compute_config_fingerprint(config: object) -> str:
     fields = [
         "model_type",
@@ -841,11 +888,9 @@ class OffloadEngine(object):
                     model.model.encoder.embed_tokens.weight.ar_id = 0
                     model.model.decoder.embed_tokens.weight.ar_id = 0
 
-                self.expert_tensor_map = dict()
-                for name, id in self.name_id_map.items():
-                    layer_id, expert_id = parse_expert_id(name, self.config)
-                    if expert_id is not None:
-                        self.expert_tensor_map[(layer_id, expert_id)] = id
+                self.expert_tensor_map = _make_expert_tensor_map(
+                    self.name_id_map, self.config
+                )
                 self.expert_prefetcher.expert_tensor_map = (
                     self.expert_tensor_map
                 )
@@ -1164,6 +1209,13 @@ class OffloadEngine(object):
         name_lst = []
         ret_dict = {}
 
+        if getattr(self.config, "model_type", "") == "gpt_oss":
+            gpt_oss_topology = _gpt_oss_expert_groups(
+                self.name_id_map, self.config
+            )
+            name_lst.extend(name for name, _ in gpt_oss_topology)
+            ret_dict.update(dict(gpt_oss_topology))
+
         for name, _ in model.named_parameters(recurse=True):
             match = re.search(r"\d+", name)
             if name not in self.name_id_map:
@@ -1360,7 +1412,7 @@ class OffloadEngine(object):
                 key = key.split(".")[0]
                 output_device_index = 0
 
-            if "expert" in key and self.config.model_type != "gpt_oss":
+            if "expert" in key:
                 for expert_idx, expert_tensors in enumerate(tensors):
                     expert_key = (
                         f"{key}.expert_{expert_idx}"
