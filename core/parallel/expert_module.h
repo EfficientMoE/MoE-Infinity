@@ -14,7 +14,8 @@ enum class ExpertType {
   NllbMoeDenseActDense = 2,
   FSGPTMoeDenseActDense = 3,
   MixtralMoeDenseActDense = 4,
-  DeepSeekMoeDenseActDense = 5
+  DeepSeekMoeDenseActDense = 5,
+  GptOssMoeDenseActDense = 6
 };
 
 // Activation functions enum
@@ -172,6 +173,7 @@ using NllbMoeDenseActDense = Expert<ExpertType::NllbMoeDenseActDense>;
 using FSGPTMoEDenseActDense = Expert<ExpertType::FSGPTMoeDenseActDense>;
 using MixtralMoEDenseActDense = Expert<ExpertType::MixtralMoeDenseActDense>;
 using DeepSeekMoEDenseActDense = Expert<ExpertType::DeepSeekMoeDenseActDense>;
+struct GptOssMoeDenseActDense : public torch::nn::Module {};
 
 #ifndef EXPERT_TYPE
   #define EXPERT_TYPE 0
@@ -181,6 +183,7 @@ using DeepSeekMoEDenseActDense = Expert<ExpertType::DeepSeekMoeDenseActDense>;
 #define FSGPT_MOE_DENSE_ACT_DENSE 3
 #define MIXTRAL_MOE_DENSE_ACT_DENSE 4
 #define DEEPSEEK_MOE_DENSE_ACT_DENSE 5
+#define GPT_OSS_MOE_DENSE_ACT_DENSE 6
 
 // forward declarations
 torch::Tensor launch_fused_moe_ffn(torch::Tensor hidden,  // [M, K]
@@ -194,6 +197,7 @@ struct MoEMLP : public torch::nn::Module {
   torch::Tensor forward(torch::Tensor hidden_states, cudaStream_t stream);
 
   void SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids);
+  void DequantMxfp4Params(cudaStream_t stream);
 
  private:
   void ForwardHelper(cudaStream_t stream);
@@ -201,6 +205,7 @@ struct MoEMLP : public torch::nn::Module {
  private:
   std::vector<torch::Tensor> buffer_;
   std::vector<torch::Tensor> param_;
+  std::vector<torch::Tensor> gpt_oss_param_;
 
   at::cuda::CUDAGraph graph_;
   int warmup_count_ = 5;

@@ -96,6 +96,9 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
         case DEEPSEEK_MOE_DENSE_ACT_DENSE:
           experts_[i][j]->module = new DeepSeekMoEDenseActDense(dtype);
           break;
+        case GPT_OSS_MOE_DENSE_ACT_DENSE:
+          experts_[i][j]->module = new GptOssMoeDenseActDense();
+          break;
         default:
           DLOG_FATAL("ExpertDispatcher::ExpertDispatcher: unknown expert type ",
                      expert_type);
@@ -518,6 +521,10 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       c10::cuda::CUDAStream torch_stream =
           c10::cuda::getStreamFromExternal(stream, gpu_id);
       c10::cuda::CUDAStreamGuard guard(torch_stream);
+
+      if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
+        modules_[thread_idx]->DequantMxfp4Params(stream);
+      }
 
       torch::Tensor output;
       {
