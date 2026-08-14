@@ -7,7 +7,6 @@ def test_native_mxfp4_gate_up_dequant_is_exact():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     from moe_infinity._v4_fp4 import mxfp4_dequant
-
     from moe_infinity.kernel.mxfp4_gemm import mxfp4_dequantize
 
     torch.manual_seed(137)
