@@ -766,9 +766,7 @@ class OffloadEngine(object):
                             state_dict = torch.load(ckpt)
 
                         _remap_v5_batched_experts(state_dict, self.config)
-                        _expand_gpt_oss_packed_experts(
-                            state_dict, self.config
-                        )
+                        _expand_gpt_oss_packed_experts(state_dict, self.config)
 
                         is_gptq_ckpt = is_gptq_quantized(self.config)
                         self._cast_state_dict_tensors(
