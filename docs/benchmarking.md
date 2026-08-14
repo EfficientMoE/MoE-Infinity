@@ -1,67 +1,67 @@
 # Benchmarking MoE-Infinity
 
-This guide explains how to correctly measure throughput and latency when running MoE-Infinity, and how to make fair comparisons with other inference frameworks.
+This guide covers the benchmark entry points under `benchmarks/`, labels each one as a stable user workflow, contributor-only spike, helper or report tool, or excluded helper module, and keeps the TTFT vs decode guidance in one place.
 
-## Key Terminology
+If you want the cross-framework comparison table, start with [Benchmark reproduction](benchmark_reproduction.md). For the expert I/O profiler flow, see [benchmarks/expert_io_microbench/README.md](../benchmarks/expert_io_microbench/README.md). For ContextPilot and DeepSeek-V4-Flash background, see [ContextPilot](contextpilot/README.md) and [DeepSeek-V4-Flash](../moe_infinity/models/deepseek_v4/README.md).
+
+## Key terminology
 
 | Term | Definition |
-|------|-----------|
-| **TTFT** (Time To First Token) | Time from submitting a prompt until the first generated token is produced. This covers prompt encoding (prefill). |
-| **ITL** (Inter-Token Latency) | Average time between consecutive generated tokens during the decode phase. |
-| **Decode Throughput** | Tokens generated per second during the decode phase only (excludes prefill). |
-| **End-to-End Throughput** | Total tokens generated divided by total wall-clock time (includes prefill). |
-| **Prefill** | The initial phase where the model processes all input tokens to build the KV cache. This is compute-bound and typically much faster per-token than decode. |
-| **Decode** | The autoregressive phase where the model generates one token at a time. This is memory-bandwidth-bound in MoE offloading scenarios. |
+| --- | --- |
+| TTFT (Time To First Token) | Time from prompt submission until the first generated token appears. This includes prefill. |
+| ITL (Inter-Token Latency) | Average time between generated decode tokens. |
+| Decode throughput | Tokens per second during decode only. This excludes prefill. |
+| End-to-end throughput | Total generated tokens divided by total wall clock time. This includes prefill. |
+| Prefill | The initial phase where the model processes the prompt and builds KV cache state. |
+| Decode | The autoregressive phase where the model emits one token at a time. |
+| Peak memory | Maximum GPU memory observed during the run. |
 
-## Common Measurement Pitfalls
+## Measurement rules
 
-### Pitfall 1: Including Prefill Time in Decode Throughput
+- Keep the model checkpoint, quantization, residency, offload path, and `device_memory_ratio` fixed when you compare runs.
+- Keep the GPU, CPU, RAM, storage, and software stack fixed too, including CUDA, PyTorch, and Transformers versions.
+- Use the same prompt length, output length, batch size, and concurrency for both baselines.
+- Warm up once before you start timing.
+- Separate TTFT from decode throughput. If you mix them, your numbers stop being comparable.
+- Compare like with like: p50-to-p50 or average-to-average. Do not compare a percentile on one side with an average on the other.
+- Record the exact commit, command line, and output file path with every result.
+- For cross-framework comparisons, use the same metric on both sides. For example, compare MoE-Infinity decode throughput with llama.cpp `eval time`, not `prompt eval time`.
 
-The most common mistake is dividing total generated tokens by total wall-clock time (which includes prefill). This conflates two fundamentally different phases and produces misleadingly low throughput numbers.
+## Using the StopWatch utility
 
-```python
-# WRONG: This includes prefill time in the throughput calculation
-start_time = time.time()
-output_ids = model.generate(input_ids, max_new_tokens=256)
-elapsed = time.time() - start_time
-throughput = len(output_ids[0]) / elapsed  # Includes prefill -- NOT decode throughput
-```
+MoE-Infinity provides a `StopWatch` class in [`examples/interface_example.py`](../examples/interface_example.py) that separates prefill from decode timing through HuggingFace `TextStreamer`.
 
-### Pitfall 2: Not Warming Up the Expert Cache
-
-The first inference run loads experts from disk into CPU memory and then transfers them to GPU. Subsequent runs benefit from cached experts. Always run at least one warmup request before measuring.
-
-### Pitfall 3: Comparing Different Metrics Across Frameworks
-
-When comparing with llama.cpp, vLLM, or other frameworks, ensure you are comparing the same metric. For example, llama.cpp reports separate `prompt eval time` and `eval time` -- use `eval time` for decode throughput comparison.
-
-## Using the StopWatch Utility
-
-MoE-Infinity provides a `StopWatch` class in [`examples/interface_example.py`](../examples/interface_example.py) that correctly separates prefill from decode timing by hooking into HuggingFace's `TextStreamer` callback.
-
-### How StopWatch Works
+### How StopWatch works
 
 ```
 generate() called
   |
   v
-put() called (1st time) --> start_prefilling = now
+put() called (1st time) -> start_prefilling = now
   |
   v
-put() called (2nd time) --> prefilling_time = now - start_prefilling
-                            start_decoding = now
-                            clear expert cache counts
+put() called (2nd time) -> prefilling_time = now - start_prefilling
+                           start_decoding = now
+                           clear expert cache counts
   |
   v
-put() called (3rd+ time) --> decoding_iterations++
+put() called (3rd+ time) -> decoding_iterations++
   |
   v
-end() called --> decoding_time = now - start_decoding
+end() called -> decoding_time = now - start_decoding
 ```
 
-The key insight: the `TextStreamer.put()` callback is invoked once per generated token. The first call marks the beginning of prefill, the second marks the first decoded token (end of prefill / start of decode), and all subsequent calls are decode iterations.
+The first callback marks the start of prefill. The second callback marks the first decoded token, which is the end of prefill and the start of decode.
 
-### Standalone Measurement Example
+If you want p50-style reporting from StopWatch, run multiple trials and take the median TTFT / E2E / decode-throughput values across runs. A single StopWatch run is a per-run measurement, not a percentile.
+
+### Standalone measurement example
+
+This example measures the current in-process synchronous `MoE.generate()` path.
+That method emits `DeprecationWarning` and is scheduled for removal, so treat
+the result as path-specific transition data. `MoE.serve()` is the recommended
+continuous-batching HTTP path, not a drop-in replacement for this in-process
+streamer benchmark.
 
 ```python
 import time
@@ -135,13 +135,51 @@ print(f"Per-token latency (decode):  {streamer.decoding_time / streamer.decoding
 print(f"Decode throughput:           {streamer.decoding_iterations / streamer.decoding_time:.2f} tokens/s")
 ```
 
-## Benchmark Scripts
+## Benchmark catalog
 
-MoE-Infinity includes ready-to-use benchmark scripts in [`benchmarks/serving/`](../benchmarks/serving/).
+| Workflow | Entry points | Purpose | Prerequisites | Metrics / output | Guide / status |
+| --- | --- | --- | --- | --- | --- |
+| Serving benchmarks | `benchmarks/serving/baseline_performance.py`<br>`benchmarks/serving/throughput.py`<br>`benchmarks/serving/latency.py`<br>`benchmarks/serving/memory.py`<br>`benchmarks/serving/kv_offload_benchmark.py` | Single request TTFT, throughput sweeps, concurrency latency, memory, and KV offload checks. | CUDA GPU, `transformers`, `moe_infinity`, model checkpoint, offload dir. | `ttft_ms`, `per_token_latency_ms`, `total_time_s`, `peak_gpu_memory_mb`, throughput per batch size, TTFT and ITL percentiles, expert hit rate, KV utilization, swap count. | Stable user workflow. Command examples are below. |
+| DeepSeek-V4-Flash ContextPilot A/B | `benchmarks/contextpilot/v4flash_ab.py`<br>`benchmarks/contextpilot/v4flash_ab_report.py` | A/B compare ContextPilot on DeepSeek-V4-Flash and emit a markdown GO/NO-GO report. | 4 GPUs in mp4 setup, official DeepSeek-V4 checkpoint, `torchrun`, pinned host RAM, `v4flash` image. | `ttft_p50`, `e2e_p50`, prompt token savings, decode tok/s, GO/NO-GO report. | Stable user workflow. See the DeepSeek-V4 guide and the ContextPilot guide. |
+| Serving validation and FlashInfer checks | `benchmarks/serving/ab_kernel_bench.py`<br>`benchmarks/serving/validate_flashinfer.py`<br>`benchmarks/serving/validate_batched_dispatch.py` | FlashInfer vs naive SDPA, FlashInfer import and correctness checks, batched dispatch feasibility. | CUDA GPU, FlashInfer for `validate_flashinfer.py`, source tree for dispatch analysis. | Speedup, GO/NO-GO summary, correctness checks, static interface analysis. | Contributor-only, experimental. Use before changing serving kernels or dispatch wiring. |
+| ContextPilot phase benchmarks | `benchmarks/contextpilot/baseline.py`<br>`benchmarks/contextpilot/phase_a_benchmark.py`<br>`benchmarks/contextpilot/phase_b_benchmark.py`<br>`benchmarks/contextpilot/phase_c_benchmark.py`<br>`benchmarks/contextpilot/compare_phases.py`<br>`benchmarks/contextpilot/memory_profile.py`<br>`benchmarks/contextpilot/reorder_overhead.py`<br>`benchmarks/contextpilot/gen_longctx_workload.py` | Baseline generation, sidecar and middleware comparisons, scheduler phase comparisons, RSS profiling, reorder overhead, and workload generation. | Local or mocked ContextPilot, optional GPU or HTTP server for real phase runs, `psutil` for `memory_profile.py`. | TTFT p50/p90/p99, E2E p50/p90/p99, token savings, KV and expert hit rates, RSS over checkpoints, reorder p50/p90/p99, generated workload JSON. | Contributor-only, experimental. Use the ContextPilot integration guide. |
+| Expert I/O microbench | `benchmarks/expert_io_microbench/run_all.py`<br>`benchmarks/expert_io_microbench/bench_routing.py`<br>`benchmarks/expert_io_microbench/bench_transfer.py`<br>`benchmarks/expert_io_microbench/bench_compute_evict.py`<br>`benchmarks/expert_io_microbench/bench_bubble.py`<br>`benchmarks/expert_io_microbench/compare_baseline.py`<br>`benchmarks/expert_io_microbench/run_decision_profile.py`<br>`benchmarks/expert_io_microbench/nsys_parser.py` | Routing, transfer, compute, bubble, merged bandwidth analysis, NVTX baseline comparison, and nsys go or no-go profiling. | CUDA GPU, model cache for the scenario scripts, offload dir, `/dev/shm` for host-only mode, `nsys` for the comparison and decision tools. | Routing and cache lookup mean and percentiles, transfer timing and sync overhead, expert compute / eviction / queue coordination, bubble ratio, bandwidth utilization, overhead regression percent, transfer step times, verdict. | Contributor-only, experimental. Detailed runbook in `benchmarks/expert_io_microbench/README.md`. |
+| Cross-framework comparison suite | `benchmarks/comparison/run_all.sh`<br>`benchmarks/comparison/run_moe_infinity.py`<br>`benchmarks/comparison/run_vllm.py`<br>`benchmarks/comparison/run_llamacpp.py`<br>`benchmarks/comparison/aggregate_results.py` | Reproduce the single-GPU MoE-Infinity vs vLLM vs llama.cpp table. | Docker, GPU, offload dir, HuggingFace cache or access, benchmark images. | TTFT, per-token latency, peak GPU memory, per-model JSON, markdown, CSV, and JSON comparison tables. | Contributor-only, reproducibility workflow. See `docs/benchmark_reproduction.md`. |
+| Performance model and roofline | `benchmarks/performance_model/bench_glm.py`<br>`benchmarks/performance_model/report_glm.py` | Tiny GLM decode versus MTP validation and roofline report generation. | CUDA GPU, `MOE_GLM_TINY=1`, `matplotlib`, `numpy`, conference plot helper. | Decode tok/s, MTP tok/s, mean accept length, peak memory, arithmetic intensity, predicted bound, markdown report and plots. | Contributor-only, experimental. Helper modules are excluded below. |
+| Kernel microbenchmarks | `benchmarks/ab_fused_kernels.py`<br>`benchmarks/ab_kernels_micro.py`<br>`benchmarks/bench_p0_topk_softmax.py`<br>`benchmarks/mxfp4_benchmark.py` | Fused kernels on or off, kernel-only A/B, gating softmax microbench, and MXFP4 versus BF16 dequant. | CUDA GPU, optional `sglang-kernel`, optional FlashInfer, optional Triton or SM120 support depending on the script. | Median, p10, p90, p99 microseconds, speedups, correctness checks, TTFT, per-token latency, peak GPU memory, expert weight size. | Contributor-only, experimental. Do not treat these as production SLA numbers. |
+| Evaluation utility | `benchmarks/eval/perplexity.py` | Perplexity evaluation over Wikitext, C4, or PTB. | CUDA GPU, `datasets`, `transformers`, offload dir, local model cache. | Perplexity, NLL, sample count, elapsed seconds. | Contributor-only utility, useful for model checks, not serving validation. |
 
-### Baseline Performance (Single Request)
+## DFlash validation
 
-Measures single-request TTFT, per-token latency, and peak GPU memory across multiple prompt lengths.
+There is no standalone benchmark CLI under `benchmarks/` for DFlash. Use [`docs/dflash.md`](dflash.md) and the gated tests under `tests/python/dflash/` instead.
+
+Typical validation commands:
+
+```bash
+MOE_DFLASH_GPU=1 pytest -q tests/python/dflash/test_gpu_serving_dflash.py
+MOE_DFLASH_GPU=1 pytest -q tests/python/dflash/test_gpu_20b_dflash.py
+MOE_DFLASH_GPU=1 pytest -q tests/python/dflash/test_gpu_120b.py
+```
+
+## Excluded helpers and fixtures
+
+These files are support code, not standalone benchmark entry points.
+
+| Path group | Why excluded |
+| --- | --- |
+| `benchmarks/comparison/__init__.py`, `benchmarks/contextpilot/__init__.py`, `benchmarks/eval/__init__.py`, `benchmarks/expert_io_microbench/__init__.py`, `benchmarks/performance_model/__init__.py`, `benchmarks/serving/__init__.py` | Package markers only. |
+| `benchmarks/comparison/common.py` | Shared result dataclasses, model metadata, and loaders for the comparison suite. |
+| `benchmarks/contextpilot/benchmark_utils.py`, `benchmarks/contextpilot/dataset_utils.py`, `benchmarks/contextpilot/http_benchmark.py` | Shared ContextPilot helpers, workload builders, and HTTP utilities. |
+| `benchmarks/expert_io_microbench/harness.py`, `benchmarks/expert_io_microbench/stats.py` | Shared profiler and timing primitives for the expert I/O suite. |
+| `benchmarks/performance_model/model_config.py`, `benchmarks/performance_model/roofline.py`, `benchmarks/performance_model/types.py` | Pure model and roofline math, plus dataclasses. |
+
+## Serving benchmark commands
+
+These are the stable serving workflows referenced in the catalog above.
+
+### Baseline performance
+
+Measures single request TTFT, per-token latency, and peak GPU memory.
 
 ```bash
 python benchmarks/serving/baseline_performance.py \
@@ -151,14 +189,9 @@ python benchmarks/serving/baseline_performance.py \
     --output-json baseline_results.json
 ```
 
-**Output fields:**
-- `ttft_ms` -- Time to first token (milliseconds)
-- `per_token_latency_ms` -- Average per-token decode latency (milliseconds)
-- `peak_gpu_memory_mb` -- Peak GPU memory usage (MB)
+### Throughput sweep
 
-### Throughput Sweep
-
-Measures tokens/s across different batch sizes to find the throughput-optimal batch size.
+Measures decode throughput across batch sizes and can compare against the baseline JSON.
 
 ```bash
 python benchmarks/serving/throughput.py \
@@ -171,9 +204,9 @@ python benchmarks/serving/throughput.py \
     --output-json throughput_results.json
 ```
 
-### Latency Under Concurrency
+### Latency under concurrency
 
-Measures TTFT and ITL at p50/p90/p99 percentiles across different concurrency levels.
+Measures TTFT and ITL percentiles across concurrency levels.
 
 ```bash
 python benchmarks/serving/latency.py \
@@ -186,19 +219,28 @@ python benchmarks/serving/latency.py \
     --output-json latency_results.json
 ```
 
-**Output fields per concurrency level:**
-- `ttft_p50_ms`, `ttft_p90_ms`, `ttft_p99_ms` -- TTFT percentiles
-- `itl_p50_ms`, `itl_p90_ms`, `itl_p99_ms` -- Inter-token latency percentiles
-
-### Kernel Microbenchmark
-
-Compares gating kernel (top-k softmax) performance across implementations.
+### Memory and KV offload
 
 ```bash
-python benchmarks/bench_p0_topk_softmax.py --num-iters 200 --warmup 50
+python benchmarks/serving/memory.py \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir /path/to/offload/dir \
+    --batch-size 8 \
+    --prompt-length 128 \
+    --max-new-tokens 16 \
+    --output-json memory_results.json
+
+python benchmarks/serving/kv_offload_benchmark.py \
+    --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --offload-dir /path/to/offload/dir \
+    --num-requests 8 \
+    --prompt-length 256 \
+    --max-new-tokens 32 \
+    --enable-kv-offload \
+    --output-json kv_offload_results.json
 ```
 
-## Comparing with Other Frameworks
+## Comparing with other frameworks
 
 ### llama.cpp
 
@@ -209,32 +251,53 @@ llama_perf_context_print: prompt eval time = 2251.78 ms /  39 tokens (57.74 ms p
 llama_perf_context_print:        eval time = 122985.89 ms / 491 runs  (250.48 ms per token, 3.99 tokens per second)
 ```
 
-- **`prompt eval time`** = Prefill. Compare with MoE-Infinity's TTFT.
-- **`eval time`** = Decode. Compare with MoE-Infinity's decode time.
-- **`eval` tokens per second** = Decode throughput. Compare with `decoding_iterations / decoding_time`.
+- `prompt eval time` is prefill. Compare it with MoE-Infinity TTFT.
+- `eval time` is decode. Compare it with MoE-Infinity decode time.
+- `eval` tokens per second is decode throughput. Compare it with `decoding_iterations / decoding_time`.
 
-### vLLM / SGLang
+### vLLM and SGLang
 
-These frameworks report TTFT and ITL directly in their benchmark outputs. Use p50 values for comparison with MoE-Infinity's `StopWatch` measurements (which report averages).
+These frameworks report TTFT and ITL directly in their benchmark outputs. Compare p50-to-p50 or average-to-average. For MoE-Infinity `StopWatch`, collect multiple trials and compare the median of those runs when you want p50-style reporting.
 
-### Fair Comparison Checklist
+### Fair comparison checklist
 
-- [ ] Same model weights (not quantized vs full-precision)
-- [ ] Same GPU and same `device_memory_ratio` / memory allocation
-- [ ] Same number of GPU layers offloaded (e.g., llama.cpp's `-ngl` flag)
-- [ ] Prefill excluded from decode throughput in both frameworks
-- [ ] At least one warmup run before measurement
-- [ ] Same `max_new_tokens` / generation length
-- [ ] Same sampling strategy (`do_sample=False` / greedy for deterministic comparison)
+- Same model weights, not quantized versus full precision.
+- Same GPU and same `device_memory_ratio` or memory allocation.
+- Same number of GPU layers offloaded, for example llama.cpp `-ngl`.
+- Prefill excluded from decode throughput in both frameworks.
+- At least one warmup run before measurement.
+- Same `max_new_tokens` or generation length.
+- Same sampling strategy, `do_sample=False` or greedy for deterministic comparison.
+- Same batch or concurrency setting and the same prompt length.
+- Same baseline file or comparison table revision when you cite the result.
 
 ## Tuning `device_memory_ratio`
 
-The `device_memory_ratio` parameter controls what fraction of GPU memory is allocated for expert caching. The remainder is used by PyTorch for activations, KV cache, and other tensors.
+`device_memory_ratio` controls what fraction of GPU memory is allocated for expert caching. The remainder is used by PyTorch for activations, KV cache, and other tensors.
 
 | Value | Effect |
-|-------|--------|
-| **Higher** (e.g., 0.85) | More experts cached on GPU = fewer cache misses = faster decode. Risk: OOM if model activations are large. |
-| **Lower** (e.g., 0.50) | Fewer experts cached = more cache misses = slower decode. Benefit: more headroom for large prompts / batches. |
-| **Default** (0.75) | Good starting point for most single-GPU setups. |
+| --- | --- |
+| Higher, for example 0.85 | More experts cached on GPU, fewer cache misses, faster decode. Risk, OOM if model activations are large. |
+| Lower, for example 0.50 | Fewer experts cached, more cache misses, slower decode. Benefit, more headroom for large prompts or batches. |
+| Default 0.75 | Good starting point for most single-GPU setups. |
 
-If you encounter CUDA OOM errors, lower this value. If decode throughput is poor, try raising it (assuming no OOM).
+If you encounter CUDA OOM errors, lower this value. If decode throughput is poor, try raising it, assuming no OOM.
+
+## Reproducibility template
+
+Fill this in for every benchmark run:
+
+| Field | Value |
+| --- | --- |
+| Commit | `git rev-parse HEAD` |
+| Benchmark workflow | `benchmarks/serving/throughput.py` |
+| Model / checkpoint | `deepseek-ai/DeepSeek-V2-Lite-Chat` |
+| GPUs, CPU, RAM, storage | `1 x A100 80GB, 32 CPU cores, 256 GB RAM, NVMe SSD` |
+| CUDA, PyTorch, Transformers | `CUDA 12.8, PyTorch 2.5.x, Transformers 5.x` |
+| Residency / offload / quantization | `device_memory_ratio=0.75, offload_dir=/ssd/offload, FP16` |
+| Batch / concurrency | `batch_size=8` or `concurrency=4` |
+| Prompt / output lengths | `prompt_length=128, max_new_tokens=16` |
+| Warmup / iterations | `warmup=1, iters=50` |
+| Baseline | `baseline_results.json` or `comparison_table.md` |
+| Metrics captured | `ttft_ms, itl_p50_ms, decode_toks_per_s, peak_gpu_memory_mb` |
+| Notes | `host-only, nsys, FlashInfer on, sampled off` |

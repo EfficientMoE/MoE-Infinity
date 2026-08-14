@@ -504,14 +504,11 @@ bool ArcherTopologyHandle::IsFirstNode(const NodePtr& node) {
   return false;
 }
 
-void ArcherTopologyHandle::InitializeTopology(
-    const std::vector<
-        std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
-        topology) {
+void ArcherTopologyHandle::BuildTopologyFromSpecs(
+    const std::vector<StageSpec>& specs) {
   std::lock_guard<std::mutex> lock(mutex_);
   pipeline_.stages.clear();
   std::size_t node_id = 0;
-  std::size_t layer_id = 0;
   std::size_t last_sparse_layer_id = UINT64_MAX;
 
   size_t num_sparse_layers = 0;
@@ -519,12 +516,14 @@ void ArcherTopologyHandle::InitializeTopology(
 
   std::vector<NodePtr> all_nodes;
 
-  for (auto& stage : topology) {
-    auto& stage_tensors = std::get<1>(stage);
-    auto stage_ptr = std::make_shared<Stage>(stage_tensors.size() > 1);
+  for (std::size_t layer_id = 0; layer_id < specs.size(); ++layer_id) {
+    const auto& spec = specs[layer_id];
+    const auto& stage_tensors = *spec.tensor_groups;
+    auto stage_ptr = std::make_shared<Stage>(spec.is_sparse);
 
-    std::size_t expert_id = 0;
-    for (auto& tensor_ids : stage_tensors) {
+    for (std::size_t expert_id = 0; expert_id < stage_tensors.size();
+         ++expert_id) {
+      const auto& tensor_ids = stage_tensors[expert_id];
       auto node_ptr = std::make_shared<Node>();
       node_ptr->tensor_ids = tensor_ids;
       int64_t byte_size = 0;
@@ -540,8 +539,7 @@ void ArcherTopologyHandle::InitializeTopology(
       }
       node_ptr->byte_size = byte_size;
       node_ptr->id = node_id;
-      node_ptr->corr_id =
-          (layer_id & 0xFFFFFFFF) | ((expert_id & 0xFFFFFFFF) << 32);
+      node_ptr->corr_id = spec.corr_ids[expert_id];
       node_ptr->is_sparse = stage_ptr->is_sparse;
 
       all_nodes.push_back(node_ptr);
@@ -552,11 +550,9 @@ void ArcherTopologyHandle::InitializeTopology(
       stage_ptr->nodes.push_back(node_body_ptr);
 
       node_id++;
-      expert_id++;
     }
     pipeline_.stages.push_back(stage_ptr);
     auto current_layer_id = layer_id;
-    layer_id++;
 
     if (stage_ptr->is_sparse) {
       if (UINT64_MAX == last_sparse_layer_id) {
@@ -575,13 +571,6 @@ void ArcherTopologyHandle::InitializeTopology(
       num_sparse_layers++;
       num_experts = stage_ptr->nodes.size();
     }
-  }
-
-  // set last stage nodes corr_id higher 32 bits to be 0xFFFFFFFF
-  auto last_stage_ptr = pipeline_.stages.back();
-  for (auto& node_body : last_stage_ptr->nodes) {
-    node_body->node->corr_id =
-        (node_body->node->corr_id & 0xFFFFFFFF) | (UINT64_MAX << 32);
   }
 
   // output every tensor id in node
@@ -734,6 +723,68 @@ void ArcherTopologyHandle::InitializeTopology(
   }
 
   EnableTrace();
+}
+
+void ArcherTopologyHandle::InitializeTopology(
+    const std::vector<
+        std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
+        topology) {
+  std::vector<StageSpec> specs;
+  specs.reserve(topology.size());
+  for (std::size_t layer_id = 0; layer_id < topology.size(); ++layer_id) {
+    const auto& stage_tensors = std::get<1>(topology[layer_id]);
+    StageSpec spec;
+    spec.is_sparse = stage_tensors.size() > 1;
+    spec.tensor_groups = &stage_tensors;
+    spec.corr_ids.reserve(stage_tensors.size());
+    for (std::size_t expert_id = 0; expert_id < stage_tensors.size();
+         ++expert_id) {
+      spec.corr_ids.push_back((layer_id & 0xFFFFFFFF) |
+                              ((expert_id & 0xFFFFFFFF) << 32));
+    }
+    specs.push_back(std::move(spec));
+  }
+  if (!specs.empty()) {
+    for (auto& corr_id : specs.back().corr_ids) {
+      corr_id = (corr_id & 0xFFFFFFFF) | (UINT64_MAX << 32);
+    }
+  }
+  BuildTopologyFromSpecs(specs);
+}
+
+void ArcherTopologyHandle::InitializeTopologyV2(
+    const std::vector<
+        std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
+                   std::vector<std::uint64_t>>>& topology) {
+  std::vector<StageSpec> specs;
+  specs.reserve(topology.size());
+  for (const auto& stage : topology) {
+    StageSpec spec;
+    spec.is_sparse = std::get<1>(stage);
+    spec.tensor_groups = &std::get<2>(stage);
+    spec.corr_ids = std::get<3>(stage);
+    if (spec.corr_ids.size() != spec.tensor_groups->size()) {
+      DLOG_ERROR(
+          "InitializeTopologyV2: corr_ids count {} != tensor group count {}",
+          spec.corr_ids.size(), spec.tensor_groups->size());
+    }
+    specs.push_back(std::move(spec));
+  }
+  BuildTopologyFromSpecs(specs);
+}
+
+std::vector<std::tuple<std::uint64_t, bool, int>>
+ArcherTopologyHandle::GetTopologySnapshot() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<std::tuple<std::uint64_t, bool, int>> snapshot;
+  for (const auto& stage : pipeline_.stages) {
+    for (const auto& node_body : stage->nodes) {
+      const auto& node = node_body->node;
+      snapshot.emplace_back(static_cast<std::uint64_t>(node->corr_id),
+                            node->is_sparse, node->default_device.index());
+    }
+  }
+  return snapshot;
 }
 
 NodePtr ArcherTopologyHandle::GetNodeFromTensorID(const TensorID& tensor_id) {

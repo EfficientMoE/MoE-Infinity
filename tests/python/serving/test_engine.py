@@ -162,6 +162,33 @@ class MockTokenizer:
         return "".join(f"tok-{token_id}" for token_id in ids)
 
 
+class MockSpeculator:
+    calls: int
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 0.0,
+        stop_token_ids: list[int] | None = None,
+        top_k: int = 0,
+        top_p: float = 1.0,
+    ) -> torch.Tensor:
+        _ = (temperature, stop_token_ids, top_k, top_p)
+        self.calls += 1
+        last_token = int(input_ids[0, -1].item())
+        continuation = torch.arange(
+            last_token + 1,
+            last_token + max_new_tokens + 1,
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        ).unsqueeze(0)
+        return torch.cat([input_ids, continuation], dim=1)
+
+
 def _make_config() -> dict[str, object]:
     return {
         "device_memory_ratio": 0.75,
@@ -215,6 +242,97 @@ def test_engine_single_request_run_until_done() -> None:
         "total_tokens": 4,
     }
     assert engine.has_pending_requests() is False
+
+
+def test_engine_delegates_single_greedy_request_to_speculator() -> None:
+    speculator = MockSpeculator()
+    engine = ContinuousBatchingEngine(
+        model=MockModel(),
+        engine=MockOffloadEngine(),
+        config=_make_config(),
+        tokenizer=MockTokenizer(),
+        speculative_draft=speculator,
+    )
+    callback_outputs: list[RequestOutput] = []
+    engine.add_request(
+        request_id="req-spec",
+        prompt_token_ids=[10],
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=3),
+        on_token=callback_outputs.append,
+    )
+
+    step_outputs = engine.step()
+
+    assert speculator.calls == 1
+    assert [output.token_id for output in step_outputs] == [11, 12, 13]
+    assert [output.token_id for output in callback_outputs] == [11, 12, 13]
+    assert step_outputs[-1].finished is True
+    assert step_outputs[-1].finish_reason == "length"
+    assert engine.get_request_n_outputs("req-spec") == [[11, 12, 13]]
+    assert engine.has_pending_requests() is False
+
+
+def test_engine_does_not_delegate_sampled_request_to_speculator() -> None:
+    speculator = MockSpeculator()
+    engine = ContinuousBatchingEngine(
+        model=MockModel(),
+        engine=MockOffloadEngine(),
+        config=_make_config(),
+        speculative_draft=speculator,
+    )
+    engine.add_request(
+        request_id="req-sampled",
+        prompt_token_ids=[10],
+        sampling_params=SamplingParams(temperature=1.0, max_tokens=1),
+    )
+
+    _ = engine.run_until_done()
+
+    assert speculator.calls == 0
+
+
+def test_engine_does_not_delegate_stop_string_request() -> None:
+    speculator = MockSpeculator()
+    engine = ContinuousBatchingEngine(
+        model=MockModel(),
+        engine=MockOffloadEngine(),
+        config=_make_config(),
+        speculative_draft=speculator,
+    )
+    engine.add_request(
+        request_id="req-stop",
+        prompt_token_ids=[10],
+        sampling_params=SamplingParams(
+            temperature=0.0,
+            max_tokens=1,
+            stop=["tok-11"],
+        ),
+    )
+
+    _ = engine.run_until_done()
+
+    assert speculator.calls == 0
+
+
+def test_engine_does_not_delegate_past_step_token_budget() -> None:
+    speculator = MockSpeculator()
+    config = _make_config()
+    config["max_tokens_per_step"] = 2
+    engine = ContinuousBatchingEngine(
+        model=MockModel(),
+        engine=MockOffloadEngine(),
+        config=config,
+        speculative_draft=speculator,
+    )
+    engine.add_request(
+        request_id="req-large",
+        prompt_token_ids=[10],
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=3),
+    )
+
+    _ = engine.run_until_done()
+
+    assert speculator.calls == 0
 
 
 def test_engine_multiple_requests() -> None:

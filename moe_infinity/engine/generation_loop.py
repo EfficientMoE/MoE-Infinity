@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 
 import torch
 import torch.nn.functional as F
@@ -28,6 +28,17 @@ class GenerationResult:
     finish_reason: SequenceStatus
 
 
+class SpecDecodeStrategy(Protocol):
+    def run(
+        self,
+        *,
+        engine: GenerationEngine,
+        prompt_token_ids: list[int],
+        sampling_params: SamplingParams,
+        request_id: Optional[str] = None,
+    ) -> list[int]: ...
+
+
 class GenerationEngine:
     kv_mgr: KVCacheManager
     kv_spec: KVCacheSpec
@@ -38,6 +49,7 @@ class GenerationEngine:
         Callable[[list[int], AttentionMetadata], torch.Tensor]
     ]
     max_seq_length: Optional[int]
+    spec_strategy: Optional[SpecDecodeStrategy]
 
     def __init__(
         self,
@@ -50,6 +62,7 @@ class GenerationEngine:
         ] = None,
         eos_token_id: int = 2,
         max_seq_length: Optional[int] = None,
+        spec_strategy: Optional[SpecDecodeStrategy] = None,
     ) -> None:
         self.kv_mgr = kv_cache_manager
         self.kv_spec = kv_spec
@@ -58,6 +71,7 @@ class GenerationEngine:
         self.eos_token_id = eos_token_id
         self._model_forward = model_forward_fn
         self.max_seq_length = max_seq_length
+        self.spec_strategy = spec_strategy
 
     def generate(
         self,
@@ -68,8 +82,56 @@ class GenerationEngine:
         if not prompt_token_ids:
             raise ValueError("prompt_token_ids must not be empty")
 
-        rid = request_id or str(uuid.uuid4())
         sp = sampling_params or SamplingParams()
+
+        if self._spec_strategy_applies(sp, batch_size=1):
+            assert self.spec_strategy is not None
+            rid = request_id or str(uuid.uuid4())
+            generated_ids = list(
+                self.spec_strategy.run(
+                    engine=self,
+                    prompt_token_ids=prompt_token_ids,
+                    sampling_params=sp,
+                    request_id=rid,
+                )
+            )
+            finish_reason = (
+                SequenceStatus.FINISHED_STOPPED
+                if generated_ids and generated_ids[-1] == self.eos_token_id
+                else SequenceStatus.FINISHED_LENGTH
+            )
+            return GenerationResult(
+                request_id=rid,
+                prompt_token_ids=prompt_token_ids,
+                output_token_ids=generated_ids,
+                finish_reason=finish_reason,
+            )
+
+        return self._generate_standard(prompt_token_ids, sp, request_id)
+
+    def _spec_strategy_applies(
+        self, sp: SamplingParams, batch_size: int
+    ) -> bool:
+        if self.spec_strategy is None:
+            return False
+        if batch_size != 1:
+            return False
+        if (
+            sp.temperature > 0
+            or sp.top_p < 1.0
+            or sp.top_k > 0
+            or getattr(sp, "do_sample", False)
+        ):
+            return False
+        return True
+
+    def _generate_standard(
+        self,
+        prompt_token_ids: list[int],
+        sp: SamplingParams,
+        request_id: Optional[str] = None,
+    ) -> GenerationResult:
+        rid = request_id or str(uuid.uuid4())
 
         num_prompt_tokens = len(prompt_token_ids)
         if (
@@ -235,4 +297,5 @@ __all__ = [
     "GenerationResult",
     "KVCacheAllocationError",
     "PromptTooLongError",
+    "SpecDecodeStrategy",
 ]
