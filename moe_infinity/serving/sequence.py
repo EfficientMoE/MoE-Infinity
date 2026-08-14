@@ -10,6 +10,8 @@ class SequenceStatus(Enum):
     WAITING = "waiting"
     PREFILL = "prefill"
     DECODE = "decode"
+    DRAFT = "draft"
+    VERIFY = "verify"
     FINISHED = "finished"
     SWAPPED = "swapped"
     CANCELLED = "cancelled"
@@ -65,6 +67,7 @@ class SequenceData:
             },
             SequenceStatus.PREFILL: {
                 SequenceStatus.DECODE,
+                SequenceStatus.DRAFT,
                 SequenceStatus.FINISHED,
                 SequenceStatus.SWAPPED,
                 SequenceStatus.CANCELLED,
@@ -74,10 +77,23 @@ class SequenceData:
                 SequenceStatus.SWAPPED,
                 SequenceStatus.CANCELLED,
             },
+            SequenceStatus.DRAFT: {
+                SequenceStatus.VERIFY,
+                SequenceStatus.FINISHED,
+                SequenceStatus.SWAPPED,
+                SequenceStatus.CANCELLED,
+            },
+            SequenceStatus.VERIFY: {
+                SequenceStatus.DRAFT,
+                SequenceStatus.FINISHED,
+                SequenceStatus.SWAPPED,
+                SequenceStatus.CANCELLED,
+            },
             SequenceStatus.SWAPPED: {
                 SequenceStatus.WAITING,
                 SequenceStatus.PREFILL,
                 SequenceStatus.DECODE,
+                SequenceStatus.DRAFT,
                 SequenceStatus.FINISHED,
                 SequenceStatus.CANCELLED,
             },
