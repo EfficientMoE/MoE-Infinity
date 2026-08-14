@@ -46,7 +46,7 @@ MODEL_MAPPING_TYPES = {
     "opt": 3,
     "deepseek_v3": 5,
     "deepseek": 5,
-    "gptoss": 4,
+    "gptoss": 6,
     "qwen3": 5,
     "dbrx": 4,
     "olmoe": 4,

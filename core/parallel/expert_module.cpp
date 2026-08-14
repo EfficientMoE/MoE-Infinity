@@ -8,6 +8,9 @@
 #include "utils/logger.h"
 #include "kernel/fused_moe_mlp.h"
 
+void mxfp4_dequant_cuda(const void* packed, const void* scales, void* output,
+                        int rows, int packed_cols, int scale_cols,
+                        int block_size, cudaStream_t stream);
 extern void fp8_dequant_blockwise_cuda(const void* weight, const void* scale,
                                        void* out, int N, int K,
                                        cudaStream_t stream);
@@ -33,6 +36,8 @@ void ExpertNode::SetTensorsFromBlob(const torch::Device& device) {
       reinterpret_cast<DeepSeekMoEDenseActDense*>(module)->SetTensorsFromBlob(
           node->device_memory_ptr, node->tensor_ids, device);
       break;
+    case ExpertType::GptOssMoeDenseActDense:
+      break;
     default:
       assert(false);
   }
@@ -48,12 +53,18 @@ MoEMLP::MoEMLP(int dtype, int expert_type) {
   for (int i = 0; i < 8; i++) {
     buffer_.push_back(torch::zeros({1}, options));
   }
-  for (int i = 0; i < 4; i++) {
+  int num_params = expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE ? 6 : 4;
+  for (int i = 0; i < num_params; i++) {
     param_.push_back(torch::zeros({1}, options));
   }
 }
 
 void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
+  if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
+    DLOG_FATAL_IF(tensor_ids.size() != 6,
+                  "GPT-OSS expert requires blocks/scales/bias for two "
+                  "projections");
+  }
   int device = at::cuda::current_device();
   auto options = torch::TensorOptions()
                      .dtype(dtype_to_torch(dtype_))
@@ -71,8 +82,15 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
   if (!param_init_) {
     auto allocator = c10::DeviceCachingAllocator::get(device);
 
-    int64_t hdim = tensor_shapes[0][1];
-    int64_t idim = tensor_shapes[0][0];
+    int64_t hdim;
+    int64_t idim;
+    if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
+      hdim = tensor_shapes[0][1] * 2;
+      idim = tensor_shapes[0][0] / 2;
+    } else {
+      hdim = tensor_shapes[0][1];
+      idim = tensor_shapes[0][0];
+    }
 
     std::vector<std::vector<int64_t>> data_shapes;
     data_shapes.push_back({kMaxTokens, hdim});
@@ -102,8 +120,15 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
 
     // MLP tensor shape: weight is [intermediate, hidden], so
     //   hdim = tensor_shapes[0][1], idim = tensor_shapes[0][0]
-    int64_t hdim = tensor_shapes[0][1];
-    int64_t idim = tensor_shapes[0][0];
+    int64_t hdim;
+    int64_t idim;
+    if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
+      hdim = tensor_shapes[0][1] * 2;
+      idim = tensor_shapes[0][0] / 2;
+    } else {
+      hdim = tensor_shapes[0][1];
+      idim = tensor_shapes[0][0];
+    }
 
     std::vector<std::vector<int64_t>> data_shapes;
     data_shapes.push_back({kMaxTokens, hdim});  // input buffer
@@ -129,6 +154,32 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
   assert(param_init_ == true);
   assert(param_set_ == false);
   param_set_ = true;
+}
+
+void MoEMLP::DequantMxfp4Params(cudaStream_t stream) {
+  if (expert_type_ != GPT_OSS_MOE_DENSE_ACT_DENSE) return;
+  int device = at::cuda::current_device();
+  gpt_oss_param_.clear();
+  for (auto pair : {std::pair<int, int>{0, 1}, {3, 4}}) {
+    auto packed = param_[pair.first].contiguous();
+    auto scales = param_[pair.second].contiguous();
+    DLOG_FATAL_IF(packed.scalar_type() != torch::kUInt8 ||
+                      scales.scalar_type() != torch::kUInt8,
+                  "GPT-OSS MXFP4 blocks/scales must be uint8");
+    int rows = packed.size(0);
+    int packed_cols = packed.size(1);
+    int scale_cols = scales.size(1);
+    int block_size = packed_cols * 2 / scale_cols;
+    auto output =
+        torch::empty({rows, packed_cols * 2}, torch::TensorOptions()
+                                                  .dtype(torch::kBFloat16)
+                                                  .device(CUDA_DEVICE(device)));
+    mxfp4_dequant_cuda(packed.data_ptr(), scales.data_ptr(), output.data_ptr(),
+                       rows, packed_cols, scale_cols, block_size, stream);
+    gpt_oss_param_.push_back(output);
+  }
+  gpt_oss_param_.insert(gpt_oss_param_.begin() + 1, param_[2]);
+  gpt_oss_param_.push_back(param_[5]);
 }
 
 torch::Tensor MoEMLP::forward(torch::Tensor hidden_states,
@@ -198,6 +249,27 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
   torch::NoGradGuard no_grad;
   auto& input = buffer_[0];
   auto& output = buffer_[1];
+
+  if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
+    auto& gate_up_weight = gpt_oss_param_[0];
+    auto& gate_up_bias = gpt_oss_param_[1];
+    auto& down_weight = gpt_oss_param_[2];
+    auto& down_bias = gpt_oss_param_[3];
+    auto gate_up =
+        torch::matmul(input, gate_up_weight.transpose(0, 1)) + gate_up_bias;
+    auto gate =
+        gate_up.index({torch::indexing::Slice(),
+                       torch::indexing::Slice(0, torch::indexing::None, 2)});
+    auto up =
+        gate_up.index({torch::indexing::Slice(),
+                       torch::indexing::Slice(1, torch::indexing::None, 2)});
+    gate = torch::clamp_max(gate, 7.0);
+    up = torch::clamp(up, -7.0, 7.0);
+    auto activated = (up + 1.0) * (gate * torch::sigmoid(gate * 1.702));
+    output.copy_(torch::matmul(activated, down_weight.transpose(0, 1)) +
+                 down_bias);
+    return;
+  }
 
   if (expert_type_ == NLLB_MOE_DENSE_ACT_DENSE) {
     auto& fc1 = param_[0];

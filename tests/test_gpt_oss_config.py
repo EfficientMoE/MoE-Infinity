@@ -94,13 +94,10 @@ def test_gpt_oss_model_mapping():
     assert MODEL_MAPPING_NAMES["gptoss"] is GptOssForCausalLM
 
 
-def test_gpt_oss_model_type():
-    MODEL_MAPPING_TYPES = import_constants_module().MODEL_MAPPING_TYPES
+def test_gpt_oss_has_dedicated_dispatcher_expert_type():
+    parse_expert_type = import_constants_module().parse_expert_type
 
-    assert (
-        "gptoss" in MODEL_MAPPING_TYPES
-    ), "gptoss key missing from MODEL_MAPPING_TYPES"
-    assert MODEL_MAPPING_TYPES["gptoss"] == 4
+    assert parse_expert_type(make_gpt_oss_config()) == 6
 
 
 def test_gpt_oss_arch_string_matching():
