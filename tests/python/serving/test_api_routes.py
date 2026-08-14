@@ -153,6 +153,46 @@ def test_list_models(client: TestClient) -> None:
     assert payload["data"][0]["object"] == "model"
 
 
+def test_initialize_with_model_forwards_speculative_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _capture_engine(**kwargs: Any) -> MagicMock:
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(srv, "ContinuousBatchingEngine", _capture_engine)
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            hidden_size=32,
+            head_dim=8,
+            max_position_embeddings=128,
+            eos_token_id=2,
+            dtype="float32",
+        ),
+        dtype="float32",
+    )
+    offload_engine = object()
+    moe_model = SimpleNamespace(model=model, engine=offload_engine)
+    speculator = object()
+
+    srv.initialize_with_model(
+        moe_model=moe_model,
+        model_name="test-model",
+        tok=None,
+        max_seq_length=128,
+        speculative_draft=speculator,
+    )
+
+    assert captured["model"] is model
+    assert captured["engine"] is offload_engine
+    assert captured["speculative_draft"] is speculator
+
+
 def test_list_models_engine_not_ready(client: TestClient) -> None:
     srv.engine = None
 

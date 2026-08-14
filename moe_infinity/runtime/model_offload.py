@@ -48,6 +48,7 @@ from moe_infinity.models import (
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
+    SyncGlmMoeDsaMoEBlock,
     SyncGptOssMLP,
     SyncJambaMoEBlock,
     SyncMixtralSparseMoeBlock,
@@ -283,6 +284,42 @@ def _make_expert_tensor_map(name_id_map, config):
     return result
 
 
+def _identify_fp8_blockwise_pairs(keys):
+    key_set = set(keys)
+    pairs = []
+    for k in keys:
+        if k.endswith("_scale_inv"):
+            base = k[: -len("_scale_inv")]
+            if base in key_set:
+                pairs.append((base, k))
+    return pairs
+
+
+_ROUTED_EXPERT_RE = re.compile(r"\.mlp\.experts\.\d+\.")
+
+
+def _is_routed_expert_key(key: str) -> bool:
+    # Routed experts (including the MTP layer's, which parse_expert_id drops via
+    # its layer_id >= num_layers guard) are dequantized on-device by the
+    # dispatcher, so they stay FP8 in the store. Matches ".mlp.experts.<id>."
+    # but not ".mlp.shared_experts." or dense ".mlp.<proj>".
+    # NOTE(#142): Mixtral names routed experts ".block_sparse_moe.experts.<id>."
+    # (see _remap_v5_batched_experts), which this regex does NOT match, so its
+    # routed experts are currently misclassified as non-routed. Tracked in #142.
+    return _ROUTED_EXPERT_RE.search(key) is not None
+
+
+def _has_fp8_blockwise(config: object) -> bool:
+    qcfg = getattr(config, "quantization_config", None)
+    if qcfg is None:
+        return False
+    if isinstance(qcfg, dict):
+        method = qcfg.get("quant_method", "") or qcfg.get("fmt", "")
+    else:
+        method = getattr(qcfg, "quant_method", "") or getattr(qcfg, "fmt", "")
+    return "fp8" in str(method).lower()
+
+
 def _compute_config_fingerprint(config: object) -> str:
     fields = [
         "model_type",
@@ -466,6 +503,24 @@ class OffloadEngine(object):
     def set_kv_cache_manager(self, manager):
         """Register a KVCacheManager for KV cache offloading."""
         self._kv_cache_manager = manager
+
+    def deliver_fp8_scales_to_dispatcher(self):
+        scales = getattr(self, "_glm_fp8_scales", None)
+        if not scales:
+            return
+        dispatcher = getattr(self, "expert_dispatcher", None)
+        set_scales = getattr(dispatcher, "set_scales", None)
+        if callable(set_scales):
+            set_scales(scales)
+        else:
+            warnings.warn(
+                "GLM-5.2-FP8 routed experts are kept FP8 in the store but the "
+                "native set_scales dispatcher API is unavailable; build the "
+                "moe_infinity._v4_fp4 extension with fp8-in-store support. "
+                "Routed experts will not be dequantized correctly.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     def init(
         self,
@@ -657,11 +712,18 @@ class OffloadEngine(object):
             SyncJambaMoEBlock
         )
 
-        transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe = transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE
-        transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
-        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = (
-            SyncDeepseekV2MoEBlock
+        _dsv2_mod = transformers.models.deepseek_v2.modeling_deepseek_v2
+        _dsv2_cls = getattr(_dsv2_mod, "DeepseekV2MoE", None) or getattr(
+            _dsv2_mod, "DeepseekV2Moe", None
         )
+        _dsv2_mod._old_deepseek_v2_moe = _dsv2_cls
+        _dsv2_attr = (
+            "DeepseekV2MoE"
+            if hasattr(_dsv2_mod, "DeepseekV2MoE")
+            else "DeepseekV2Moe"
+        )
+        setattr(_dsv2_mod, _dsv2_attr, SyncDeepseekV2MoEBlock)
+        transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = (
             SyncDeepseekV3MoEBlock
         )
@@ -674,6 +736,14 @@ class OffloadEngine(object):
         _q35_mod = transformers.models.qwen3_5_moe.modeling_qwen3_5_moe
         _q35_mod._old_qwen3_5_sparse_moe = _q35_mod.Qwen3_5MoeSparseMoeBlock
         _q35_mod.Qwen3_5MoeSparseMoeBlock = SyncQwen3_5MoeSparseMoeBlock
+
+        try:
+            import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
+
+            _glm_mod._old_glm_moe_dsa_moe = _glm_mod.GlmMoeDsaMoE
+            _glm_mod.GlmMoeDsaMoE = SyncGlmMoeDsaMoEBlock
+        except (ImportError, AttributeError):
+            pass
 
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
@@ -762,10 +832,18 @@ class OffloadEngine(object):
                         _expand_gpt_oss_packed_experts(state_dict, self.config)
 
                         is_gptq_ckpt = is_gptq_quantized(self.config)
+                        _arch0_cast = (
+                            getattr(self.config, "architectures", None) or [""]
+                        )[0]
+                        is_glm_fp8_ckpt = (
+                            "GlmMoeDsa" in _arch0_cast
+                            and _has_fp8_blockwise(self.config)
+                        )
                         self._cast_state_dict_tensors(
                             state_dict,
                             is_gptq_ckpt=is_gptq_ckpt,
                             is_mxfp4_ckpt=is_mxfp4_ckpt,
+                            is_glm_fp8_ckpt=is_glm_fp8_ckpt,
                         )
 
                         if (
@@ -816,6 +894,48 @@ class OffloadEngine(object):
                                 del state_dict[blocks_key]
                                 del state_dict[scales_key]
 
+                        arch0 = (
+                            getattr(self.config, "architectures", None) or [""]
+                        )[0]
+                        is_glm_fp8 = (
+                            "GlmMoeDsa" in arch0
+                            and _has_fp8_blockwise(self.config)
+                        )
+                        if is_glm_fp8:
+                            from moe_infinity.utils.fp8 import (
+                                dequant_fp8_blockwise,
+                            )
+
+                            if not hasattr(self, "_glm_fp8_scales"):
+                                self._glm_fp8_scales = {}
+                            fp8_pairs = _identify_fp8_blockwise_pairs(
+                                list(state_dict.keys())
+                            )
+                            for base_key, scale_key in fp8_pairs:
+                                w = state_dict.get(base_key)
+                                s = state_dict.get(scale_key)
+                                if w is None or s is None:
+                                    continue
+                                if w.dtype != torch.float8_e4m3fn:
+                                    continue
+                                if _is_routed_expert_key(base_key):
+                                    # Routed expert: keep FP8 in the host store;
+                                    # the dispatcher dequantizes on-device.
+                                    self._glm_fp8_scales[base_key] = s
+                                else:
+                                    # Required by the model: attention, dense MLP
+                                    # and shared experts run in PyTorch (not the
+                                    # dispatcher), so dequantize them to BF16.
+                                    state_dict[base_key] = (
+                                        dequant_fp8_blockwise(
+                                            w,
+                                            s,
+                                            dtype=torch.bfloat16,
+                                            block_size=128,
+                                        )
+                                    )
+                                del state_dict[scale_key]
+
                         self._offload_state_dict(state_dict, empty_state_dict)
 
                         del state_dict
@@ -847,18 +967,28 @@ class OffloadEngine(object):
                     with open(name_id_map_file, "r") as f:
                         self.name_id_map = json.load(f)
 
+                    _arch0_reload = (
+                        getattr(self.config, "architectures", None) or [""]
+                    )[0]
+                    if "GlmMoeDsa" in _arch0_reload and _has_fp8_blockwise(
+                        self.config
+                    ):
+                        self._rebuild_glm_fp8_scales_from_ckpt()
+
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
                 )
+                _model_type = getattr(self.config, "model_type", "")
+                _force_eager = _model_type == "glm_moe_dsa"
                 model = cls._from_config(
                     self.config,
                     torch_dtype=self.dtype_cls
                     if self.config.model_type != "deepseek_v3"
                     else torch.bfloat16,
                     attn_implementation=(
-                        "flash_attention_2"
-                        if is_flash_attn_available
-                        else "eager"
+                        "eager"
+                        if _force_eager or not is_flash_attn_available
+                        else "flash_attention_2"
                     ),
                 )
 
@@ -894,18 +1024,29 @@ class OffloadEngine(object):
                             self.name_id_map.pop(name_without_prefix)
                     param.ar_id = self.name_id_map.get(name, None)
 
-                # the case for NLLB MoE
+                # Tied embeddings: lm_head.weight shares storage with the
+                # input embeddings, so it never got its own tensor id in the
+                # loop above. Register it under whichever embedding submodule
+                # this architecture actually has -- encoder/decoder for
+                # encoder-decoder models (NLLB-MoE), a single embed_tokens
+                # for decoder-only ones (Mixtral, Qwen3-MoE, etc.).
                 if "lm_head.weight" not in self.name_id_map:
                     print(
                         "lm_head.weight not in name_id_map, add it as embed_tokens"
                     )
                     self.name_id_map["lm_head.weight"] = 0
-                    self.name_id_map["encoder.embed_tokens.weight"] = 0
-                    self.name_id_map["decoder.embed_tokens.weight"] = 0
-
                     model.lm_head.weight.ar_id = 0
-                    model.model.encoder.embed_tokens.weight.ar_id = 0
-                    model.model.decoder.embed_tokens.weight.ar_id = 0
+
+                    if hasattr(model.model, "encoder") and hasattr(
+                        model.model, "decoder"
+                    ):
+                        self.name_id_map["encoder.embed_tokens.weight"] = 0
+                        self.name_id_map["decoder.embed_tokens.weight"] = 0
+                        model.model.encoder.embed_tokens.weight.ar_id = 0
+                        model.model.decoder.embed_tokens.weight.ar_id = 0
+                    else:
+                        self.name_id_map["embed_tokens.weight"] = 0
+                        model.model.embed_tokens.weight.ar_id = 0
 
                 self.expert_tensor_map = _make_expert_tensor_map(
                     self.name_id_map, self.config
@@ -914,9 +1055,9 @@ class OffloadEngine(object):
                     self.expert_tensor_map
                 )
 
-                # for deepseek, we need to set the expert_tensor_map for the model
+                # for deepseek and glm, we need to set the expert_tensor_map for the model
                 first_k_dense_replace = 0
-                if "deepseek" in model_name:
+                if "deepseek" in model_name or "glm" in model_name.lower():
                     self.expert_prefetcher.first_k_dense_replace = (
                         self.config.first_k_dense_replace
                     )
@@ -951,6 +1092,7 @@ class OffloadEngine(object):
                         or isinstance(module, SyncQwen3_5MoeSparseMoeBlock)
                         or isinstance(module, SyncOlmoeMoEBlock)
                         or isinstance(module, SyncJambaMoEBlock)
+                        or isinstance(module, SyncGlmMoeDsaMoEBlock)
                     ):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
@@ -978,6 +1120,15 @@ class OffloadEngine(object):
 
                         module_idx += 1
 
+                if getattr(self.config, "model_type", "") in (
+                    "glm_moe_dsa",
+                    "qwen3_5_moe",
+                ):
+                    self._load_resident_shared_experts(model)
+                    for _name in list(self.name_id_map.keys()):
+                        if self._is_shared_expert_param(_name):
+                            del self.name_id_map[_name]
+
                 if (
                     getattr(self.config, "model_type", "") == "gpt_oss"
                     and not self.gpt_oss_offload_enabled
@@ -985,6 +1136,7 @@ class OffloadEngine(object):
                     self._load_resident_gpt_oss(model)
 
                 self.setup_archer_hooks(model)
+                self.deliver_fp8_scales_to_dispatcher()
                 return model
 
             return archer_from_pretrained
@@ -1022,6 +1174,14 @@ class OffloadEngine(object):
         if hasattr(_q35_mod, "_old_qwen3_5_sparse_moe"):
             _q35_mod.Qwen3_5MoeSparseMoeBlock = _q35_mod._old_qwen3_5_sparse_moe
 
+        try:
+            import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
+
+            if hasattr(_glm_mod, "_old_glm_moe_dsa_moe"):
+                _glm_mod.GlmMoeDsaMoE = _glm_mod._old_glm_moe_dsa_moe
+        except (ImportError, AttributeError):
+            pass
+
     def _is_shared_expert_param(self, name: str) -> bool:
         # DeepSeek names shared experts ".shared_experts." (plural); Qwen3.5-MoE
         # uses singular ".shared_expert." plus ".shared_expert_gate.". The
@@ -1057,6 +1217,20 @@ class OffloadEngine(object):
             return
 
         remaining = set(wanted)
+        from moe_infinity.utils.fp8 import dequant_fp8_blockwise
+
+        def _resolve(param, name, weight, scale):
+            if weight.dtype == torch.float8_e4m3fn:
+                if scale is None:
+                    raise RuntimeError(
+                        f"FP8 shared-expert weight {name!r} is missing its "
+                        "_scale_inv; cannot dequantize resident shared experts."
+                    )
+                weight = dequant_fp8_blockwise(
+                    weight, scale, dtype=param.dtype, block_size=128
+                )
+            return weight.to(dtype=param.dtype, device="cpu").contiguous()
+
         for ckpt in self.ckpt_files:
             if not remaining:
                 break
@@ -1067,10 +1241,14 @@ class OffloadEngine(object):
                         if name not in keys:
                             continue
                         param = wanted[name]
-                        param.data = (
-                            f.get_tensor(name)
-                            .to(dtype=param.dtype, device="cpu")
-                            .contiguous()
+                        scale_key = name + "_scale_inv"
+                        scale = (
+                            f.get_tensor(scale_key)
+                            if scale_key in keys
+                            else None
+                        )
+                        param.data = _resolve(
+                            param, name, f.get_tensor(name), scale
                         )
                         param.requires_grad_(False)
                         param._moe_infinity_resident = True
@@ -1081,10 +1259,8 @@ class OffloadEngine(object):
                     if name not in state:
                         continue
                     param = wanted[name]
-                    param.data = (
-                        state[name]
-                        .to(dtype=param.dtype, device="cpu")
-                        .contiguous()
+                    param.data = _resolve(
+                        param, name, state[name], state.get(name + "_scale_inv")
                     )
                     param.requires_grad_(False)
                     param._moe_infinity_resident = True
@@ -1234,6 +1410,25 @@ class OffloadEngine(object):
             for candidate in (name, f"{model.base_model_prefix}.{name}"):
                 self.name_id_map.pop(candidate, None)
 
+    def _rebuild_glm_fp8_scales_from_ckpt(self):
+        # Reload-from-store path: FP8 block scales are NOT persisted in the store,
+        # so rebuild them from the checkpoint. Deliver every scale (superset): the
+        # dispatcher only applies a scale to a weight that is actually stored FP8,
+        # so scales for BF16-dequantized weights are simply ignored. This keeps
+        # reload compatible with stores whose non-routed weights are still FP8.
+        self._glm_fp8_scales = {}
+        for ckpt in self.ckpt_files:
+            if not ckpt.endswith(".safetensors"):
+                continue
+            with safe_open(ckpt, framework="pt", device="cpu") as f:
+                keys = set(f.keys())
+                for k in keys:
+                    if not k.endswith("_scale_inv"):
+                        continue
+                    base = k[: -len("_scale_inv")]
+                    if base in keys:
+                        self._glm_fp8_scales[base] = f.get_tensor(k)
+
     def get_topology(self, model):
         name_lst = []
         ret_dict = {}
@@ -1248,10 +1443,9 @@ class OffloadEngine(object):
         for name, _ in model.named_parameters(recurse=True):
             match = re.search(r"\d+", name)
             if name not in self.name_id_map:
-                print("param not in self.name_id_map", name)
                 continue
             if match:
-                if "expert" in name and "shared_experts" not in name:
+                if _is_routed_expert_key(name):
                     match = re.match(r"(.*experts)", name)
                     assert match, "Not correct expert name!"
                     stored_name = match.group(1)
@@ -1308,7 +1502,7 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             if match:
-                if "expert" in name and "shared_experts" not in name:
+                if _is_routed_expert_key(name):
                     match = re.match(r"(.*experts)", name)
                     assert match, "Not correct expert name!"
                     stored_name = match.group(1)
@@ -1357,6 +1551,15 @@ class OffloadEngine(object):
                 ret_dict[i] = list(ret_dict[i].values())
 
         topology = list(ret_dict.items())
+        # Canonicalize DENSE nodes' tensor_ids to ascending id == store/offload
+        # order so the C++ per-slot views match the physical store layout (fixes
+        # q_a_layernorm[2048] <- router[256] mis-map when a dense node spans a
+        # partition). Expert nodes carry positional [gate,up,down] tensors the
+        # fused MoE kernel reads by slot, so they must KEEP their order.
+        for _stored_name, id_groups in topology:
+            if len(id_groups) != 1:
+                continue
+            id_groups[0].sort()
         return topology
 
     def setup_archer_hooks(self, model):
@@ -1364,6 +1567,7 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             self.archer_engine.register(param.data, self.name_id_map[name])
+            param.ar_id = self.name_id_map[name]
             self.offload_set.add(param.data.data_ptr())
 
             if "shared" in name:
@@ -1373,7 +1577,10 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             self.archer_engine.register(buffer.data, self.name_id_map[name])
+            buffer.ar_id = self.name_id_map[name]
             self.offload_set.add(buffer.data.data_ptr())
+
+        from moe_infinity.utils.topology import build_topology_specs
 
         topo = self.get_topology(model)
         sparse_count = sum(
@@ -1383,7 +1590,7 @@ class OffloadEngine(object):
             f"TOPO: {len(topo)} stages, {sparse_count} sparse",
             flush=True,
         )
-        self.archer_engine.set_topology(topo)
+        self.archer_engine.set_topology_v2(build_topology_specs(topo))
         print("TOPO: set_topology done", flush=True)
 
         @torch.no_grad()
@@ -1432,7 +1639,7 @@ class OffloadEngine(object):
                 )
 
         expert_layer_id = 0
-        if "deepseek" in self.model_name:
+        if "deepseek" in self.model_name or "glm" in self.model_name.lower():
             expert_layer_id = self.config.first_k_dense_replace
 
         output_device_index = None
@@ -1511,6 +1718,7 @@ class OffloadEngine(object):
         *,
         is_gptq_ckpt: bool = False,
         is_mxfp4_ckpt: bool = False,
+        is_glm_fp8_ckpt: bool = False,
     ) -> None:
         quant_info = getattr(self, "_quant_info", None)
 
@@ -1518,6 +1726,12 @@ class OffloadEngine(object):
             try:
                 if is_mxfp4_ckpt and (
                     k.endswith("_blocks") or k.endswith("_scales")
+                ):
+                    state_dict[k] = v.to("cpu")
+                    continue
+
+                if is_glm_fp8_ckpt and (
+                    k.endswith("_scale_inv") or v.dtype == torch.float8_e4m3fn
                 ):
                     state_dict[k] = v.to("cpu")
                     continue
@@ -1789,7 +2003,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                self.archer_engine.begin(self.request_id, param)
+                self.archer_engine.begin(
+                    self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
@@ -1801,7 +2017,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.begin(self.request_id, buf)
+                self.archer_engine.begin(
+                    self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.data.device)
@@ -1826,7 +2044,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                self.archer_engine.end(self.request_id, param)
+                self.archer_engine.end(
+                    self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
@@ -1836,7 +2056,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.end(self.request_id, buf)
+                self.archer_engine.end(
+                    self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.device)
@@ -1913,7 +2135,13 @@ class OffloadEngine(object):
             transformers.models.jamba.modeling_jamba._old_jamba_moe
         )
 
-        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe
+        _dsv2_mod2 = transformers.models.deepseek_v2.modeling_deepseek_v2
+        _dsv2_attr2 = (
+            "DeepseekV2MoE"
+            if hasattr(_dsv2_mod2, "DeepseekV2MoE")
+            else "DeepseekV2Moe"
+        )
+        setattr(_dsv2_mod2, _dsv2_attr2, _dsv2_mod2._old_deepseek_v2_moe)
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe
         transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
             transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp

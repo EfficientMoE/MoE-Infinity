@@ -22,6 +22,11 @@ try:
 except ImportError:
     Qwen3_5MoeForConditionalGeneration = None
 
+try:
+    from transformers import GlmMoeDsaForCausalLM
+except ImportError:
+    GlmMoeDsaForCausalLM = None
+
 MODEL_MAPPING_NAMES = {
     "nllb": NllbMoeForConditionalGeneration,
     "mixtral": MixtralForCausalLM,
@@ -62,6 +67,14 @@ if DeepseekV4ForCausalLM is not None:
 if Qwen3_5MoeForConditionalGeneration is not None:
     MODEL_MAPPING_NAMES["qwen3_5"] = Qwen3_5MoeForConditionalGeneration
     MODEL_MAPPING_TYPES["qwen3_5"] = 5
+
+# GLM-MoE-DSA (arch "GlmMoeDsaForCausalLM") uses per-expert gate_proj/up_proj/
+# down_proj weights (expert-type 5, like Qwen3/DeepSeek). Requires transformers
+# >= 5.12 which ships GlmMoeDsaForCausalLM. Registered only when the HF class
+# is importable (mirrors the V4 and Qwen3.5 guards above).
+if GlmMoeDsaForCausalLM is not None:
+    MODEL_MAPPING_NAMES["glmmoedsa"] = GlmMoeDsaForCausalLM
+    MODEL_MAPPING_TYPES["glmmoedsa"] = 5
 
 
 def parse_expert_type(config: PretrainedConfig) -> int:

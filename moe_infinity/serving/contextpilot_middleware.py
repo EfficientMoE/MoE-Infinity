@@ -162,6 +162,20 @@ class ContextPilotMiddleware:
                 self._last_tokens_saved = 0
                 self._last_savings_pct = 0.0
             return prompt
+        except (ValueError, IndexError) as exc:
+            # ContextPilot.optimize can't index the empty context set a bare
+            # completion prompt produces (issue #146 Bug 3); the chat path
+            # guards the same way. Preserve the prompt without a warning.
+            logger.debug(
+                "ContextPilot.optimize raised %s; preserving prompt", exc
+            )
+            with self._stats_lock:
+                self._requests_processed += 1
+                self._last_reorder_latency_ms = 0.0
+                self._last_dedup_latency_ms = 0.0
+                self._last_tokens_saved = 0
+                self._last_savings_pct = 0.0
+            return prompt
         except Exception as exc:
             logger.warning("ContextPilot completion optimize failed: %s", exc)
             with self._stats_lock:

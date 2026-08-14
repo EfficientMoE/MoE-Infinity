@@ -104,12 +104,47 @@ class ExpertPrefetcher(object):
                     self.archer_engine.enqueue_prefetch(tensor_id, gpu_id)
 
     def speculative_prefetch(
-        self, layer_idx: int, router_logits: Optional[Any] = None
+        self,
+        layer_idx: int,
+        router_logits: Optional[Any] = None,
+        *,
+        expert_ids: Optional[List[int]] = None,
+        prefetch_layer_id: Optional[int] = None,
     ):
+        """Speculatively prefetch experts for an upcoming layer. Two modes:
+
+        * Legacy (default): pool ``router_logits`` via ``mean(0)`` and
+          prefetch the ``min(2, num_experts)`` top experts for
+          ``layer_idx + 1``. Unchanged pre-A2 behavior (non-spec decode).
+        * Explicit (DFlash route-ahead seam, Track A2): when ``expert_ids``
+          is given, prefetch exactly that set for ``prefetch_layer_id``
+          (default ``layer_idx + 1``) via ``prefetch_experts_list`` -- no
+          mean/topk pooling. Empty ``expert_ids`` is a safe no-op.
+
+        Returns ``None``. Raises ``ValueError`` if both are ``None``.
+        """
+        if expert_ids is not None:
+            if not expert_ids:
+                return
+            target_layer = (
+                prefetch_layer_id
+                if prefetch_layer_id is not None
+                else layer_idx + 1
+            )
+            if target_layer >= self.num_layers:
+                return
+            self.prefetch_experts_list(target_layer, list(expert_ids))
+            self._last_speculative_prediction = set(expert_ids)
+            return
+
+        if router_logits is None:
+            raise ValueError(
+                "speculative_prefetch requires router_logits (legacy mode) "
+                + "or expert_ids (explicit route-ahead mode); got neither."
+            )
+
         next_layer = layer_idx + 1
         if next_layer >= self.num_layers:
-            return
-        if router_logits is None:
             return
 
         num_experts_to_prefetch = min(2, self.num_experts)
