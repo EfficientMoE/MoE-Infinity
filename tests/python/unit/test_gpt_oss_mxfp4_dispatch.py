@@ -50,7 +50,7 @@ def test_dequantized_option_a_matches_resident_expert_forward():
         (2 * intermediate, hidden // 2),
         dtype=torch.uint8,
         device="cuda",
-    ).zero_()
+    )
     gate_scales = torch.randint(
         120,
         135,
@@ -108,4 +108,21 @@ def test_dequantized_option_a_matches_resident_expert_forward():
     )
     option_a = option_a_activated @ down_weight.t() + down_bias
 
-    torch.testing.assert_close(option_a, resident, rtol=1e-2, atol=5e-2)
+    gate_weight_f = gate_weight.float()
+    down_weight_f = down_weight.float()
+    golden_gate_up = x.float() @ gate_weight_f.t() + gate_bias.float()
+    golden_gate, golden_up = golden_gate_up[:, ::2], golden_gate_up[:, 1::2]
+    golden_activated = (golden_up.clamp(-7, 7) + 1) * (
+        golden_gate.clamp(max=7)
+        * torch.sigmoid(golden_gate.clamp(max=7) * 1.702)
+    )
+    golden = golden_activated @ down_weight_f.t() + down_bias.float()
+
+    # Bound bf16 rounding by the down-GEMM magnitude instead of comparing two
+    # cancellation-sensitive bf16 paths directly.
+    envelope = 8 * (2**-8) * (
+        golden_activated.abs() @ down_weight_f.abs().t()
+        + down_bias.float().abs()
+    ) + 1e-2
+    assert ((option_a.float() - golden).abs() <= envelope).all()
+    assert ((resident.float() - golden).abs() <= envelope).all()
