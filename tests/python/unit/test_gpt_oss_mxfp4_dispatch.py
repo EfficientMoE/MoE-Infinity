@@ -77,9 +77,7 @@ def test_dequantized_option_a_matches_resident_expert_forward():
     )
     down_bias = torch.randn(hidden, dtype=torch.bfloat16, device="cuda")
 
-    resident_gate_up = fused_mxfp4_gemm(
-        x, gate_blocks, gate_scales, gate_bias
-    )
+    resident_gate_up = fused_mxfp4_gemm(x, gate_blocks, gate_scales, gate_bias)
     resident_gate, resident_up = (
         resident_gate_up[:, ::2],
         resident_gate_up[:, 1::2],
@@ -120,9 +118,14 @@ def test_dequantized_option_a_matches_resident_expert_forward():
 
     # Bound bf16 rounding by the down-GEMM magnitude instead of comparing two
     # cancellation-sensitive bf16 paths directly.
-    envelope = 8 * (2**-8) * (
-        golden_activated.abs() @ down_weight_f.abs().t()
-        + down_bias.float().abs()
-    ) + 1e-2
+    envelope = (
+        8
+        * (2**-8)
+        * (
+            golden_activated.abs() @ down_weight_f.abs().t()
+            + down_bias.float().abs()
+        )
+        + 1e-2
+    )
     assert ((option_a.float() - golden).abs() <= envelope).all()
     assert ((resident.float() - golden).abs() <= envelope).all()

@@ -10,8 +10,8 @@
 #include "kernel/fused_moe_mlp.h"
 
 void mxfp4_dequant_cuda(const void* packed, const void* scales, void* output,
-                         int rows, int packed_cols, int scale_cols,
-                         int block_size, cudaStream_t stream);
+                        int rows, int packed_cols, int scale_cols,
+                        int block_size, cudaStream_t stream);
 
 static const int64_t kMaxTokens = 256;
 
@@ -51,8 +51,7 @@ MoEMLP::MoEMLP(int dtype, int expert_type) {
   for (int i = 0; i < 8; i++) {
     buffer_.push_back(torch::zeros({1}, options));
   }
-  int num_params =
-      expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE ? 6 : 4;
+  int num_params = expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE ? 6 : 4;
   for (int i = 0; i < num_params; i++) {
     param_.push_back(torch::zeros({1}, options));
   }
@@ -169,12 +168,12 @@ void MoEMLP::DequantMxfp4Params(cudaStream_t stream) {
     int packed_cols = packed.size(1);
     int scale_cols = scales.size(1);
     int block_size = packed_cols * 2 / scale_cols;
-    auto output = torch::empty(
-        {rows, packed_cols * 2},
-        torch::TensorOptions().dtype(torch::kBFloat16).device(
-            CUDA_DEVICE(device)));
+    auto output =
+        torch::empty({rows, packed_cols * 2}, torch::TensorOptions()
+                                                  .dtype(torch::kBFloat16)
+                                                  .device(CUDA_DEVICE(device)));
     mxfp4_dequant_cuda(packed.data_ptr(), scales.data_ptr(), output.data_ptr(),
-                        rows, packed_cols, scale_cols, block_size, stream);
+                       rows, packed_cols, scale_cols, block_size, stream);
     gpt_oss_param_.push_back(output);
   }
   gpt_oss_param_.insert(gpt_oss_param_.begin() + 1, param_[2]);
@@ -254,14 +253,14 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
     auto& gate_up_bias = gpt_oss_param_[1];
     auto& down_weight = gpt_oss_param_[2];
     auto& down_bias = gpt_oss_param_[3];
-    auto gate_up = torch::matmul(input, gate_up_weight.transpose(0, 1)) +
-                   gate_up_bias;
-    auto gate = gate_up.index(
-        {torch::indexing::Slice(),
-         torch::indexing::Slice(0, torch::indexing::None, 2)});
-    auto up = gate_up.index(
-        {torch::indexing::Slice(),
-         torch::indexing::Slice(1, torch::indexing::None, 2)});
+    auto gate_up =
+        torch::matmul(input, gate_up_weight.transpose(0, 1)) + gate_up_bias;
+    auto gate =
+        gate_up.index({torch::indexing::Slice(),
+                       torch::indexing::Slice(0, torch::indexing::None, 2)});
+    auto up =
+        gate_up.index({torch::indexing::Slice(),
+                       torch::indexing::Slice(1, torch::indexing::None, 2)});
     gate = torch::clamp_max(gate, 7.0);
     up = torch::clamp(up, -7.0, 7.0);
     auto activated = (up + 1.0) * (gate * torch::sigmoid(gate * 1.702));
