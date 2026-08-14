@@ -48,25 +48,28 @@ class DeepseekMoEBlock(nn.Module):
         self.num_expert = config.n_routed_experts
 
         if self.config.model_type == "deepseek_v2":
+            import transformers.models.deepseek_v2.modeling_deepseek_v2 as _dsv2
             from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
                 DeepseekV2MLP,
-                DeepseekV2MoEGate,
             )
 
             self.mlp_cls = DeepseekV2MLP
-            self.gate_cls = DeepseekV2MoEGate
+            # DeepseekV2MoEGate was removed in newer Transformers; fall back to
+            # the local DeepseekMoEGate which has the same raw-logits interface.
+            _gate_cls = getattr(_dsv2, "DeepseekV2MoEGate", None)
+            self.gate_cls = _gate_cls if _gate_cls is not None else DeepseekMoEGate
         if self.config.model_type == "deepseek_v3":
             from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
                 DeepseekV3MLP,
             )
 
             self.mlp_cls = DeepseekV3MLP
-            # V3 upstream has no standalone gate; use V2 gate (same interface)
-            from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
-                DeepseekV2MoEGate,
-            )
+            # V3 upstream has no standalone gate; use V2 gate when available,
+            # otherwise fall back to the local DeepseekMoEGate.
+            import transformers.models.deepseek_v2.modeling_deepseek_v2 as _dsv2
 
-            self.gate_cls = DeepseekV2MoEGate
+            _gate_cls = getattr(_dsv2, "DeepseekV2MoEGate", None)
+            self.gate_cls = _gate_cls if _gate_cls is not None else DeepseekMoEGate
 
         self.experts = nn.ModuleList(
             [
