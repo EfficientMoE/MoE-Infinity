@@ -34,12 +34,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       // &ArcherPrefetchHandle::AcquireTensor) .def("end", (void
       // (ArcherPrefetchHandle::*)(torch::nn::Module&))
       // &ArcherPrefetchHandle::ReleaseTensor)
-      .def("begin",
-           (void(ArcherPrefetchHandle::*)(std::uint64_t&, torch::Tensor&)) &
-               ArcherPrefetchHandle::AcquireTensor)
-      .def("end",
-           (void(ArcherPrefetchHandle::*)(std::uint64_t&, torch::Tensor&)) &
-               ArcherPrefetchHandle::ReleaseTensor)
+      .def("begin", (void(ArcherPrefetchHandle::*)(
+                        std::uint64_t&, torch::Tensor&, std::uint32_t)) &
+                        ArcherPrefetchHandle::AcquireTensor)
+      .def("end", (void(ArcherPrefetchHandle::*)(std::uint64_t&, torch::Tensor&,
+                                                 std::uint32_t)) &
+                      ArcherPrefetchHandle::ReleaseTensor)
       // .def("begin",
       //      (void (ArcherPrefetchHandle::*)(torch::Tensor&, const
       //      std::uint32_t)) &
@@ -64,6 +64,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                const std::vector<std::tuple<
                    std::string, std::vector<std::vector<TensorID>>>>&)) &
                ArcherPrefetchHandle::SetTopology)
+      .def("set_topology_v2",
+           (void(ArcherPrefetchHandle::*)(
+               const std::vector<std::tuple<std::string, bool,
+                                            std::vector<std::vector<TensorID>>,
+                                            std::vector<std::uint64_t>>>&)) &
+               ArcherPrefetchHandle::SetTopologyV2)
+      .def("get_topology_snapshot", &ArcherPrefetchHandle::GetTopologySnapshot)
       .def("update_tensor_map",
            (void(ArcherPrefetchHandle::*)(std::uint64_t, std::uint64_t)) &
                ArcherPrefetchHandle::UpdateTensorMap)
@@ -99,9 +106,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("enqueue_expert", &ExpertDispatcher::EnqueueExpert)
       .def("set_inputs", &ExpertDispatcher::SetInputs)
       .def("set_expected_queue", &ExpertDispatcher::SetExpectedQueue)
-      //  .def("wait_expert", &ExpertDispatcher::WaitExpert)
       .def("wait_expert", &ExpertDispatcher::WaitHiddenStates)
       .def("notify_fetch_start", &ExpertDispatcher::NotifyFetchStart)
       .def("clear_expert_cache_counts",
-           &ExpertDispatcher::ClearExpertCacheCounts);
+           &ExpertDispatcher::ClearExpertCacheCounts)
+      .def("set_scales", &ExpertDispatcher::SetScales,
+           "Store fp8 block scales for dequant-on-copy (fp8-in-store path)");
 }

@@ -16,6 +16,7 @@ from moe_infinity.common.constants import (
     parse_expert_type,
 )
 from moe_infinity.models import SyncQwen3_5MoeSparseMoeBlock
+from moe_infinity.runtime.model_offload import OffloadEngine
 from moe_infinity.utils.hf_config import parse_expert_id, parse_moe_param
 
 
@@ -134,3 +135,36 @@ def test_sync_block_executor_stays_unset():
     cfg = _tiny_text_config()
     block = SyncQwen3_5MoeSparseMoeBlock(cfg)
     assert block.expert_executor is None
+
+
+def test_qwen3_5_topology_distinguishes_shared_and_routed_experts():
+    class TinyQwen35(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.language_model = torch.nn.Module()
+            self.model.language_model.layers = torch.nn.ModuleList(
+                [torch.nn.Module()]
+            )
+            layer = self.model.language_model.layers[0]
+            layer.mlp = SyncQwen3_5MoeSparseMoeBlock(_tiny_text_config())
+
+    model = TinyQwen35()
+    engine = object.__new__(OffloadEngine)
+    engine.config = _arch("Qwen3_5MoeForConditionalGeneration")
+    engine.name_id_map = {
+        name: tensor_id
+        for tensor_id, (name, _) in enumerate(model.named_parameters())
+    }
+
+    topology = dict(engine.get_topology(model))
+
+    routed = topology["model.language_model.layers.0.mlp.experts"]
+    assert len(routed) == 8
+    shared_stage = topology["model.language_model.layers.0"][0]
+    shared_ids = {
+        engine.name_id_map[name]
+        for name, _ in model.named_parameters()
+        if ".shared_expert" in name
+    }
+    assert shared_ids <= set(shared_stage)

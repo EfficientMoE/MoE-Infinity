@@ -89,12 +89,20 @@ void ArcherPrefetchHandle::CleanUpResources() {
 }
 
 void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
-                                         torch::Tensor& buffer) {
-  auto tensor_id = kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
+                                         torch::Tensor& buffer,
+                                         std::uint32_t explicit_id) {
+  auto tensor_id =
+      (explicit_id != UINT32_MAX)
+          ? explicit_id
+          : kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
   void* old_ptr = (void*)buffer.data_ptr();
   DLOG_TRACE("Acquire tensor ", tensor_id, old_ptr);
 
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
+  if (node == nullptr) {
+    DLOG_ERROR("AcquireTensor: no topology node for tensor_id ", tensor_id);
+    return;
+  }
   node->state = 1;
 
   // add node tensor_ids to node_id_to_tensor_ids_
@@ -135,12 +143,20 @@ void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
   kArcherTensorHandle->UpdateTensorMap(old_ptr, (void*)buffer.data_ptr());
 }
 void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
-                                         torch::Tensor& buffer) {
-  auto tensor_id = kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
+                                         torch::Tensor& buffer,
+                                         std::uint32_t explicit_id) {
+  auto tensor_id =
+      (explicit_id != UINT32_MAX)
+          ? explicit_id
+          : kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
   void* old_ptr = (void*)buffer.data_ptr();
   DLOG_TRACE("Release tensor ", tensor_id, old_ptr);
 
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
+  if (node == nullptr) {
+    DLOG_ERROR("ReleaseTensor: no topology node for tensor_id ", tensor_id);
+    return;
+  }
   // node->state = 1;
 
   if (node_id_to_tensor_ids_.find(node->id) == node_id_to_tensor_ids_.end()) {
@@ -159,7 +175,7 @@ void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
   // TraceRequest(request_id, tensor_id);
 
   auto current_layer_id = node->corr_id & 0xFFFFFFFF;
-  if (current_layer_id != last_layer_id_ &&
+  if (last_node_ != nullptr && current_layer_id != last_layer_id_ &&
       node_id_to_tensor_ids_[last_node_->id].size() != 0) {
     node_id_to_tensor_ids_[last_node_->id].clear();
     kTaskPool->StopExec(request_id,
@@ -213,11 +229,6 @@ void ArcherPrefetchHandle::ReplaceCacheCandidates(
   std::vector<NodePtr> candidates;
   for (std::uint32_t tensor_id : tensor_ids) {
     auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
-    {
-      auto expected = NodeExecState::IDLE;
-      node->exec_state.compare_exchange_strong(
-          expected, NodeExecState::FETCHING, std::memory_order_acq_rel);
-    }
     candidates.push_back(node);
   }
 
@@ -350,6 +361,18 @@ void ArcherPrefetchHandle::SetTopology(
         std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
         topology) {
   kTopologyHandle->InitializeTopology(topology);
+}
+
+void ArcherPrefetchHandle::SetTopologyV2(
+    const std::vector<
+        std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
+                   std::vector<std::uint64_t>>>& topology) {
+  kTopologyHandle->InitializeTopologyV2(topology);
+}
+
+std::vector<std::tuple<std::uint64_t, bool, int>>
+ArcherPrefetchHandle::GetTopologySnapshot() {
+  return kTopologyHandle->GetTopologySnapshot();
 }
 
 bool ArcherPrefetchHandle::IsTensorOffloaded(const std::uint32_t tensor_id) {
