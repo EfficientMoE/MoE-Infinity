@@ -76,16 +76,63 @@ def test_expansion_creates_128_identities_per_layer_without_copy():
                 assert view.storage_offset() == expert_idx * packed.stride(0)
 
 
-def test_expansion_rejects_incomplete_layer():
-    state = _packed_layer(0)
-    del state["model.layers.0.mlp.experts.down_proj_scales"]
+_EXPERT_FIELDS = (
+    "gate_up_proj_blocks",
+    "gate_up_proj_scales",
+    "gate_up_proj_bias",
+    "down_proj_blocks",
+    "down_proj_scales",
+    "down_proj_bias",
+)
+
+
+def test_expansion_handles_components_split_across_shards():
+    """gpt-oss-20b splits a layer's packed expert components across safetensors
+    shards (e.g. gate_up_proj_bias in one shard, the other five in another).
+    The loader expands one per-shard slice at a time, so expansion must succeed
+    on each partial slice rather than requiring all six components together."""
+    experts = 4
+    prefix = "model.layers.6.mlp.experts"
+    full = _packed_layer(6, experts=experts)
+    bias_key = f"{prefix}.gate_up_proj_bias"
+
+    shard_bias = {bias_key: full[bias_key]}
+    shard_rest = {k: v for k, v in full.items() if k != bias_key}
+
+    config = _config(layers=7, experts=experts)
+    _expand_gpt_oss_packed_experts(shard_bias, config)
+    _expand_gpt_oss_packed_experts(shard_rest, config)
+
+    expected_bias = {f"{prefix}.{e}.gate_up_proj_bias" for e in range(experts)}
+    assert set(shard_bias) == expected_bias
+
+    expected_rest = {
+        f"{prefix}.{e}.{field}"
+        for e in range(experts)
+        for field in _EXPERT_FIELDS
+        if field != "gate_up_proj_bias"
+    }
+    assert set(shard_rest) == expected_rest
+
+    merged = {**shard_bias, **shard_rest}
+    assert len(merged) == experts * len(_EXPERT_FIELDS)
+
+
+def test_incomplete_checkpoint_rejected_globally():
+    """A component missing from every shard is a genuinely corrupt checkpoint;
+    the merged-name_id_map check in _gpt_oss_expert_groups must reject it."""
+    config = _config(layers=1, experts=4)
+    name_id_map = _synthetic_name_id_map(layers=1, experts=4)
+    del name_id_map["model.layers.0.mlp.experts.2.down_proj_scales"]
 
     try:
-        _expand_gpt_oss_packed_experts(state, _config(layers=1))
+        _gpt_oss_expert_groups(name_id_map, config)
     except ValueError as exc:
-        assert "down_proj_scales" in str(exc)
+        message = str(exc)
+        assert "layer=0" in message
+        assert "expert=2" in message
     else:
-        raise AssertionError("incomplete GPT-OSS packed layer was accepted")
+        raise AssertionError("incomplete GPT-OSS checkpoint was accepted")
 
 
 def _synthetic_name_id_map(layers=2, experts=128):

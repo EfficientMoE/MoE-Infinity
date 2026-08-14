@@ -206,44 +206,35 @@ def _expand_gpt_oss_packed_experts(state_dict, config):
     if getattr(config, "model_type", "") != "gpt_oss":
         return
 
-    layer_prefixes = sorted(
-        {
-            key.rsplit(".", 1)[0]
-            for key in state_dict
-            if key.endswith(".mlp.experts.gate_up_proj_blocks")
-        }
-    )
+    # gpt-oss checkpoints can split a layer's six packed expert components across
+    # safetensors shards, and the loader expands one per-shard state_dict slice
+    # at a time. Expand each packed component independently so a slice missing
+    # some of the six still expands the ones it holds; global per-(layer, expert)
+    # completeness is enforced later over the merged name_id_map by
+    # _gpt_oss_expert_groups.
     expected_experts = int(config.num_local_experts)
-    for prefix in layer_prefixes:
-        packed = {}
-        missing = []
-        for field in _GPT_OSS_EXPERT_FIELDS:
-            key = f"{prefix}.{field}"
-            if key not in state_dict:
-                missing.append(field)
-            else:
-                packed[field] = state_dict[key]
-        if missing:
+    field_set = set(_GPT_OSS_EXPERT_FIELDS)
+    packed_keys = [
+        key
+        for key in list(state_dict)
+        if ".mlp.experts." in key and key.rsplit(".", 1)[-1] in field_set
+    ]
+    for key in packed_keys:
+        prefix, field = key.rsplit(".", 1)
+        tensor = state_dict[key]
+        if tensor.shape[0] != expected_experts:
             raise ValueError(
-                f"Incomplete GPT-OSS packed expert layer {prefix}: {missing}"
+                f"{key} has {tensor.shape[0]} experts; "
+                f"expected {expected_experts}"
             )
-        for field, tensor in packed.items():
-            if tensor.shape[0] != expected_experts:
-                raise ValueError(
-                    f"{prefix}.{field} has {tensor.shape[0]} experts; "
-                    f"expected {expected_experts}"
-                )
         for expert_idx in range(expected_experts):
-            expert_prefix = f"{prefix}.{expert_idx}"
-            for field in _GPT_OSS_EXPERT_FIELDS:
-                view = packed[field][expert_idx]
-                if not view.is_contiguous():
-                    raise ValueError(
-                        f"Non-contiguous GPT-OSS slice {expert_prefix}.{field}"
-                    )
-                state_dict[f"{expert_prefix}.{field}"] = view
-        for field in _GPT_OSS_EXPERT_FIELDS:
-            del state_dict[f"{prefix}.{field}"]
+            view = tensor[expert_idx]
+            if not view.is_contiguous():
+                raise ValueError(
+                    f"Non-contiguous GPT-OSS slice {prefix}.{expert_idx}.{field}"
+                )
+            state_dict[f"{prefix}.{expert_idx}.{field}"] = view
+        del state_dict[key]
 
 
 def _gpt_oss_expert_groups(name_id_map, config):
