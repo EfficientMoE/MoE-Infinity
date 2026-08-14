@@ -227,8 +227,15 @@ def _expand_gpt_oss_packed_experts(state_dict, config):
                 f"{key} has {tensor.shape[0]} experts; "
                 f"expected {expected_experts}"
             )
+        flatten_blocks = field.endswith("_blocks")
         for expert_idx in range(expected_experts):
             view = tensor[expert_idx]
+            if flatten_blocks and view.dim() == 3:
+                # MXFP4 blocks ship as [out, n_blocks, 16]; the native MoEMLP
+                # offload path (DequantMxfp4Params/SetTensorsFromIds) treats
+                # blocks as 2D [out, packed_bytes] and derives hidden as
+                # packed_bytes*2, so collapse the trailing block dims here.
+                view = view.reshape(view.shape[0], -1)
             if not view.is_contiguous():
                 raise ValueError(
                     f"Non-contiguous GPT-OSS slice {prefix}.{expert_idx}.{field}"

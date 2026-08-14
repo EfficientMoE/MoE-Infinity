@@ -175,7 +175,7 @@ void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
   // TraceRequest(request_id, tensor_id);
 
   auto current_layer_id = node->corr_id & 0xFFFFFFFF;
-  if (last_node_ != nullptr && current_layer_id != last_layer_id_ &&
+  if (current_layer_id != last_layer_id_ && last_node_ != nullptr &&
       node_id_to_tensor_ids_[last_node_->id].size() != 0) {
     node_id_to_tensor_ids_[last_node_->id].clear();
     kTaskPool->StopExec(request_id,
