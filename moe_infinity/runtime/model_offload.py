@@ -173,6 +173,14 @@ _GPT_OSS_EXPERT_FIELDS = (
     "down_proj_bias",
 )
 
+_GPT_OSS_RESIDENT_RATIO = 0.9
+
+
+def _gpt_oss_offload_enabled(model_type, archer_config):
+    if model_type != "gpt_oss":
+        return True
+    return archer_config.device_memory_ratio < _GPT_OSS_RESIDENT_RATIO
+
 
 def _expand_gpt_oss_packed_experts(state_dict, config):
     if getattr(config, "model_type", "") != "gpt_oss":
@@ -487,6 +495,9 @@ class OffloadEngine(object):
         )
 
         self.archer_config = _archer_config
+        self.gpt_oss_offload_enabled = _gpt_oss_offload_enabled(
+            getattr(self.config, "model_type", ""), self.archer_config
+        )
         if _archer_config.trace_path is not None:
             self.expert_tracer.load_trace(_archer_config.trace_path)
 
@@ -952,7 +963,10 @@ class OffloadEngine(object):
 
                         module_idx += 1
 
-                if getattr(self.config, "model_type", "") == "gpt_oss":
+                if (
+                    getattr(self.config, "model_type", "") == "gpt_oss"
+                    and not self.gpt_oss_offload_enabled
+                ):
                     self._load_resident_gpt_oss(model)
 
                 self.setup_archer_hooks(model)
