@@ -36,6 +36,13 @@ class _PackedExperts(nn.Module):
 class SyncGptOssMLP(nn.Module):
     archer_config: Optional[ArcherConfig] = None
     layer_id: Optional[int] = None
+    expert_executor = None
+    expert_prefetcher = None
+    expert_tracer = None
+    expert_predictor = None
+    expert_tensor_map = None
+    archer_engine = None
+    lib = None
 
     def __init__(self, config):
         super().__init__()
