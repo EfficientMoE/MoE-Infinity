@@ -57,7 +57,9 @@ class DeepseekMoEBlock(nn.Module):
             # DeepseekV2MoEGate was removed in newer Transformers; fall back to
             # the local DeepseekMoEGate which has the same raw-logits interface.
             _gate_cls = getattr(_dsv2, "DeepseekV2MoEGate", None)
-            self.gate_cls = _gate_cls if _gate_cls is not None else DeepseekMoEGate
+            self.gate_cls = (
+                _gate_cls if _gate_cls is not None else DeepseekMoEGate
+            )
         if self.config.model_type == "deepseek_v3":
             from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
                 DeepseekV3MLP,
@@ -69,7 +71,9 @@ class DeepseekMoEBlock(nn.Module):
             import transformers.models.deepseek_v2.modeling_deepseek_v2 as _dsv2
 
             _gate_cls = getattr(_dsv2, "DeepseekV2MoEGate", None)
-            self.gate_cls = _gate_cls if _gate_cls is not None else DeepseekMoEGate
+            self.gate_cls = (
+                _gate_cls if _gate_cls is not None else DeepseekMoEGate
+            )
 
         self.experts = nn.ModuleList(
             [
