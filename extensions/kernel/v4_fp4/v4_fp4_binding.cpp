@@ -9,8 +9,8 @@
 void fp4_dequant_to_bf16(const void* packed, const void* scale_e8m0, void* out,
                          int N, int K, cudaStream_t stream);
 void mxfp4_dequant_cuda(const void* packed, const void* scales, void* output,
-                         int rows, int packed_cols, int scale_cols,
-                         int block_size, cudaStream_t stream);
+                        int rows, int packed_cols, int scale_cols,
+                        int block_size, cudaStream_t stream);
 
 torch::Tensor mxfp4_dequant(torch::Tensor packed, torch::Tensor scales) {
   TORCH_CHECK(packed.is_cuda() && scales.is_cuda(), "CUDA tensors required");
@@ -23,11 +23,11 @@ torch::Tensor mxfp4_dequant(torch::Tensor packed, torch::Tensor scales) {
   int block_size = packed_cols * 2 / scale_cols;
   packed = packed.contiguous();
   scales = scales.contiguous();
-  auto output = torch::empty(
-      {rows, packed_cols * 2}, packed.options().dtype(torch::kBFloat16));
+  auto output = torch::empty({rows, packed_cols * 2},
+                             packed.options().dtype(torch::kBFloat16));
   auto stream = at::cuda::getCurrentCUDAStream(packed.device().index());
   mxfp4_dequant_cuda(packed.data_ptr(), scales.data_ptr(), output.data_ptr(),
-                      rows, packed_cols, scale_cols, block_size, stream);
+                     rows, packed_cols, scale_cols, block_size, stream);
   return output;
 }
 
@@ -73,8 +73,7 @@ torch::Tensor v4_expert_forward(torch::Tensor x, torch::Tensor w1,
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp4_dequant", &fp4_dequant, "FP4 E2M1 packed -> BF16 dequant");
-  m.def("mxfp4_dequant", &mxfp4_dequant,
-        "MXFP4 uint8 blocks/scales to BF16");
+  m.def("mxfp4_dequant", &mxfp4_dequant, "MXFP4 uint8 blocks/scales to BF16");
   m.def("v4_expert_forward", &v4_expert_forward,
         "V4 FP4 routed-expert SwiGLU forward");
 }

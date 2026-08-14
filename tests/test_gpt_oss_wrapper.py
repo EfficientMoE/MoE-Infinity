@@ -147,7 +147,9 @@ def test_sync_gpt_oss_mlp_resident_path_matches_existing_forward():
     with torch.no_grad():
         output, router_logits = mlp(hidden)
         hidden_flat = hidden.view(-1, hidden.shape[-1])
-        routing_weights = torch.softmax(router_logits, dim=-1, dtype=torch.float32)
+        routing_weights = torch.softmax(
+            router_logits, dim=-1, dtype=torch.float32
+        )
         routing_weights, selected_experts = torch.topk(
             routing_weights, mlp.top_k, dim=-1
         )
