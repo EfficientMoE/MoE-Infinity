@@ -216,13 +216,16 @@ def parse_expert_id(
             layer_id = int(layer_id)
             expert_id = int(expert_id)
     elif "gpt_oss" in arch or "gptoss" in arch:
+        layer_type = "decoder"
         result = re.findall(
-            r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)",
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\."
+            r"(?:gate_up_proj|down_proj)_(?:blocks|scales|bias)$",
             param_name,
         )
         if result:
-            layer_id = int(result[0][0])
-            return layer_id, None
+            layer_id, expert_id = (int(value) for value in result[0])
+            if layer_id >= num_layers or expert_id >= config.num_local_experts:
+                return None, None
 
     if result:
         if layer_type == "decoder":

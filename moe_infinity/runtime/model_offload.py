@@ -165,6 +165,107 @@ def _remap_v5_batched_experts(
         del state_dict[down_key]
 
 
+_GPT_OSS_EXPERT_FIELDS = (
+    "gate_up_proj_blocks",
+    "gate_up_proj_scales",
+    "gate_up_proj_bias",
+    "down_proj_blocks",
+    "down_proj_scales",
+    "down_proj_bias",
+)
+
+
+def _expand_gpt_oss_packed_experts(state_dict, config):
+    if getattr(config, "model_type", "") != "gpt_oss":
+        return
+
+    layer_prefixes = sorted(
+        {
+            key.rsplit(".", 1)[0]
+            for key in state_dict
+            if key.endswith(".mlp.experts.gate_up_proj_blocks")
+        }
+    )
+    expected_experts = int(config.num_local_experts)
+    for prefix in layer_prefixes:
+        packed = {}
+        missing = []
+        for field in _GPT_OSS_EXPERT_FIELDS:
+            key = f"{prefix}.{field}"
+            if key not in state_dict:
+                missing.append(field)
+            else:
+                packed[field] = state_dict[key]
+        if missing:
+            raise ValueError(
+                f"Incomplete GPT-OSS packed expert layer {prefix}: {missing}"
+            )
+        for field, tensor in packed.items():
+            if tensor.shape[0] != expected_experts:
+                raise ValueError(
+                    f"{prefix}.{field} has {tensor.shape[0]} experts; "
+                    f"expected {expected_experts}"
+                )
+        for expert_idx in range(expected_experts):
+            expert_prefix = f"{prefix}.{expert_idx}"
+            for field in _GPT_OSS_EXPERT_FIELDS:
+                view = packed[field][expert_idx]
+                if not view.is_contiguous():
+                    raise ValueError(
+                        f"Non-contiguous GPT-OSS slice {expert_prefix}.{field}"
+                    )
+                state_dict[f"{expert_prefix}.{field}"] = view
+        for field in _GPT_OSS_EXPERT_FIELDS:
+            del state_dict[f"{prefix}.{field}"]
+
+
+def _gpt_oss_expert_groups(name_id_map, config):
+    fields = {name: index for index, name in enumerate(_GPT_OSS_EXPERT_FIELDS)}
+    grouped = {}
+    for name, tensor_id in name_id_map.items():
+        layer_id, expert_id = parse_expert_id(name, config)
+        if layer_id is None or expert_id is None:
+            continue
+        field = name.rsplit(".", 1)[-1]
+        if field not in fields:
+            continue
+        slots = grouped.setdefault(
+            (layer_id, expert_id), [None] * len(_GPT_OSS_EXPERT_FIELDS)
+        )
+        slots[fields[field]] = tensor_id
+
+    topology = []
+    for layer_id in range(config.num_hidden_layers):
+        experts = []
+        for expert_id in range(config.num_local_experts):
+            ids = grouped.get((layer_id, expert_id))
+            if ids is None or any(tensor_id is None for tensor_id in ids):
+                raise ValueError(
+                    f"Missing GPT-OSS expert tensors for layer={layer_id}, "
+                    f"expert={expert_id}"
+                )
+            experts.append(ids)
+        topology.append((f"model.layers.{layer_id}.mlp.experts", experts))
+    return topology
+
+
+def _make_expert_tensor_map(name_id_map, config):
+    if getattr(config, "model_type", "") == "gpt_oss":
+        return {
+            (layer_id, expert_id): tensor_ids[0]
+            for layer_id, (_, experts) in enumerate(
+                _gpt_oss_expert_groups(name_id_map, config)
+            )
+            for expert_id, tensor_ids in enumerate(experts)
+        }
+    result = {}
+    for name, tensor_id in name_id_map.items():
+        layer_id, expert_id = parse_expert_id(name, config)
+        if expert_id is not None:
+            result[(layer_id, expert_id)] = tensor_id
+    return result
+
+
 def _identify_fp8_blockwise_pairs(keys):
     key_set = set(keys)
     pairs = []
@@ -707,6 +808,7 @@ class OffloadEngine(object):
                             state_dict = torch.load(ckpt)
 
                         _remap_v5_batched_experts(state_dict, self.config)
+                        _expand_gpt_oss_packed_experts(state_dict, self.config)
 
                         is_gptq_ckpt = is_gptq_quantized(self.config)
                         _arch0_cast = (
@@ -725,6 +827,7 @@ class OffloadEngine(object):
 
                         if (
                             is_mxfp4_ckpt
+                            and self.config.model_type != "gpt_oss"
                             and os.environ.get("MOE_INFINITY_MXFP4_DEQUANT", "")
                             == "1"
                         ):
@@ -924,11 +1027,9 @@ class OffloadEngine(object):
                         self.name_id_map["embed_tokens.weight"] = 0
                         model.model.embed_tokens.weight.ar_id = 0
 
-                self.expert_tensor_map = dict()
-                for name, id in self.name_id_map.items():
-                    layer_id, expert_id = parse_expert_id(name, self.config)
-                    if expert_id is not None:
-                        self.expert_tensor_map[(layer_id, expert_id)] = id
+                self.expert_tensor_map = _make_expert_tensor_map(
+                    self.name_id_map, self.config
+                )
                 self.expert_prefetcher.expert_tensor_map = (
                     self.expert_tensor_map
                 )
@@ -1301,6 +1402,13 @@ class OffloadEngine(object):
         name_lst = []
         ret_dict = {}
 
+        if getattr(self.config, "model_type", "") == "gpt_oss":
+            gpt_oss_topology = _gpt_oss_expert_groups(
+                self.name_id_map, self.config
+            )
+            name_lst.extend(name for name, _ in gpt_oss_topology)
+            ret_dict.update(dict(gpt_oss_topology))
+
         for name, _ in model.named_parameters(recurse=True):
             match = re.search(r"\d+", name)
             if name not in self.name_id_map:
@@ -1509,7 +1617,7 @@ class OffloadEngine(object):
                 key = key.split(".")[0]
                 output_device_index = 0
 
-            if "expert" in key and self.config.model_type != "gpt_oss":
+            if "expert" in key:
                 for expert_idx, expert_tensors in enumerate(tensors):
                     expert_key = (
                         f"{key}.expert_{expert_idx}"
