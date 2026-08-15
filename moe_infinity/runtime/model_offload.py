@@ -14,7 +14,7 @@ import os
 import re
 import tempfile
 import warnings
-from typing import Callable, Dict, Type, Union
+from typing import Callable, Dict, Optional, Type, Union
 
 import torch
 import transformers
@@ -461,6 +461,41 @@ class OffloadEngine(object):
     request_id = 0
     config = {}
 
+    @property
+    def num_offloaded_experts(self) -> int:
+        prefetcher = getattr(self, "expert_prefetcher", None)
+        if prefetcher is None:
+            return 0
+        return int(getattr(prefetcher, "num_offloaded_experts", 0))
+
+    @property
+    def expert_cache_hit_rate(self) -> float:
+        prefetcher = getattr(self, "expert_prefetcher", None)
+        getter = getattr(prefetcher, "get_hit_rate", None)
+        return float(getter()) if callable(getter) else 0.0
+
+    @property
+    def expert_occupancy_bytes(self) -> float:
+        prefetcher = getattr(self, "expert_prefetcher", None)
+        getter = getattr(prefetcher, "expert_occupancy_bytes", None)
+        return float(getter()) if callable(getter) else 0.0
+
+    @property
+    def kv_occupancy_bytes(self) -> Optional[float]:
+        manager = getattr(self, "kv_cache_manager", None)
+        if manager is None:
+            return None
+        for name in ("occupancy_bytes", "resident_bytes", "kv_cache_bytes"):
+            value = getattr(manager, name, None)
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:
+                    value = None
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value)
+        return None
+
     def __init__(
         self,
         capacity,
@@ -472,6 +507,7 @@ class OffloadEngine(object):
     ):
         self.offload_exemption = set()
         self.expert_modules = []
+        self.kv_cache_manager = kv_cache_manager
 
         self.ckpt_files = []
 
@@ -1039,6 +1075,9 @@ class OffloadEngine(object):
                     self.dtype,
                     parse_expert_type(self.config),
                     self.archer_config.num_threads,
+                )
+                self.expert_prefetcher.expert_dispatcher = (
+                    self.expert_dispatcher
                 )
 
                 for name, param in model.named_parameters(recurse=True):

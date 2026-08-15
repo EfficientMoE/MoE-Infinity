@@ -27,10 +27,26 @@ except Exception:
     IOProfiler = None
 
 
+def _hit_rate_from_visit_counts(counts: Any) -> Optional[float]:
+    if counts is None or not hasattr(counts, "numel"):
+        return None
+    try:
+        if counts.numel() == 0 or counts.dim() != 2 or counts.shape[1] < 4:
+            return None
+        visit = float(counts[:, 0].sum().item())
+        hit = float(counts[:, 3].sum().item())
+    except Exception:
+        return None
+    if visit <= 0.0:
+        return None
+    return hit / visit
+
+
 class ExpertPrefetcher(object):
     cache_file_rd: Optional[Any] = None
     first_k_dense_replace: int = 0
     archer_engine: Any
+    expert_dispatcher: Optional[Any] = None
     expert_tensor_map: dict[tuple[int, int], int]
     expert_nbytes_map: dict[tuple[int, int], int]
 
@@ -40,6 +56,7 @@ class ExpertPrefetcher(object):
             parse_moe_param(config)
         )
         self.archer_engine: Optional[Any] = None
+        self.expert_dispatcher: Optional[Any] = None
         self.expert_tensor_map: Dict[Tuple[int, int], int] = {}
         self.expert_nbytes_map: Dict[Tuple[int, int], int] = {}
         self._last_speculative_prediction: Set[int] = set()
@@ -48,6 +65,89 @@ class ExpertPrefetcher(object):
         global _expert_prefetcher
         _expert_prefetcher = archer_engine
         self.archer_engine = archer_engine
+
+    @property
+    def num_offloaded_experts(self) -> int:
+        engine = self.archer_engine
+        checker = (
+            getattr(engine, "is_tensor_offloaded", None)
+            if engine is not None
+            else None
+        )
+        if not callable(checker):
+            return len(self.expert_tensor_map)
+        count = 0
+        for tensor_id in self.expert_tensor_map.values():
+            try:
+                if checker(int(tensor_id)):
+                    count += 1
+            except Exception:
+                continue
+        return count
+
+    def get_hit_rate(self) -> float:
+        dispatcher = self.expert_dispatcher
+        if dispatcher is not None:
+            getter = getattr(dispatcher, "get_cache_hit_rate", None)
+            if callable(getter):
+                try:
+                    rate = float(getter())
+                except Exception:
+                    rate = 0.0
+                if rate:
+                    return rate
+        engine = self.archer_engine
+        getter = (
+            getattr(engine, "get_hit_rate", None)
+            if engine is not None
+            else None
+        )
+        if callable(getter):
+            try:
+                counts = getter()
+            except Exception:
+                counts = None
+            rate = _hit_rate_from_visit_counts(counts)
+            if rate is not None:
+                return rate
+        return 0.0
+
+    def expert_occupancy_bytes(self) -> float:
+        total = 0.0
+        dispatcher = self.expert_dispatcher
+        if dispatcher is not None:
+            getter = getattr(dispatcher, "get_cache_occupancy_bytes", None)
+            if callable(getter):
+                try:
+                    total += float(getter())
+                except Exception:
+                    pass
+        engine = self.archer_engine
+        getter = (
+            getattr(engine, "get_expert_occupancy_bytes", None)
+            if engine is not None
+            else None
+        )
+        if callable(getter):
+            try:
+                total += float(getter())
+            except Exception:
+                pass
+        return total
+
+    def wasted_prefetch_bytes(self) -> float:
+        engine = self.archer_engine
+        getter = (
+            getattr(engine, "get_wasted_prefetch_bytes", None)
+            if engine is not None
+            else None
+        )
+        if callable(getter):
+            try:
+                return float(getter())
+            except Exception:
+                return 0.0
+        return 0.0
 
     def prefetch_experts_list(self, layer_id: int, expert_list: List[int]):
         if self.archer_engine is None:
