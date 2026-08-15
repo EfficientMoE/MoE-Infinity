@@ -14,9 +14,12 @@ schema is defined once. Two public entry points:
 
 from __future__ import annotations
 
+import argparse
+import json
 import math
+import sys
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 REQUIRED_METRICS = (
     "output_tokens_per_second",
@@ -129,21 +132,219 @@ def validate_result_matrix(
         row = rows[baseline]
         if baseline == "B3" and row.get("status") == UNAVAILABLE_CAPACITY:
             continue
-        for metric in REQUIRED_METRICS:
-            if metric not in row:
-                raise ValueError(f"{baseline} missing metric: {metric}")
-            value = row[metric]
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(
-                    f"{baseline}.{metric} must be a finite, non-negative "
-                    f"number; got {value!r}"
-                )
-            number = float(value)
-            if not math.isfinite(number) or number < 0.0:
-                raise ValueError(
-                    f"{baseline}.{metric} must be a finite, non-negative "
-                    f"number; got {value!r}"
-                )
+        _validate_metric_row(baseline, row)
+
+
+def _validate_metric_row(baseline: str, row: Mapping[str, object]) -> None:
+    for metric in REQUIRED_METRICS:
+        if metric not in row:
+            raise ValueError(f"{baseline} missing metric: {metric}")
+        value = row[metric]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"{baseline}.{metric} must be a finite, non-negative "
+                f"number; got {value!r}"
+            )
+        number = float(value)
+        if not math.isfinite(number) or number < 0.0:
+            raise ValueError(
+                f"{baseline}.{metric} must be a finite, non-negative "
+                f"number; got {value!r}"
+            )
+
+
+def summarise_row(row: Mapping[str, object]) -> Mapping[str, object]:
+    """BM1 router-ahead cost summary for one row (design §10).
+
+    BM1 passes when the route-ahead router projection is strictly cheaper than
+    the width-B verify it front-runs (``t_router < t_verify``); the raw seconds
+    and their ratio are retained so the aggregator can rank configurations, not
+    only gate them. Raises ``ValueError`` on a missing term, a negative time, or
+    a non-positive ``t_verify_seconds``.
+    """
+    for key in ("t_router_seconds", "t_verify_seconds"):
+        if key not in row:
+            raise ValueError(f"row missing BM1 term: {key}")
+    t_router = _require_finite_non_negative(
+        "t_router_seconds", row["t_router_seconds"]
+    )
+    t_verify = _require_finite_non_negative(
+        "t_verify_seconds", row["t_verify_seconds"]
+    )
+    if t_verify <= 0.0:
+        raise ValueError(f"t_verify_seconds must be > 0; got {t_verify!r}")
+    return {
+        "t_router_seconds": t_router,
+        "t_verify_seconds": t_verify,
+        "bm1_router_to_verify_ratio": t_router / t_verify,
+        "bm1_pass": t_router < t_verify,
+    }
+
+
+def aggregate_result_matrices(
+    rows: Sequence[Mapping[str, Any]],
+) -> Dict[Tuple[str, int, int], Dict[str, Mapping[str, Any]]]:
+    """Group raw observation rows into §8 matrices.
+
+    Keyed by ``(model, block_size, concurrency)``; each value maps a baseline
+    label to its single row. A duplicate ``(key, baseline)`` raises, mirroring
+    the runner's append-without-overwrite guarantee.
+    """
+    matrices: Dict[Tuple[str, int, int], Dict[str, Mapping[str, Any]]] = {}
+    for row in rows:
+        key = (
+            str(row["model"]),
+            int(row["block_size"]),
+            int(row["concurrency"]),
+        )
+        baseline = str(row["baseline"])
+        bucket = matrices.setdefault(key, {})
+        if baseline in bucket:
+            raise ValueError(f"duplicate baseline {baseline} for {key}")
+        bucket[baseline] = row
+    return matrices
+
+
+def evaluate_matrix(
+    baseline_rows: Mapping[str, Mapping[str, Any]],
+    allow_blocked: Sequence[str] = (),
+) -> Tuple[bool, Dict[str, Any]]:
+    """Completeness + BM1 verdict for one grouped matrix.
+
+    A baseline is satisfied when it carries the full metric schema; a baseline
+    listed in ``allow_blocked`` may instead carry a blocking ``status`` (e.g.
+    B2's ``BLOCKED_UNTIL_2D_SCHEDULER`` before the 2-D scheduler lands). Any
+    other missing/invalid/blocked baseline fails the group. BM1 summaries are
+    attached for every row carrying ``t_router_seconds``/``t_verify_seconds``.
+    """
+    allow = set(allow_blocked)
+    detail: Dict[str, Any] = {
+        "present": sorted(baseline_rows),
+        "blocked": [],
+        "missing": [],
+        "invalid": [],
+        "bm1": {},
+    }
+    ok = True
+    for baseline in REQUIRED_BASELINES:
+        row = baseline_rows.get(baseline)
+        if row is None:
+            detail["missing"].append(baseline)
+            ok = False
+            continue
+        if row.get("status"):
+            if baseline in allow:
+                detail["blocked"].append(baseline)
+            else:
+                detail["blocked"].append(baseline)
+                ok = False
+            continue
+        try:
+            _validate_metric_row(baseline, row)
+        except ValueError:
+            detail["invalid"].append(baseline)
+            ok = False
+        if "t_router_seconds" in row and "t_verify_seconds" in row:
+            detail["bm1"][baseline] = dict(summarise_row(row))
+    return ok, detail
+
+
+def _matrix_key(key: Tuple[str, int, int]) -> str:
+    return f"{key[0]}|B{key[1]}|c{key[2]}"
+
+
+def _write_json(path: str, payload: Mapping[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def _write_csv(
+    path: str,
+    matrices: Mapping[Tuple[str, int, int], Mapping[str, Mapping[str, Any]]],
+) -> None:
+    import csv
+
+    columns = ["model", "block_size", "concurrency", "baseline", "status"]
+    columns += list(REQUIRED_METRICS)
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for (model, block, conc), baseline_rows in sorted(matrices.items()):
+            for baseline, row in sorted(baseline_rows.items()):
+                record = {
+                    "model": model,
+                    "block_size": block,
+                    "concurrency": conc,
+                    "baseline": baseline,
+                    "status": row.get("status", ""),
+                }
+                for metric in REQUIRED_METRICS:
+                    record[metric] = row.get(metric, "")
+                writer.writerow(record)
+
+
+def _write_markdown(path: str, report: Mapping[str, Any]) -> None:
+    lines = ["# PD-DFlash Phase-A result matrix", ""]
+    for group, detail in sorted(report.items()):
+        lines.append(f"## {group}")
+        lines.append(f"- present: {', '.join(detail['present']) or '(none)'}")
+        if detail["blocked"]:
+            lines.append(f"- blocked: {', '.join(detail['blocked'])}")
+        if detail["missing"]:
+            lines.append(f"- missing: {', '.join(detail['missing'])}")
+        if detail["invalid"]:
+            lines.append(f"- invalid: {', '.join(detail['invalid'])}")
+        for baseline, bm1 in sorted(detail["bm1"].items()):
+            lines.append(
+                f"- BM1 {baseline}: ratio="
+                f"{bm1['bm1_router_to_verify_ratio']:.4f} "
+                f"pass={bm1['bm1_pass']}"
+            )
+        lines.append("")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m benchmarks.dflash.report",
+        description="Aggregate PD-DFlash raw observation rows into §8 matrices.",
+    )
+    parser.add_argument("--input", nargs="+", required=True)
+    parser.add_argument("--matrix-json")
+    parser.add_argument("--csv")
+    parser.add_argument("--markdown")
+    parser.add_argument("--allow-blocked", nargs="*", default=[])
+    args = parser.parse_args(argv)
+
+    rows: List[Mapping[str, Any]] = []
+    for path in args.input:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        rows.extend(data if isinstance(data, list) else [data])
+
+    matrices = aggregate_result_matrices(rows)
+    report: Dict[str, Any] = {}
+    all_ok = True
+    for key, baseline_rows in sorted(matrices.items()):
+        ok, detail = evaluate_matrix(baseline_rows, args.allow_blocked)
+        all_ok = all_ok and ok
+        report[_matrix_key(key)] = detail
+
+    if args.matrix_json:
+        _write_json(
+            args.matrix_json,
+            {_matrix_key(k): dict(v) for k, v in matrices.items()},
+        )
+    if args.csv:
+        _write_csv(args.csv, matrices)
+    if args.markdown:
+        _write_markdown(args.markdown, report)
+
+    json.dump(report, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0 if all_ok else 1
 
 
 __all__ = [
@@ -151,6 +352,14 @@ __all__ = [
     "REQUIRED_BASELINES",
     "UNAVAILABLE_CAPACITY",
     "HideInequality",
+    "aggregate_result_matrices",
     "evaluate_hide_inequality",
+    "evaluate_matrix",
+    "main",
+    "summarise_row",
     "validate_result_matrix",
 ]
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry
+    raise SystemExit(main())
