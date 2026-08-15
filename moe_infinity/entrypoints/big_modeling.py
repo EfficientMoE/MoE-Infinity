@@ -318,6 +318,7 @@ class MoE:
             self._native_scheduler = None
             self._native_generation_engine = None
             self._native_kv_offload_coordinator = None
+            self._native_expert_offload_coordinator = None
             return {}
 
         from moe_infinity.engine.generation_loop import GenerationEngine
@@ -444,6 +445,25 @@ class MoE:
             )
             kv_offload_coordinator.register_with_scheduler(transfer_scheduler)
 
+        expert_offload_coordinator = None
+        if getattr(engine_config, "enable_expert_offload", False):
+            from moe_infinity.engine.expert_offload_coordinator import (
+                ExpertOffloadCoordinator,
+            )
+
+            # Opt-in engine-path scaffolding mirroring the KV coordinator above;
+            # default-off (absent flag => False) leaves the standard path
+            # unchanged. Registers EXPERT_FETCH/EXPERT_EVICT handlers; with no
+            # real expert_prefetcher supplied the coordinator uses a stub, so
+            # transfers are no-ops until a prefetcher is wired.
+            expert_offload_coordinator = ExpertOffloadCoordinator(
+                config=engine_config,
+                num_devices=max(1, torch.cuda.device_count()),
+            )
+            expert_offload_coordinator.register_with_scheduler(
+                transfer_scheduler
+            )
+
         scheduler = Scheduler(
             kv_cache_manager=kv_cache_manager,
             transfer_scheduler=transfer_scheduler,
@@ -477,6 +497,7 @@ class MoE:
         self._native_scheduler = scheduler
         self._native_generation_engine = generation_engine
         self._native_kv_offload_coordinator = kv_offload_coordinator
+        self._native_expert_offload_coordinator = expert_offload_coordinator
 
         return {
             "memory_coordinator": memory_coordinator,
@@ -484,6 +505,7 @@ class MoE:
             "attention_backend": attention_backend,
             "transfer_scheduler": transfer_scheduler,
             "kv_offload_coordinator": kv_offload_coordinator,
+            "expert_offload_coordinator": expert_offload_coordinator,
             "scheduler": scheduler,
             "generation_engine": generation_engine,
         }
