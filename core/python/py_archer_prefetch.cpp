@@ -53,6 +53,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       //    ArcherPrefetchHandle::GetTrace)
       .def("get_hit_rate", (torch::Tensor(ArcherPrefetchHandle::*)()) &
                                ArcherPrefetchHandle::GetHitRate)
+      .def("get_expert_occupancy_bytes",
+           &ArcherPrefetchHandle::GetExpertOccupancyBytes)
+      .def("get_wasted_prefetch_bytes",
+           &ArcherPrefetchHandle::GetWastedPrefetchBytes)
       .def("set_trace", (void(ArcherPrefetchHandle::*)(const torch::Tensor&)) &
                             ArcherPrefetchHandle::SetTrace)
       //    .def("trace_request",
@@ -111,6 +115,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("notify_fetch_start", &ExpertDispatcher::NotifyFetchStart)
       .def("clear_expert_cache_counts",
            &ExpertDispatcher::ClearExpertCacheCounts)
+      .def("get_cache_occupancy_bytes",
+           &ExpertDispatcher::GetCacheOccupancyBytes)
+      .def("get_cache_hit_rate", &ExpertDispatcher::GetCacheHitRate)
       .def("set_scales", &ExpertDispatcher::SetScales,
            "Store fp8 block scales for dequant-on-copy (fp8-in-store path)");
 }

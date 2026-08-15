@@ -185,6 +185,7 @@ class ArcherTopologyHandle : public base::noncopyable {
   void DisableTrace() noexcept { trace_enabled_ = false; }
 
   std::vector<std::vector<std::size_t>> GetNodeVisitCounts();
+  std::tuple<std::int64_t, std::int64_t> GetResidentAndWastedBytes();
   std::vector<std::size_t> GetChildVisitCounts();
   void SetNodeVisitCounts(const std::vector<std::size_t>& visit_counts);
   void SetChildVisitCounts(const std::vector<std::size_t>& visit_counts);

@@ -372,6 +372,24 @@ ArcherTopologyHandle::GetNodeVisitCounts() {
   return node_visit_counts;
 }
 
+std::tuple<std::int64_t, std::int64_t>
+ArcherTopologyHandle::GetResidentAndWastedBytes() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::int64_t resident = 0;
+  std::int64_t wasted = 0;
+  for (auto& stage : pipeline_.stages) {
+    for (auto& node_body : stage->nodes) {
+      auto& node = node_body->node;
+      if (node == nullptr) continue;
+      if (node->device.is_cuda()) {
+        resident += node->byte_size;
+      }
+      wasted += node->byte_size * static_cast<std::int64_t>(node->unused_count);
+    }
+  }
+  return std::make_tuple(resident, wasted);
+}
+
 std::vector<std::size_t> ArcherTopologyHandle::GetChildVisitCounts() {
   std::lock_guard<std::mutex> lock(mutex_);
   int num_layers = 0;
