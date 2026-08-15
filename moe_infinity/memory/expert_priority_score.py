@@ -45,7 +45,6 @@ def priority_score(
     total_layer,
 ):
     num_encoder_layers = total_layer // 2
-    # print("Cache entries size", len(cache_entries))
     frequency_score = np.zeros_like(decoder_entry.matrix)
     frequency_sum = 0
     for key, value in expert_freq.items():
@@ -62,11 +61,9 @@ def priority_score(
     assert (
         np.sum(frequency_score) > 0
     ), f"frequency_score = {frequency_score}, frequency_sum = {frequency_sum}"
-    # print("frequency_score", np.sum(frequency_score), np.max(frequency_score), np.min(frequency_score), frequency_score.shape)
 
     topo_expert_score = np.zeros_like(decoder_entry.matrix)
     for i in range(topo_expert_score.shape[0]):
-        entry_layer_idx = i
         if current_layer < num_encoder_layers:
             if i < num_encoder_layers:
                 topo_expert_score[i, :] = (
@@ -93,20 +90,15 @@ def priority_score(
 
     seq_expert_score = np.zeros_like(decoder_entry.matrix)
     freq_sum = 0
-    # zero_access = False
     for entry in trace_entries:
         freq_sum += entry.access
     if freq_sum == 0:
-        # freq_sum = len(trace_entries)
         seq_expert_score = np.ones_like(seq_expert_score)
         freq_sum = 1
-        zero_access = True
     else:
         for entry in trace_entries:
             matrix = copy.deepcopy(entry.matrix)
             matrix[matrix > 0] = 1
-            # q = (1 if zero_access else entry.access) / freq_sum
-            # # matrix = matrix * q
             seq_expert_score += entry.matrix
 
     seq_expert_score[num_encoder_layers:, :] = 0

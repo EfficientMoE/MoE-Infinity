@@ -12,7 +12,6 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-# from sklearn.metrics.pairwise import cosine_similarity
 from moe_infinity.memory.expert_entry import ExpertTraceEntry
 from moe_infinity.utils import parse_moe_param
 
@@ -111,10 +110,8 @@ class ExpertTracer:
         return self.trace[seq_id]
 
     def find_most_similar(self, matrix, layer_idx) -> np.ndarray:
-        # start_time = time.time()
         trace_collection_copy = self.trace_collection.clone()
         trace_collection_copy[:, : (layer_idx + 1), :] = 1e-9
-        # print("trace_collection copy", time.time() - start_time)
 
         trace_collection_copy /= torch.sum(
             trace_collection_copy, dim=2, keepdims=True
@@ -131,9 +128,6 @@ class ExpertTracer:
         matrix_copy = torch.nan_to_num(matrix_copy)
 
         cos_sim = self.cos(replicated_matrix_copy, trace_collection_copy)
-        # print("cos_sim", time.time() - start_time)
-
-        # print(cos_sim.shape)
 
         cos_dist = 1 - torch.mean(cos_sim, dim=1)
         min_idx = torch.argmin(cos_dist).item()

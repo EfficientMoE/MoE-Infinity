@@ -27,18 +27,6 @@ class ArcherConfig:
     )
     perfect_cache_file: str = field(init=False)
     device_per_node: int = field(init=False)
-    # master_addr: str = field(
-    #     default="127.0.0.1",
-    #     metadata={"help": "Hosts for running archer"},
-    # )
-    # master_port: str = field(
-    #     default=29500,
-    #     metadata={"help": "Port for running archer"},
-    # )
-    # device_per_node: int = field(
-    #     default=1,
-    #     metadata={"help": "Number of devices per node"},
-    # )
     prefetch: bool = field(
         default=False, metadata={"help": "Enable prefetching"}
     )

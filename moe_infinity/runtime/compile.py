@@ -11,7 +11,6 @@ EXPERT_CLS = {
     "deepseek_v2": DeepseekV2MLP,
     "deepseek_v3": DeepseekV3MLP,
     "mixtral": MixtralExpertMLP,
-    # "nllb_moe": NllbMoeDenseActDense,
     "qwen3_moe": Qwen3MoeMLP,
 }
 
@@ -21,10 +20,6 @@ def script_expert(save_dir, expert_type, config, **kwargs):
     """
     Compile a single expert.
     """
-    # get argument list from the expert class
-    # expert_cls = EXPERT_CLS[expert_type]
-    # expert_args = expert_cls.__init__.__code__.co_varnames
-
     expert_instance = EXPERT_CLS[expert_type](config, **kwargs)
     # compile the forward function of the expert
     module = torch.jit.script(expert_instance)

@@ -188,8 +188,6 @@ class CompletionRequest(BaseModel):
         str,
         Union[str, int, float, List[int], List[str], Dict[str, float], None],
     ]:
-        echo_without_generation = self.echo and self.max_tokens == 0
-
         return {
             "temperature": self.temperature,
             "top_p": self.top_p,
@@ -268,12 +266,3 @@ class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
     finish_reason: Optional[Literal["stop", "length", "error"]] = None
-
-
-class ChatCompletionStreamResponse(BaseModel):
-    id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
-    object: str = "chat.completion.chunk"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    model: str
-    choices: List[ChatCompletionResponseStreamChoice]
-    usage: Optional[UsageInfo] = Field(default=None)

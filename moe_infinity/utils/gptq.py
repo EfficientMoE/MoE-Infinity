@@ -1,7 +1,6 @@
 # Copyright (c) EfficientMoE.
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Sequence
 from typing import Optional, Protocol
 
 GPTQ_PACKED_SUFFIXES = (".qweight", ".qzeros")

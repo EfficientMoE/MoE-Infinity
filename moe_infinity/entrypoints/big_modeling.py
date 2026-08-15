@@ -2,7 +2,7 @@
 
 import os
 import warnings
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 
@@ -149,8 +149,6 @@ class MoE:
             )
         self.arch = arch
         model_cls = MODEL_MAPPING_NAMES[arch]
-        # with init_empty_weights():
-        #     self.model = model_cls(model_config)
         if os.path.exists(model_name_or_path):
             model_path = model_name_or_path
             quant_info = detect_quantization(model_config, model_path)
@@ -224,10 +222,9 @@ class MoE:
             ),
         )
         self.engine.ckpt_files = checkpoint_paths
-        # self.engine.save(config.offload_path, checkpoint_paths)
         is_flash_attn_available = False
         try:
-            import flash_attn
+            import flash_attn  # noqa: F401  # availability probe; import side effect only
 
             is_flash_attn_available = True
 
@@ -722,11 +719,7 @@ class MoE:
         return classes
 
     def _configure_hook(self, input_ids: torch.LongTensor):
-        import transformers
 
-        from moe_infinity.models import (
-            apply_rotary_pos_emb,
-        )
 
         if self.arch == "mixtral":
             import moe_infinity.models.mixtral  # noqa: F401
