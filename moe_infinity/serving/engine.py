@@ -41,6 +41,8 @@ class SpeculativeGenerator(Protocol):
 
 _eviction_sync: Optional[EvictionSyncAdapter] = None
 
+_VERIFY_ADMISSION_MAX_RETRIES = 1024
+
 
 def set_eviction_sync(adapter: Optional[EvictionSyncAdapter]) -> None:
     global _eviction_sync
@@ -149,6 +151,9 @@ class ContinuousBatchingEngine:
         self.sampler = Sampler()
         self.batch_builder = BatchBuilder()
         self.speculative_draft = speculative_draft
+        self._verify_scheduling_enabled = (
+            self.scheduler.verify_scheduling_enabled
+        )
 
         self._next_seq_id = 0
         self._sequences: dict[int, SequenceData] = {}
@@ -219,6 +224,8 @@ class ContinuousBatchingEngine:
             )
 
         if self._can_delegate_speculative(batch):
+            if self._can_drive_verify_rounds():
+                return self._step_speculative_session(batch)
             return self._step_speculative(batch)
 
         logits = self._execute_batch(batch)
@@ -404,6 +411,185 @@ class ContinuousBatchingEngine:
             _eviction_sync.on_request_finished(request_id)
         _ = self._callbacks.pop(request_id, None)
         return outputs
+
+    def _can_drive_verify_rounds(self) -> bool:
+        """Opt-in gate for the Step-5 per-round DRAFT->VERIFY->DRAFT driver.
+
+        Off by default: only when the operator configured verify budgets AND
+        the speculator exposes the single-round ``SpecSession`` seam. Otherwise
+        the delegated request keeps the proven whole-request ``generate()`` path
+        unchanged, so default serving stays byte-for-byte identical.
+        """
+        speculator = self.speculative_draft
+        return (
+            self._verify_scheduling_enabled
+            and speculator is not None
+            and callable(getattr(speculator, "begin_session", None))
+            and callable(getattr(speculator, "draft_round", None))
+            and callable(getattr(speculator, "verify_round", None))
+        )
+
+    def _step_speculative_session(
+        self, batch: BatchMetadata
+    ) -> list[RequestOutput]:
+        """Drive one eligible request through the scheduled single-round seam.
+
+        Per round the engine drafts a block, registers that pending verify's
+        EXACT token/byte demand with the 2-D verify scheduler
+        (``set_verify_demand`` with the drafter-projected ``expert_nbytes`` sum,
+        never a fabricated estimate), and runs the verify ONLY once the
+        scheduler admits it (``verify_seq_ids``). The serving sequence advances
+        PREFILL -> DRAFT -> (VERIFY -> DRAFT)* -> FINISHED; emitted tokens stream
+        exactly as on the whole-request path. This runs only under the opt-in
+        gate; ordinary serving and non-session speculators are untouched.
+        """
+        speculator = self.speculative_draft
+        if speculator is None:
+            raise RuntimeError("speculative generator is not configured")
+
+        seq_id = batch.seq_ids[0]
+        sequence = self._sequences[seq_id]
+        request_id = self._sequence_to_request_id[seq_id]
+        prompt = torch.tensor([sequence.prompt_token_ids], dtype=torch.long)
+        stop_token_ids = (
+            [self.eos_token_id] if self.eos_token_id is not None else None
+        )
+        params = sequence.sampling_params
+
+        owner = cast(object | None, getattr(speculator, "moe", None))
+        if owner is not None:
+            setattr(owner, "_cached_past_key_values", None)
+
+        outputs: list[RequestOutput] = []
+        try:
+            session = speculator.begin_session(
+                prompt,
+                max_new_tokens=params.max_tokens,
+                temperature=0.0,
+                stop_token_ids=stop_token_ids,
+                top_k=params.top_k,
+                top_p=params.top_p,
+                collect_route_union=True,
+            )
+            sequence.set_status(SequenceStatus.DRAFT)
+
+            streamed = 0
+            outputs.extend(
+                self._emit_session_tokens(
+                    sequence, request_id, seq_id, session, streamed
+                )
+            )
+            streamed = len(session.emitted)
+
+            while not session.finished and not self._output_finished(outputs):
+                draft = speculator.draft_round(session)
+                self._admit_verify_round(seq_id, draft)
+                sequence.set_status(SequenceStatus.VERIFY)
+                speculator.verify_round(session)
+                self.scheduler.clear_verify_demand(seq_id)
+                if not session.finished:
+                    sequence.set_status(SequenceStatus.DRAFT)
+
+                outputs.extend(
+                    self._emit_session_tokens(
+                        sequence, request_id, seq_id, session, streamed
+                    )
+                )
+                streamed = len(session.emitted)
+                if self._output_finished(outputs):
+                    break
+        finally:
+            if owner is not None:
+                setattr(owner, "_cached_past_key_values", None)
+            self.scheduler.clear_verify_demand(seq_id)
+
+        if sequence.status in (
+            SequenceStatus.DRAFT,
+            SequenceStatus.VERIFY,
+        ):
+            sequence.set_status(SequenceStatus.FINISHED)
+
+        self.scheduler.update_after_step(
+            completed_seq_ids=[seq_id],
+            new_decode_seq_ids=[],
+            committed_counts={seq_id: len(outputs)},
+        )
+        self._num_steps += 1
+        self._completed_request_ids.add(request_id)
+
+        for output in outputs:
+            for callback in self._callbacks.get(request_id, []):
+                callback(output)
+        if _eviction_sync is not None:
+            _eviction_sync.on_request_finished(request_id)
+        _ = self._callbacks.pop(request_id, None)
+        return outputs
+
+    def _admit_verify_round(self, seq_id: int, draft: object) -> None:
+        """Register a pending verify's exact demand and gate on admission.
+
+        Seats the demand as a new (non-in-flight) DRAFT round and lets
+        ``Scheduler`` decide when the verify runs; unadmitted rounds carry their
+        2-D deficit and are retried as the budget accrues. Raises when a
+        correctly-shaped demand is never admitted (a budget misconfiguration:
+        e.g. a zero budget in a dimension the demand needs).
+        """
+        tokens = int(getattr(draft, "tokens"))
+        expert_bytes = int(getattr(draft, "expert_bytes"))
+        self.scheduler.set_verify_demand(
+            seq_id,
+            tokens=tokens,
+            expert_bytes=expert_bytes,
+            in_flight=False,
+        )
+        for _ in range(_VERIFY_ADMISSION_MAX_RETRIES):
+            output = self.scheduler.schedule()
+            if seq_id in output.verify_seq_ids:
+                return
+        raise RuntimeError(
+            "verify round for seq_id "
+            f"{seq_id} was never admitted after "
+            f"{_VERIFY_ADMISSION_MAX_RETRIES} scheduling passes; raise "
+            "verify_token_budget / verify_expert_byte_budget to cover a single "
+            f"verify (tokens={tokens}, expert_bytes={expert_bytes})"
+        )
+
+    def _emit_session_tokens(
+        self,
+        sequence: SequenceData,
+        request_id: str,
+        seq_id: int,
+        session: object,
+        streamed: int,
+    ) -> list[RequestOutput]:
+        """Stream the session's newly emitted tokens as ``RequestOutput`` rows."""
+        emitted = cast(list[int], getattr(session, "emitted"))
+        outputs: list[RequestOutput] = []
+        for token_id in emitted[streamed:]:
+            if self._output_finished(outputs):
+                break
+            sequence.append_output_token(token_id)
+            self._request_outputs[request_id][seq_id].append(token_id)
+            self._total_generated_tokens += 1
+
+            finish_reason = self._get_finish_reason(sequence, token_id)
+            finished = finish_reason is not None
+            outputs.append(
+                RequestOutput(
+                    request_id=request_id,
+                    seq_id=seq_id,
+                    token_id=token_id,
+                    token_text=self._decode_token(token_id),
+                    finished=finished,
+                    finish_reason=finish_reason,
+                    usage=(self._build_usage(sequence) if finished else None),
+                )
+            )
+        return outputs
+
+    @staticmethod
+    def _output_finished(outputs: list[RequestOutput]) -> bool:
+        return bool(outputs) and outputs[-1].finished
 
     def run_until_done(self) -> dict[str, list[int] | list[list[int]]]:
         while self.has_pending_requests():
