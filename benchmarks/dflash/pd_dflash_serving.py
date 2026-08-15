@@ -15,8 +15,10 @@ CUDA, or touches the network. All hardware work is lazily imported inside
 Design contract (frozen here, cross-checked by the aggregator):
 
 * baselines are exactly B0-B3 with the design-doc §8 semantics;
-* the required generalization targets are ``Qwen/Qwen3-Coder-30B-A3B`` and
-  ``openai/gpt-oss-20b`` with their ``z-lab`` DFlash drafts;
+* the required generalization targets are
+  ``Qwen/Qwen3-Coder-30B-A3B-Instruct`` and ``openai/gpt-oss-20b`` with their
+  ``z-lab`` DFlash drafts (the bare ``Qwen/Qwen3-Coder-30B-A3B`` repo returns
+  HTTP 404 and never existed; ``-Instruct`` is the real ``qwen3_moe`` repo);
 * block sizes are 8 and 16, concurrency sweeps 1..32; and
 * every emitted observation carries the full ``REQUIRED_METRICS`` schema, plus
   the byte-accurate route-ahead ``wasted_prefetch_bytes`` from the instrumented
@@ -50,12 +52,12 @@ EXPERIMENTAL_CONFIGURATIONS = {
 }
 
 REQUIRED_MODELS: Tuple[str, ...] = (
-    "Qwen/Qwen3-Coder-30B-A3B",
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
     "openai/gpt-oss-20b",
 )
 
 REQUIRED_DRAFTS: Dict[str, str] = {
-    "Qwen/Qwen3-Coder-30B-A3B": "z-lab/Qwen3-Coder-30B-A3B-DFlash",
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct": "z-lab/Qwen3-Coder-30B-A3B-DFlash",
     "openai/gpt-oss-20b": "z-lab/gpt-oss-20b-DFlash",
 }
 
@@ -251,6 +253,7 @@ class RunnerArgs:
     requests: int
     warmup_rounds: int
     measured_h2d_gbps: Optional[float]
+    probe_h2d: bool
     slo_ms: Optional[float]
     seed: int
     device_memory_ratio: float
@@ -294,6 +297,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--requests", type=int, default=64)
     parser.add_argument("--warmup-rounds", type=int, default=5)
     parser.add_argument("--measured-h2d-gbps", type=float, default=None)
+    parser.add_argument(
+        "--probe-h2d",
+        action="store_true",
+        help=(
+            "when --measured-h2d-gbps is unset, measure host->device "
+            "bandwidth on the visible GPU and use it for the §7 hide "
+            "inequality (never a theoretical PCIe figure)"
+        ),
+    )
     parser.add_argument("--slo-ms", type=float, default=None)
     parser.add_argument("--seed", type=int, default=1408)
     parser.add_argument(
@@ -323,6 +335,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunnerArgs:
         requests=parsed.requests,
         warmup_rounds=parsed.warmup_rounds,
         measured_h2d_gbps=parsed.measured_h2d_gbps,
+        probe_h2d=parsed.probe_h2d,
         slo_ms=parsed.slo_ms,
         seed=parsed.seed,
         device_memory_ratio=parsed.device_memory_ratio,
