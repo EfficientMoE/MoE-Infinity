@@ -184,6 +184,13 @@ def test_glm_routing_parity_vs_hf():
 
     from moe_infinity.models import SyncGlmMoeDsaMoEBlock
 
+    if not hasattr(SyncGlmMoeDsaMoEBlock, "route_tokens_to_experts"):
+        pytest.skip(
+            "canonical SyncGlmMoeDsaMoEBlock delegates routing to HF and has no "
+            "standalone route_tokens_to_experts; parity covered by "
+            "test_glm_routing.py::test_routing_parity"
+        )
+
     torch.manual_seed(0)
     config = GlmMoeDsaConfig(
         hidden_size=128,
@@ -202,12 +209,6 @@ def test_glm_routing_parity_vs_hf():
     )
     hf = GlmMoeDsaMoE(config).eval()
     sync = SyncGlmMoeDsaMoEBlock(config).eval()
-    if not hasattr(sync, "route_tokens_to_experts"):
-        pytest.skip(
-            "canonical SyncGlmMoeDsaMoEBlock delegates routing to HF and has no "
-            "standalone route_tokens_to_experts; parity covered by "
-            "test_glm_routing.py::test_routing_parity"
-        )
     sync.gate.load_state_dict(hf.gate.state_dict())
     with torch.no_grad():
         bias = torch.randn(config.n_routed_experts)
