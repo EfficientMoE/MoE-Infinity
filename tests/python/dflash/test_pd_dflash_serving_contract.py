@@ -88,7 +88,7 @@ def test_require_offloaded_refuses_resident_b0_b1_b2():
 
 def test_observation_row_requires_full_metric_schema():
     row = make_observation_row(
-        model="Qwen/Qwen3-Coder-30B-A3B",
+        model="Qwen/Qwen3-Coder-30B-A3B-Instruct",
         draft="z-lab/Qwen3-Coder-30B-A3B-DFlash",
         baseline="B1",
         block_size=16,
@@ -165,7 +165,7 @@ def test_parse_args_defaults_cover_the_full_matrix():
     args = parse_args(
         [
             "--model",
-            "Qwen/Qwen3-Coder-30B-A3B",
+            "Qwen/Qwen3-Coder-30B-A3B-Instruct",
             "--draft",
             "z-lab/Qwen3-Coder-30B-A3B-DFlash",
             "--offload-dir",
