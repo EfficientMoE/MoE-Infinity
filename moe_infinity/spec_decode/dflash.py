@@ -29,6 +29,7 @@ from moe_infinity.spec_decode._dflash_sample_ops import (
     committed_tokens_sampled,
     warped_probs,
 )
+from moe_infinity.spec_decode._prefetch_route import union_experts_from_mask
 from moe_infinity.spec_decode._route_ahead_ctx import route_ahead_context
 from moe_infinity.spec_decode._route_ahead_stats import RouteAheadStats
 
@@ -468,6 +469,174 @@ class NativeStepTrace(NamedTuple):
     ]  # context-KV length after crop (KV drafter only)
 
 
+# ---------------------------------------------------------------------------
+# Single-round control seam (PD-DFlash Task 6 Step 5)
+#
+# ``SpecSession`` + ``begin_session``/``draft_round``/``verify_round`` externalize
+# the ``_generate_single`` loop so the serving engine can interpose the 2-D
+# verify scheduler between DRAFT and VERIFY, registering each pending verify's
+# EXACT token/byte demand. This is ADDITIVE: ``generate()`` / ``_generate_single``
+# are intentionally left byte-identical and the session runs alongside them.
+# ---------------------------------------------------------------------------
+
+
+class RouteUnionCollector:
+    """Read-only per-verify routed-union recorder for the Step-5 projection.
+
+    Duck-types the ``RouteAheadStats`` recorder slot of ``route_ahead_context``
+    so it plugs into the EXISTING route-ahead seam with zero executor changes:
+    ``DistributedExpertExecutor._maybe_route_ahead_prefetch`` calls
+    ``observe_layer(layer_id, predicted_ids, router_mask, ...)`` for every
+    executor-backed MoE dispatch of the verify forward. This recorder ignores
+    the pinned ``predicted_ids`` and unions the layer's ACTUAL routed experts
+    straight from ``router_mask`` via the SAME ``union_experts_from_mask``
+    primitive the verify's dispatch uses -- so the projection IS the verify's
+    own gate/top-k routing, observed, never re-run. It NEVER pins, prefetches,
+    or changes routing/outputs. Bare-HF / gpt-oss / resident targets never
+    reach the seam, so the union stays empty (byte-free admission).
+    """
+
+    def __init__(self) -> None:
+        self._pending: set[tuple[int, int]] = set()
+        self.union: set[tuple[int, int]] = set()
+
+    def begin_step(self) -> None:
+        """Start a verify step; drop any uncommitted prior-layer records."""
+        self._pending = set()
+
+    def observe_layer(
+        self,
+        layer_id: int,
+        predicted_ids: Sequence[int],
+        router_mask: Any,
+        expert_nbytes: Optional[Any] = None,
+    ) -> None:
+        """Union this dispatched layer's ACTUAL routed experts (read-only)."""
+        del predicted_ids, expert_nbytes  # read the routed union, not the pin
+        for expert_id in union_experts_from_mask(router_mask):
+            self._pending.add((int(layer_id), int(expert_id)))
+
+    def commit_step(self, kept_rows: int = 0) -> RouteAheadStats | None:
+        """Finalize the step's union as the projection for the next round.
+
+        ``kept_rows`` is accepted for recorder-interface parity but ignored:
+        the admission projection intentionally covers the FULL block's routing
+        (the pending verify reads every block row before the accept rule fixes
+        the kept prefix). Returns ``None``.
+        """
+        del kept_rows
+        self.union = set(self._pending)
+        self._pending = set()
+        return None
+
+
+def project_expert_bytes(
+    expert_union: Any, expert_nbytes_map: Optional[Any]
+) -> int:
+    """Exact Sum of registration-time payload bytes over a routed union.
+
+    ``expert_nbytes_map`` is ``ExpertPrefetcher.expert_nbytes_map`` -- the real
+    FP4 payload sizes keyed by ``(layer_id, expert_id)``. ``(layer, expert)``
+    pairs absent from the map contribute nothing; the demand is NEVER
+    fabricated from an expert count or an average size. A missing / non-dict /
+    empty map yields ``0`` (resident / bare-HF / mock -> byte-free admission).
+    """
+    if (
+        not expert_union
+        or not isinstance(expert_nbytes_map, dict)
+        or not expert_nbytes_map
+    ):
+        return 0
+    total = 0
+    for key in expert_union:
+        nbytes = expert_nbytes_map.get(key)
+        if nbytes is not None:
+            total += int(nbytes)
+    return total
+
+
+@dataclass(frozen=True)
+class DraftResult:
+    """One DRAFT round's projected verify demand (engine Step-5 admission).
+
+    ``tokens`` is the verify block width (``block_size``). ``expert_union`` is
+    the projected ``(layer_id, expert_id)`` set the pending verify is expected
+    to route to -- captured read-only from the SAME gate/top-k path the verify
+    uses (see ``RouteUnionCollector``), NOT a second router. ``expert_bytes`` is
+    the EXACT summed registration-time payload over that union (never an
+    expert-count estimate). An empty union / no offload prefetcher yields
+    ``expert_bytes == 0`` (byte-free admission, e.g. the first warm-up round or
+    resident / bare-HF targets).
+    """
+
+    tokens: int
+    expert_union: frozenset[tuple[int, int]]
+    expert_bytes: int
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    """One VERIFY round's committed outcome.
+
+    ``accepted_token_ids`` are the tokens emitted this round (accepted drafts
+    then the bonus, stop/budget-truncated); ``accept`` is the accepted drafts
+    committed to KV (cache advance minus one); ``committed_count`` is the number
+    of emitted tokens appended to the sequence; ``finished`` is set once a stop
+    id or ``max_new_tokens`` ends the session.
+    """
+
+    accepted_token_ids: list[int]
+    accept: int
+    committed_count: int
+    finished: bool
+
+
+@dataclass
+class SpecSession:
+    """Externalized per-sequence round state for the DFlash draft/verify loop.
+
+    ``begin_session`` seeds this from the prefill/anchor forward; ``draft_round``
+    and ``verify_round`` advance it one DRAFT and one VERIFY round respectively,
+    reproducing the ``_generate_single`` loop body exactly but under explicit
+    engine control (Task 6 Step 5). ``generate()`` is left untouched and
+    byte-identical; this seam runs ALONGSIDE it.
+    """
+
+    input_ids: torch.Tensor
+    max_new_tokens: int
+    temperature: float
+    top_k: int
+    top_p: float
+    sampled: bool
+    block_size: int
+    layer_ids: list[int]
+    mask_token_id: int
+    stop_ids: set[int]
+    num_prompt_tokens: int
+    target_kv: Any
+    draft_kv: Any
+    context_feature: torch.Tensor
+    anchor: int
+    start: int
+    emitted: list[int]
+    step_trace: list[NativeStepTrace]
+    finished: bool = False
+    round_index: int = 0
+    projected_expert_union: frozenset[tuple[int, int]] = frozenset()
+    projected_expert_bytes: int = 0
+    collector: Optional[RouteUnionCollector] = None
+    _pending: bool = False
+    _pending_block: Optional[torch.Tensor] = None
+    _pending_prev_start: int = 0
+    _pending_draft_probs: Optional[torch.Tensor] = None
+    _pending_cache_snapshot: Any = None
+
+    @property
+    def output_ids(self) -> list[int]:
+        """All tokens emitted so far (anchor ++ per-round commits), capped."""
+        return list(self.emitted[: self.max_new_tokens])
+
+
 class DFlashSpeculator:
     def __init__(
         self,
@@ -742,6 +911,307 @@ class DFlashSpeculator:
             draft_kv.crop(start)
             return drafter_out
         return self.draft(block, context_feature)
+
+    @torch.no_grad()
+    def begin_session(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        max_new_tokens: int = 256,
+        temperature: float = 0.0,
+        stop_token_ids: Optional[List[int]] = None,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        collect_route_union: bool = False,
+    ) -> SpecSession:
+        """Prefill + anchor forward; seed a ``SpecSession`` for engine rounds.
+
+        Mirrors the setup half of ``_generate_single`` (batch==1, greedy or the
+        lossless sampled path) but stops after the anchor, handing the per-round
+        loop to ``draft_round``/``verify_round``. ``collect_route_union`` opts in
+        to the read-only route projection (``RouteUnionCollector``); it is off
+        on ``generate()``'s path, so nothing there changes. A prefill anchor
+        that is itself a stop id yields an immediately ``finished`` session
+        whose only emitted token is that anchor (never cached), matching
+        ``_generate_single``'s early return.
+        """
+        if input_ids.ndim != 2 or input_ids.shape[0] != 1:
+            raise ValueError(
+                "begin_session expects input_ids of shape [1, seq], got "
+                f"{tuple(input_ids.shape)}"
+            )
+        if float(temperature) < 0:
+            raise ValueError(
+                f"begin_session: temperature must be >= 0, got {temperature}"
+            )
+
+        from transformers import DynamicCache
+
+        sampled = float(temperature) > 0
+        input_ids = input_ids.to(self.device)
+        self._configure_target_hooks(input_ids)
+
+        num_prompt_tokens = int(input_ids.shape[1])
+        block_size = int(self.config.block_size)
+        layer_ids = list(self.config.target_layer_ids)
+        max_new_tokens = int(max_new_tokens)
+
+        logits, hidden_states, target_kv = self._forward_target(
+            input_ids, past_key_values=None, logits_to_keep=1
+        )
+        if sampled:
+            anchor = int(
+                torch.multinomial(
+                    warped_probs(logits[0, -1], temperature, top_k, top_p),
+                    num_samples=1,
+                ).item()
+            )
+        else:
+            anchor = int(logits[:, -1, :].argmax(dim=-1).item())
+        context_feature = _extract_context_feature(hidden_states, layer_ids).to(
+            self.device
+        )
+        stop_ids = set(_resolve_stop_ids(self.target, stop_token_ids))
+
+        session = SpecSession(
+            input_ids=input_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=float(temperature),
+            top_k=int(top_k),
+            top_p=float(top_p),
+            sampled=sampled,
+            block_size=block_size,
+            layer_ids=layer_ids,
+            mask_token_id=int(self.config.mask_token_id),
+            stop_ids=stop_ids,
+            num_prompt_tokens=num_prompt_tokens,
+            target_kv=target_kv,
+            draft_kv=(DynamicCache() if self._drafter_has_kv_cache else None),
+            context_feature=context_feature,
+            anchor=anchor,
+            start=num_prompt_tokens,
+            emitted=[anchor],
+            step_trace=[],
+            collector=(RouteUnionCollector() if collect_route_union else None),
+        )
+        self.step_trace = session.step_trace
+        self.last_generated_lengths = None
+        if stop_ids and anchor in stop_ids and max_new_tokens >= 1:
+            self.last_target_cache = target_kv
+            self.last_draft_cache = session.draft_kv
+            session.finished = True
+        return session
+
+    @torch.no_grad()
+    def draft_round(self, session: SpecSession) -> DraftResult:
+        """One drafter pass over the next block + the read-only verify demand.
+
+        Reproduces the DRAFT half of the ``_generate_single`` loop body (build
+        the ``[anchor, MASK...]`` block, one ``_run_drafter`` pass, fill the
+        drafts greedily or by lossless sampling), snapshots the target cache for
+        the pending verify's rollback, and returns the projected demand for
+        admission. The projection is the union captured read-only from the
+        PRIOR round's verify routing (``session.projected_*``); the first round
+        projects the empty set (byte-free warm-up) since no verify has routed
+        yet. No expert executes and no second router runs here.
+        """
+        if session.finished:
+            raise RuntimeError("draft_round called on a finished session")
+        if session._pending:
+            raise RuntimeError(
+                "draft_round called with an un-verified pending block; "
+                "call verify_round first"
+            )
+
+        prev_start = session.start
+        block = build_block(
+            session.anchor, session.mask_token_id, session.block_size
+        ).to(self.device)
+        drafter_out = self._run_drafter(
+            block, session.context_feature, session.start, session.draft_kv
+        )
+        draft_logits = self.lm_head(drafter_out)[
+            :, -(session.block_size - 1) :, :
+        ]
+        draft_probs: Optional[torch.Tensor] = None
+        if session.sampled:
+            draft_probs = warped_probs(
+                draft_logits[0],
+                session.temperature,
+                session.top_k,
+                session.top_p,
+            )
+            block[:, 1:] = torch.multinomial(
+                draft_probs, num_samples=1
+            ).squeeze(-1)
+        else:
+            block[:, 1:] = draft_logits.argmax(dim=-1)
+
+        session._pending_block = block
+        session._pending_prev_start = prev_start
+        session._pending_draft_probs = draft_probs
+        session._pending_cache_snapshot = snapshot_target_cache(
+            session.target_kv
+        )
+        session._pending = True
+
+        return DraftResult(
+            tokens=session.block_size,
+            expert_union=session.projected_expert_union,
+            expert_bytes=session.projected_expert_bytes,
+        )
+
+    @torch.no_grad()
+    def verify_round(self, session: SpecSession) -> VerifyResult:
+        """One verify forward + accept/commit/rollback for the pending block.
+
+        Reproduces the VERIFY half of the ``_generate_single`` loop body exactly
+        (verify under ``route_ahead_context``, accept rule, emitted/cached
+        split, hybrid rollback, step trace, next anchor/context feature). When
+        the session opted into the route projection, this run's ACTUAL routed
+        union is collected read-only and turned into the EXACT
+        ``expert_nbytes``-summed demand carried to the next ``draft_round``.
+        """
+        if not session._pending or session._pending_block is None:
+            raise RuntimeError(
+                "verify_round called without a pending draft; "
+                "call draft_round first"
+            )
+
+        block = session._pending_block
+        prev_start = session._pending_prev_start
+        draft_probs = session._pending_draft_probs
+        cache_snapshot = session._pending_cache_snapshot
+
+        collector = session.collector
+        stats = (
+            collector
+            if collector is not None
+            else getattr(self, "route_ahead_stats", None)
+        )
+        if stats is not None:
+            stats.begin_step()
+        with route_ahead_context(
+            self._resolve_route_ahead_prefetcher(), stats=stats
+        ):
+            logits, hidden_states, session.target_kv = self._forward_target(
+                block, past_key_values=session.target_kv, logits_to_keep=0
+            )
+
+        if session.sampled:
+            assert draft_probs is not None
+            decision = acceptance_sampled(
+                draft_probs,
+                warped_probs(
+                    logits[0],
+                    session.temperature,
+                    session.top_k,
+                    session.top_p,
+                ),
+                block[0, 1:],
+            )
+            accept = decision.accept
+            committed = committed_tokens_sampled(
+                block, decision.accept, decision.final_token
+            )
+        else:
+            posterior = logits.argmax(dim=-1).to(self.device)
+            accept = acceptance_length(block, posterior)
+            committed = committed_tokens(block, posterior, accept)
+
+        step_tokens = [int(t) for t in committed.emitted[0].tolist()]
+        keep = accept + 1
+        stop = False
+        if session.stop_ids:
+            for j, tok in enumerate(step_tokens):
+                if tok in session.stop_ids:
+                    keep = j + 1
+                    stop = True
+                    break
+        remaining = session.max_new_tokens - len(session.emitted)
+        if keep > remaining:
+            keep = remaining
+            stop = True
+
+        session.emitted.extend(step_tokens[:keep])
+        cache_committed = min(keep, accept) + 1
+        session.start = prev_start + cache_committed
+        rollback_target_cache(
+            session.target_kv,
+            cache_snapshot,
+            prev_start=prev_start,
+            committed=cache_committed,
+            block_size=session.block_size,
+            block=block,
+            replay=(
+                (
+                    lambda prefix, cache: self._forward_target(
+                        prefix, past_key_values=cache, logits_to_keep=0
+                    )[2]
+                )
+                if cache_snapshot.linear
+                else None
+            ),
+        )
+        assert int(session.target_kv.get_seq_length()) == session.start
+
+        if collector is not None:
+            collector.commit_step(kept_rows=cache_committed)
+            prefetcher = self._resolve_route_ahead_prefetcher()
+            union = frozenset(collector.union)
+            session.projected_expert_union = union
+            session.projected_expert_bytes = project_expert_bytes(
+                union, getattr(prefetcher, "expert_nbytes_map", None)
+            )
+        elif stats is not None:
+            stats.commit_step(kept_rows=cache_committed)
+
+        session.step_trace.append(
+            NativeStepTrace(
+                prev_start=prev_start,
+                accept=cache_committed - 1,
+                start=session.start,
+                emitted_len=len(session.emitted),
+                target_cache_len=int(session.target_kv.get_seq_length()),
+                draft_cache_len=(
+                    int(session.draft_kv.get_seq_length())
+                    if session.draft_kv is not None
+                    else None
+                ),
+            )
+        )
+        self.step_trace = session.step_trace
+
+        finished = stop or len(session.emitted) >= session.max_new_tokens
+        if not finished:
+            suffix = _extract_context_feature(
+                hidden_states, session.layer_ids
+            ).to(self.device)[:, : accept + 1, :]
+            if self._drafter_has_kv_cache:
+                session.context_feature = suffix
+            else:
+                session.context_feature = torch.cat(
+                    [session.context_feature, suffix], dim=1
+                )
+            session.anchor = int(committed.bonus[0, 0].item())
+
+        session._pending = False
+        session._pending_block = None
+        session._pending_draft_probs = None
+        session._pending_cache_snapshot = None
+        session.round_index += 1
+
+        if finished:
+            session.finished = True
+            self.last_target_cache = session.target_kv
+            self.last_draft_cache = session.draft_kv
+
+        return VerifyResult(
+            accepted_token_ids=step_tokens[:keep],
+            accept=cache_committed - 1,
+            committed_count=keep,
+            finished=finished,
+        )
 
     @torch.no_grad()
     def generate(
@@ -1326,9 +1796,14 @@ class DFlashSpeculator:
 __all__ = [
     "DFlashConfig",
     "DFlashSpeculator",
+    "DraftResult",
+    "RouteUnionCollector",
+    "SpecSession",
+    "VerifyResult",
+    "bind_shared_weights",
+    "project_expert_bytes",
     "read_dflash_config",
-    "validate_pairing",
     "validate_drafter",
     "validate_drafter_module",
-    "bind_shared_weights",
+    "validate_pairing",
 ]

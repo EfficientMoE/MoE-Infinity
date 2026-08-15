@@ -204,6 +204,11 @@ class Scheduler:
     def set_cp_kv_manager(self, manager: CPAwareKVManager) -> None:
         self._cp_kv_manager = manager
 
+    @property
+    def verify_scheduling_enabled(self) -> bool:
+        """True iff all four verify budgets were configured (Step-5 opt-in)."""
+        return self._verify_config.enabled
+
     def add_request(self, seq_group: SequenceGroup) -> None:
         if seq_group.request_id in self._request_map:
             raise ValueError(
