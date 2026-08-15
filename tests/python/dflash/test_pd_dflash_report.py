@@ -22,7 +22,10 @@ import pytest
 
 from benchmarks.dflash.report import (
     REQUIRED_METRICS,
+    aggregate_result_matrices,
     evaluate_hide_inequality,
+    evaluate_matrix,
+    summarise_row,
     validate_result_matrix,
 )
 
@@ -142,6 +145,111 @@ def test_wasted_prefetch_is_bytes_not_expert_count():
     validate_result_matrix(rows)
     assert rows["B1"]["wasted_prefetch_bytes"] == 12_582_912
     assert "wasted_prefetch_bytes" in REQUIRED_METRICS
+
+
+# ---------------------------------------------------------------------------
+# BM1 router-ahead cost aggregation (design §10)
+# ---------------------------------------------------------------------------
+
+
+def complete_row(**overrides) -> dict[str, float]:
+    row: dict[str, float] = {metric: 1.0 for metric in REQUIRED_METRICS}
+    row["t_router_seconds"] = 0.002
+    row["t_verify_seconds"] = 0.020
+    row.update(overrides)
+    return row
+
+
+def test_bm1_reports_router_cost_against_verify():
+    row = complete_row(t_router_seconds=0.002, t_verify_seconds=0.020)
+    summary = summarise_row(row)
+    assert summary["bm1_router_to_verify_ratio"] == 0.1
+    assert summary["bm1_pass"] is True
+
+
+def test_bm1_fails_when_router_not_cheaper_than_verify():
+    summary = summarise_row(
+        complete_row(t_router_seconds=0.03, t_verify_seconds=0.02)
+    )
+    assert summary["bm1_pass"] is False
+    assert summary["bm1_router_to_verify_ratio"] == 1.5
+
+
+def test_bm1_retains_raw_terms_and_rejects_bad_inputs():
+    summary = summarise_row(complete_row())
+    assert summary["t_router_seconds"] == 0.002
+    assert summary["t_verify_seconds"] == 0.020
+    with pytest.raises(ValueError, match="t_verify_seconds"):
+        summarise_row(complete_row(t_verify_seconds=0.0))
+    with pytest.raises(ValueError, match="t_router_seconds"):
+        summarise_row(complete_row(t_router_seconds=-0.1))
+    with pytest.raises(ValueError, match="t_router_seconds"):
+        summarise_row({"t_verify_seconds": 0.02})
+
+
+# ---------------------------------------------------------------------------
+# aggregation: group raw rows into §8 matrices, allow blocked B2
+# ---------------------------------------------------------------------------
+
+
+def _obs_row(baseline: str, **overrides) -> dict[str, object]:
+    row: dict[str, object] = {
+        "model": "M",
+        "draft": "d",
+        "baseline": baseline,
+        "block_size": 16,
+        "concurrency": 8,
+        "repeat": 0,
+    }
+    row.update({metric: 1.0 for metric in REQUIRED_METRICS})
+    row.update(overrides)
+    return row
+
+
+def _blocked_b2() -> dict[str, object]:
+    return {
+        "model": "M",
+        "draft": "d",
+        "baseline": "B2",
+        "block_size": 16,
+        "concurrency": 8,
+        "repeat": 0,
+        "status": "BLOCKED_UNTIL_2D_SCHEDULER",
+    }
+
+
+def test_aggregate_groups_rows_and_rejects_duplicate_baseline():
+    matrices = aggregate_result_matrices(
+        [_obs_row(b) for b in ("B0", "B1", "B3")]
+    )
+    assert set(matrices) == {("M", 16, 8)}
+    assert set(matrices[("M", 16, 8)]) == {"B0", "B1", "B3"}
+    with pytest.raises(ValueError, match="duplicate baseline"):
+        aggregate_result_matrices([_obs_row("B0"), _obs_row("B0")])
+
+
+def test_evaluate_matrix_allows_blocked_b2_only_when_permitted():
+    rows = {b: _obs_row(b) for b in ("B0", "B1", "B3")}
+    rows["B2"] = _blocked_b2()
+    ok, detail = evaluate_matrix(rows, allow_blocked=["B2"])
+    assert ok is True and detail["blocked"] == ["B2"]
+    not_ok, detail2 = evaluate_matrix(rows, allow_blocked=[])
+    assert not_ok is False and "B2" in detail2["blocked"]
+
+
+def test_evaluate_matrix_flags_missing_baseline_and_attaches_bm1():
+    partial, missing = evaluate_matrix(
+        {b: _obs_row(b) for b in ("B0", "B1")}, []
+    )
+    assert partial is False and set(missing["missing"]) == {"B2", "B3"}
+
+    full = {
+        b: _obs_row(b, t_router_seconds=0.002, t_verify_seconds=0.020)
+        for b in ("B0", "B1", "B2", "B3")
+    }
+    ok, detail = evaluate_matrix(full, [])
+    assert ok is True
+    assert detail["bm1"]["B1"]["bm1_pass"] is True
 
 
 def test_required_metrics_are_frozen_and_complete():

@@ -289,6 +289,31 @@ def _make_expert_tensor_map(name_id_map, config):
     return result
 
 
+def _make_expert_nbytes_map(model, config):
+    """Sum stored payload bytes per ``(layer_id, expert_id)`` from live params.
+
+    Read while the routed-expert weights still carry their true shape/dtype
+    (before ``setup_archer_hooks`` installs offload placeholders), so
+    ``numel * element_size`` is the exact stored FP4/FP8 payload the route-ahead
+    prefetch fetches -- even a meta-init param preserves shape and dtype. This
+    is read-only measurement metadata for the A5 recorder; it never changes
+    routing, prefetch, or offload placement. gpt-oss stacks its experts into one
+    tensor and never reaches the executor route-ahead seam, so it is skipped.
+    """
+    if getattr(config, "model_type", "") == "gpt_oss":
+        return {}
+    result: dict[tuple[int, int], int] = {}
+    for name, param in model.named_parameters(recurse=True):
+        layer_id, expert_id = parse_expert_id(name, config)
+        if expert_id is None:
+            continue
+        nbytes = int(param.numel()) * int(param.element_size())
+        result[(layer_id, expert_id)] = (
+            result.get((layer_id, expert_id), 0) + nbytes
+        )
+    return result
+
+
 def _identify_fp8_blockwise_pairs(keys):
     key_set = set(keys)
     pairs = []
@@ -1058,6 +1083,9 @@ class OffloadEngine(object):
                 )
                 self.expert_prefetcher.expert_tensor_map = (
                     self.expert_tensor_map
+                )
+                self.expert_prefetcher.expert_nbytes_map = (
+                    _make_expert_nbytes_map(model, self.config)
                 )
 
                 # for deepseek and glm, we need to set the expert_tensor_map for the model
