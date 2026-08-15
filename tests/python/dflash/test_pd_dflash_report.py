@@ -268,3 +268,68 @@ def test_required_metrics_are_frozen_and_complete():
     )
     assert len(set(REQUIRED_METRICS)) == len(REQUIRED_METRICS)
     assert math.isfinite(1.0)
+
+
+# ===========================================================================
+# BM5 equivalence + final C++-hop keep/remove verdicts (design §10, Task 10).
+#
+# BM5: switching from Python per-expert issue to shipped C++ batched issue must
+# not alter acceptance, route-ahead coverage, wasted bytes, or output tokens --
+# only tokens/s may move. The final gate reports keep/remove per C++ hop from
+# each hop's paired BM ship flag; a hop lacking a passing BM is removed.
+# ===========================================================================
+
+from benchmarks.dflash.report import (  # noqa: E402
+    cpp_hop_verdicts,
+    summarise_bm5_equivalence,
+)
+
+
+def _bm5_row(tokens_per_second):
+    return {
+        "acceptance_length_a": 3.0,
+        "route_ahead_prefetch_coverage": 0.75,
+        "wasted_prefetch_bytes": 12_582_912.0,
+        "output_tokens_per_second": tokens_per_second,
+    }
+
+
+def test_bm5_equivalence_holds_when_only_throughput_moves():
+    summary = summarise_bm5_equivalence(
+        python_row=_bm5_row(100.0), cpp_row=_bm5_row(140.0)
+    )
+    assert summary["equivalent"] is True
+    assert summary["python_tokens_per_second"] == 100.0
+    assert summary["cpp_tokens_per_second"] == 140.0
+
+
+def test_bm5_equivalence_fails_when_coverage_changes():
+    cpp = _bm5_row(140.0)
+    cpp["route_ahead_prefetch_coverage"] = 0.50
+    summary = summarise_bm5_equivalence(python_row=_bm5_row(100.0), cpp_row=cpp)
+    assert summary["equivalent"] is False
+    assert "route_ahead_prefetch_coverage" in summary["mismatched"]
+
+
+def test_bm5_equivalence_fails_when_waste_bytes_change():
+    cpp = _bm5_row(140.0)
+    cpp["wasted_prefetch_bytes"] = 0.0
+    summary = summarise_bm5_equivalence(python_row=_bm5_row(100.0), cpp_row=cpp)
+    assert summary["equivalent"] is False
+    assert "wasted_prefetch_bytes" in summary["mismatched"]
+
+
+def test_cpp_hop_verdicts_keep_only_hops_with_passing_bm():
+    verdicts = cpp_hop_verdicts(
+        bm2={"ship_batched": True},
+        bm3={"ship_priority_band": False},
+    )
+    assert verdicts["batched_issuance"]["keep"] is True
+    assert verdicts["priority_band"]["keep"] is False
+
+
+def test_cpp_hop_verdicts_missing_bm_removes_hop():
+    verdicts = cpp_hop_verdicts(bm2=None, bm3=None)
+    assert verdicts["batched_issuance"]["keep"] is False
+    assert verdicts["priority_band"]["keep"] is False
+    assert verdicts["batched_issuance"]["reason"]
