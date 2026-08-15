@@ -72,6 +72,28 @@ def _call_expert_dispatcher(method, *args, **kwargs):
     return func(*args, **kwargs)
 
 
+def _layer_expert_nbytes(prefetcher, layer_id, expert_ids):
+    """``{expert_id: stored_bytes}`` for this layer's prefetched set, or None.
+
+    Reads the registration-time ``ExpertPrefetcher.expert_nbytes_map`` -- a real
+    ``dict`` only on the offloaded native path. Mocks, resident runs, and any
+    engine without the map yield ``None`` so the A5 recorder keeps byte-accurate
+    absence instead of a fabricated average expert size, and never calls
+    ``int()`` on a mock attribute.
+    """
+    if not expert_ids:
+        return None
+    nbytes_map = getattr(prefetcher, "expert_nbytes_map", None)
+    if not isinstance(nbytes_map, dict) or not nbytes_map:
+        return None
+    entry = {}
+    for expert_id in expert_ids:
+        nbytes = nbytes_map.get((layer_id, expert_id))
+        if nbytes is not None:
+            entry[expert_id] = int(nbytes)
+    return entry or None
+
+
 class DistributedExpertExecutor:
     def __init__(self, archer_config: ArcherConfig):
         self.archer_config = archer_config
@@ -151,8 +173,14 @@ class DistributedExpertExecutor:
         if stats is not None:
             # A5 read-only observation: predicted == the pinned union when
             # the prefetch fired, else [] (coverage 0 for this layer).
+            predicted_ids = union_expert_ids if fired else []
             stats.observe_layer(
-                layer_id, union_expert_ids if fired else [], mask_2d
+                layer_id,
+                predicted_ids,
+                mask_2d,
+                expert_nbytes=_layer_expert_nbytes(
+                    route_prefetcher, layer_id, predicted_ids
+                ),
             )
         return fired
 

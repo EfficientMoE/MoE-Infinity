@@ -32,6 +32,7 @@ class ExpertPrefetcher(object):
     first_k_dense_replace: int = 0
     archer_engine: Any
     expert_tensor_map: dict[tuple[int, int], int]
+    expert_nbytes_map: dict[tuple[int, int], int]
 
     def __init__(self, config: PretrainedConfig):
         print(config)
@@ -40,6 +41,7 @@ class ExpertPrefetcher(object):
         )
         self.archer_engine: Optional[Any] = None
         self.expert_tensor_map: Dict[Tuple[int, int], int] = {}
+        self.expert_nbytes_map: Dict[Tuple[int, int], int] = {}
         self._last_speculative_prediction: Set[int] = set()
 
     def set_archer_engine(self, archer_engine: Any):

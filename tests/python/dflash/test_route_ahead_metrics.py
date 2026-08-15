@@ -259,6 +259,95 @@ def test_empty_union_dispatch_is_vacuous_noop():
 
 
 # ---------------------------------------------------------------------------
+# (b2) byte-accurate waste: payload bytes, not expert counts (Phase A Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_waste_accounts_payload_bytes_not_only_ids():
+    stats = RouteAheadStats()
+    stats.begin_step()
+    stats.observe_layer(
+        0,
+        predicted_ids=[0, 1],
+        router_mask=torch.tensor([[1, 0], [0, 1]], dtype=torch.bool),
+        expert_nbytes={0: 1024, 1: 4096},
+    )
+    summary = stats.commit_step(kept_rows=1)
+    assert summary.wasted == 1
+    assert summary.wasted_bytes == 4096
+    assert stats.as_dict()["wasted_prefetch_bytes"] == 4096
+
+
+def test_byte_fields_split_predicted_into_kept_and_wasted():
+    stats = RouteAheadStats()
+    stats.begin_step()
+    stats.observe_layer(
+        0,
+        predicted_ids=[0, 1],
+        router_mask=torch.tensor([[1, 0], [0, 1]], dtype=torch.bool),
+        expert_nbytes={0: 1024, 1: 4096},
+    )
+    summary = stats.commit_step(kept_rows=1)
+    # Kept prefix (row 0) routes expert 0 only, so expert 1's 4096 B is wasted;
+    # bytes are restricted to the PREFETCHED set, so predicted == kept + wasted.
+    assert summary.predicted_bytes == 5120
+    assert summary.kept_bytes == 1024
+    assert summary.wasted_bytes == 4096
+    assert summary.predicted_bytes == summary.kept_bytes + summary.wasted_bytes
+    assert stats.as_dict()["predicted_prefetch_bytes"] == 5120
+    assert stats.as_dict()["kept_prefetch_bytes"] == 1024
+
+
+def test_byte_accounting_is_none_without_payload_sizes():
+    # Backward-compatible: mocks / resident paths pass no ``expert_nbytes``, so
+    # the byte fields stay None -- never a fabricated average expert size.
+    stats = RouteAheadStats()
+    stats.begin_step()
+    stats.observe_layer(0, UNION, ROUTER_MASK)
+    summary = stats.commit_step(kept_rows=1)
+    assert summary.wasted == 3  # counts unaffected (experts {2, 5, 7})
+    assert summary.predicted_bytes is None
+    assert summary.kept_bytes is None
+    assert summary.wasted_bytes is None
+    assert stats.as_dict()["wasted_prefetch_bytes"] is None
+    # A fresh recorder also reports None -- the zero-overhead default.
+    assert RouteAheadStats().as_dict()["wasted_prefetch_bytes"] is None
+
+
+def test_executor_seam_forwards_expert_payload_bytes():
+    stats = RouteAheadStats()
+    prefetcher, _engine = _make_real_prefetcher()
+    prefetcher.expert_nbytes_map = {
+        (LAYER_ID, e): (e + 1) * 1024 for e in UNION
+    }
+    stats.begin_step()
+    with route_ahead_context(prefetcher=prefetcher, stats=stats):
+        _dispatch(_make_executor())
+    summary = stats.commit_step(kept_rows=1)
+
+    kept = {0, 1}  # ROUTER_MASK row 0 routes experts {0, 1}
+    wasted = set(UNION) - kept
+    assert summary.predicted_bytes == sum((e + 1) * 1024 for e in UNION)
+    assert summary.kept_bytes == sum((e + 1) * 1024 for e in kept)
+    assert summary.wasted_bytes == sum((e + 1) * 1024 for e in wasted)
+    assert stats.as_dict()["wasted_prefetch_bytes"] == summary.wasted_bytes
+
+
+def test_executor_seam_bytes_absent_for_mock_prefetcher():
+    # A MagicMock prefetcher has no real ``expert_nbytes_map`` dict, so the
+    # seam records None byte fields and never crashes on ``int(mock)``.
+    stats = RouteAheadStats()
+    prefetcher = MagicMock(name="ExpertPrefetcher")
+    stats.begin_step()
+    with route_ahead_context(prefetcher=prefetcher, stats=stats):
+        _dispatch(_make_executor())
+    summary = stats.commit_step(kept_rows=3)
+    assert summary.covered == len(UNION)
+    assert summary.wasted_bytes is None
+    assert stats.as_dict()["wasted_prefetch_bytes"] is None
+
+
+# ---------------------------------------------------------------------------
 # (c) default-off / zero-overhead: no handle, no recording, legacy behavior
 # ---------------------------------------------------------------------------
 

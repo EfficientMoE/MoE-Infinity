@@ -30,7 +30,16 @@ after ``generate()``.
 
 from __future__ import annotations
 
-from typing import Dict, List, NamedTuple, Sequence, Tuple, Union
+from typing import (
+    Dict,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import torch
 
@@ -49,6 +58,11 @@ class RouteAheadStepSummary(NamedTuple):
     covered: int  # sum |P_l ∩ A_l|
     kept: int  # sum |U_keep_l| -- union over only the kept prefix rows
     wasted: int  # sum |P_l \ U_keep_l| -- rejected-token prefetch waste
+    # Byte-accurate counterparts, scored over the PREFETCHED set only; None
+    # when the caller supplied no payload sizes (mock / resident paths).
+    predicted_bytes: Optional[int] = None  # stored bytes of P_l
+    kept_bytes: Optional[int] = None  # bytes of P_l the kept prefix still used
+    wasted_bytes: Optional[int] = None  # bytes of P_l \ U_keep_l (waste)
 
     @property
     def coverage(self) -> float:
@@ -80,7 +94,13 @@ class RouteAheadStats:
         self.covered_experts: int = 0
         self.kept_experts: int = 0
         self.wasted_experts: int = 0
-        self._pending: List[Tuple[int, List[int], torch.Tensor]] = []
+        self.predicted_prefetch_bytes: int = 0
+        self.kept_prefetch_bytes: int = 0
+        self.wasted_prefetch_bytes: int = 0
+        self._bytes_seen: bool = False
+        self._pending: List[
+            Tuple[int, List[int], torch.Tensor, Optional[Dict[int, int]]]
+        ] = []
 
     # ------------------------------------------------------------------
     # recorder interface (speculator + executor seam drive these)
@@ -95,6 +115,7 @@ class RouteAheadStats:
         layer_id: int,
         predicted_ids: Sequence[int],
         router_mask: Union[torch.Tensor, Sequence[Sequence[int]]],
+        expert_nbytes: Optional[Mapping[int, int]] = None,
     ) -> None:
         """Record one dispatched layer of the in-flight verify step.
 
@@ -105,6 +126,12 @@ class RouteAheadStats:
         verify-read union. The mask is snapshotted to CPU (a no-op view when
         already on CPU) so the kept-prefix waste can be computed later, once
         the accept length is known. Read-only: the mask is never modified.
+
+        ``expert_nbytes`` optionally maps each prefetched expert id to its
+        exact stored payload bytes; when given, ``commit_step`` reports
+        byte-accurate predicted/kept/wasted alongside the counts. ``None``
+        (mocks, resident-expert runs) keeps every byte field ``None`` -- the
+        recorder never fabricates an average expert size.
         """
         mask = (
             router_mask
@@ -117,8 +144,13 @@ class RouteAheadStats:
                 f"got shape {tuple(mask.shape)}"
             )
         mask_cpu = mask.detach().to(torch.bool).cpu()
+        nbytes = (
+            {int(e): int(n) for e, n in expert_nbytes.items()}
+            if expert_nbytes is not None
+            else None
+        )
         self._pending.append(
-            (int(layer_id), [int(e) for e in predicted_ids], mask_cpu)
+            (int(layer_id), [int(e) for e in predicted_ids], mask_cpu, nbytes)
         )
 
     def commit_step(self, kept_rows: int) -> RouteAheadStepSummary:
@@ -138,11 +170,14 @@ class RouteAheadStats:
             return RouteAheadStepSummary(0, 0, 0, 0, 0, 0)
 
         predicted = actual = covered = kept = wasted = 0
-        for _layer_id, predicted_ids, mask in pending:
+        predicted_b = kept_b = wasted_b = 0
+        step_has_bytes = False
+        for _layer_id, predicted_ids, mask, nbytes in pending:
             full_union = union_experts_from_mask(mask)
             rows = max(0, min(int(kept_rows), int(mask.shape[0])))
             kept_union = union_experts_from_mask(mask[:rows]) if rows else []
             predicted_set = set(predicted_ids)
+            kept_set = set(kept_union)
             predicted += len(predicted_set)
             actual += len(full_union)
             # Same set semantics as the A1 ``prefetch_coverage``; the count
@@ -150,6 +185,15 @@ class RouteAheadStats:
             covered += len(predicted_set & set(full_union))
             kept += len(kept_union)
             wasted += len(rejected_expert_ids(predicted_ids, kept_union))
+            if nbytes is not None:
+                step_has_bytes = True
+                predicted_b += sum(nbytes.get(e, 0) for e in predicted_set)
+                kept_b += sum(
+                    nbytes.get(e, 0) for e in predicted_set & kept_set
+                )
+                wasted_b += sum(
+                    nbytes.get(e, 0) for e in predicted_set - kept_set
+                )
 
         self.steps += 1
         self.layers_observed += len(pending)
@@ -158,8 +202,21 @@ class RouteAheadStats:
         self.covered_experts += covered
         self.kept_experts += kept
         self.wasted_experts += wasted
+        if step_has_bytes:
+            self._bytes_seen = True
+            self.predicted_prefetch_bytes += predicted_b
+            self.kept_prefetch_bytes += kept_b
+            self.wasted_prefetch_bytes += wasted_b
         return RouteAheadStepSummary(
-            len(pending), predicted, actual, covered, kept, wasted
+            len(pending),
+            predicted,
+            actual,
+            covered,
+            kept,
+            wasted,
+            predicted_b if step_has_bytes else None,
+            kept_b if step_has_bytes else None,
+            wasted_b if step_has_bytes else None,
         )
 
     # ------------------------------------------------------------------
@@ -190,8 +247,13 @@ class RouteAheadStats:
         """Zero all counters and drop any uncommitted records."""
         self.__init__()
 
-    def as_dict(self) -> Dict[str, Union[int, float]]:
-        """Flat snapshot of the counters plus the two derived ratios."""
+    def as_dict(self) -> Dict[str, Union[int, float, None]]:
+        """Flat snapshot of the counters, byte totals, and derived ratios.
+
+        The three ``*_prefetch_bytes`` entries are ``None`` until a step is
+        committed with per-expert payload sizes, so uninstrumented and
+        resident runs report byte-accurate absence rather than a fake zero.
+        """
         return {
             "steps": self.steps,
             "layers_observed": self.layers_observed,
@@ -202,6 +264,15 @@ class RouteAheadStats:
             "wasted_experts": self.wasted_experts,
             "coverage": self.coverage,
             "waste_ratio": self.waste_ratio,
+            "predicted_prefetch_bytes": (
+                self.predicted_prefetch_bytes if self._bytes_seen else None
+            ),
+            "kept_prefetch_bytes": (
+                self.kept_prefetch_bytes if self._bytes_seen else None
+            ),
+            "wasted_prefetch_bytes": (
+                self.wasted_prefetch_bytes if self._bytes_seen else None
+            ),
         }
 
 
