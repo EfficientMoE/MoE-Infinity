@@ -3,11 +3,6 @@ from typing import Callable
 
 import torch
 
-from moe_infinity.models import (
-    apply_rotary_pos_emb,
-    apply_rotary_pos_emb_deepseek,
-)
-
 
 def do_nothing_decorator(orig_func: Callable) -> Callable:
     @functools.wraps(orig_func)

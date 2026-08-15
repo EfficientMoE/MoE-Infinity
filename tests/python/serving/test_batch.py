@@ -97,6 +97,33 @@ def test_scheduler_output_creation() -> None:
     assert output.num_decode_tokens == 1
 
 
+def test_scheduler_output_verify_fields_default_empty() -> None:
+    output = SchedulerOutput(prefill_seq_ids=[1], decode_seq_ids=[2])
+
+    assert output.draft_seq_ids == []
+    assert output.verify_seq_ids == []
+    assert output.num_verify_tokens == 0
+    assert output.num_verify_expert_bytes == 0
+
+
+def test_scheduler_output_verify_fields_are_copied() -> None:
+    draft_ids = [5, 6]
+    verify_ids = [7]
+    output = SchedulerOutput(
+        draft_seq_ids=draft_ids,
+        verify_seq_ids=verify_ids,
+        num_verify_tokens=16,
+        num_verify_expert_bytes=4096,
+    )
+
+    assert output.draft_seq_ids == [5, 6]
+    assert output.verify_seq_ids == [7]
+    assert output.num_verify_tokens == 16
+    assert output.num_verify_expert_bytes == 4096
+    assert output.draft_seq_ids is not draft_ids
+    assert output.verify_seq_ids is not verify_ids
+
+
 def test_batch_builder_prefill_only() -> None:
     cache = _make_cache()
     sequences = {
