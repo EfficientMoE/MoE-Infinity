@@ -86,7 +86,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_node_default_device",
            &ArcherPrefetchHandle::GetNodeDefaultDevice)
       .def("get_node_device", &ArcherPrefetchHandle::GetNodeDevice)
-      .def("prefetch_tensors", &ArcherPrefetchHandle::PrefetchTensors)
+      .def("prefetch_tensors", &ArcherPrefetchHandle::EnqueuePrefetchTensors,
+           py::arg("tensor_ids"), py::arg("priority") = 1)
       .def("replace_cache_candidates",
            &ArcherPrefetchHandle::ReplaceCacheCandidates)
       .def("enqueue_prefetch", &ArcherPrefetchHandle::EnqueuePrefetch)

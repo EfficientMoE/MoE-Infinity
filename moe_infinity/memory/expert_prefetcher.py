@@ -55,6 +55,12 @@ class ExpertPrefetcher(object):
         tensor_ids = []
         for j in expert_list:
             tensor_ids.append(self.expert_tensor_map[(layer_id, j)])
+        if not tensor_ids:
+            return
+        batched_issue = getattr(self.archer_engine, "prefetch_tensors", None)
+        if callable(batched_issue):
+            batched_issue(tensor_ids)
+            return
         for tensor_id in tensor_ids:
             gpu_id = self.archer_engine.get_node_default_device([tensor_id])
             self.archer_engine.enqueue_prefetch(tensor_id, gpu_id)

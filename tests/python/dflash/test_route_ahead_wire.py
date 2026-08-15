@@ -121,6 +121,21 @@ def _enqueued_experts(executor) -> list[int]:
     )
 
 
+def _issued_tensor_ids(engine) -> list[int]:
+    # Mechanism-agnostic route-ahead issuance readout: a batched
+    # ``prefetch_tensors([...])`` call carries the same ordered tensor ids the
+    # per-expert ``enqueue_prefetch`` fallback would, so flatten the batched
+    # calls in order when present and fall back otherwise.
+    batched = getattr(engine, "prefetch_tensors", None)
+    batched_calls = getattr(batched, "call_args_list", None)
+    if batched_calls:
+        issued: list[int] = []
+        for call in batched_calls:
+            issued.extend(call.args[0])
+        return issued
+    return [call.args[0] for call in engine.enqueue_prefetch.call_args_list]
+
+
 # ---------------------------------------------------------------------------
 # (a) context active -> exact-union pin + prefetch for the current layer
 # ---------------------------------------------------------------------------
@@ -171,13 +186,7 @@ def test_active_context_falls_back_to_executor_prefetcher():
     engine.replace_cache_candidates.assert_called_once_with(
         [300, 301, 302, 305, 307]
     )
-    assert [c.args[0] for c in engine.enqueue_prefetch.call_args_list] == [
-        300,
-        301,
-        302,
-        305,
-        307,
-    ]
+    assert _issued_tensor_ids(engine) == [300, 301, 302, 305, 307]
     assert prefetcher._last_speculative_prediction == set(UNION)
     trigger_spy.assert_not_called()
     assert executor._pending_prefetch == (prefetcher, LAYER_ID, UNION, None)
@@ -186,13 +195,7 @@ def test_active_context_falls_back_to_executor_prefetcher():
     # recorded prediction IS the actual union; nothing further is enqueued.
     executor.wait_dispatch_local()
     engine.replace_cache_candidates.assert_called_once()
-    assert [c.args[0] for c in engine.enqueue_prefetch.call_args_list] == [
-        300,
-        301,
-        302,
-        305,
-        307,
-    ]
+    assert _issued_tensor_ids(engine) == [300, 301, 302, 305, 307]
     assert prefetcher._last_speculative_prediction == set()
 
 
@@ -429,10 +432,19 @@ def test_consecutive_dispatches_each_pin_exactly_one_layer():
     # No call ever mixes tensor ids from two layers (id = layer * 100 + e).
     for call in pin_calls:
         assert len({tensor_id // 100 for tensor_id in call.args[0]}) == 1
-    # Enqueues stay per-layer single-layered as well.
-    assert [
-        call.args[0] for call in engine.enqueue_prefetch.call_args_list
-    ] == [300, 301, 302, 305, 307, 400, 401, 402, 405, 407]
+    # Issuances stay per-layer single-layered as well (one batched call/layer).
+    assert _issued_tensor_ids(engine) == [
+        300,
+        301,
+        302,
+        305,
+        307,
+        400,
+        401,
+        402,
+        405,
+        407,
+    ]
 
 
 def _make_gpt_oss_mlp():

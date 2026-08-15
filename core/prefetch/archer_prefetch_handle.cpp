@@ -248,6 +248,20 @@ void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
   kTaskPool->EnqueueTask(task);
 }
 
+void ArcherPrefetchHandle::EnqueuePrefetchTensors(
+    const std::vector<std::uint32_t>& tensor_ids, std::uint32_t priority) {
+  for (std::uint32_t tensor_id : tensor_ids) {
+    auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
+    auto task = std::make_shared<Task>();
+    task->priority = priority;
+    task->node = node;
+    task->on_demand = false;
+    task->src_device = node->device;
+    task->dst_device = node->default_device;
+    kTaskPool->EnqueueTask(task);
+  }
+}
+
 void ArcherPrefetchHandle::FetchTensors(
     std::uint64_t& request_id, const std::vector<std::uint32_t>& buffer) {
   // std::vector<NodePtr> candidates;
