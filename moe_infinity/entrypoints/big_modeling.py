@@ -741,8 +741,6 @@ class MoE:
         return classes
 
     def _configure_hook(self, input_ids: torch.LongTensor):
-
-
         if self.arch == "mixtral":
             import moe_infinity.models.mixtral  # noqa: F401
 
