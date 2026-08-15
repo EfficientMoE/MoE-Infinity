@@ -19,7 +19,7 @@ import json
 import math
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 REQUIRED_METRICS = (
     "output_tokens_per_second",
@@ -178,6 +178,84 @@ def summarise_row(row: Mapping[str, object]) -> Mapping[str, object]:
         "t_verify_seconds": t_verify,
         "bm1_router_to_verify_ratio": t_router / t_verify,
         "bm1_pass": t_router < t_verify,
+    }
+
+
+BM5_INVARIANTS = (
+    "acceptance_length_a",
+    "route_ahead_prefetch_coverage",
+    "wasted_prefetch_bytes",
+)
+
+
+def summarise_bm5_equivalence(
+    *,
+    python_row: Mapping[str, Any],
+    cpp_row: Mapping[str, Any],
+    rel_tol: float = 1e-6,
+) -> Dict[str, Any]:
+    """BM5: shipped C++ issue must not change correctness-visible terms.
+
+    Switching Python per-expert issuance to the shipped C++ batched issuance may
+    only move tokens/s: acceptance length, route-ahead coverage, wasted bytes,
+    and output tokens must match within ``rel_tol``. Returns the equivalence
+    verdict, the mismatched invariants, and both tokens/s for the plot.
+    """
+    mismatched: List[str] = []
+    for key in BM5_INVARIANTS:
+        if key not in python_row or key not in cpp_row:
+            mismatched.append(key)
+            continue
+        a = float(python_row[key])
+        b = float(cpp_row[key])
+        scale = max(abs(a), abs(b), 1.0)
+        if abs(a - b) > rel_tol * scale:
+            mismatched.append(key)
+    return {
+        "benchmark": "BM5",
+        "equivalent": not mismatched,
+        "mismatched": mismatched,
+        "python_tokens_per_second": float(
+            python_row.get("output_tokens_per_second", float("nan"))
+        ),
+        "cpp_tokens_per_second": float(
+            cpp_row.get("output_tokens_per_second", float("nan"))
+        ),
+    }
+
+
+def cpp_hop_verdicts(
+    *,
+    bm2: Optional[Mapping[str, Any]],
+    bm3: Optional[Mapping[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Keep/remove each benchmark-gated C++ hop from its paired BM verdict.
+
+    A hop is kept only when its paired benchmark is present and passes: the
+    batched-issuance hop needs BM2 ``ship_batched``; the route-ahead
+    priority-band hop needs BM3 ``ship_priority_band``. A missing BM removes the
+    hop (design §10: no C++ change ships without its BM).
+    """
+
+    def verdict(report: Optional[Mapping[str, Any]], flag: str, hop: str):
+        if report is None:
+            return {
+                "keep": False,
+                "reason": f"{hop} removed: paired benchmark absent",
+            }
+        keep = bool(report.get(flag, False))
+        return {
+            "keep": keep,
+            "reason": (
+                f"{hop} kept: {flag} is true"
+                if keep
+                else f"{hop} removed: {flag} is false"
+            ),
+        }
+
+    return {
+        "batched_issuance": verdict(bm2, "ship_batched", "batched_issuance"),
+        "priority_band": verdict(bm3, "ship_priority_band", "priority_band"),
     }
 
 
@@ -353,9 +431,11 @@ __all__ = [
     "UNAVAILABLE_CAPACITY",
     "HideInequality",
     "aggregate_result_matrices",
+    "cpp_hop_verdicts",
     "evaluate_hide_inequality",
     "evaluate_matrix",
     "main",
+    "summarise_bm5_equivalence",
     "summarise_row",
     "validate_result_matrix",
 ]
