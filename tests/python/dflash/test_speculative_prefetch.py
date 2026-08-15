@@ -57,6 +57,16 @@ def _make_prefetcher(num_layers: int = 8, num_experts: int = 8):
 
 
 def _enqueued_tensor_ids(engine: MagicMock) -> list[int]:
+    # Mechanism-agnostic: a batched ``prefetch_tensors([...])`` issuance carries
+    # the same ordered ids as the per-expert ``enqueue_prefetch`` fallback, so
+    # flatten the batched calls when present and fall back otherwise.
+    batched = getattr(engine, "prefetch_tensors", None)
+    batched_calls = getattr(batched, "call_args_list", None)
+    if batched_calls:
+        issued: list[int] = []
+        for call in batched_calls:
+            issued.extend(call.args[0])
+        return issued
     return [call.args[0] for call in engine.enqueue_prefetch.call_args_list]
 
 
@@ -148,3 +158,47 @@ def test_both_none_raises_value_error():
     prefetcher, _engine = _make_prefetcher()
     with pytest.raises(ValueError, match="router_logits"):
         prefetcher.speculative_prefetch(0)
+
+
+def _make_prefetcher_without_batch(num_layers: int = 8, num_experts: int = 8):
+    prefetcher = ExpertPrefetcher.__new__(ExpertPrefetcher)
+    prefetcher.num_layers = num_layers
+    prefetcher.num_experts = num_experts
+    engine = MagicMock(
+        spec=[
+            "get_node_default_device",
+            "enqueue_prefetch",
+            "replace_cache_candidates",
+        ]
+    )
+    engine.get_node_default_device.return_value = 0
+    prefetcher.archer_engine = engine
+    prefetcher.expert_tensor_map = {
+        (layer, expert): layer * 100 + expert
+        for layer in range(num_layers)
+        for expert in range(num_experts)
+    }
+    prefetcher._last_speculative_prediction = set()
+    return prefetcher, engine
+
+
+def test_prefetch_experts_list_batches_one_native_call_when_available():
+    prefetcher, engine = _make_prefetcher(num_layers=8, num_experts=8)
+    prefetcher.prefetch_experts_list(3, [3, 1, 7])
+    engine.prefetch_tensors.assert_called_once_with([303, 301, 307])
+    engine.enqueue_prefetch.assert_not_called()
+
+
+def test_prefetch_experts_list_falls_back_to_per_expert_without_batch_api():
+    prefetcher, engine = _make_prefetcher_without_batch(
+        num_layers=8, num_experts=8
+    )
+    prefetcher.prefetch_experts_list(3, [3, 1, 7])
+    assert _enqueued_tensor_ids(engine) == [303, 301, 307]
+
+
+def test_prefetch_experts_list_empty_batch_calls_neither_path():
+    prefetcher, engine = _make_prefetcher(num_layers=8, num_experts=8)
+    prefetcher.prefetch_experts_list(3, [])
+    engine.prefetch_tensors.assert_not_called()
+    engine.enqueue_prefetch.assert_not_called()
