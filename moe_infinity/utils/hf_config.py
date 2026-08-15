@@ -212,7 +212,6 @@ def parse_expert_id(
         result = re.findall(r"layers\.(\d+)\.mlp\.experts\.(\d+)\.", param_name)
         if result:
             layer_id, expert_id = result[0]
-            # print(f"layer_id: {layer_id}, expert_id: {expert_id}")
             layer_id = int(layer_id)
             expert_id = int(expert_id)
     elif "gpt_oss" in arch or "gptoss" in arch:

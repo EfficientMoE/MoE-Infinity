@@ -2,7 +2,7 @@
 
 import os
 import warnings
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 
@@ -149,8 +149,6 @@ class MoE:
             )
         self.arch = arch
         model_cls = MODEL_MAPPING_NAMES[arch]
-        # with init_empty_weights():
-        #     self.model = model_cls(model_config)
         if os.path.exists(model_name_or_path):
             model_path = model_name_or_path
             quant_info = detect_quantization(model_config, model_path)
@@ -224,10 +222,9 @@ class MoE:
             ),
         )
         self.engine.ckpt_files = checkpoint_paths
-        # self.engine.save(config.offload_path, checkpoint_paths)
         is_flash_attn_available = False
         try:
-            import flash_attn
+            import flash_attn  # noqa: F401  # availability probe; import side effect only
 
             is_flash_attn_available = True
 
@@ -321,6 +318,7 @@ class MoE:
             self._native_scheduler = None
             self._native_generation_engine = None
             self._native_kv_offload_coordinator = None
+            self._native_expert_offload_coordinator = None
             return {}
 
         from moe_infinity.engine.generation_loop import GenerationEngine
@@ -447,6 +445,25 @@ class MoE:
             )
             kv_offload_coordinator.register_with_scheduler(transfer_scheduler)
 
+        expert_offload_coordinator = None
+        if getattr(engine_config, "enable_expert_offload", False):
+            from moe_infinity.engine.expert_offload_coordinator import (
+                ExpertOffloadCoordinator,
+            )
+
+            # Opt-in engine-path scaffolding mirroring the KV coordinator above;
+            # default-off (absent flag => False) leaves the standard path
+            # unchanged. Registers EXPERT_FETCH/EXPERT_EVICT handlers; with no
+            # real expert_prefetcher supplied the coordinator uses a stub, so
+            # transfers are no-ops until a prefetcher is wired.
+            expert_offload_coordinator = ExpertOffloadCoordinator(
+                config=engine_config,
+                num_devices=max(1, torch.cuda.device_count()),
+            )
+            expert_offload_coordinator.register_with_scheduler(
+                transfer_scheduler
+            )
+
         scheduler = Scheduler(
             kv_cache_manager=kv_cache_manager,
             transfer_scheduler=transfer_scheduler,
@@ -480,6 +497,7 @@ class MoE:
         self._native_scheduler = scheduler
         self._native_generation_engine = generation_engine
         self._native_kv_offload_coordinator = kv_offload_coordinator
+        self._native_expert_offload_coordinator = expert_offload_coordinator
 
         return {
             "memory_coordinator": memory_coordinator,
@@ -487,6 +505,7 @@ class MoE:
             "attention_backend": attention_backend,
             "transfer_scheduler": transfer_scheduler,
             "kv_offload_coordinator": kv_offload_coordinator,
+            "expert_offload_coordinator": expert_offload_coordinator,
             "scheduler": scheduler,
             "generation_engine": generation_engine,
         }
@@ -722,12 +741,6 @@ class MoE:
         return classes
 
     def _configure_hook(self, input_ids: torch.LongTensor):
-        import transformers
-
-        from moe_infinity.models import (
-            apply_rotary_pos_emb,
-        )
-
         if self.arch == "mixtral":
             import moe_infinity.models.mixtral  # noqa: F401
 

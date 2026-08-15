@@ -7,7 +7,6 @@ from typing import Dict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers.models.dbrx.modeling_dbrx import DbrxExperts, DbrxRouter
 
 
@@ -43,7 +42,6 @@ class SyncDbrxFFNBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple:
         batch_size, sequence_length, hidden_dim = x.shape
-        hidden_states = x.view(-1, hidden_dim)
 
         weights, top_weights, top_experts = self.router(x)
 

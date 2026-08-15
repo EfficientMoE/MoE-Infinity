@@ -38,7 +38,6 @@ from tqdm import tqdm
 from transformers import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
-import moe_infinity
 from moe_infinity.common import parse_expert_type
 from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
@@ -56,7 +55,6 @@ from moe_infinity.models import (
     SyncOlmoeMoEBlock,
     SyncQwen3_5MoeSparseMoeBlock,
 )
-from moe_infinity.runtime.compile import script_expert
 from moe_infinity.runtime.hooks import *
 from moe_infinity.utils import (
     ArcherConfig,
@@ -1657,13 +1655,6 @@ class OffloadEngine(object):
 
             if "expert" in key:
                 for expert_idx, expert_tensors in enumerate(tensors):
-                    expert_key = (
-                        f"{key}.expert_{expert_idx}"
-                        if self.config.model_type != "mixtral"
-                        and self.config.model_type != "deepseek_v2"
-                        and self.config.model_type != "deepseek_v3"
-                        else f"{key}.{expert_idx}"
-                    )
                     input_device_index = (
                         self.archer_engine.get_node_default_device(
                             expert_tensors
@@ -2033,7 +2024,7 @@ class OffloadEngine(object):
 
             # KV CACHE RELOAD POINT (T16)
             # When enable_kv_cache_offload=True, reload swapped-out KV cache here.
-            # Future: self._kv_cache_manager.swap_in(block_ids_for_this_layer)
+            # Future: self._kv_cache_manager.swap_in(block_ids_for_this_layer)  # noqa: ERA001
             # This fires BEFORE each module's forward(), giving time to H2D transfer KV blocks.
             if (
                 self._enable_kv_cache_offload
@@ -2073,7 +2064,7 @@ class OffloadEngine(object):
             # KV CACHE CAPTURE POINT (T16)
             # When enable_kv_cache_offload=True, capture past_key_values here.
             # Future: extract output[1] (present_key_value) and call
-            #         self._kv_cache_manager.allocate_blocks(seq_id, num_blocks)
+            #         self._kv_cache_manager.allocate_blocks(seq_id, num_blocks)  # noqa: ERA001
             # This fires AFTER each module's forward(), when KV output is available.
             if (
                 self._enable_kv_cache_offload

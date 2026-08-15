@@ -17,9 +17,9 @@ __all__ = [
 ]
 
 try:
-    from .expert_predictor import ExpertPredictor
-    from .expert_prefetcher import ExpertPrefetcher
-    from .expert_tracer import ExpertTracer
+    from .expert_predictor import ExpertPredictor  # noqa: F401
+    from .expert_prefetcher import ExpertPrefetcher  # noqa: F401
+    from .expert_tracer import ExpertTracer  # noqa: F401
 
     __all__.extend(["ExpertPredictor", "ExpertPrefetcher", "ExpertTracer"])
 except ModuleNotFoundError:
