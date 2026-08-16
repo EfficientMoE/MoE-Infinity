@@ -250,7 +250,11 @@ void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
 
   auto task = std::make_shared<Task>();
-  task->priority = kBackgroundPrefetchPriority;
+  // BM3 verdict NO-SHIP: revert the route-ahead priority band. Ordinary
+  // prefetch returns to band 1 (pre-candidate), so route-ahead is no longer
+  // serviced ahead of background prefetch. Two seeds proved no robust win --
+  // the exposed-fetch effect flipped sign and never held throughput at once.
+  task->priority = 1;
   task->node = node;
   task->on_demand = false;
   task->src_device = node->device;
