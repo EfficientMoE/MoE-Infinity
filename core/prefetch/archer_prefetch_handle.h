@@ -62,6 +62,7 @@ class ArcherPrefetchHandle {
   bool IsTensorOnDevice(const TensorID tensor_id) const;
 
   void CleanUpResources();
+  void ResetCache();
 
   // void SetNodeCachePriority(const std::uint64_t corr_id, const float
   // priority);

@@ -141,6 +141,20 @@ def test_native_priority_bands_accept_each_service_class_reverse_order(
         torch.cuda.synchronize()
 
 
+def test_native_reset_cache_is_non_terminal(offloaded_prefetcher) -> None:
+    engine = offloaded_prefetcher.archer_engine
+    tensor_ids = _saturated_ids(offloaded_prefetcher)
+    assert tensor_ids, "no offloaded expert tensors to issue"
+
+    assert engine.reset_cache() is None
+    torch.cuda.synchronize()
+
+    assert engine.prefetch_tensors(tensor_ids, 1) is None
+    torch.cuda.synchronize()
+    assert engine.reset_cache() is None
+    torch.cuda.synchronize()
+
+
 def test_native_route_ahead_priority_knob_issues_each_band(
     offloaded_prefetcher,
 ) -> None:

@@ -88,6 +88,17 @@ void ArcherPrefetchHandle::CleanUpResources() {
   has_cleaned_up_resources_ = true;
 }
 
+void ArcherPrefetchHandle::ResetCache() {
+  // Non-terminal reset (BM3 ablation): drop pending prefetch work so a prior
+  // arm's route-ahead band cannot leak into the next, without tearing down the
+  // engine. Unlike CleanUpResources, kTaskPool/threads stay alive and
+  // has_cleaned_up_resources_ is untouched, so the next FetchTensors does not
+  // deadlock. ClearQueue scans priority 1..NUM_PRIORITY, leaving on-demand (0).
+  if (kTaskPool) {
+    kTaskPool->ClearQueue();
+  }
+}
+
 void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
                                          torch::Tensor& buffer,
                                          std::uint32_t explicit_id) {
