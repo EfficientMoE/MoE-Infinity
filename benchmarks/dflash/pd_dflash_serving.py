@@ -24,9 +24,15 @@ Design contract (frozen here, cross-checked by the aggregator):
   the byte-accurate route-ahead ``wasted_prefetch_bytes`` from the instrumented
   ``RouteAheadStats`` (never an expert-count proxy).
 
-At this Phase-A stage B2 (the 2-D deficit scheduler) does not yet exist, so the
-runner emits an explicit ``BLOCKED_UNTIL_2D_SCHEDULER`` status for B2 rather than
-silently emulating another baseline.
+B2 (the 2-D deficit verify scheduler) is measured through the continuous-
+batching serving path (``moe_infinity.serving.engine.ContinuousBatchingEngine``)
+rather than ``MoE.generate()``: configuring the four Task-6 verify budgets flips
+the engine onto ``_step_speculative_session``, so the 2-D admission scheduler
+governs every VERIFY round and the serving ``PagedKVCache`` yields a real
+``kv_occupancy_bytes`` (the sync path has no serving KV manager and falls back to
+``0.0``). This runner stays opt-in (GPU-gated) and never changes default serving
+behaviour. If ``--baseline B2`` runs before the serving wiring is available the
+runner still records an honest ``BLOCKED_UNTIL_2D_SCHEDULER`` status.
 """
 
 from __future__ import annotations
@@ -67,6 +73,15 @@ DEFAULT_BASELINES: Tuple[str, ...] = ("B0", "B1", "B2", "B3")
 
 OFFLOADED_BASELINES: Tuple[str, ...] = ("B0", "B1", "B2")
 BLOCKED_STATUS = "BLOCKED_UNTIL_2D_SCHEDULER"
+
+SERVING_BASELINES: Tuple[str, ...] = ("B2",)
+
+# B2 == "no expert-byte coupling": admission is gated only by the token
+# dimension, so this stands in for an unbounded expert-byte budget/cap. It must
+# exceed any single route-ahead union's summed FP4 payload so admit_verify_
+# demands never rejects on bytes and its "cap >= largest single demand" guard
+# always holds.
+B2_UNBOUNDED_EXPERT_BYTES = 1 << 60
 
 RTX_PRO_6000_NAME_FRAGMENT = "RTX PRO 6000"
 RTX_PRO_6000_CAPABILITY: Tuple[int, int] = (12, 0)
@@ -137,6 +152,45 @@ def require_offloaded(baseline: str, offloaded_expert_count: int) -> None:
             "reports none resident on host -- lower --device-memory-ratio below "
             "0.9 so experts actually offload"
         )
+
+
+def build_b2_serving_config(
+    *,
+    block_size: int,
+    concurrency: int,
+    num_layers: int,
+    num_kv_heads: int,
+    head_dim: int,
+    dtype: str,
+    eos_token_id: Optional[int],
+    num_kv_blocks: int,
+    device_memory_ratio: float,
+) -> Dict[str, Any]:
+    """Return the ``ContinuousBatchingEngine`` config that selects the B2 path.
+
+    Setting all four verify budgets makes ``Scheduler.verify_scheduling_enabled``
+    true, so the engine drives ``_step_speculative_session`` (the 2-D admission
+    scheduler) per VERIFY round. The token budget/cap equal ``block_size`` (one
+    verify block per round) while the expert-byte budget/cap are unbounded, which
+    is exactly B2's "token-deficit scheduler and no expert-byte coupling".
+    """
+    return {
+        "device_memory_ratio": float(device_memory_ratio),
+        "kv_cache_ratio": 0.01,
+        "max_batch_size": max(1, int(concurrency)),
+        "max_tokens_per_step": 2048,
+        "block_size": int(block_size),
+        "num_layers": int(num_layers),
+        "num_kv_heads": int(num_kv_heads),
+        "head_dim": int(head_dim),
+        "dtype": dtype,
+        "eos_token_id": eos_token_id,
+        "num_kv_blocks": int(num_kv_blocks),
+        "verify_token_budget": int(block_size),
+        "verify_expert_byte_budget": B2_UNBOUNDED_EXPERT_BYTES,
+        "verify_token_deficit_cap": int(block_size),
+        "verify_expert_byte_deficit_cap": B2_UNBOUNDED_EXPERT_BYTES,
+    }
 
 
 def observation_key(
@@ -399,7 +453,10 @@ def run_experiment(args: RunnerArgs) -> int:
     and appends one row per ``(model, baseline, block, concurrency, repeat)``.
     B2 is emitted as ``BLOCKED_UNTIL_2D_SCHEDULER`` until Task 6 lands.
     """
-    from benchmarks.dflash._serving_measure import measure_configuration
+    from benchmarks.dflash._serving_measure import (
+        measure_configuration,
+        measure_configuration_serving,
+    )
 
     assert args.model and args.draft and args.offload_dir and args.output
     _validate_gpu_environment()
@@ -408,28 +465,22 @@ def run_experiment(args: RunnerArgs) -> int:
     for baseline in args.baselines:
         for block_size in args.block_sizes:
             for concurrency in args.concurrency:
-                if baseline == "B2":
-                    append_observation(
-                        args.output,
-                        make_observation_row(
-                            model=args.model,
-                            draft=draft,
-                            baseline=baseline,
-                            block_size=block_size,
-                            concurrency=concurrency,
-                            repeat=0,
-                            metrics={},
-                            status=BLOCKED_STATUS,
-                        ),
+                if baseline in SERVING_BASELINES:
+                    row = measure_configuration_serving(
+                        args=args,
+                        baseline=baseline,
+                        draft=draft,
+                        block_size=block_size,
+                        concurrency=concurrency,
                     )
-                    continue
-                row = measure_configuration(
-                    args=args,
-                    baseline=baseline,
-                    draft=draft,
-                    block_size=block_size,
-                    concurrency=concurrency,
-                )
+                else:
+                    row = measure_configuration(
+                        args=args,
+                        baseline=baseline,
+                        draft=draft,
+                        block_size=block_size,
+                        concurrency=concurrency,
+                    )
                 append_observation(args.output, row)
     return 0
 
