@@ -8,14 +8,13 @@ import torch.nn as nn
 try:
     from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
         GlmMoeDsaMLP,
-        GlmMoeDsaMoE,
         GlmMoeDsaTopkRouter,
     )
 
     _GLM_AVAILABLE = True
 except ImportError:
     _GLM_AVAILABLE = False
-    GlmMoeDsaMoE = GlmMoeDsaTopkRouter = GlmMoeDsaMLP = None
+    GlmMoeDsaTopkRouter = GlmMoeDsaMLP = None
 
 
 class SyncGlmMoeDsaMoEBlock(nn.Module):
@@ -59,9 +58,6 @@ class SyncGlmMoeDsaMoEBlock(nn.Module):
             intermediate_size=config.moe_intermediate_size
             * config.n_shared_experts,
         )
-        self._hf_route_tokens = getattr(
-            GlmMoeDsaMoE, "route_tokens_to_experts", None
-        )
 
     def _route(self, hidden_flat: torch.Tensor):
         dev = hidden_flat.device
@@ -69,13 +65,44 @@ class SyncGlmMoeDsaMoEBlock(nn.Module):
             self.gate.e_score_correction_bias = (
                 self.gate.e_score_correction_bias.to(dev)
             )
-        router_logits = self.gate(hidden_flat)
-        if self._hf_route_tokens is None:
-            raise RuntimeError(
-                "GLM-MoE-DSA routing requires a transformers build providing "
-                "GlmMoeDsaMoE.route_tokens_to_experts (removed in 5.15+)"
-            )
-        return self._hf_route_tokens(self, router_logits)
+        routed = self.gate(hidden_flat)
+        if isinstance(routed, tuple):
+            # transformers >= 5.15 moved routing into GlmMoeDsaTopkRouter, which
+            # returns (router_logits, topk_weights, topk_indices).
+            _, topk_weights, topk_indices = routed
+            return topk_indices, topk_weights
+        return self._route_tokens_to_experts(routed)
+
+    def _route_tokens_to_experts(self, router_logits: torch.Tensor):
+        # Mirror of transformers GlmMoeDsaMoE.route_tokens_to_experts (grouped
+        # sigmoid top-k). Inlined so offload routing stays correct on builds
+        # that no longer expose that method (see #144); sigmoid gating, not
+        # softmax.
+        router_logits = router_logits.sigmoid()
+        scores = router_logits + self.gate.e_score_correction_bias
+        group_scores = (
+            scores.view(-1, self.n_group, self.n_routed_experts // self.n_group)
+            .topk(2, dim=-1)[0]
+            .sum(dim=-1)
+        )
+        group_idx = torch.topk(
+            group_scores, k=self.topk_group, dim=-1, sorted=False
+        )[1]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+            .reshape(-1, self.n_routed_experts)
+        )
+        scores = scores.masked_fill(~score_mask.bool(), float("-inf"))
+        topk_indices = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)[1]
+        topk_weights = router_logits.gather(1, topk_indices)
+        if self.norm_topk_prob:
+            denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weights = topk_weights / denominator
+        topk_weights = topk_weights * self.routed_scaling_factor
+        return topk_indices, topk_weights
 
     def _local_experts(self, hidden_flat, router_mask, routing_weights_mask):
         return torch.zeros_like(hidden_flat)

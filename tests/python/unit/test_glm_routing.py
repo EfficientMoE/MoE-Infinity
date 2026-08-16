@@ -12,11 +12,7 @@ from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (  # noqa: E402
     GlmMoeDsaMoE as _GlmMoeDsaMoE,
 )
 
-if not hasattr(_GlmMoeDsaMoE, "route_tokens_to_experts"):
-    pytest.skip(
-        "transformers dropped GlmMoeDsaMoE.route_tokens_to_experts (5.15+)",
-        allow_module_level=True,
-    )
+_HAS_HF_ROUTER = hasattr(_GlmMoeDsaMoE, "route_tokens_to_experts")
 
 
 def _tiny_config():
@@ -53,6 +49,10 @@ def test_exported():
     assert "SyncGlmMoeDsaMoEBlock" in m.__all__
 
 
+@pytest.mark.skipif(
+    not _HAS_HF_ROUTER,
+    reason="transformers build lacks GlmMoeDsaMoE.route_tokens_to_experts to compare against",
+)
 def test_routing_parity():
     from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
         GlmMoeDsaMoE,
