@@ -14,11 +14,13 @@ import json
 import pytest
 
 from benchmarks.dflash.pd_dflash_serving import (
+    B2_UNBOUNDED_EXPERT_BYTES,
     BLOCKED_STATUS,
     REQUIRED_CONCURRENCY,
     REQUIRED_DRAFTS,
     REQUIRED_MODELS,
     append_observation,
+    build_b2_serving_config,
     build_contract_matrix,
     load_observations,
     main,
@@ -129,6 +131,36 @@ def test_blocked_row_carries_status_and_no_metrics():
     )
     assert row["status"] == BLOCKED_STATUS
     assert "output_tokens_per_second" not in row
+
+
+def test_b2_serving_config_enables_token_only_verify_scheduler():
+    from moe_infinity.serving.scheduler import _resolve_verify_config
+
+    config = build_b2_serving_config(
+        block_size=16,
+        concurrency=4,
+        num_layers=24,
+        num_kv_heads=8,
+        head_dim=64,
+        dtype="bfloat16",
+        eos_token_id=7,
+        num_kv_blocks=128,
+        device_memory_ratio=0.85,
+    )
+    assert config["verify_token_budget"] == 16
+    assert config["verify_token_deficit_cap"] == 16
+    assert config["verify_expert_byte_budget"] == B2_UNBOUNDED_EXPERT_BYTES
+    assert config["verify_expert_byte_deficit_cap"] == B2_UNBOUNDED_EXPERT_BYTES
+    assert config["max_batch_size"] == 4
+    assert config["block_size"] == 16
+
+    resolved = _resolve_verify_config(
+        token_budget=config["verify_token_budget"],
+        expert_byte_budget=config["verify_expert_byte_budget"],
+        token_deficit_cap=config["verify_token_deficit_cap"],
+        expert_byte_deficit_cap=config["verify_expert_byte_deficit_cap"],
+    )
+    assert resolved.enabled is True
 
 
 # ---------------------------------------------------------------------------
