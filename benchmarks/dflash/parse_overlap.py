@@ -105,6 +105,19 @@ def _overlap_duration(
     return covered
 
 
+def _strip_empty_domain(name: str) -> str:
+    """Drop the leading empty-domain ``:`` nsys prefixes default-domain ranges.
+
+    nsys renders push/pop ranges as ``<domain>:<message>``; a range pushed
+    without a registered domain (``torch.cuda.nvtx.range_push`` / native
+    ``nvtx3::scoped_range`` / ``nvtx.push_range``) is rendered with an EMPTY
+    domain, i.e. a leading ``:`` (``:dflash_draft``). Named domains such as
+    ``CCCL:cub::...`` are left untouched -- only the empty-domain colon is
+    dropped so the bare ``DEFAULT_COMPUTE_RANGES`` names match the trace.
+    """
+    return name[1:] if name.startswith(":") else name
+
+
 def compute_overlap(
     memcpys: Sequence[Memcpy],
     ranges: Sequence[NvtxRange],
@@ -116,10 +129,19 @@ def compute_overlap(
     bytes; a zero-duration memcpy contributes its full bytes only when its
     start instant lies inside a compute span, and nothing otherwise. The
     aggregate fraction is hidden bytes over total bytes (``0`` when no bytes).
+
+    Range names are matched modulo the empty-domain ``:`` prefix nsys renders
+    default-domain push/pop ranges with, so the bare ``DEFAULT_COMPUTE_RANGES``
+    match the captured ``:dflash_draft`` / ``:route_ahead_router`` /
+    ``:target_verify`` (and ``--compute-range :expert_compute`` still matches).
     """
-    compute_names = set(compute_ranges)
+    compute_names = {_strip_empty_domain(name) for name in compute_ranges}
     spans = _merge_intervals(
-        [(r.start, r.end) for r in ranges if r.name in compute_names]
+        [
+            (r.start, r.end)
+            for r in ranges
+            if _strip_empty_domain(r.name) in compute_names
+        ]
     )
 
     total_bytes = 0

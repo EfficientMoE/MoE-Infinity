@@ -29,6 +29,7 @@ from moe_infinity.spec_decode._dflash_sample_ops import (
     committed_tokens_sampled,
     warped_probs,
 )
+from moe_infinity.spec_decode._nvtx import nvtx_phase
 from moe_infinity.spec_decode._prefetch_route import union_experts_from_mask
 from moe_infinity.spec_decode._route_ahead_ctx import route_ahead_context
 from moe_infinity.spec_decode._route_ahead_stats import RouteAheadStats
@@ -870,12 +871,13 @@ class DFlashSpeculator:
             kwargs["attention_mask"] = attention_mask
         if position_ids is not None:
             kwargs["position_ids"] = position_ids
-        with route_ahead_context(
-            self._resolve_route_ahead_prefetcher(), stats=stats
-        ):
-            return self._forward_target(
-                block, past_key_values=target_kv, logits_to_keep=0, **kwargs
-            )
+        with nvtx_phase("target_verify"):
+            with route_ahead_context(
+                self._resolve_route_ahead_prefetcher(), stats=stats
+            ):
+                return self._forward_target(
+                    block, past_key_values=target_kv, logits_to_keep=0, **kwargs
+                )
 
     def _run_drafter(
         self,
@@ -892,25 +894,26 @@ class DFlashSpeculator:
         the cache accumulates projected context KV only, so this block's
         noise KV is discarded (mirrors the reference ``spec_generate``).
         """
-        if self._drafter_has_kv_cache:
-            noise_embedding = self.embed_tokens(block)
-            position_ids = torch.arange(
-                draft_kv.get_seq_length(),
-                start + block.shape[1],
-                device=block.device,
-                dtype=torch.long,
-            ).unsqueeze(0)
-            drafter_out = self.draft(
-                target_hidden=context_feature,
-                noise_embedding=noise_embedding,
-                position_ids=position_ids,
-                past_key_values=draft_kv,
-                use_cache=True,
-                is_causal=False,
-            )
-            draft_kv.crop(start)
-            return drafter_out
-        return self.draft(block, context_feature)
+        with nvtx_phase("dflash_draft"):
+            if self._drafter_has_kv_cache:
+                noise_embedding = self.embed_tokens(block)
+                position_ids = torch.arange(
+                    draft_kv.get_seq_length(),
+                    start + block.shape[1],
+                    device=block.device,
+                    dtype=torch.long,
+                ).unsqueeze(0)
+                drafter_out = self.draft(
+                    target_hidden=context_feature,
+                    noise_embedding=noise_embedding,
+                    position_ids=position_ids,
+                    past_key_values=draft_kv,
+                    use_cache=True,
+                    is_causal=False,
+                )
+                draft_kv.crop(start)
+                return drafter_out
+            return self.draft(block, context_feature)
 
     @torch.no_grad()
     def begin_session(
@@ -1091,12 +1094,15 @@ class DFlashSpeculator:
         )
         if stats is not None:
             stats.begin_step()
-        with route_ahead_context(
-            self._resolve_route_ahead_prefetcher(), stats=stats
-        ):
-            logits, hidden_states, session.target_kv = self._forward_target(
-                block, past_key_values=session.target_kv, logits_to_keep=0
-            )
+        with nvtx_phase("target_verify"):
+            with route_ahead_context(
+                self._resolve_route_ahead_prefetcher(), stats=stats
+            ):
+                logits, hidden_states, session.target_kv = self._forward_target(
+                    block,
+                    past_key_values=session.target_kv,
+                    logits_to_keep=0,
+                )
 
         if session.sampled:
             assert draft_probs is not None
