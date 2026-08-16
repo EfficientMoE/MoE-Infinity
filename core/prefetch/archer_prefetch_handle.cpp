@@ -239,7 +239,7 @@ void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
 
   auto task = std::make_shared<Task>();
-  task->priority = 1;
+  task->priority = kBackgroundPrefetchPriority;
   task->node = node;
   task->on_demand = false;
   task->src_device = node->device;

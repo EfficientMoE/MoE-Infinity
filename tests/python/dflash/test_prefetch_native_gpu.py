@@ -117,3 +117,57 @@ def test_native_batched_prefetch_experts_list_uses_batched_path(
         if layer == some_layer
     )
     offloaded_prefetcher.prefetch_experts_list(some_layer, experts)
+
+
+def test_native_priority_bands_accept_each_service_class_reverse_order(
+    offloaded_prefetcher,
+) -> None:
+    from moe_infinity.memory.expert_prefetcher import (
+        BACKGROUND_PREFETCH_PRIORITY,
+        ON_DEMAND_PRIORITY,
+        ROUTE_AHEAD_PRIORITY,
+    )
+
+    engine = offloaded_prefetcher.archer_engine
+    tensor_ids = _saturated_ids(offloaded_prefetcher)
+    assert tensor_ids, "no offloaded expert tensors to issue"
+
+    for priority in (
+        BACKGROUND_PREFETCH_PRIORITY,
+        ROUTE_AHEAD_PRIORITY,
+        ON_DEMAND_PRIORITY,
+    ):
+        assert engine.prefetch_tensors(tensor_ids, priority) is None
+        torch.cuda.synchronize()
+
+
+def test_native_route_ahead_priority_knob_issues_each_band(
+    offloaded_prefetcher,
+) -> None:
+    from moe_infinity.memory.expert_prefetcher import (
+        BACKGROUND_PREFETCH_PRIORITY,
+        ON_DEMAND_PRIORITY,
+        ROUTE_AHEAD_PRIORITY,
+    )
+
+    layers = sorted(
+        {layer for layer, _e in offloaded_prefetcher.expert_tensor_map}
+    )
+    some_layer = layers[0]
+    experts = sorted(
+        expert
+        for layer, expert in offloaded_prefetcher.expert_tensor_map
+        if layer == some_layer
+    )
+    original = offloaded_prefetcher.route_ahead_priority
+    try:
+        for band in (
+            BACKGROUND_PREFETCH_PRIORITY,
+            ROUTE_AHEAD_PRIORITY,
+            ON_DEMAND_PRIORITY,
+        ):
+            offloaded_prefetcher.route_ahead_priority = band
+            offloaded_prefetcher.prefetch_experts_list(some_layer, experts)
+            torch.cuda.synchronize()
+    finally:
+        offloaded_prefetcher.route_ahead_priority = original
