@@ -1,0 +1,4 @@
+memcpy_kind,count,total_MB,total_duration_ms
+[CUDA memcpy Host-to-Device],822,18035.2,450.453
+[CUDA memcpy Device-to-Device],6485,241.1,9.539
+[CUDA memcpy Device-to-Host],7395,0.0,4.964

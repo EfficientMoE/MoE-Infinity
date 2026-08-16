@@ -1,0 +1,15 @@
+{
+  "benchmark": "BM4",
+  "compute_ranges": [
+    "dflash_draft",
+    "route_ahead_router",
+    "target_verify"
+  ],
+  "exposed_fetch_bytes": 18035167000.0,
+  "num_memcpys": 822,
+  "overlap_fraction": 0.0,
+  "overlapped_h2d_bytes": 0.0,
+  "rep":
+      "/mnt/raid0nvme0/leyang/mi-worktrees/pd-dflash-bm4-overlap/benchmarks/dflash/results/bm4-gptoss-20b/nsys/gptoss-bm4.nsys-rep",
+  "total_h2d_bytes": 18035167000
+}

@@ -1,0 +1,5 @@
+# Large nsys trace artifacts — regenerate via the capture command in README.md
+nsys/*.nsys-rep
+nsys/*.sqlite
+nsys/*.csv
+nsys-stats/
