@@ -108,6 +108,9 @@ class ExpertDispatcher : public base::noncopyable {
                       const std::vector<std::uint32_t>& tensor_ids,
                       std::string jit_path);
   void ClearExpertCacheCounts();
+  // Read-only observability accessors; neither alters routing/dispatch.
+  std::int64_t GetCacheOccupancyBytes();
+  double GetCacheHitRate() const;
   void SetExpectedQueue(int expected_pending = 0) {
     pending_.store(expected_pending);
   }
@@ -149,6 +152,10 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<bool> main_thread_stop_flag_;
 
   std::atomic<size_t> pending_;
+
+  // Passive counters for GetCacheHitRate(); reset by ClearExpertCacheCounts().
+  std::atomic<std::uint64_t> cache_hit_count_{0};
+  std::atomic<std::uint64_t> cache_access_count_{0};
 
   std::mutex pending_mutex_;
   std::condition_variable pending_cv_;

@@ -341,6 +341,14 @@ torch::Tensor ArcherPrefetchHandle::GetHitRate() {
   return trace;
 }
 
+std::int64_t ArcherPrefetchHandle::GetExpertOccupancyBytes() {
+  return std::get<0>(kTopologyHandle->GetResidentAndWastedBytes());
+}
+
+std::int64_t ArcherPrefetchHandle::GetWastedPrefetchBytes() {
+  return std::get<1>(kTopologyHandle->GetResidentAndWastedBytes());
+}
+
 void ArcherPrefetchHandle::SetTrace(const torch::Tensor& trace) {
   if (trace.dim() != 3 || !trace.is_contiguous() || !trace.is_cpu()) {
     DLOG_ERROR("Trace should be a contiguous 3D tensor on CPU");

@@ -130,11 +130,14 @@ def measure_configuration(
         slo_ms=args.slo_ms,
         warnings=warnings,
     )
+    effective_h2d_gbps = args.measured_h2d_gbps
+    if effective_h2d_gbps is None and getattr(args, "probe_h2d", False):
+        effective_h2d_gbps = _probe_h2d_gbps()
     cost_terms = _collect_cost_terms(
         baseline=baseline,
         speculator=speculator,
         engine=engine,
-        measured_h2d_gbps=args.measured_h2d_gbps,
+        measured_h2d_gbps=effective_h2d_gbps,
         warnings=warnings,
     )
     return make_observation_row(
@@ -268,6 +271,42 @@ def _route_ahead_snapshot(speculator: Any) -> Tuple[float, Optional[int]]:
     return coverage, (int(wasted) if wasted is not None else None)
 
 
+def _probe_h2d_gbps(
+    nbytes: int = 256 * 1024 * 1024, iters: int = 20
+) -> Optional[float]:
+    import torch
+
+    if not torch.cuda.is_available():
+        return None
+    try:
+        elements = max(1, nbytes // 2)
+        host = torch.empty(elements, dtype=torch.float16, pin_memory=True)
+        device = torch.empty(elements, dtype=torch.float16, device="cuda:0")
+        torch.cuda.synchronize()
+        device.copy_(host, non_blocking=True)
+        torch.cuda.synchronize()
+        started = time.perf_counter()
+        for _ in range(max(1, iters)):
+            device.copy_(host, non_blocking=True)
+        torch.cuda.synchronize()
+        elapsed = max(time.perf_counter() - started, 1e-9)
+    except Exception:
+        return None
+    moved = float(elements * 2 * max(1, iters))
+    return moved / elapsed / 1_000_000_000.0
+
+
+def _native_wasted_prefetch_bytes(engine: Any) -> Optional[float]:
+    prefetcher = getattr(engine, "expert_prefetcher", None)
+    getter = getattr(prefetcher, "wasted_prefetch_bytes", None)
+    if callable(getter):
+        try:
+            return float(getter())
+        except Exception:
+            return None
+    return None
+
+
 def _extract_float(source: Any, names: Tuple[str, ...]) -> Optional[float]:
     for name in names:
         value = getattr(source, name, None)
@@ -300,11 +339,16 @@ def _collect_metrics(
     per_round_latency = elapsed / rounds
     coverage, wasted_bytes = _route_ahead_snapshot(speculator)
     if wasted_bytes is None:
-        warnings.append(
-            "wasted_prefetch_bytes unavailable from RouteAheadStats; a route-"
-            "ahead configuration on offloaded experts must report real bytes"
-        )
-        wasted_bytes = 0
+        native_wasted = _native_wasted_prefetch_bytes(engine)
+        if native_wasted is not None:
+            wasted_bytes = int(native_wasted)
+        else:
+            warnings.append(
+                "wasted_prefetch_bytes unavailable from RouteAheadStats; a "
+                "route-ahead configuration on offloaded experts must report "
+                "real bytes"
+            )
+            wasted_bytes = 0
 
     hit_rate = _extract_float(
         getattr(engine, "expert_prefetcher", engine),
@@ -358,6 +402,10 @@ def _collect_cost_terms(
     warnings: List[str],
 ) -> Dict[str, Any]:
     coverage, wasted_bytes = _route_ahead_snapshot(speculator)
+    if wasted_bytes is None:
+        native_wasted = _native_wasted_prefetch_bytes(engine)
+        if native_wasted is not None:
+            wasted_bytes = int(native_wasted)
     terms: Dict[str, Any] = {
         "route_ahead_coverage": coverage,
         "wasted_prefetch_bytes": wasted_bytes,

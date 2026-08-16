@@ -233,6 +233,8 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
     exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
     exec_args.evict = false;
     exec_args.hit = true;
+    cache_hit_count_.fetch_add(1, std::memory_order_relaxed);
+    cache_access_count_.fetch_add(1, std::memory_order_relaxed);
     // transfer_event = nullptr: expert is already on GPU, no H2D wait needed
 
     // module_->SetTensorsFromIds(expert_node->node->tensor_ids);
@@ -296,6 +298,39 @@ void ExpertDispatcher::ClearExpertCacheCounts() {
       expert_node->node->incache_visit_count = 0;
     }
   }
+  cache_hit_count_.store(0, std::memory_order_relaxed);
+  cache_access_count_.store(0, std::memory_order_relaxed);
+}
+
+std::int64_t ExpertDispatcher::GetCacheOccupancyBytes() {
+  std::int64_t total = 0;
+  for (auto& gpu_cache : cached_experts_) {
+    for (auto key : gpu_cache) {
+      int layer_idx = static_cast<int>(key >> 32);
+      int expert_idx = static_cast<int>(key & 0xFFFFFFFF);
+      if (expert_idx < 0 || expert_idx >= static_cast<int>(experts_.size())) {
+        continue;
+      }
+      if (layer_idx < 0 ||
+          layer_idx >= static_cast<int>(experts_[expert_idx].size())) {
+        continue;
+      }
+      auto& expert_node = experts_[expert_idx][layer_idx];
+      if (expert_node && expert_node->node) {
+        total += expert_node->node->byte_size;
+      }
+    }
+  }
+  return total;
+}
+
+double ExpertDispatcher::GetCacheHitRate() const {
+  std::uint64_t access = cache_access_count_.load(std::memory_order_relaxed);
+  if (access == 0) {
+    return 0.0;
+  }
+  std::uint64_t hits = cache_hit_count_.load(std::memory_order_relaxed);
+  return static_cast<double>(hits) / static_cast<double>(access);
 }
 
 // void ExpertDispatcher::GPUThreadFunc(int gpu_id) {
@@ -388,6 +423,8 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
         exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
         exec_args.evict = false;
         exec_args.hit = true;
+        cache_hit_count_.fetch_add(1, std::memory_order_relaxed);
+        cache_access_count_.fetch_add(1, std::memory_order_relaxed);
         exec_args.transfer_event = nullptr;
         exec_queue_[gpu_id].Push(exec_args);
         continue;
@@ -537,6 +574,8 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
       exec_args.evict = gpu_overload_[gpu_id].load(std::memory_order_acquire);
       exec_args.hit = cache_hit;
+      cache_access_count_.fetch_add(1, std::memory_order_relaxed);
+      if (cache_hit) cache_hit_count_.fetch_add(1, std::memory_order_relaxed);
       exec_args.transfer_event = transfer_done;
       // std::lock_guard<std::mutex> lock(exec_mutex_[gpu_id]);
       // exec_queue_[gpu_id].emplace_back(std::move(exec_args));
