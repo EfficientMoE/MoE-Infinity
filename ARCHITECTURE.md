@@ -231,7 +231,25 @@ Both paths share:
 
 If a symbol is exported but not listed in the documented package surface row, treat it as convenience-only unless the docs explicitly elevate it. Internal helpers may change without notice; documented behavior is tracked through the docs and changelog/release notes.
 
-## 6. Where to Look When …
+## 6. Future Work
+
+- **Unify `engine/` and `serving/`.** Today the synchronous and async paths
+  are two independent schedulers with duplicate data structures (`Sequence`
+  vs `SequenceGroup`, `SchedulerOutput` vs `SchedulerOutput`, etc.). A future
+  refactor should make `MoE.generate()` a synchronous facade over the
+  continuous batching engine so there is only one scheduling code path.
+- **Expand `distributed/` tests.** The distributed module has smoke tests
+  only (see `tests/python/unit/test_distributed_smoke.py`). Deeper coverage
+  requires a multi-process CUDA harness.
+- **Multi-node distributed inference.** The current distributed module only
+  supports single-host multi-GPU via NCCL; cross-host RPC scaffolding exists
+  but is not production-tested.
+- **Block-diffusion (dflash) serving.** A design proposal for serving
+  block-diffusion LLMs on the offloading runtime — dflash kernels, PD-dflash
+  scheduling, and an expert-prefetch lookahead — lives in
+  [`docs/design/pd-dflash-moe-serving.md`](./docs/design/pd-dflash-moe-serving.md).
+
+## 7. Where to Look When …
 
 | Symptom | Start here |
 |---|---|
