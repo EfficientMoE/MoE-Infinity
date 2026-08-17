@@ -8,6 +8,7 @@
 #include "aio/archer_tensor_handle.h"
 #include "model/model_topology.h"
 #include "parallel/expert_dispatcher.h"
+#include "prefetch/task_scheduler.h"
 
 class ArcherPrefetchHandle {
  public:
@@ -17,8 +18,10 @@ class ArcherPrefetchHandle {
 
   bool IsTensorOffloaded(const std::uint32_t tensor_id);
 
-  void AcquireTensor(std::uint64_t& request_id, torch::Tensor& buffer);
-  void ReleaseTensor(std::uint64_t& request_id, torch::Tensor& buffer);
+  void AcquireTensor(std::uint64_t& request_id, torch::Tensor& buffer,
+                     std::uint32_t explicit_id = UINT32_MAX);
+  void ReleaseTensor(std::uint64_t& request_id, torch::Tensor& buffer,
+                     std::uint32_t explicit_id = UINT32_MAX);
   void PrefetchTensors(std::uint64_t& request_id,
                        const std::vector<std::uint32_t>& buffer);
   void FetchTensors(std::uint64_t& request_id,
@@ -26,6 +29,8 @@ class ArcherPrefetchHandle {
 
   void ReplaceCacheCandidates(const std::vector<std::uint32_t>& tensor_ids);
   void EnqueuePrefetch(const uint32_t tensor_id, int gpu_id);
+  void EnqueuePrefetchTensors(const std::vector<std::uint32_t>& tensor_ids,
+                              std::uint32_t priority = kRouteAheadPriority);
 
   void OffloadTensor(torch::Tensor& tensor, const std::uint32_t tensor_id);
   void RegisterTensor(torch::Tensor& tensor, const std::uint32_t tensor_id);
@@ -39,6 +44,8 @@ class ArcherPrefetchHandle {
 
   torch::Tensor GetTrace();
   torch::Tensor GetHitRate();
+  std::int64_t GetExpertOccupancyBytes();
+  std::int64_t GetWastedPrefetchBytes();
   void SetTrace(const torch::Tensor& trace);
   void TraceRequest(const std::uint64_t request_id, const TensorID tensor_id);
   void SetTopology(const std::vector<
@@ -55,6 +62,7 @@ class ArcherPrefetchHandle {
   bool IsTensorOnDevice(const TensorID tensor_id) const;
 
   void CleanUpResources();
+  void ResetCache();
 
   // void SetNodeCachePriority(const std::uint64_t corr_id, const float
   // priority);

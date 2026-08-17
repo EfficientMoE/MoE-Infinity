@@ -10,7 +10,9 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -106,9 +108,14 @@ class ExpertDispatcher : public base::noncopyable {
                       const std::vector<std::uint32_t>& tensor_ids,
                       std::string jit_path);
   void ClearExpertCacheCounts();
+  // Read-only observability accessors; neither alters routing/dispatch.
+  std::int64_t GetCacheOccupancyBytes();
+  double GetCacheHitRate() const;
   void SetExpectedQueue(int expected_pending = 0) {
     pending_.store(expected_pending);
   }
+
+  void SetScales(const std::map<std::string, torch::Tensor>& scales);
 
   std::vector<CallResult> WaitExpert() { return Wait(); }
   torch::Tensor WaitHiddenStates();
@@ -146,6 +153,10 @@ class ExpertDispatcher : public base::noncopyable {
 
   std::atomic<size_t> pending_;
 
+  // Passive counters for GetCacheHitRate(); reset by ClearExpertCacheCounts().
+  std::atomic<std::uint64_t> cache_hit_count_{0};
+  std::atomic<std::uint64_t> cache_access_count_{0};
+
   std::mutex pending_mutex_;
   std::condition_variable pending_cv_;
 
@@ -177,6 +188,9 @@ class ExpertDispatcher : public base::noncopyable {
   int num_threads_ = 1;
 
   std::vector<MoEMLP*> modules_;
+
+  bool fp8_in_store_ = false;
+  std::vector<std::vector<std::vector<torch::Tensor>>> fp8_scales_;
 };
 
 #define SET_TENSORS_AND_MODULE_FROM_BLOB(cls, module, node, device, \

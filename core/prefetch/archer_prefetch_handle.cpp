@@ -88,13 +88,32 @@ void ArcherPrefetchHandle::CleanUpResources() {
   has_cleaned_up_resources_ = true;
 }
 
+void ArcherPrefetchHandle::ResetCache() {
+  // Non-terminal reset (BM3 ablation): drop pending prefetch work so a prior
+  // arm's route-ahead band cannot leak into the next, without tearing down the
+  // engine. Unlike CleanUpResources, kTaskPool/threads stay alive and
+  // has_cleaned_up_resources_ is untouched, so the next FetchTensors does not
+  // deadlock. ClearQueue scans priority 1..NUM_PRIORITY, leaving on-demand (0).
+  if (kTaskPool) {
+    kTaskPool->ClearQueue();
+  }
+}
+
 void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
-                                         torch::Tensor& buffer) {
-  auto tensor_id = kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
+                                         torch::Tensor& buffer,
+                                         std::uint32_t explicit_id) {
+  auto tensor_id =
+      (explicit_id != UINT32_MAX)
+          ? explicit_id
+          : kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
   void* old_ptr = (void*)buffer.data_ptr();
   DLOG_TRACE("Acquire tensor ", tensor_id, old_ptr);
 
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
+  if (node == nullptr) {
+    DLOG_ERROR("AcquireTensor: no topology node for tensor_id ", tensor_id);
+    return;
+  }
   node->state = 1;
 
   // add node tensor_ids to node_id_to_tensor_ids_
@@ -135,12 +154,20 @@ void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
   kArcherTensorHandle->UpdateTensorMap(old_ptr, (void*)buffer.data_ptr());
 }
 void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
-                                         torch::Tensor& buffer) {
-  auto tensor_id = kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
+                                         torch::Tensor& buffer,
+                                         std::uint32_t explicit_id) {
+  auto tensor_id =
+      (explicit_id != UINT32_MAX)
+          ? explicit_id
+          : kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
   void* old_ptr = (void*)buffer.data_ptr();
   DLOG_TRACE("Release tensor ", tensor_id, old_ptr);
 
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
+  if (node == nullptr) {
+    DLOG_ERROR("ReleaseTensor: no topology node for tensor_id ", tensor_id);
+    return;
+  }
   // node->state = 1;
 
   if (node_id_to_tensor_ids_.find(node->id) == node_id_to_tensor_ids_.end()) {
@@ -159,7 +186,7 @@ void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
   // TraceRequest(request_id, tensor_id);
 
   auto current_layer_id = node->corr_id & 0xFFFFFFFF;
-  if (current_layer_id != last_layer_id_ &&
+  if (current_layer_id != last_layer_id_ && last_node_ != nullptr &&
       node_id_to_tensor_ids_[last_node_->id].size() != 0) {
     node_id_to_tensor_ids_[last_node_->id].clear();
     kTaskPool->StopExec(request_id,
@@ -213,11 +240,6 @@ void ArcherPrefetchHandle::ReplaceCacheCandidates(
   std::vector<NodePtr> candidates;
   for (std::uint32_t tensor_id : tensor_ids) {
     auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
-    {
-      auto expected = NodeExecState::IDLE;
-      node->exec_state.compare_exchange_strong(
-          expected, NodeExecState::FETCHING, std::memory_order_acq_rel);
-    }
     candidates.push_back(node);
   }
 
@@ -228,6 +250,10 @@ void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
 
   auto task = std::make_shared<Task>();
+  // BM3 verdict NO-SHIP: revert the route-ahead priority band. Ordinary
+  // prefetch returns to band 1 (pre-candidate), so route-ahead is no longer
+  // serviced ahead of background prefetch. Two seeds proved no robust win --
+  // the exposed-fetch effect flipped sign and never held throughput at once.
   task->priority = 1;
   task->node = node;
   task->on_demand = false;
@@ -235,6 +261,20 @@ void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
   // task->dst_device = CUDA_DEVICE(gpu_id); // use default device for now
   task->dst_device = node->default_device;
   kTaskPool->EnqueueTask(task);
+}
+
+void ArcherPrefetchHandle::EnqueuePrefetchTensors(
+    const std::vector<std::uint32_t>& tensor_ids, std::uint32_t priority) {
+  for (std::uint32_t tensor_id : tensor_ids) {
+    auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
+    auto task = std::make_shared<Task>();
+    task->priority = priority;
+    task->node = node;
+    task->on_demand = false;
+    task->src_device = node->device;
+    task->dst_device = node->default_device;
+    kTaskPool->EnqueueTask(task);
+  }
 }
 
 void ArcherPrefetchHandle::FetchTensors(
@@ -314,6 +354,14 @@ torch::Tensor ArcherPrefetchHandle::GetHitRate() {
                        torch::kInt64)
           .clone();
   return trace;
+}
+
+std::int64_t ArcherPrefetchHandle::GetExpertOccupancyBytes() {
+  return std::get<0>(kTopologyHandle->GetResidentAndWastedBytes());
+}
+
+std::int64_t ArcherPrefetchHandle::GetWastedPrefetchBytes() {
+  return std::get<1>(kTopologyHandle->GetResidentAndWastedBytes());
 }
 
 void ArcherPrefetchHandle::SetTrace(const torch::Tensor& trace) {

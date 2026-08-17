@@ -36,6 +36,13 @@ class _PackedExperts(nn.Module):
 class SyncGptOssMLP(nn.Module):
     archer_config: Optional[ArcherConfig] = None
     layer_id: Optional[int] = None
+    expert_executor = None
+    expert_prefetcher = None
+    expert_tracer = None
+    expert_predictor = None
+    expert_tensor_map = None
+    archer_engine = None
+    lib = None
 
     def __init__(self, config):
         super().__init__()
@@ -99,12 +106,13 @@ class SyncGptOssMLP(nn.Module):
         down_scales = self.experts.down_proj_scales[expert_idx].to(device)
         down_b = self.experts.down_proj_bias[expert_idx].to(device)
 
-        # Checkpoint stores weights as [K, N//2] (input-major packed).
-        # The fused kernel expects [N, K//2] (output-major packed).
+        # Checkpoint stores each expert's packed weights output-major as
+        # [N, K//2] (blocks) and [N, K//32] (scales) - exactly the layout the
+        # fused kernel expects, so they are fed through unchanged.
         gate_up_out = fused_mxfp4_gemm(
             x,
-            gate_up_packed.t().contiguous(),
-            gate_up_scales.t().contiguous(),
+            gate_up_packed.contiguous(),
+            gate_up_scales.contiguous(),
             gate_up_b,
         )
 
@@ -113,45 +121,72 @@ class SyncGptOssMLP(nn.Module):
 
         result = fused_mxfp4_gemm(
             activated.to(torch.bfloat16),
-            down_packed.t().contiguous(),
-            down_scales.t().contiguous(),
+            down_packed.contiguous(),
+            down_scales.contiguous(),
             down_b,
         )
         return result
 
+    def _observe_resident_route_ahead(self, router_mask: torch.Tensor) -> None:
+        if self.expert_executor is not None:
+            return
+
+        import moe_infinity.spec_decode._route_ahead_ctx as route_ahead_ctx
+
+        if not route_ahead_ctx.is_active():
+            return
+
+        stats = route_ahead_ctx.current_stats()
+        _resident_prefetcher = route_ahead_ctx.current_prefetcher()
+        if stats is None:
+            return
+
+        from moe_infinity.spec_decode._prefetch_route import (
+            union_experts_from_mask,
+        )
+
+        mask_2d = router_mask.reshape(-1, self.num_experts)
+        union_expert_ids = union_experts_from_mask(mask_2d)
+        stats.observe_layer(self.layer_id, union_expert_ids, mask_2d)
+
     def forward(
         self, hidden_states: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from moe_infinity.spec_decode._nvtx import nvtx_phase
+
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         num_tokens = batch_size * sequence_length
         hidden_flat = hidden_states.view(-1, hidden_dim)
 
-        router_logits = self.router(hidden_flat)
+        with nvtx_phase("route_ahead_router"):
+            router_logits = self.router(hidden_flat)
 
-        routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float32)
-        routing_weights, selected_experts = torch.topk(
-            routing_weights, self.top_k, dim=-1
-        )
-        routing_weights = routing_weights / routing_weights.sum(
-            dim=-1, keepdim=True
-        )
-        routing_weights = routing_weights.to(hidden_states.dtype)
+            routing_weights = F.softmax(
+                router_logits, dim=-1, dtype=torch.float32
+            )
+            routing_weights, selected_experts = torch.topk(
+                routing_weights, self.top_k, dim=-1
+            )
+            routing_weights = routing_weights / routing_weights.sum(
+                dim=-1, keepdim=True
+            )
+            routing_weights = routing_weights.to(hidden_states.dtype)
 
-        router_mask = torch.zeros(
-            num_tokens,
-            self.num_experts,
-            dtype=torch.bool,
-            device=hidden_states.device,
-        )
-        router_mask.scatter_(1, selected_experts, True)
+            router_mask = torch.zeros(
+                num_tokens,
+                self.num_experts,
+                dtype=torch.bool,
+                device=hidden_states.device,
+            )
+            router_mask.scatter_(1, selected_experts, True)
 
-        routing_weights_mask = torch.zeros(
-            num_tokens,
-            self.num_experts,
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        routing_weights_mask.scatter_(1, selected_experts, routing_weights)
+            routing_weights_mask = torch.zeros(
+                num_tokens,
+                self.num_experts,
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            routing_weights_mask.scatter_(1, selected_experts, routing_weights)
 
         if self.expert_executor is not None:
             self.expert_executor.dispatch_local(
@@ -163,6 +198,7 @@ class SyncGptOssMLP(nn.Module):
             )
             final_hidden = self.expert_executor.wait_dispatch_local()
         else:
+            self._observe_resident_route_ahead(router_mask)
             final_hidden = torch.zeros_like(hidden_flat)
             for expert_idx in range(self.num_experts):
                 token_mask = router_mask[:, expert_idx]

@@ -13,8 +13,9 @@ import logging
 import os
 import re
 import tempfile
+import time
 import warnings
-from typing import Callable, Dict, Type, Union
+from typing import Callable, Dict, Optional, Type, Union
 
 import torch
 import transformers
@@ -38,7 +39,6 @@ from tqdm import tqdm
 from transformers import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
-import moe_infinity
 from moe_infinity.common import parse_expert_type
 from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
@@ -48,6 +48,7 @@ from moe_infinity.models import (
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
+    SyncGlmMoeDsaMoEBlock,
     SyncGptOssMLP,
     SyncJambaMoEBlock,
     SyncMixtralSparseMoeBlock,
@@ -55,7 +56,6 @@ from moe_infinity.models import (
     SyncOlmoeMoEBlock,
     SyncQwen3_5MoeSparseMoeBlock,
 )
-from moe_infinity.runtime.compile import script_expert
 from moe_infinity.runtime.hooks import *
 from moe_infinity.utils import (
     ArcherConfig,
@@ -162,6 +162,193 @@ def _remap_v5_batched_experts(
                 expert_idx
             ].contiguous()
         del state_dict[down_key]
+
+
+_GPT_OSS_EXPERT_FIELDS = (
+    "gate_up_proj_blocks",
+    "gate_up_proj_scales",
+    "gate_up_proj_bias",
+    "down_proj_blocks",
+    "down_proj_scales",
+    "down_proj_bias",
+)
+
+_GPT_OSS_RESIDENT_RATIO = 0.9
+
+
+def _gpt_oss_offload_enabled(model_type, archer_config):
+    if model_type != "gpt_oss":
+        return True
+    return archer_config.device_memory_ratio < _GPT_OSS_RESIDENT_RATIO
+
+
+def _wire_expert_collaborators(
+    module,
+    enabled,
+    *,
+    expert_executor,
+    expert_prefetcher,
+    expert_tracer,
+    expert_predictor,
+    expert_tensor_map,
+):
+    if not enabled:
+        return
+    module.expert_executor = expert_executor
+    module.expert_prefetcher = expert_prefetcher
+    module.expert_tracer = expert_tracer
+    module.expert_predictor = expert_predictor
+    module.expert_tensor_map = expert_tensor_map
+
+
+def _expand_gpt_oss_packed_experts(state_dict, config):
+    if getattr(config, "model_type", "") != "gpt_oss":
+        return
+
+    # gpt-oss checkpoints can split a layer's six packed expert components across
+    # safetensors shards, and the loader expands one per-shard state_dict slice
+    # at a time. Expand each packed component independently so a slice missing
+    # some of the six still expands the ones it holds; global per-(layer, expert)
+    # completeness is enforced later over the merged name_id_map by
+    # _gpt_oss_expert_groups.
+    expected_experts = int(config.num_local_experts)
+    field_set = set(_GPT_OSS_EXPERT_FIELDS)
+    packed_keys = [
+        key
+        for key in list(state_dict)
+        if ".mlp.experts." in key and key.rsplit(".", 1)[-1] in field_set
+    ]
+    for key in packed_keys:
+        prefix, field = key.rsplit(".", 1)
+        tensor = state_dict[key]
+        if tensor.shape[0] != expected_experts:
+            raise ValueError(
+                f"{key} has {tensor.shape[0]} experts; "
+                f"expected {expected_experts}"
+            )
+        flatten_blocks = field.endswith("_blocks")
+        for expert_idx in range(expected_experts):
+            view = tensor[expert_idx]
+            if flatten_blocks and view.dim() == 3:
+                # MXFP4 blocks ship as [out, n_blocks, 16]; the native MoEMLP
+                # offload path (DequantMxfp4Params/SetTensorsFromIds) treats
+                # blocks as 2D [out, packed_bytes] and derives hidden as
+                # packed_bytes*2, so collapse the trailing block dims here.
+                view = view.reshape(view.shape[0], -1)
+            if not view.is_contiguous():
+                raise ValueError(
+                    f"Non-contiguous GPT-OSS slice {prefix}.{expert_idx}.{field}"
+                )
+            state_dict[f"{prefix}.{expert_idx}.{field}"] = view
+        del state_dict[key]
+
+
+def _gpt_oss_expert_groups(name_id_map, config):
+    fields = {name: index for index, name in enumerate(_GPT_OSS_EXPERT_FIELDS)}
+    grouped = {}
+    for name, tensor_id in name_id_map.items():
+        layer_id, expert_id = parse_expert_id(name, config)
+        if layer_id is None or expert_id is None:
+            continue
+        field = name.rsplit(".", 1)[-1]
+        if field not in fields:
+            continue
+        slots = grouped.setdefault(
+            (layer_id, expert_id), [None] * len(_GPT_OSS_EXPERT_FIELDS)
+        )
+        slots[fields[field]] = tensor_id
+
+    topology = []
+    for layer_id in range(config.num_hidden_layers):
+        experts = []
+        for expert_id in range(config.num_local_experts):
+            ids = grouped.get((layer_id, expert_id))
+            if ids is None or any(tensor_id is None for tensor_id in ids):
+                raise ValueError(
+                    f"Missing GPT-OSS expert tensors for layer={layer_id}, "
+                    f"expert={expert_id}"
+                )
+            experts.append(ids)
+        topology.append((f"model.layers.{layer_id}.mlp.experts", experts))
+    return topology
+
+
+def _make_expert_tensor_map(name_id_map, config):
+    if getattr(config, "model_type", "") == "gpt_oss":
+        return {
+            (layer_id, expert_id): tensor_ids[0]
+            for layer_id, (_, experts) in enumerate(
+                _gpt_oss_expert_groups(name_id_map, config)
+            )
+            for expert_id, tensor_ids in enumerate(experts)
+        }
+    result = {}
+    for name, tensor_id in name_id_map.items():
+        layer_id, expert_id = parse_expert_id(name, config)
+        if expert_id is not None:
+            result[(layer_id, expert_id)] = tensor_id
+    return result
+
+
+def _make_expert_nbytes_map(model, config):
+    """Sum stored payload bytes per ``(layer_id, expert_id)`` from live params.
+
+    Read while the routed-expert weights still carry their true shape/dtype
+    (before ``setup_archer_hooks`` installs offload placeholders), so
+    ``numel * element_size`` is the exact stored FP4/FP8 payload the route-ahead
+    prefetch fetches -- even a meta-init param preserves shape and dtype. This
+    is read-only measurement metadata for the A5 recorder; it never changes
+    routing, prefetch, or offload placement. gpt-oss stacks its experts into one
+    tensor and never reaches the executor route-ahead seam, so it is skipped.
+    """
+    if getattr(config, "model_type", "") == "gpt_oss":
+        return {}
+    result: dict[tuple[int, int], int] = {}
+    for name, param in model.named_parameters(recurse=True):
+        layer_id, expert_id = parse_expert_id(name, config)
+        if expert_id is None:
+            continue
+        nbytes = int(param.numel()) * int(param.element_size())
+        result[(layer_id, expert_id)] = (
+            result.get((layer_id, expert_id), 0) + nbytes
+        )
+    return result
+
+
+def _identify_fp8_blockwise_pairs(keys):
+    key_set = set(keys)
+    pairs = []
+    for k in keys:
+        if k.endswith("_scale_inv"):
+            base = k[: -len("_scale_inv")]
+            if base in key_set:
+                pairs.append((base, k))
+    return pairs
+
+
+_ROUTED_EXPERT_RE = re.compile(r"\.mlp\.experts\.\d+\.")
+
+
+def _is_routed_expert_key(key: str) -> bool:
+    # Routed experts (including the MTP layer's, which parse_expert_id drops via
+    # its layer_id >= num_layers guard) are dequantized on-device by the
+    # dispatcher, so they stay FP8 in the store. Matches ".mlp.experts.<id>."
+    # but not ".mlp.shared_experts." or dense ".mlp.<proj>".
+    # NOTE(#142): Mixtral names routed experts ".block_sparse_moe.experts.<id>."
+    # (see _remap_v5_batched_experts), which this regex does NOT match, so its
+    # routed experts are currently misclassified as non-routed. Tracked in #142.
+    return _ROUTED_EXPERT_RE.search(key) is not None
+
+
+def _has_fp8_blockwise(config: object) -> bool:
+    qcfg = getattr(config, "quantization_config", None)
+    if qcfg is None:
+        return False
+    if isinstance(qcfg, dict):
+        method = qcfg.get("quant_method", "") or qcfg.get("fmt", "")
+    else:
+        method = getattr(qcfg, "quant_method", "") or getattr(qcfg, "fmt", "")
+    return "fp8" in str(method).lower()
 
 
 def _compute_config_fingerprint(config: object) -> str:
@@ -275,6 +462,60 @@ class OffloadEngine(object):
     request_id = 0
     config = {}
 
+    @property
+    def num_offloaded_experts(self) -> int:
+        prefetcher = getattr(self, "expert_prefetcher", None)
+        if prefetcher is None:
+            return 0
+        return int(getattr(prefetcher, "num_offloaded_experts", 0))
+
+    @property
+    def expert_cache_hit_rate(self) -> float:
+        prefetcher = getattr(self, "expert_prefetcher", None)
+        getter = getattr(prefetcher, "get_hit_rate", None)
+        return float(getter()) if callable(getter) else 0.0
+
+    @property
+    def expert_occupancy_bytes(self) -> float:
+        prefetcher = getattr(self, "expert_prefetcher", None)
+        getter = getattr(prefetcher, "expert_occupancy_bytes", None)
+        return float(getter()) if callable(getter) else 0.0
+
+    def _fetch_tensors_timed(self, tensors) -> None:
+        """Issue the blocking on-demand fetch and accumulate its stall time.
+
+        This synchronous call is the exposed-fetch window: compute cannot
+        proceed until every un-prefetched expert is resident. Read-only BM3
+        instrumentation (plan Task 9) -- the fetch is unchanged, only timed.
+        """
+        start = time.perf_counter()
+        self.archer_engine.fetch_tensors(self.request_id, tensors)
+        self._exposed_fetch_seconds += time.perf_counter() - start
+
+    def get_exposed_fetch_seconds(self) -> float:
+        """Total wall time compute stalled on on-demand expert fetches."""
+        return float(getattr(self, "_exposed_fetch_seconds", 0.0))
+
+    def reset_exposed_fetch_seconds(self) -> None:
+        """Zero the exposed-fetch accumulator (per BM3 ablation arm)."""
+        self._exposed_fetch_seconds = 0.0
+
+    @property
+    def kv_occupancy_bytes(self) -> Optional[float]:
+        manager = getattr(self, "kv_cache_manager", None)
+        if manager is None:
+            return None
+        for name in ("occupancy_bytes", "resident_bytes", "kv_cache_bytes"):
+            value = getattr(manager, name, None)
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:
+                    value = None
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value)
+        return None
+
     def __init__(
         self,
         capacity,
@@ -286,6 +527,8 @@ class OffloadEngine(object):
     ):
         self.offload_exemption = set()
         self.expert_modules = []
+        self.kv_cache_manager = kv_cache_manager
+        self._exposed_fetch_seconds = 0.0
 
         self.ckpt_files = []
 
@@ -348,6 +591,24 @@ class OffloadEngine(object):
         """Register a KVCacheManager for KV cache offloading."""
         self._kv_cache_manager = manager
 
+    def deliver_fp8_scales_to_dispatcher(self):
+        scales = getattr(self, "_glm_fp8_scales", None)
+        if not scales:
+            return
+        dispatcher = getattr(self, "expert_dispatcher", None)
+        set_scales = getattr(dispatcher, "set_scales", None)
+        if callable(set_scales):
+            set_scales(scales)
+        else:
+            warnings.warn(
+                "GLM-5.2-FP8 routed experts are kept FP8 in the store but the "
+                "native set_scales dispatcher API is unavailable; build the "
+                "moe_infinity._v4_fp4 extension with fp8-in-store support. "
+                "Routed experts will not be dequantized correctly.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     def init(
         self,
         cls: Type[PreTrainedModel],
@@ -386,6 +647,9 @@ class OffloadEngine(object):
         )
 
         self.archer_config = _archer_config
+        self.gpt_oss_offload_enabled = _gpt_oss_offload_enabled(
+            getattr(self.config, "model_type", ""), self.archer_config
+        )
         if _archer_config.trace_path is not None:
             self.expert_tracer.load_trace(_archer_config.trace_path)
 
@@ -535,11 +799,18 @@ class OffloadEngine(object):
             SyncJambaMoEBlock
         )
 
-        transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe = transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE
-        transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
-        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = (
-            SyncDeepseekV2MoEBlock
+        _dsv2_mod = transformers.models.deepseek_v2.modeling_deepseek_v2
+        _dsv2_cls = getattr(_dsv2_mod, "DeepseekV2MoE", None) or getattr(
+            _dsv2_mod, "DeepseekV2Moe", None
         )
+        _dsv2_mod._old_deepseek_v2_moe = _dsv2_cls
+        _dsv2_attr = (
+            "DeepseekV2MoE"
+            if hasattr(_dsv2_mod, "DeepseekV2MoE")
+            else "DeepseekV2Moe"
+        )
+        setattr(_dsv2_mod, _dsv2_attr, SyncDeepseekV2MoEBlock)
+        transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe = transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = (
             SyncDeepseekV3MoEBlock
         )
@@ -552,6 +823,14 @@ class OffloadEngine(object):
         _q35_mod = transformers.models.qwen3_5_moe.modeling_qwen3_5_moe
         _q35_mod._old_qwen3_5_sparse_moe = _q35_mod.Qwen3_5MoeSparseMoeBlock
         _q35_mod.Qwen3_5MoeSparseMoeBlock = SyncQwen3_5MoeSparseMoeBlock
+
+        try:
+            import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
+
+            _glm_mod._old_glm_moe_dsa_moe = _glm_mod.GlmMoeDsaMoE
+            _glm_mod.GlmMoeDsaMoE = SyncGlmMoeDsaMoEBlock
+        except (ImportError, AttributeError):
+            pass
 
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
@@ -637,16 +916,26 @@ class OffloadEngine(object):
                             state_dict = torch.load(ckpt)
 
                         _remap_v5_batched_experts(state_dict, self.config)
+                        _expand_gpt_oss_packed_experts(state_dict, self.config)
 
                         is_gptq_ckpt = is_gptq_quantized(self.config)
+                        _arch0_cast = (
+                            getattr(self.config, "architectures", None) or [""]
+                        )[0]
+                        is_glm_fp8_ckpt = (
+                            "GlmMoeDsa" in _arch0_cast
+                            and _has_fp8_blockwise(self.config)
+                        )
                         self._cast_state_dict_tensors(
                             state_dict,
                             is_gptq_ckpt=is_gptq_ckpt,
                             is_mxfp4_ckpt=is_mxfp4_ckpt,
+                            is_glm_fp8_ckpt=is_glm_fp8_ckpt,
                         )
 
                         if (
                             is_mxfp4_ckpt
+                            and self.config.model_type != "gpt_oss"
                             and os.environ.get("MOE_INFINITY_MXFP4_DEQUANT", "")
                             == "1"
                         ):
@@ -692,6 +981,48 @@ class OffloadEngine(object):
                                 del state_dict[blocks_key]
                                 del state_dict[scales_key]
 
+                        arch0 = (
+                            getattr(self.config, "architectures", None) or [""]
+                        )[0]
+                        is_glm_fp8 = (
+                            "GlmMoeDsa" in arch0
+                            and _has_fp8_blockwise(self.config)
+                        )
+                        if is_glm_fp8:
+                            from moe_infinity.utils.fp8 import (
+                                dequant_fp8_blockwise,
+                            )
+
+                            if not hasattr(self, "_glm_fp8_scales"):
+                                self._glm_fp8_scales = {}
+                            fp8_pairs = _identify_fp8_blockwise_pairs(
+                                list(state_dict.keys())
+                            )
+                            for base_key, scale_key in fp8_pairs:
+                                w = state_dict.get(base_key)
+                                s = state_dict.get(scale_key)
+                                if w is None or s is None:
+                                    continue
+                                if w.dtype != torch.float8_e4m3fn:
+                                    continue
+                                if _is_routed_expert_key(base_key):
+                                    # Routed expert: keep FP8 in the host store;
+                                    # the dispatcher dequantizes on-device.
+                                    self._glm_fp8_scales[base_key] = s
+                                else:
+                                    # Required by the model: attention, dense MLP
+                                    # and shared experts run in PyTorch (not the
+                                    # dispatcher), so dequantize them to BF16.
+                                    state_dict[base_key] = (
+                                        dequant_fp8_blockwise(
+                                            w,
+                                            s,
+                                            dtype=torch.bfloat16,
+                                            block_size=128,
+                                        )
+                                    )
+                                del state_dict[scale_key]
+
                         self._offload_state_dict(state_dict, empty_state_dict)
 
                         del state_dict
@@ -723,18 +1054,28 @@ class OffloadEngine(object):
                     with open(name_id_map_file, "r") as f:
                         self.name_id_map = json.load(f)
 
+                    _arch0_reload = (
+                        getattr(self.config, "architectures", None) or [""]
+                    )[0]
+                    if "GlmMoeDsa" in _arch0_reload and _has_fp8_blockwise(
+                        self.config
+                    ):
+                        self._rebuild_glm_fp8_scales_from_ckpt()
+
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
                 )
+                _model_type = getattr(self.config, "model_type", "")
+                _force_eager = _model_type == "glm_moe_dsa"
                 model = cls._from_config(
                     self.config,
                     torch_dtype=self.dtype_cls
                     if self.config.model_type != "deepseek_v3"
                     else torch.bfloat16,
                     attn_implementation=(
-                        "flash_attention_2"
-                        if is_flash_attn_available
-                        else "eager"
+                        "eager"
+                        if _force_eager or not is_flash_attn_available
+                        else "flash_attention_2"
                     ),
                 )
 
@@ -755,6 +1096,9 @@ class OffloadEngine(object):
                     self.dtype,
                     parse_expert_type(self.config),
                     self.archer_config.num_threads,
+                )
+                self.expert_prefetcher.expert_dispatcher = (
+                    self.expert_dispatcher
                 )
 
                 for name, param in model.named_parameters(recurse=True):
@@ -794,18 +1138,19 @@ class OffloadEngine(object):
                         self.name_id_map["embed_tokens.weight"] = 0
                         model.model.embed_tokens.weight.ar_id = 0
 
-                self.expert_tensor_map = dict()
-                for name, id in self.name_id_map.items():
-                    layer_id, expert_id = parse_expert_id(name, self.config)
-                    if expert_id is not None:
-                        self.expert_tensor_map[(layer_id, expert_id)] = id
+                self.expert_tensor_map = _make_expert_tensor_map(
+                    self.name_id_map, self.config
+                )
                 self.expert_prefetcher.expert_tensor_map = (
                     self.expert_tensor_map
                 )
+                self.expert_prefetcher.expert_nbytes_map = (
+                    _make_expert_nbytes_map(model, self.config)
+                )
 
-                # for deepseek, we need to set the expert_tensor_map for the model
+                # for deepseek and glm, we need to set the expert_tensor_map for the model
                 first_k_dense_replace = 0
-                if "deepseek" in model_name:
+                if "deepseek" in model_name or "glm" in model_name.lower():
                     self.expert_prefetcher.first_k_dense_replace = (
                         self.config.first_k_dense_replace
                     )
@@ -840,18 +1185,26 @@ class OffloadEngine(object):
                         or isinstance(module, SyncQwen3_5MoeSparseMoeBlock)
                         or isinstance(module, SyncOlmoeMoEBlock)
                         or isinstance(module, SyncJambaMoEBlock)
+                        or isinstance(module, SyncGlmMoeDsaMoEBlock)
                     ):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
                         module.is_gptq = is_gptq_quantized(self.config)
                         self.expert_modules.append(module)
 
-                        if not isinstance(module, SyncGptOssMLP):
-                            module.expert_executor = self.expert_executor
-                            module.expert_prefetcher = self.expert_prefetcher
-                            module.expert_tracer = self.expert_tracer
-                            module.expert_predictor = self.expert_predictor
-                            module.expert_tensor_map = self.expert_tensor_map
+                        use_dispatcher = (
+                            not isinstance(module, SyncGptOssMLP)
+                            or self.gpt_oss_offload_enabled
+                        )
+                        _wire_expert_collaborators(
+                            module,
+                            use_dispatcher,
+                            expert_executor=self.expert_executor,
+                            expert_prefetcher=self.expert_prefetcher,
+                            expert_tracer=self.expert_tracer,
+                            expert_predictor=self.expert_predictor,
+                            expert_tensor_map=self.expert_tensor_map,
+                        )
 
                         module.lib = self.prefetch_lib
 
@@ -860,7 +1213,23 @@ class OffloadEngine(object):
 
                         module_idx += 1
 
+                if getattr(self.config, "model_type", "") in (
+                    "glm_moe_dsa",
+                    "qwen3_5_moe",
+                ):
+                    self._load_resident_shared_experts(model)
+                    for _name in list(self.name_id_map.keys()):
+                        if self._is_shared_expert_param(_name):
+                            del self.name_id_map[_name]
+
+                if (
+                    getattr(self.config, "model_type", "") == "gpt_oss"
+                    and not self.gpt_oss_offload_enabled
+                ):
+                    self._load_resident_gpt_oss(model)
+
                 self.setup_archer_hooks(model)
+                self.deliver_fp8_scales_to_dispatcher()
                 return model
 
             return archer_from_pretrained
@@ -898,6 +1267,14 @@ class OffloadEngine(object):
         if hasattr(_q35_mod, "_old_qwen3_5_sparse_moe"):
             _q35_mod.Qwen3_5MoeSparseMoeBlock = _q35_mod._old_qwen3_5_sparse_moe
 
+        try:
+            import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
+
+            if hasattr(_glm_mod, "_old_glm_moe_dsa_moe"):
+                _glm_mod.GlmMoeDsaMoE = _glm_mod._old_glm_moe_dsa_moe
+        except (ImportError, AttributeError):
+            pass
+
     def _is_shared_expert_param(self, name: str) -> bool:
         # DeepSeek names shared experts ".shared_experts." (plural); Qwen3.5-MoE
         # uses singular ".shared_expert." plus ".shared_expert_gate.". The
@@ -933,6 +1310,20 @@ class OffloadEngine(object):
             return
 
         remaining = set(wanted)
+        from moe_infinity.utils.fp8 import dequant_fp8_blockwise
+
+        def _resolve(param, name, weight, scale):
+            if weight.dtype == torch.float8_e4m3fn:
+                if scale is None:
+                    raise RuntimeError(
+                        f"FP8 shared-expert weight {name!r} is missing its "
+                        "_scale_inv; cannot dequantize resident shared experts."
+                    )
+                weight = dequant_fp8_blockwise(
+                    weight, scale, dtype=param.dtype, block_size=128
+                )
+            return weight.to(dtype=param.dtype, device="cpu").contiguous()
+
         for ckpt in self.ckpt_files:
             if not remaining:
                 break
@@ -943,10 +1334,14 @@ class OffloadEngine(object):
                         if name not in keys:
                             continue
                         param = wanted[name]
-                        param.data = (
-                            f.get_tensor(name)
-                            .to(dtype=param.dtype, device="cpu")
-                            .contiguous()
+                        scale_key = name + "_scale_inv"
+                        scale = (
+                            f.get_tensor(scale_key)
+                            if scale_key in keys
+                            else None
+                        )
+                        param.data = _resolve(
+                            param, name, f.get_tensor(name), scale
                         )
                         param.requires_grad_(False)
                         param._moe_infinity_resident = True
@@ -957,10 +1352,8 @@ class OffloadEngine(object):
                     if name not in state:
                         continue
                     param = wanted[name]
-                    param.data = (
-                        state[name]
-                        .to(dtype=param.dtype, device="cpu")
-                        .contiguous()
+                    param.data = _resolve(
+                        param, name, state[name], state.get(name + "_scale_inv")
                     )
                     param.requires_grad_(False)
                     param._moe_infinity_resident = True
@@ -972,17 +1365,180 @@ class OffloadEngine(object):
                 f"Missing shared_experts weights: {sorted(remaining)[:5]}"
             )
 
+    @torch.no_grad()
+    def _load_resident_gpt_oss(self, model):
+        # GPT-OSS is not wired into the C++ expert dispatcher (see the
+        # SyncGptOssMLP guards in setup_archer_hooks / register_expert): its
+        # SyncGptOssMLP.forward runs a resident Python expert loop reading the
+        # _PackedExperts params directly. The Archer empty-init replaces those
+        # params with [1] placeholders and never materializes them, so load the
+        # real MXFP4 blocks/scales, biases, router, and attention sinks here and
+        # keep them resident. MXFP4 packed weights stay uint8 output-major
+        # ([E, N, K//2] blocks, [E, N, K//32] scales) - the layout the fused
+        # kernel consumes without transposition.
+        modules = [m for m in model.modules() if isinstance(m, SyncGptOssMLP)]
+        if not modules:
+            return
+
+        num_devices = torch.cuda.device_count()
+        target = get_device(num_devices - 1) if num_devices else "cpu"
+
+        def _set(param, tensor, *, cast_dtype=None):
+            data = tensor
+            if cast_dtype is not None:
+                data = data.to(cast_dtype)
+            param.requires_grad_(False)
+            param.data = data.to(device=target).contiguous()
+            param._moe_infinity_resident = True
+
+        loaded_names = set()
+
+        def _reshape_blocks(t):
+            if t.dim() == 4:
+                E, N, G, B = t.shape
+                return t.reshape(E, N, G * B)
+            return t
+
+        for module in modules:
+            layer_id = module.layer_id
+            prefix = f"model.layers.{layer_id}"
+            experts = f"{prefix}.mlp.experts"
+            wanted = {
+                f"{experts}.gate_up_proj_blocks": (
+                    module.experts.gate_up_proj,
+                    _reshape_blocks,
+                    None,
+                ),
+                f"{experts}.gate_up_proj_scales": (
+                    module.experts.gate_up_proj_scales,
+                    None,
+                    None,
+                ),
+                f"{experts}.gate_up_proj_bias": (
+                    module.experts.gate_up_proj_bias,
+                    None,
+                    self.dtype_cls,
+                ),
+                f"{experts}.down_proj_blocks": (
+                    module.experts.down_proj,
+                    _reshape_blocks,
+                    None,
+                ),
+                f"{experts}.down_proj_scales": (
+                    module.experts.down_proj_scales,
+                    None,
+                    None,
+                ),
+                f"{experts}.down_proj_bias": (
+                    module.experts.down_proj_bias,
+                    None,
+                    self.dtype_cls,
+                ),
+                f"{prefix}.mlp.router.weight": (
+                    module.router.weight,
+                    None,
+                    self.dtype_cls,
+                ),
+                f"{prefix}.mlp.router.bias": (
+                    module.router.bias,
+                    None,
+                    self.dtype_cls,
+                ),
+            }
+            remaining = dict(wanted)
+            for ckpt in self.ckpt_files:
+                if not remaining or not ckpt.endswith(".safetensors"):
+                    continue
+                with safe_open(ckpt, framework="pt", device="cpu") as f:
+                    keys = set(f.keys())
+                    for name in list(remaining):
+                        if name not in keys:
+                            continue
+                        param, transform, cast_dtype = remaining[name]
+                        t = f.get_tensor(name)
+                        if transform is not None:
+                            t = transform(t)
+                        _set(param, t, cast_dtype=cast_dtype)
+                        loaded_names.add(name)
+                        del remaining[name]
+
+            if remaining:
+                raise RuntimeError(
+                    f"Missing gpt-oss resident weights: {sorted(remaining)[:5]}"
+                )
+
+        sink_params = {
+            name: param
+            for name, param in model.named_parameters(recurse=True)
+            if name.endswith("self_attn.sinks")
+        }
+        sink_remaining = dict(sink_params)
+        for ckpt in self.ckpt_files:
+            if not sink_remaining or not ckpt.endswith(".safetensors"):
+                continue
+            with safe_open(ckpt, framework="pt", device="cpu") as f:
+                keys = set(f.keys())
+                for name in list(sink_remaining):
+                    lookup = name
+                    if lookup not in keys and name.startswith(
+                        model.base_model_prefix + "."
+                    ):
+                        lookup = name[len(model.base_model_prefix) + 1 :]
+                    if lookup not in keys:
+                        continue
+                    _set(
+                        sink_remaining[name],
+                        f.get_tensor(lookup),
+                        cast_dtype=self.dtype_cls,
+                    )
+                    loaded_names.add(name)
+                    loaded_names.add(lookup)
+                    del sink_remaining[name]
+        if sink_remaining:
+            raise RuntimeError(
+                f"Missing gpt-oss attention sinks: {sorted(sink_remaining)[:5]}"
+            )
+
+        for name in loaded_names:
+            for candidate in (name, f"{model.base_model_prefix}.{name}"):
+                self.name_id_map.pop(candidate, None)
+
+    def _rebuild_glm_fp8_scales_from_ckpt(self):
+        # Reload-from-store path: FP8 block scales are NOT persisted in the store,
+        # so rebuild them from the checkpoint. Deliver every scale (superset): the
+        # dispatcher only applies a scale to a weight that is actually stored FP8,
+        # so scales for BF16-dequantized weights are simply ignored. This keeps
+        # reload compatible with stores whose non-routed weights are still FP8.
+        self._glm_fp8_scales = {}
+        for ckpt in self.ckpt_files:
+            if not ckpt.endswith(".safetensors"):
+                continue
+            with safe_open(ckpt, framework="pt", device="cpu") as f:
+                keys = set(f.keys())
+                for k in keys:
+                    if not k.endswith("_scale_inv"):
+                        continue
+                    base = k[: -len("_scale_inv")]
+                    if base in keys:
+                        self._glm_fp8_scales[base] = f.get_tensor(k)
+
     def get_topology(self, model):
         name_lst = []
         ret_dict = {}
 
+        if getattr(self.config, "model_type", "") == "gpt_oss":
+            gpt_oss_topology = _gpt_oss_expert_groups(
+                self.name_id_map, self.config
+            )
+            name_lst.extend(name for name, _ in gpt_oss_topology)
+            ret_dict.update(dict(gpt_oss_topology))
+
         for name, _ in model.named_parameters(recurse=True):
             match = re.search(r"\d+", name)
             if name not in self.name_id_map:
-                print("param not in self.name_id_map", name)
                 continue
             if match:
-                if "expert" in name and "shared_experts" not in name:
+                if _is_routed_expert_key(name):
                     match = re.match(r"(.*experts)", name)
                     assert match, "Not correct expert name!"
                     stored_name = match.group(1)
@@ -1039,7 +1595,7 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             if match:
-                if "expert" in name and "shared_experts" not in name:
+                if _is_routed_expert_key(name):
                     match = re.match(r"(.*experts)", name)
                     assert match, "Not correct expert name!"
                     stored_name = match.group(1)
@@ -1088,6 +1644,15 @@ class OffloadEngine(object):
                 ret_dict[i] = list(ret_dict[i].values())
 
         topology = list(ret_dict.items())
+        # Canonicalize DENSE nodes' tensor_ids to ascending id == store/offload
+        # order so the C++ per-slot views match the physical store layout (fixes
+        # q_a_layernorm[2048] <- router[256] mis-map when a dense node spans a
+        # partition). Expert nodes carry positional [gate,up,down] tensors the
+        # fused MoE kernel reads by slot, so they must KEEP their order.
+        for _stored_name, id_groups in topology:
+            if len(id_groups) != 1:
+                continue
+            id_groups[0].sort()
         return topology
 
     def setup_archer_hooks(self, model):
@@ -1095,6 +1660,7 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             self.archer_engine.register(param.data, self.name_id_map[name])
+            param.ar_id = self.name_id_map[name]
             self.offload_set.add(param.data.data_ptr())
 
             if "shared" in name:
@@ -1104,6 +1670,7 @@ class OffloadEngine(object):
             if name not in self.name_id_map:
                 continue
             self.archer_engine.register(buffer.data, self.name_id_map[name])
+            buffer.ar_id = self.name_id_map[name]
             self.offload_set.add(buffer.data.data_ptr())
 
         from moe_infinity.utils.topology import build_topology_specs
@@ -1121,7 +1688,7 @@ class OffloadEngine(object):
 
         @torch.no_grad()
         def _pre_forward_input_hook(module, input, kwargs, device, tensors):
-            self.archer_engine.fetch_tensors(self.request_id, tensors)
+            self._fetch_tensors_timed(tensors)
             new_args = copy_args_to_device(device, input)
             new_kwargs = copy_kwargs_to_device(device, kwargs)
             return new_args, new_kwargs
@@ -1165,7 +1732,7 @@ class OffloadEngine(object):
                 )
 
         expert_layer_id = 0
-        if "deepseek" in self.model_name:
+        if "deepseek" in self.model_name or "glm" in self.model_name.lower():
             expert_layer_id = self.config.first_k_dense_replace
 
         output_device_index = None
@@ -1174,15 +1741,8 @@ class OffloadEngine(object):
                 key = key.split(".")[0]
                 output_device_index = 0
 
-            if "expert" in key and self.config.model_type != "gpt_oss":
+            if "expert" in key:
                 for expert_idx, expert_tensors in enumerate(tensors):
-                    expert_key = (
-                        f"{key}.expert_{expert_idx}"
-                        if self.config.model_type != "mixtral"
-                        and self.config.model_type != "deepseek_v2"
-                        and self.config.model_type != "deepseek_v3"
-                        else f"{key}.{expert_idx}"
-                    )
                     input_device_index = (
                         self.archer_engine.get_node_default_device(
                             expert_tensors
@@ -1244,6 +1804,7 @@ class OffloadEngine(object):
         *,
         is_gptq_ckpt: bool = False,
         is_mxfp4_ckpt: bool = False,
+        is_glm_fp8_ckpt: bool = False,
     ) -> None:
         quant_info = getattr(self, "_quant_info", None)
 
@@ -1251,6 +1812,12 @@ class OffloadEngine(object):
             try:
                 if is_mxfp4_ckpt and (
                     k.endswith("_blocks") or k.endswith("_scales")
+                ):
+                    state_dict[k] = v.to("cpu")
+                    continue
+
+                if is_glm_fp8_ckpt and (
+                    k.endswith("_scale_inv") or v.dtype == torch.float8_e4m3fn
                 ):
                     state_dict[k] = v.to("cpu")
                     continue
@@ -1522,7 +2089,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                self.archer_engine.begin(self.request_id, param)
+                self.archer_engine.begin(
+                    self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
@@ -1534,14 +2103,16 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.begin(self.request_id, buf)
+                self.archer_engine.begin(
+                    self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.data.device)
 
             # KV CACHE RELOAD POINT (T16)
             # When enable_kv_cache_offload=True, reload swapped-out KV cache here.
-            # Future: self._kv_cache_manager.swap_in(block_ids_for_this_layer)
+            # Future: self._kv_cache_manager.swap_in(block_ids_for_this_layer)  # noqa: ERA001
             # This fires BEFORE each module's forward(), giving time to H2D transfer KV blocks.
             if (
                 self._enable_kv_cache_offload
@@ -1559,7 +2130,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                self.archer_engine.end(self.request_id, param)
+                self.archer_engine.end(
+                    self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
@@ -1569,7 +2142,9 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.end(self.request_id, buf)
+                self.archer_engine.end(
+                    self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF)
+                )
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.device)
@@ -1577,7 +2152,7 @@ class OffloadEngine(object):
             # KV CACHE CAPTURE POINT (T16)
             # When enable_kv_cache_offload=True, capture past_key_values here.
             # Future: extract output[1] (present_key_value) and call
-            #         self._kv_cache_manager.allocate_blocks(seq_id, num_blocks)
+            #         self._kv_cache_manager.allocate_blocks(seq_id, num_blocks)  # noqa: ERA001
             # This fires AFTER each module's forward(), when KV output is available.
             if (
                 self._enable_kv_cache_offload
@@ -1646,7 +2221,13 @@ class OffloadEngine(object):
             transformers.models.jamba.modeling_jamba._old_jamba_moe
         )
 
-        transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2MoE = transformers.models.deepseek_v2.modeling_deepseek_v2._old_deepseek_v2_moe
+        _dsv2_mod2 = transformers.models.deepseek_v2.modeling_deepseek_v2
+        _dsv2_attr2 = (
+            "DeepseekV2MoE"
+            if hasattr(_dsv2_mod2, "DeepseekV2MoE")
+            else "DeepseekV2Moe"
+        )
+        setattr(_dsv2_mod2, _dsv2_attr2, _dsv2_mod2._old_deepseek_v2_moe)
         transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3MoE = transformers.models.deepseek_v3.modeling_deepseek_v3._old_deepseek_v3_moe
         transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
             transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp

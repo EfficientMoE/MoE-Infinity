@@ -221,3 +221,47 @@ def test_handlers_work_normally_after_engine_initialized() -> None:
         assert chat_response.json()["choices"][0]["message"]["content"] == "ok"
     finally:
         _restore_runtime_state(module, original_state)
+
+
+def test_initialize_model_failure_sets_unhealthy(monkeypatch: Any) -> None:
+    module: Any = importlib.import_module(MODULE_NAME)
+    original_state = _snapshot_runtime_state(module)
+    original_health = module._health_state
+
+    from moe_infinity.serving.health import ServerHealthState
+
+    module._health_state = ServerHealthState()
+    module.engine = None
+    setattr(
+        module,
+        "_startup_args",
+        SimpleNamespace(
+            model="unit-test-model",
+            offload_dir="/tmp/unit-test-offload",
+            device_memory_ratio=0.5,
+            enable_prefix_caching=False,
+            speculative_draft=None,
+            startup_timeout=None,
+            decode_step_timeout=None,
+        ),
+    )
+
+    import transformers
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("boom: tokenizer load failed")
+
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", _boom)
+
+    try:
+        asyncio.run(module._initialize_model())
+
+        status = module._health_state.get_status_dict()
+        assert status["status"] == "unhealthy"
+        assert status["reason"] is not None
+        assert "boom" in status["reason"]
+        assert module.engine is None
+        assert not module._health_state.is_healthy()
+    finally:
+        module._health_state = original_health
+        _restore_runtime_state(module, original_state)

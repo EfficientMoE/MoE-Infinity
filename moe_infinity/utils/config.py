@@ -27,18 +27,6 @@ class ArcherConfig:
     )
     perfect_cache_file: str = field(init=False)
     device_per_node: int = field(init=False)
-    # master_addr: str = field(
-    #     default="127.0.0.1",
-    #     metadata={"help": "Hosts for running archer"},
-    # )
-    # master_port: str = field(
-    #     default=29500,
-    #     metadata={"help": "Port for running archer"},
-    # )
-    # device_per_node: int = field(
-    #     default=1,
-    #     metadata={"help": "Number of devices per node"},
-    # )
     prefetch: bool = field(
         default=False, metadata={"help": "Enable prefetching"}
     )
@@ -107,6 +95,16 @@ class ArcherConfig:
 
     @classmethod
     def load_from_json(cls, config_json: dict):
+        if "glm_fp8_in_store" in config_json:
+            warnings.warn(
+                "glm_fp8_in_store is deprecated and ignored: GLM-5.2-FP8 routed "
+                "experts are always kept FP8 in the host store.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            config_json = {
+                k: v for k, v in config_json.items() if k != "glm_fp8_in_store"
+            }
         parser = HfArgumentParser(cls)
         config = parser.parse_dict(config_json)[0]
         return config

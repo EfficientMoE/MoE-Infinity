@@ -221,6 +221,8 @@ _STORE_SOURCES = [
     "extensions/kernel/fused_moe_mlp.cu",
     "extensions/kernel/activation_kernels.cu",
     "extensions/kernel/topk_softmax_kernels.cu",
+    "extensions/kernel/v4_fp4/mxfp4_dequant.cu",
+    "extensions/kernel/v4_fp4/fp8_dequant.cu",
     # Python binding
     "core/python/py_archer_prefetch.cpp",
 ]
@@ -365,6 +367,8 @@ if cuda_available:
             sources=[
                 "extensions/kernel/v4_fp4/v4_fp4_binding.cpp",
                 "extensions/kernel/v4_fp4/v4_fp4_dequant.cu",
+                "extensions/kernel/v4_fp4/mxfp4_dequant.cu",
+                "extensions/kernel/v4_fp4/fp8_dequant.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17", "-fPIC"],

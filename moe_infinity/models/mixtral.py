@@ -97,7 +97,6 @@ class SyncMixtralSparseMoeBlock(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
-        num_tokens = batch_size * sequence_length
         hidden_states_flat = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate(hidden_states_flat)
 
@@ -125,10 +124,6 @@ class SyncMixtralSparseMoeBlock(nn.Module):
             router_mask[:, :, 0], router_mask[:, :, 1]
         )
         routing_weights_mask = torch.sum(routing_weights_mask, dim=-1)
-
-        expert_index = selected_experts.reshape(
-            batch_size, sequence_length, self.top_k
-        )
 
         self.expert_executor.dispatch_local(
             self.layer_id,

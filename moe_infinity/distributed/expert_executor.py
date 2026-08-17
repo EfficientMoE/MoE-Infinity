@@ -48,10 +48,50 @@ def _profiler_instance():
     return instance()
 
 
+_route_ahead_impl = None
+
+
+def _load_route_ahead_impl():
+    # Lazy import: a top-level import would be circular (spec_decode.__init__
+    # -> dflash -> big_modeling -> model_offload -> this module). Both targets
+    # are leaf modules, so importing them at first dispatch is safe.
+    global _route_ahead_impl
+    if _route_ahead_impl is None:
+        import moe_infinity.spec_decode._route_ahead_ctx as route_ahead_ctx
+        from moe_infinity.spec_decode._prefetch_route import (
+            union_experts_from_mask,
+        )
+
+        _route_ahead_impl = (route_ahead_ctx, union_experts_from_mask)
+    return _route_ahead_impl
+
+
 def _call_expert_dispatcher(method, *args, **kwargs):
     global _expert_dispatcher
     func = getattr(_expert_dispatcher, method)
     return func(*args, **kwargs)
+
+
+def _layer_expert_nbytes(prefetcher, layer_id, expert_ids):
+    """``{expert_id: stored_bytes}`` for this layer's prefetched set, or None.
+
+    Reads the registration-time ``ExpertPrefetcher.expert_nbytes_map`` -- a real
+    ``dict`` only on the offloaded native path. Mocks, resident runs, and any
+    engine without the map yield ``None`` so the A5 recorder keeps byte-accurate
+    absence instead of a fabricated average expert size, and never calls
+    ``int()`` on a mock attribute.
+    """
+    if not expert_ids:
+        return None
+    nbytes_map = getattr(prefetcher, "expert_nbytes_map", None)
+    if not isinstance(nbytes_map, dict) or not nbytes_map:
+        return None
+    entry = {}
+    for expert_id in expert_ids:
+        nbytes = nbytes_map.get((layer_id, expert_id))
+        if nbytes is not None:
+            entry[expert_id] = int(nbytes)
+    return entry or None
 
 
 class DistributedExpertExecutor:
@@ -79,6 +119,70 @@ class DistributedExpertExecutor:
     def trigger_speculative_prefetch(self, layer_id, router_logits):
         if self.prefetcher is not None:
             self.prefetcher.speculative_prefetch(layer_id, router_logits)
+
+    def _maybe_route_ahead_prefetch(
+        self, layer_id, router_mask, num_expert, prefetcher=None
+    ) -> bool:
+        """Track A3 route-ahead seam; True iff the union prefetch fired.
+
+        Active only inside a DFlash verify forward (``_route_ahead_ctx``).
+        Pins the ACTUAL routed union of this layer via
+        ``fetch_experts_lock_cache`` and enqueues it through the A2
+        explicit-set ``speculative_prefetch`` -- cache warming for the reads
+        this dispatch is about to issue, never a routing change. Inactive
+        context, no prefetcher (resident mode / ``speculative_prefetch``
+        config off), or an empty union returns False so the caller falls
+        through to the legacy mean/topk path byte-identically.
+
+        A4: when the context carries a ``RouteAheadStats`` handle, the
+        predicted set and this layer's mask are reported to it (read-only
+        observation; ``None`` handle = zero overhead). Offloaded
+        executor-backed models (DeepSeek/Qwen/Mixtral) reach this seam with
+        no resident-only gate; gpt-oss never reaches it at all
+        (``model_offload.py`` wires no ``expert_executor`` into
+        ``SyncGptOssMLP``).
+        """
+        ctx, union_experts_from_mask = _load_route_ahead_impl()
+        if not ctx.is_active():
+            return False
+        stats = ctx.current_stats()
+        route_prefetcher = prefetcher
+        if route_prefetcher is None:
+            route_prefetcher = ctx.current_prefetcher()
+        if route_prefetcher is None:
+            route_prefetcher = self.prefetcher
+        mask_2d = router_mask.reshape(-1, num_expert)
+        union_expert_ids = union_experts_from_mask(mask_2d)
+        fired = False
+        if route_prefetcher is not None and union_expert_ids:
+            # A0 section 2/5 (A4 guard): pin exactly ONE layer's union per
+            # dispatch -- ``ReplaceCacheCandidates`` is global and clears the
+            # background queues (task_scheduler.h), so folding several layers
+            # into one pin would evict candidates the next layer's dispatch
+            # still needs. Never batch pins across layers; never pin the
+            # empty set (short-circuited above).
+            route_prefetcher.fetch_experts_lock_cache(
+                layer_id, union_expert_ids
+            )
+            route_prefetcher.speculative_prefetch(
+                layer_id,
+                expert_ids=union_expert_ids,
+                prefetch_layer_id=layer_id,
+            )
+            fired = True
+        if stats is not None:
+            # A5 read-only observation: predicted == the pinned union when
+            # the prefetch fired, else [] (coverage 0 for this layer).
+            predicted_ids = union_expert_ids if fired else []
+            stats.observe_layer(
+                layer_id,
+                predicted_ids,
+                mask_2d,
+                expert_nbytes=_layer_expert_nbytes(
+                    route_prefetcher, layer_id, predicted_ids
+                ),
+            )
+        return fired
 
     def dispatch_local(
         self,
@@ -116,6 +220,12 @@ class DistributedExpertExecutor:
         )
         self.expert_dispatcher.set_expected_queue(expected_wait_cnt)
 
+        # Route-ahead pin + enqueue must precede every enqueue_expert below
+        # (A0 section 2). Inactive context: no-op, legacy flow unchanged.
+        route_ahead_handled = self._maybe_route_ahead_prefetch(
+            layer_id, router_mask, num_expert, prefetcher
+        )
+
         dispatch_nvtx_ctx = _nvtx_ctx("expert_dispatch")
         dispatch_profiler_ctx = (
             profiler.time("expert_dispatch", layer=layer_id, expert=-1)
@@ -135,7 +245,12 @@ class DistributedExpertExecutor:
         if prefetcher is None:
             prefetcher = self.prefetcher
 
-        if (
+        if route_ahead_handled:
+            # A0 section 3: the exact-union prefetch REPLACES the legacy
+            # mean(0)/topk prediction for this dispatch, so neither the
+            # overlap-triggered nor the deferred pooled call may fire.
+            pending_router_logits = None
+        elif (
             self._speculative_prefetch_overlap
             and prefetcher is not None
             and router_logits is not None

@@ -4,6 +4,8 @@ import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
+
 _MODULE_PATH = (
     Path(__file__).resolve().parents[3]
     / "moe_infinity"
@@ -76,3 +78,97 @@ def test_sampling_params_defaults() -> None:
     assert params.max_tokens == 256
     assert params.stop == []
     assert params.repetition_penalty == 1.0
+
+
+def _fresh_sequence(seq_id: int = 100) -> object:
+    return SequenceData(
+        seq_id=seq_id,
+        prompt_token_ids=[1, 2],
+        sampling_params=SamplingParams(),
+    )
+
+
+def test_dflash_draft_verify_round_loop() -> None:
+    sequence = _fresh_sequence()
+
+    sequence.set_status(SequenceStatus.PREFILL)
+    sequence.set_status(SequenceStatus.DRAFT)
+    sequence.set_status(SequenceStatus.VERIFY)
+    sequence.set_status(SequenceStatus.DRAFT)
+    sequence.set_status(SequenceStatus.VERIFY)
+
+    assert SequenceStatus.DRAFT.value == "draft"
+    assert SequenceStatus.VERIFY.value == "verify"
+    assert sequence.status is SequenceStatus.VERIFY
+
+
+def test_verify_can_finish() -> None:
+    sequence = _fresh_sequence()
+
+    sequence.set_status(SequenceStatus.PREFILL)
+    sequence.set_status(SequenceStatus.DRAFT)
+    sequence.set_status(SequenceStatus.VERIFY)
+    sequence.set_status(SequenceStatus.FINISHED)
+
+    assert sequence.status is SequenceStatus.FINISHED
+
+
+def test_draft_and_verify_swap_then_recover_to_draft() -> None:
+    sequence = _fresh_sequence()
+
+    sequence.set_status(SequenceStatus.PREFILL)
+    sequence.set_status(SequenceStatus.DRAFT)
+    sequence.set_status(SequenceStatus.SWAPPED)
+    sequence.set_status(SequenceStatus.DRAFT)
+    sequence.set_status(SequenceStatus.VERIFY)
+    sequence.set_status(SequenceStatus.SWAPPED)
+
+    assert sequence.status is SequenceStatus.SWAPPED
+
+
+def test_draft_and_verify_can_cancel() -> None:
+    draft_seq = _fresh_sequence(seq_id=101)
+    draft_seq.set_status(SequenceStatus.PREFILL)
+    draft_seq.set_status(SequenceStatus.DRAFT)
+    draft_seq.set_status(SequenceStatus.CANCELLED)
+    assert draft_seq.status is SequenceStatus.CANCELLED
+
+    verify_seq = _fresh_sequence(seq_id=102)
+    verify_seq.set_status(SequenceStatus.PREFILL)
+    verify_seq.set_status(SequenceStatus.DRAFT)
+    verify_seq.set_status(SequenceStatus.VERIFY)
+    verify_seq.set_status(SequenceStatus.CANCELLED)
+    assert verify_seq.status is SequenceStatus.CANCELLED
+
+
+def test_ordinary_prefill_still_decodes() -> None:
+    sequence = _fresh_sequence()
+
+    sequence.set_status(SequenceStatus.PREFILL)
+    sequence.set_status(SequenceStatus.DECODE)
+
+    assert sequence.status is SequenceStatus.DECODE
+
+
+def test_waiting_cannot_enter_verify() -> None:
+    sequence = _fresh_sequence()
+
+    with pytest.raises(ValueError, match="invalid transition"):
+        sequence.set_status(SequenceStatus.VERIFY)
+
+
+def test_waiting_cannot_enter_draft() -> None:
+    sequence = _fresh_sequence()
+
+    with pytest.raises(ValueError, match="invalid transition"):
+        sequence.set_status(SequenceStatus.DRAFT)
+
+
+def test_ordinary_decode_cannot_enter_verify() -> None:
+    sequence = _fresh_sequence()
+
+    sequence.set_status(SequenceStatus.PREFILL)
+    sequence.set_status(SequenceStatus.DECODE)
+
+    with pytest.raises(ValueError, match="invalid transition"):
+        sequence.set_status(SequenceStatus.VERIFY)

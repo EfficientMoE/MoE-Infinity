@@ -34,12 +34,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       // &ArcherPrefetchHandle::AcquireTensor) .def("end", (void
       // (ArcherPrefetchHandle::*)(torch::nn::Module&))
       // &ArcherPrefetchHandle::ReleaseTensor)
-      .def("begin",
-           (void(ArcherPrefetchHandle::*)(std::uint64_t&, torch::Tensor&)) &
-               ArcherPrefetchHandle::AcquireTensor)
-      .def("end",
-           (void(ArcherPrefetchHandle::*)(std::uint64_t&, torch::Tensor&)) &
-               ArcherPrefetchHandle::ReleaseTensor)
+      .def("begin", (void(ArcherPrefetchHandle::*)(
+                        std::uint64_t&, torch::Tensor&, std::uint32_t)) &
+                        ArcherPrefetchHandle::AcquireTensor)
+      .def("end", (void(ArcherPrefetchHandle::*)(std::uint64_t&, torch::Tensor&,
+                                                 std::uint32_t)) &
+                      ArcherPrefetchHandle::ReleaseTensor)
       // .def("begin",
       //      (void (ArcherPrefetchHandle::*)(torch::Tensor&, const
       //      std::uint32_t)) &
@@ -53,6 +53,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       //    ArcherPrefetchHandle::GetTrace)
       .def("get_hit_rate", (torch::Tensor(ArcherPrefetchHandle::*)()) &
                                ArcherPrefetchHandle::GetHitRate)
+      .def("get_expert_occupancy_bytes",
+           &ArcherPrefetchHandle::GetExpertOccupancyBytes)
+      .def("get_wasted_prefetch_bytes",
+           &ArcherPrefetchHandle::GetWastedPrefetchBytes)
       .def("set_trace", (void(ArcherPrefetchHandle::*)(const torch::Tensor&)) &
                             ArcherPrefetchHandle::SetTrace)
       //    .def("trace_request",
@@ -86,12 +90,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_node_default_device",
            &ArcherPrefetchHandle::GetNodeDefaultDevice)
       .def("get_node_device", &ArcherPrefetchHandle::GetNodeDevice)
-      .def("prefetch_tensors", &ArcherPrefetchHandle::PrefetchTensors)
+      .def("prefetch_tensors", &ArcherPrefetchHandle::EnqueuePrefetchTensors,
+           py::arg("tensor_ids"), py::arg("priority") = kRouteAheadPriority)
       .def("replace_cache_candidates",
            &ArcherPrefetchHandle::ReplaceCacheCandidates)
       .def("enqueue_prefetch", &ArcherPrefetchHandle::EnqueuePrefetch)
       .def("fetch_tensors", &ArcherPrefetchHandle::FetchTensors)
-      .def("clean_up_resources", &ArcherPrefetchHandle::CleanUpResources);
+      .def("clean_up_resources", &ArcherPrefetchHandle::CleanUpResources)
+      .def("reset_cache", &ArcherPrefetchHandle::ResetCache);
   //    .def("set_node_cache_priority",
   //    &ArcherPrefetchHandle::SetNodeCachePriority);
 
@@ -106,9 +112,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("enqueue_expert", &ExpertDispatcher::EnqueueExpert)
       .def("set_inputs", &ExpertDispatcher::SetInputs)
       .def("set_expected_queue", &ExpertDispatcher::SetExpectedQueue)
-      //  .def("wait_expert", &ExpertDispatcher::WaitExpert)
       .def("wait_expert", &ExpertDispatcher::WaitHiddenStates)
       .def("notify_fetch_start", &ExpertDispatcher::NotifyFetchStart)
       .def("clear_expert_cache_counts",
-           &ExpertDispatcher::ClearExpertCacheCounts);
+           &ExpertDispatcher::ClearExpertCacheCounts)
+      .def("get_cache_occupancy_bytes",
+           &ExpertDispatcher::GetCacheOccupancyBytes)
+      .def("get_cache_hit_rate", &ExpertDispatcher::GetCacheHitRate)
+      .def("set_scales", &ExpertDispatcher::SetScales,
+           "Store fp8 block scales for dequant-on-copy (fp8-in-store path)");
 }

@@ -17,11 +17,17 @@ class SchedulerOutput:
     preempted_seq_ids: list[int] = field(default_factory=list)
     num_prefill_tokens: int = 0
     num_decode_tokens: int = 0
+    draft_seq_ids: list[int] = field(default_factory=list)
+    verify_seq_ids: list[int] = field(default_factory=list)
+    num_verify_tokens: int = 0
+    num_verify_expert_bytes: int = 0
 
     def __post_init__(self) -> None:
         self.prefill_seq_ids = list(self.prefill_seq_ids)
         self.decode_seq_ids = list(self.decode_seq_ids)
         self.preempted_seq_ids = list(self.preempted_seq_ids)
+        self.draft_seq_ids = list(self.draft_seq_ids)
+        self.verify_seq_ids = list(self.verify_seq_ids)
 
 
 @dataclass

@@ -20,6 +20,73 @@
 #include <c10/cuda/CUDAStream.h>
 
 #include <future>
+#include <regex>
+#include <sstream>
+
+extern void fp8_dequant_blockwise_cuda(const void* weight, const void* scale,
+                                       void* out, int N, int K,
+                                       cudaStream_t stream);
+
+static torch::Tensor _fp8_dequant_on_device(const torch::Tensor& w_fp8,
+                                            const torch::Tensor& scale,
+                                            cudaStream_t stream) {
+  int N = w_fp8.size(0);
+  int K = w_fp8.size(1);
+  auto out = torch::empty(
+      {N, K},
+      torch::TensorOptions().dtype(torch::kBFloat16).device(w_fp8.device()));
+  auto w_u8 = w_fp8.view(torch::kUInt8).contiguous();
+  auto s_f32 = scale.to(torch::kFloat32).contiguous();
+  fp8_dequant_blockwise_cuda(w_u8.data_ptr(), s_f32.data_ptr(), out.data_ptr(),
+                             N, K, stream);
+  return out;
+}
+
+void ExpertDispatcher::SetScales(
+    const std::map<std::string, torch::Tensor>& scales) {
+  if (scales.empty()) return;
+
+  static const std::regex kLayerRe(R"(layers\.(\d+)\.)");
+  static const std::regex kExpertRe(R"(experts\.(\d+)\.)");
+  static const std::vector<std::string> kWeightNames = {
+      "gate_proj.weight", "up_proj.weight", "down_proj.weight"};
+
+  int max_layer = 0;
+  int max_expert = 0;
+  for (auto& kv : scales) {
+    std::smatch m;
+    std::string k = kv.first;
+    if (std::regex_search(k, m, kLayerRe)) {
+      max_layer = std::max(max_layer, std::stoi(m[1].str()));
+    }
+    if (std::regex_search(k, m, kExpertRe)) {
+      max_expert = std::max(max_expert, std::stoi(m[1].str()));
+    }
+  }
+
+  fp8_scales_.assign(max_layer + 1,
+                     std::vector<std::vector<torch::Tensor>>(
+                         max_expert + 1, std::vector<torch::Tensor>(3)));
+
+  for (auto& kv : scales) {
+    std::smatch m;
+    std::string k = kv.first;
+    int layer_idx = -1, expert_idx = -1, weight_idx = -1;
+    if (std::regex_search(k, m, kLayerRe)) layer_idx = std::stoi(m[1].str());
+    if (std::regex_search(k, m, kExpertRe)) expert_idx = std::stoi(m[1].str());
+    for (int wi = 0; wi < 3; ++wi) {
+      if (k.find(kWeightNames[wi]) != std::string::npos) {
+        weight_idx = wi;
+        break;
+      }
+    }
+    if (layer_idx >= 0 && expert_idx >= 0 && weight_idx >= 0) {
+      fp8_scales_[layer_idx][expert_idx][weight_idx] = kv.second.cpu();
+    }
+  }
+
+  fp8_in_store_ = true;
+}
 
 ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
                                    int expert_type, int num_threads)
@@ -96,6 +163,9 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
         case DEEPSEEK_MOE_DENSE_ACT_DENSE:
           experts_[i][j]->module = new DeepSeekMoEDenseActDense(dtype);
           break;
+        case GPT_OSS_MOE_DENSE_ACT_DENSE:
+          experts_[i][j]->module = new GptOssMoeDenseActDense();
+          break;
         default:
           DLOG_FATAL("ExpertDispatcher::ExpertDispatcher: unknown expert type ",
                      expert_type);
@@ -163,6 +233,8 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
     exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
     exec_args.evict = false;
     exec_args.hit = true;
+    cache_hit_count_.fetch_add(1, std::memory_order_relaxed);
+    cache_access_count_.fetch_add(1, std::memory_order_relaxed);
     // transfer_event = nullptr: expert is already on GPU, no H2D wait needed
 
     // module_->SetTensorsFromIds(expert_node->node->tensor_ids);
@@ -226,6 +298,39 @@ void ExpertDispatcher::ClearExpertCacheCounts() {
       expert_node->node->incache_visit_count = 0;
     }
   }
+  cache_hit_count_.store(0, std::memory_order_relaxed);
+  cache_access_count_.store(0, std::memory_order_relaxed);
+}
+
+std::int64_t ExpertDispatcher::GetCacheOccupancyBytes() {
+  std::int64_t total = 0;
+  for (auto& gpu_cache : cached_experts_) {
+    for (auto key : gpu_cache) {
+      int layer_idx = static_cast<int>(key >> 32);
+      int expert_idx = static_cast<int>(key & 0xFFFFFFFF);
+      if (expert_idx < 0 || expert_idx >= static_cast<int>(experts_.size())) {
+        continue;
+      }
+      if (layer_idx < 0 ||
+          layer_idx >= static_cast<int>(experts_[expert_idx].size())) {
+        continue;
+      }
+      auto& expert_node = experts_[expert_idx][layer_idx];
+      if (expert_node && expert_node->node) {
+        total += expert_node->node->byte_size;
+      }
+    }
+  }
+  return total;
+}
+
+double ExpertDispatcher::GetCacheHitRate() const {
+  std::uint64_t access = cache_access_count_.load(std::memory_order_relaxed);
+  if (access == 0) {
+    return 0.0;
+  }
+  std::uint64_t hits = cache_hit_count_.load(std::memory_order_relaxed);
+  return static_cast<double>(hits) / static_cast<double>(access);
 }
 
 // void ExpertDispatcher::GPUThreadFunc(int gpu_id) {
@@ -318,6 +423,8 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
         exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
         exec_args.evict = false;
         exec_args.hit = true;
+        cache_hit_count_.fetch_add(1, std::memory_order_relaxed);
+        cache_access_count_.fetch_add(1, std::memory_order_relaxed);
         exec_args.transfer_event = nullptr;
         exec_queue_[gpu_id].Push(exec_args);
         continue;
@@ -467,6 +574,8 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
       exec_args.evict = gpu_overload_[gpu_id].load(std::memory_order_acquire);
       exec_args.hit = cache_hit;
+      cache_access_count_.fetch_add(1, std::memory_order_relaxed);
+      if (cache_hit) cache_hit_count_.fetch_add(1, std::memory_order_relaxed);
       exec_args.transfer_event = transfer_done;
       // std::lock_guard<std::mutex> lock(exec_mutex_[gpu_id]);
       // exec_queue_[gpu_id].emplace_back(std::move(exec_args));
@@ -515,9 +624,24 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       modules_[thread_idx]->SetTensorsFromIds(
           args.expert_node->node->tensor_ids);
 
+      if (fp8_in_store_) {
+        int64_t layer_idx = args.expert_node->layer_idx;
+        int64_t expert_idx_val = args.expert_node->expert_idx;
+        if (layer_idx < (int64_t)fp8_scales_.size() &&
+            expert_idx_val < (int64_t)fp8_scales_[layer_idx].size()) {
+          modules_[thread_idx]->SetFp8Scales(
+              fp8_scales_[layer_idx][expert_idx_val]);
+          modules_[thread_idx]->DequantFp8Params(stream);
+        }
+      }
+
       c10::cuda::CUDAStream torch_stream =
           c10::cuda::getStreamFromExternal(stream, gpu_id);
       c10::cuda::CUDAStreamGuard guard(torch_stream);
+
+      if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
+        modules_[thread_idx]->DequantMxfp4Params(stream);
+      }
 
       torch::Tensor output;
       {

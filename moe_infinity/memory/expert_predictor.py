@@ -50,13 +50,9 @@ class ExpertPredictor:
                 tracer.update_entry(seq_id, expert_list, layer_idx)
                 current_entry = tracer.get_entry(seq_id)
 
-                # start_time = time.time()
                 expert_matrix = tracer.find_most_similar(
                     current_entry.matrix, layer_idx
                 )
-                # print("find_most_similar", time.time() - start_time)
-
-                # expert_matrix = copy.deepcopy(entry)
                 expert_matrix[:layer_idx, :] = 0
 
                 for l in range(layer_idx, self.num_layers):

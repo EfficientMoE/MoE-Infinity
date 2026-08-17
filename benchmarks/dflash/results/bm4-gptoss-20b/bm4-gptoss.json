@@ -1,0 +1,14 @@
+{
+  "benchmark": "BM4",
+  "compute_ranges": [
+    "dflash_draft",
+    "route_ahead_router",
+    "target_verify"
+  ],
+  "exposed_fetch_bytes": 17200669000.0,
+  "num_memcpys": 833,
+  "overlap_fraction": 0.053914022720471126,
+  "overlapped_h2d_bytes": 980204000.0,
+  "rep": "benchmarks/dflash/results/bm4-gptoss-20b/nsys/gptoss-bm4.nsys-rep",
+  "total_h2d_bytes": 18180873000
+}
