@@ -152,36 +152,41 @@ class SyncGptOssMLP(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from moe_infinity.spec_decode._nvtx import nvtx_phase
+
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         num_tokens = batch_size * sequence_length
         hidden_flat = hidden_states.view(-1, hidden_dim)
 
-        router_logits = self.router(hidden_flat)
+        with nvtx_phase("route_ahead_router"):
+            router_logits = self.router(hidden_flat)
 
-        routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float32)
-        routing_weights, selected_experts = torch.topk(
-            routing_weights, self.top_k, dim=-1
-        )
-        routing_weights = routing_weights / routing_weights.sum(
-            dim=-1, keepdim=True
-        )
-        routing_weights = routing_weights.to(hidden_states.dtype)
+            routing_weights = F.softmax(
+                router_logits, dim=-1, dtype=torch.float32
+            )
+            routing_weights, selected_experts = torch.topk(
+                routing_weights, self.top_k, dim=-1
+            )
+            routing_weights = routing_weights / routing_weights.sum(
+                dim=-1, keepdim=True
+            )
+            routing_weights = routing_weights.to(hidden_states.dtype)
 
-        router_mask = torch.zeros(
-            num_tokens,
-            self.num_experts,
-            dtype=torch.bool,
-            device=hidden_states.device,
-        )
-        router_mask.scatter_(1, selected_experts, True)
+            router_mask = torch.zeros(
+                num_tokens,
+                self.num_experts,
+                dtype=torch.bool,
+                device=hidden_states.device,
+            )
+            router_mask.scatter_(1, selected_experts, True)
 
-        routing_weights_mask = torch.zeros(
-            num_tokens,
-            self.num_experts,
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        routing_weights_mask.scatter_(1, selected_experts, routing_weights)
+            routing_weights_mask = torch.zeros(
+                num_tokens,
+                self.num_experts,
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            routing_weights_mask.scatter_(1, selected_experts, routing_weights)
 
         if self.expert_executor is not None:
             self.expert_executor.dispatch_local(

@@ -1,0 +1,19 @@
+{
+  "canonical_overlap_fraction": 0.053914022720471126,
+  "expert_cache_hit_rate": 0.7637693631669535,
+  "exposed_fetch_bytes": 17200669000.0,
+  "hide_inequality": {
+    "hidden": false,
+    "lhs_fetch_seconds": 0.31589338363457703,
+    "margin_seconds": -0.03021163257205589,
+    "rhs_hide_window_seconds": 0.28568175106252114
+  },
+  "measured_h2d_bytes_per_second": 57553826518.35307,
+  "num_memcpys": 833,
+  "overlap_with_prev_verify_seconds": 0.017031083062521088,
+  "overlapped_h2d_bytes": 980204000.0,
+  "t_draft_seconds": 0.127181882,
+  "t_router_seconds": 0.141468786,
+  "t_verify_seconds": 1.131497051,
+  "total_h2d_bytes": 18180873000
+}

@@ -1,0 +1,28 @@
+[
+  {
+    "acceptance_length_a": 1.0,
+    "baseline": "OURS",
+    "block_size": 16,
+    "concurrency": 1,
+    "cost_terms": {
+      "measured_h2d_bytes_per_second": 57553826518.35307,
+      "route_ahead_coverage": 1.0,
+      "wasted_prefetch_bytes": 0
+    },
+    "draft": "z-lab/gpt-oss-20b-DFlash",
+    "expert_cache_hit_rate": 0.7637693631669535,
+    "expert_occupancy_bytes": 18246754304.0,
+    "goodput_at_slo": 64.97956088942549,
+    "kv_occupancy_bytes": 0.0,
+    "model": "openai/gpt-oss-20b",
+    "output_tokens_per_second": 64.97956088942549,
+    "per_round_latency_seconds": 0.015389454565593041,
+    "repeat": 0,
+    "route_ahead_prefetch_coverage": 1.0,
+    "ttft_seconds": 0.29489212902262807,
+    "warnings": [
+      "kv_occupancy_bytes fell back to 0.0"
+    ],
+    "wasted_prefetch_bytes": 0.0
+  }
+]
