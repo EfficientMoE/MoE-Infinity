@@ -88,6 +88,17 @@ void ArcherPrefetchHandle::CleanUpResources() {
   has_cleaned_up_resources_ = true;
 }
 
+void ArcherPrefetchHandle::ResetCache() {
+  // Non-terminal reset (BM3 ablation): drop pending prefetch work so a prior
+  // arm's route-ahead band cannot leak into the next, without tearing down the
+  // engine. Unlike CleanUpResources, kTaskPool/threads stay alive and
+  // has_cleaned_up_resources_ is untouched, so the next FetchTensors does not
+  // deadlock. ClearQueue scans priority 1..NUM_PRIORITY, leaving on-demand (0).
+  if (kTaskPool) {
+    kTaskPool->ClearQueue();
+  }
+}
+
 void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
                                          torch::Tensor& buffer,
                                          std::uint32_t explicit_id) {
@@ -239,6 +250,10 @@ void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
 
   auto task = std::make_shared<Task>();
+  // BM3 verdict NO-SHIP: revert the route-ahead priority band. Ordinary
+  // prefetch returns to band 1 (pre-candidate), so route-ahead is no longer
+  // serviced ahead of background prefetch. Two seeds proved no robust win --
+  // the exposed-fetch effect flipped sign and never held throughput at once.
   task->priority = 1;
   task->node = node;
   task->on_demand = false;

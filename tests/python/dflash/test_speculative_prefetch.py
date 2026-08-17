@@ -26,7 +26,12 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from moe_infinity.memory.expert_prefetcher import ExpertPrefetcher
+from moe_infinity.memory.expert_prefetcher import (
+    BACKGROUND_PREFETCH_PRIORITY,
+    ON_DEMAND_PRIORITY,
+    ROUTE_AHEAD_PRIORITY,
+    ExpertPrefetcher,
+)
 
 # Hand-checked legacy fixture: [2 tokens, 4 experts]
 #   mean over tokens = [2.0, 3.5, 3.0, 0.5] -> top-2 = experts [1, 2]
@@ -185,7 +190,9 @@ def _make_prefetcher_without_batch(num_layers: int = 8, num_experts: int = 8):
 def test_prefetch_experts_list_batches_one_native_call_when_available():
     prefetcher, engine = _make_prefetcher(num_layers=8, num_experts=8)
     prefetcher.prefetch_experts_list(3, [3, 1, 7])
-    engine.prefetch_tensors.assert_called_once_with([303, 301, 307])
+    engine.prefetch_tensors.assert_called_once_with(
+        [303, 301, 307], priority=ROUTE_AHEAD_PRIORITY
+    )
     engine.enqueue_prefetch.assert_not_called()
 
 
@@ -202,3 +209,43 @@ def test_prefetch_experts_list_empty_batch_calls_neither_path():
     prefetcher.prefetch_experts_list(3, [])
     engine.prefetch_tensors.assert_not_called()
     engine.enqueue_prefetch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# priority bands (plan Task 9 Step 5): explicit route-ahead vs legacy background
+# ---------------------------------------------------------------------------
+
+
+def _issued_priority(engine: MagicMock) -> int:
+    return engine.prefetch_tensors.call_args.kwargs["priority"]
+
+
+def test_explicit_route_ahead_issues_on_the_route_ahead_band():
+    prefetcher, engine = _make_prefetcher(num_layers=8, num_experts=8)
+    prefetcher.speculative_prefetch(
+        1, expert_ids=[3, 1, 7], prefetch_layer_id=5
+    )
+    assert _enqueued_tensor_ids(engine) == [503, 501, 507]
+    assert _issued_priority(engine) == ROUTE_AHEAD_PRIORITY
+
+
+def test_legacy_router_logits_issues_on_the_background_band():
+    prefetcher, engine = _make_prefetcher(num_layers=8, num_experts=4)
+    prefetcher.speculative_prefetch(2, LOGITS)
+    assert _enqueued_tensor_ids(engine) == [301, 302]
+    assert _issued_priority(engine) == BACKGROUND_PREFETCH_PRIORITY
+
+
+def test_correct_prefetch_issues_on_the_route_ahead_band():
+    prefetcher, engine = _make_prefetcher(num_layers=8, num_experts=8)
+    prefetcher._last_speculative_prediction = {1}
+    prefetcher.correct_prefetch(3, [3, 1, 7])
+    assert _enqueued_tensor_ids(engine) == [303, 307]
+    assert _issued_priority(engine) == ROUTE_AHEAD_PRIORITY
+
+
+def test_route_ahead_priority_knob_sweeps_the_issued_band():
+    prefetcher, engine = _make_prefetcher(num_layers=8, num_experts=8)
+    prefetcher.route_ahead_priority = ON_DEMAND_PRIORITY
+    prefetcher.prefetch_experts_list(3, [3, 1, 7])
+    assert _issued_priority(engine) == ON_DEMAND_PRIORITY

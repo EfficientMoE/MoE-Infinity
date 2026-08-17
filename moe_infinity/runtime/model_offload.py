@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 import warnings
 from typing import Callable, Dict, Optional, Type, Union
 
@@ -480,6 +481,25 @@ class OffloadEngine(object):
         getter = getattr(prefetcher, "expert_occupancy_bytes", None)
         return float(getter()) if callable(getter) else 0.0
 
+    def _fetch_tensors_timed(self, tensors) -> None:
+        """Issue the blocking on-demand fetch and accumulate its stall time.
+
+        This synchronous call is the exposed-fetch window: compute cannot
+        proceed until every un-prefetched expert is resident. Read-only BM3
+        instrumentation (plan Task 9) -- the fetch is unchanged, only timed.
+        """
+        start = time.perf_counter()
+        self.archer_engine.fetch_tensors(self.request_id, tensors)
+        self._exposed_fetch_seconds += time.perf_counter() - start
+
+    def get_exposed_fetch_seconds(self) -> float:
+        """Total wall time compute stalled on on-demand expert fetches."""
+        return float(getattr(self, "_exposed_fetch_seconds", 0.0))
+
+    def reset_exposed_fetch_seconds(self) -> None:
+        """Zero the exposed-fetch accumulator (per BM3 ablation arm)."""
+        self._exposed_fetch_seconds = 0.0
+
     @property
     def kv_occupancy_bytes(self) -> Optional[float]:
         manager = getattr(self, "kv_cache_manager", None)
@@ -508,6 +528,7 @@ class OffloadEngine(object):
         self.offload_exemption = set()
         self.expert_modules = []
         self.kv_cache_manager = kv_cache_manager
+        self._exposed_fetch_seconds = 0.0
 
         self.ckpt_files = []
 
@@ -1667,7 +1688,7 @@ class OffloadEngine(object):
 
         @torch.no_grad()
         def _pre_forward_input_hook(module, input, kwargs, device, tensors):
-            self.archer_engine.fetch_tensors(self.request_id, tensors)
+            self._fetch_tensors_timed(tensors)
             new_args = copy_args_to_device(device, input)
             new_kwargs = copy_kwargs_to_device(device, kwargs)
             return new_args, new_kwargs

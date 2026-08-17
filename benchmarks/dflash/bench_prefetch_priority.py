@@ -278,16 +278,31 @@ def run_priority_ablation(
     tokens_per_request = max(block_size * 4, 32)
 
     def _reset_cache() -> None:
-        reset = getattr(prefetcher.archer_engine, "clean_up_resources", None)
+        archer = prefetcher.archer_engine
+        reset = getattr(archer, "reset_cache", None)
         if callable(reset):
             try:
                 reset()
+            except Exception:
+                pass
+        else:
+            replace = getattr(archer, "replace_cache_candidates", None)
+            if callable(replace):
+                try:
+                    replace([])
+                except Exception:
+                    pass
+        zero_exposed = getattr(engine, "reset_exposed_fetch_seconds", None)
+        if callable(zero_exposed):
+            try:
+                zero_exposed()
             except Exception:
                 pass
         torch.cuda.synchronize()
 
     def _measure_once() -> Dict[str, float]:
         torch.cuda.synchronize()
+        exposed_before = _exposed_fetch_seconds(engine, speculator)
         started = time.perf_counter()
         generated = 0
         for _ in range(max(1, requests)):
@@ -297,7 +312,9 @@ def run_priority_ablation(
             generated += len(out)
         torch.cuda.synchronize()
         elapsed = max(time.perf_counter() - started, 1e-9)
-        exposed = _exposed_fetch_seconds(engine, speculator)
+        exposed = max(
+            _exposed_fetch_seconds(engine, speculator) - exposed_before, 0.0
+        )
         return {
             "exposed_fetch_seconds": exposed,
             "tokens_per_second": generated / elapsed,

@@ -23,6 +23,13 @@
 
 #define NUM_PRIORITY 20UL
 
+// Priority bands, lowest value serviced first (GPUThreadFunc scans queue 0 up).
+// Band 0 is also the on-demand queue: dedup sweeps skip index 0, so route-ahead
+// work parked at 0 keeps on-demand's non-preemptible semantics.
+constexpr std::uint32_t kOnDemandPriority = 0;
+constexpr std::uint32_t kRouteAheadPriority = 1;
+constexpr std::uint32_t kBackgroundPrefetchPriority = 2;
+
 struct Task {
   bool on_demand = false;
   NodePtr node;

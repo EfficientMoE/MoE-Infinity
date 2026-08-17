@@ -12,6 +12,11 @@ from transformers import PretrainedConfig
 
 from moe_infinity.utils import parse_moe_param
 
+# Native prefetch priority bands; must mirror core/prefetch/task_scheduler.h.
+ON_DEMAND_PRIORITY = 0
+ROUTE_AHEAD_PRIORITY = 1
+BACKGROUND_PREFETCH_PRIORITY = 2
+
 try:
     import nvtx  # type: ignore[reportMissingTypeStubs]
 except ImportError:
@@ -45,6 +50,7 @@ def _hit_rate_from_visit_counts(counts: Any) -> Optional[float]:
 class ExpertPrefetcher(object):
     cache_file_rd: Optional[Any] = None
     first_k_dense_replace: int = 0
+    route_ahead_priority: int = ROUTE_AHEAD_PRIORITY
     archer_engine: Any
     expert_dispatcher: Optional[Any] = None
     expert_tensor_map: dict[tuple[int, int], int]
@@ -149,7 +155,12 @@ class ExpertPrefetcher(object):
                 return 0.0
         return 0.0
 
-    def prefetch_experts_list(self, layer_id: int, expert_list: List[int]):
+    def prefetch_experts_list(
+        self,
+        layer_id: int,
+        expert_list: List[int],
+        priority: Optional[int] = None,
+    ):
         if self.archer_engine is None:
             return
         tensor_ids = []
@@ -157,9 +168,10 @@ class ExpertPrefetcher(object):
             tensor_ids.append(self.expert_tensor_map[(layer_id, j)])
         if not tensor_ids:
             return
+        band = self.route_ahead_priority if priority is None else priority
         batched_issue = getattr(self.archer_engine, "prefetch_tensors", None)
         if callable(batched_issue):
-            batched_issue(tensor_ids)
+            batched_issue(tensor_ids, priority=band)
             return
         for tensor_id in tensor_ids:
             gpu_id = self.archer_engine.get_node_default_device([tensor_id])
@@ -274,7 +286,9 @@ class ExpertPrefetcher(object):
                 ::-1
             ].tolist()
 
-        self.prefetch_experts_list(next_layer, topk_indices)
+        self.prefetch_experts_list(
+            next_layer, topk_indices, priority=BACKGROUND_PREFETCH_PRIORITY
+        )
         self._last_speculative_prediction = set(topk_indices)
 
     def correct_prefetch(
