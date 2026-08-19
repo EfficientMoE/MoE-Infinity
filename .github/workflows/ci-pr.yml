@@ -80,6 +80,11 @@ jobs:
             -m "not gpu and not multi_gpu and not slow and not perf and not network" \
             -x --timeout=120 -v
 
+      - name: Run DFlash unified validation E2E
+        run: |
+          pytest tests/python/integration/test_dflash_unified_validation_e2e.py \
+            -v
+
       - name: Install contextpilot
         run: pip install contextpilot
 
