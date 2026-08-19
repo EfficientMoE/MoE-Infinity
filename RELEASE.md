@@ -44,6 +44,25 @@ Stable releases are automated through GitHub Actions workflows in `.github/workf
 - `.github/workflows/publish-test.yml`: publishes nightly pre-release builds from `main` to PyPI.
 - `.github/workflows/build-test.yml`: build validation for pull requests.
 
+### One-time PyPI setup (Trusted Publishing)
+
+Publishing authenticates via PyPI Trusted Publishing (OIDC); there are no PyPI
+username/password/token secrets in the repository. The `pypa/gh-action-pypi-publish`
+action reads credentials only from its `user`/`password` inputs (not from
+`TWINE_*` env vars) and, with none supplied plus `id-token: write`, uses OIDC.
+
+Before the first successful publish, register a trusted publisher on PyPI once
+per workflow, at `https://pypi.org/manage/project/moe-infinity/settings/publishing/`:
+
+- Owner: `EfficientMoE`
+- Repository name: `MoE-Infinity`
+- Workflow name: `publish-test.yml` (nightly) — then add a second, identical
+  entry with Workflow name `publish.yml` (stable)
+- Environment: leave blank
+
+Until these are registered, the publish step fails with
+`invalid-publisher: ... no corresponding publisher`.
+
 ### Steps to Release a New Version
 To release a new version, such as version 1.0.0, follow this order:
 
