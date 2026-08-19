@@ -54,6 +54,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -69,7 +71,7 @@ jobs:
             | pip install -r /dev/stdin 2>&1 || true
 
       - name: Install test tools
-        run: pip install pytest pytest-xdist pytest-timeout
+        run: pip install pytest pytest-xdist pytest-timeout "setuptools-scm>=8"
 
       - name: Install package (no CUDA extensions)
         run: pip install --no-build-isolation --no-deps -e .
@@ -92,6 +94,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
@@ -100,7 +104,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          pip install "setuptools>=78.1.1,<82" wheel build
+          pip install "setuptools>=78.1.1,<82" "setuptools-scm>=8" wheel build
           pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Build sdist
