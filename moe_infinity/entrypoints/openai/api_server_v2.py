@@ -1070,15 +1070,24 @@ async def _initialize_model() -> None:
             trust_remote_code=True,
         )
 
+        enable_deepseek_mla_paging = bool(
+            getattr(args, "enable_deepseek_mla_paging", False)
+        )
+        max_resident_paged_speculative_sessions = int(
+            getattr(args, "max_resident_paged_speculative_sessions", 1)
+        )
+        min_free_mla_blocks_after_admission = int(
+            getattr(args, "min_free_mla_blocks_after_admission", 1)
+        )
         moe_config = {
             "offload_path": os.path.join(args.offload_dir, args.model),
             "device_memory_ratio": args.device_memory_ratio,
-            "enable_deepseek_mla_paging": args.enable_deepseek_mla_paging,
+            "enable_deepseek_mla_paging": enable_deepseek_mla_paging,
             "max_resident_paged_speculative_sessions": (
-                args.max_resident_paged_speculative_sessions
+                max_resident_paged_speculative_sessions
             ),
             "min_free_mla_blocks_after_admission": (
-                args.min_free_mla_blocks_after_admission
+                min_free_mla_blocks_after_admission
             ),
         }
         if args.enable_prefix_caching:
