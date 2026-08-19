@@ -53,7 +53,9 @@ For `CUDA_VISIBLE_DEVICES` ordering, expert ownership, and one-host multi-GPU be
 | `NVTX_DISABLE` | `"0"` | `setup.py` build | If `"1"`, compile out NVTX instrumentation macros. | Build-time only. |
 | `MOE_ENABLE_SM90` | `"1"` | `setup.py` build | Include sm_90 kernels in the compiled extensions. | Build-time only. |
 | `MOE_ENABLE_SM120` | `"0"` | `setup.py` build | Include sm_120 kernels and the native FP4 extension arch flags. | Build-time only. |
-| `MOEINF_VERSION` | `"0.0.1"` | `setup.py` packaging | Set the package version string. | Packaging only. |
+
+The package version is not set via an environment variable; it is derived from
+git tags at build time by setuptools-scm (see `pyproject.toml`).
 
 ## Standard third-party envs
 

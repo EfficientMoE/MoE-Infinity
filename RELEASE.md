@@ -51,10 +51,18 @@ To release a new version, such as version 1.0.0, follow this order:
    - close the current `## [Unreleased]` section in `CHANGELOG.md`
    - move shipped notes into the dated release entry
    - recreate a fresh `## [Unreleased]` section at the top
-1. Update Version:
-   - Update `moe_infinity/__init__.py` (`__version__ = "..."`) to the new stable version.
-   - Ensure `setup.py` remains `version=os.getenv("MOEINF_VERSION", "...")` and update the default fallback version there to match the new stable version.
-   - If needed, bump `NIGHTLY_BASE_VERSION` in `.github/workflows/publish-test.yml` to the next planned stable series so nightly dev builds sort correctly.
+1. Versioning is automatic (setuptools-scm):
+   - Versions are derived from the git tag at build time (see `pyproject.toml`
+     `[tool.setuptools_scm]`) and written to `moe_infinity/_version.py`. There
+     are no version strings to edit in `setup.py` or `moe_infinity/__init__.py`.
+   - Tag `vX.Y.Z` publishes stable `X.Y.Z`. Every later commit on `main`
+     publishes as the next-patch pre-release `X.Y.(Z+1).devN`, so nightlies
+     always sort above the last stable and below the next one, with no manual
+     `NIGHTLY_BASE_VERSION` bump.
+   - First release only: the repository has no tags yet, so until the first tag
+     exists nightlies version as `0.1.devN`. Create the initial tag (for example
+     `git tag v0.0.1`) on the release commit to anchor the `0.0.x` series;
+     afterwards nightlies become `0.0.2.devN` automatically.
 2. Review the release checklist above
    - confirm model and capability coverage
    - verify install and quick starts
