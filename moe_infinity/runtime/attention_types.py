@@ -31,3 +31,4 @@ class AttentionMetadata:
     num_decode_tokens: int
     slot_mapping: torch.Tensor
     is_prefill: bool
+    seq_id: int | None = None
