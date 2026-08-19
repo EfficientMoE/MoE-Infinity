@@ -20,7 +20,9 @@ jobs:
   wheel:
     name: Build Wheel
     runs-on: ${{ matrix.os }}
-    permissions: write-all
+    permissions:
+      id-token: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -97,12 +99,12 @@ jobs:
           cp dist/*.tar.gz sdist_only/
 
       # Nightly publishes only the sdist to PyPI (see publish.yml for rationale).
+      # Auth via PyPI Trusted Publishing (OIDC) — no username/password needed;
+      # requires id-token: write (above) and a publisher registered on PyPI for
+      # this repo + workflow file. See RELEASE.md.
       - name: Publish sdist to PyPI
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.python-version == '3.10' }}
         uses: pypa/gh-action-pypi-publish@release/v1.8
         with:
           skip-existing: true
           packages-dir: sdist_only
-        env:
-          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
-          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
