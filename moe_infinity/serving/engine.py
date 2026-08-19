@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from math import ceil
@@ -29,6 +30,8 @@ from .spec_session_driver import (
     SpecSessionDriver,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class EvictionSyncAdapter(Protocol):
     def on_request_finished(self, request_id: str) -> None: ...
@@ -51,6 +54,29 @@ class SpeculativeGenerator(Protocol):
 _eviction_sync: Optional[EvictionSyncAdapter] = None
 
 _VERIFY_ADMISSION_MAX_RETRIES = 1024
+
+
+def _debug_cleanup_reporting_failure(
+    *,
+    action: str,
+    request_id: str,
+    phase: str,
+    primary: BaseException,
+    reporting_error: BaseException,
+) -> None:
+    try:
+        logger.debug(
+            "cleanup %s attachment failed for request %s during %s; "
+            "primary=%s reporting=%s",
+            action,
+            request_id,
+            phase,
+            type(primary).__name__,
+            type(reporting_error).__name__,
+            exc_info=reporting_error,
+        )
+    except BaseException:
+        return
 
 
 def set_eviction_sync(adapter: Optional[EvictionSyncAdapter]) -> None:
@@ -584,12 +610,44 @@ class ContinuousBatchingEngine:
                 _eviction_sync.on_request_aborted(request_id)
             except BaseException as exc:
                 cleanup_errors.append(exc)
-        add_note = getattr(primary, "add_note", None)
-        if callable(add_note):
-            for cleanup_error in cleanup_errors:
-                add_note(
-                    "speculative request cleanup failed: " f"{cleanup_error}"
+        if cleanup_errors:
+            cleanup_metadata = tuple(cleanup_errors)
+            try:
+                setattr(primary, "session_cleanup_errors", cleanup_metadata)
+            except BaseException as reporting_error:
+                _debug_cleanup_reporting_failure(
+                    action="metadata",
+                    request_id=request_id,
+                    phase=phase,
+                    primary=primary,
+                    reporting_error=reporting_error,
                 )
+            try:
+                add_note = getattr(primary, "add_note", None)
+            except BaseException as reporting_error:
+                _debug_cleanup_reporting_failure(
+                    action="note-lookup",
+                    request_id=request_id,
+                    phase=phase,
+                    primary=primary,
+                    reporting_error=reporting_error,
+                )
+                add_note = None
+            if callable(add_note):
+                for cleanup_error in cleanup_metadata:
+                    try:
+                        add_note(
+                            "speculative request cleanup failed: "
+                            f"{cleanup_error}"
+                        )
+                    except BaseException as reporting_error:
+                        _debug_cleanup_reporting_failure(
+                            action="note",
+                            request_id=request_id,
+                            phase=phase,
+                            primary=primary,
+                            reporting_error=reporting_error,
+                        )
 
     def _publish_speculative_commit(
         self,

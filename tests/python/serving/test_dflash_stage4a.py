@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import types
 from dataclasses import dataclass, field
 from typing import Callable
@@ -20,11 +21,12 @@ class _Cache:
         self.released = False
         self.fail_crop = fail_crop
         self.crop_calls = 0
+        self.crop_error = RuntimeError("cache cleanup boom")
 
     def crop(self, length: int) -> None:
         self.crop_calls += 1
         if self.fail_crop:
-            raise RuntimeError("cache cleanup boom")
+            raise self.crop_error
         if length == 0:
             self.released = True
 
@@ -369,7 +371,143 @@ def test_backend_failure_survives_private_cache_cleanup_failure() -> None:
     assert session.draft_kv.released
     assert engine.speculative_sessions == {}
     assert engine.has_pending_requests() is False
-    assert any("cache cleanup boom" in note for note in caught.value.__notes__)
+    assert caught.value.session_cleanup_errors == (
+        session.target_kv.crop_error,
+    )
+    notes = getattr(caught.value, "__notes__", None)
+    if notes is not None:
+        assert any("cache cleanup boom" in note for note in notes)
+    assert engine.get_request_failure("cleanup-fail") == {
+        "phase": "draft",
+        "failure_type": "RuntimeError",
+        "code": "speculative_draft_failed",
+    }
+
+
+def test_cleanup_metadata_does_not_depend_on_add_note() -> None:
+    class LegacyRuntimeError(RuntimeError):
+        def __getattribute__(self, name: str) -> object:
+            if name == "add_note":
+                return None
+            return super().__getattribute__(name)
+
+    speculator = _Speculator()
+    engine = _engine(speculator)
+    engine.add_request(
+        "legacy-cleanup-fail",
+        [50],
+        SamplingParams(temperature=0.5, max_tokens=5),
+    )
+    _ = engine.step()
+    session = speculator.sessions[0]
+    session.target_kv.fail_crop = True
+    original = LegacyRuntimeError("draft primary")
+    speculator.draft_error = original
+
+    with pytest.raises(LegacyRuntimeError, match="draft primary") as caught:
+        engine.step()
+
+    assert caught.value is original
+    assert caught.value.session_cleanup_errors == (
+        session.target_kv.crop_error,
+    )
+
+
+def test_cleanup_reporting_failures_are_logged_without_masking_primary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class HostileRuntimeError(RuntimeError):
+        def __setattr__(self, name: str, value: object) -> None:
+            if name == "session_cleanup_errors":
+                raise TypeError("metadata blocked")
+            super().__setattr__(name, value)
+
+        def add_note(self, note: str) -> None:
+            del note
+            raise RuntimeError("note blocked")
+
+    speculator = _Speculator()
+    engine = _engine(speculator)
+    engine.add_request(
+        "hostile-cleanup-fail",
+        [50],
+        SamplingParams(temperature=0.5, max_tokens=5),
+    )
+    _ = engine.step()
+    session = speculator.sessions[0]
+    session.target_kv.fail_crop = True
+    original = HostileRuntimeError("draft primary")
+    speculator.draft_error = original
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="moe_infinity.serving.engine"),
+        pytest.raises(HostileRuntimeError, match="draft primary") as caught,
+    ):
+        engine.step()
+
+    assert caught.value is original
+    assert session.target_kv.crop_calls == 1
+    assert session.draft_kv.released
+    assert engine.speculative_sessions == {}
+    assert engine.has_pending_requests() is False
+    assert any(
+        "cleanup metadata attachment failed for request "
+        "hostile-cleanup-fail during draft; "
+        "primary=HostileRuntimeError reporting=TypeError" in message
+        for message in caplog.messages
+    )
+    assert any(
+        "cleanup note attachment failed for request "
+        "hostile-cleanup-fail during draft; "
+        "primary=HostileRuntimeError reporting=RuntimeError" in message
+        for message in caplog.messages
+    )
+
+
+def test_cleanup_note_lookup_failure_is_logged_without_masking_primary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class LookupHostileRuntimeError(RuntimeError):
+        def __getattribute__(self, name: str) -> object:
+            if name == "add_note":
+                raise LookupError("note lookup blocked")
+            return super().__getattribute__(name)
+
+    speculator = _Speculator()
+    engine = _engine(speculator)
+    engine.add_request(
+        "lookup-cleanup-fail",
+        [50],
+        SamplingParams(temperature=0.5, max_tokens=5),
+    )
+    _ = engine.step()
+    session = speculator.sessions[0]
+    session.target_kv.fail_crop = True
+    original = LookupHostileRuntimeError("draft primary")
+    record = next(iter(engine.speculative_sessions.values()))
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="moe_infinity.serving.engine"),
+        pytest.raises(
+            LookupHostileRuntimeError, match="draft primary"
+        ) as caught,
+    ):
+        engine._fail_speculative_request(record, "draft", original)
+        raise original
+
+    assert caught.value is original
+    assert caught.value.session_cleanup_errors == (
+        session.target_kv.crop_error,
+    )
+    assert session.draft_kv.released
+    assert engine.speculative_sessions == {}
+    assert engine.has_pending_requests() is False
+    assert any(
+        "cleanup note-lookup attachment failed for request "
+        "lookup-cleanup-fail during draft; "
+        "primary=LookupHostileRuntimeError reporting=LookupError" in message
+        for message in caplog.messages
+    )
 
 
 def test_mixed_scheduled_work_splits_eligible_from_normal_fallback() -> None:
