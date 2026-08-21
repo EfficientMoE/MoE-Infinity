@@ -7,7 +7,10 @@ All notable changes to MoE-Infinity will be documented in this file.
 ### Added
 
 - Documentation hub at `docs/README.md` for users, operators, contributors, and project-history readers.
-- DFlash documentation that distinguishes direct batch-1 greedy and sampled draft/verify from the greedy-gated `MoE.generate` and serving integrations, explains the current batch>1 greedy-only constraint, and limits continuous-batching and route-ahead claims to validated paths.
+- Unified DFlash `SessionDriver`/`SpecSession` protocol, capability-selected bare-HF and rich backends, shared trace evidence, and per-request sampling streams.
+- Direct bare-HF batch-1/batch>1 greedy, sampled, and mixed-row execution with dense reconstruction, right-padded output, and `last_generated_lengths`.
+- Stage 4a persistent serving sessions and default-off Stage 4b engine-owned DeepSeek V2/V3 MLA pages for eligible greedy batch-1 requests.
+- No-download unified-execution benchmark/validator and compatibility assertions that fail closed on sampling, ordering, cache invariant, or ownership failures.
 
 ### Changed
 
@@ -30,5 +33,8 @@ All notable changes to MoE-Infinity will be documented in this file.
 
 ### Known Limitations
 
-- Batch > 1 DFlash is greedy-only, requires a bare HuggingFace target, and sampled batch > 1 remains unsupported.
+- `MoE.generate()` retains narrower compatibility behavior than the direct API and does not generally expose sampled batch > 1.
+- Stage 4b is default-off, greedy batch-1 DeepSeek V2/V3 only, resident-only, and non-preemptible; all ineligible and hybrid/Qwen paths use Stage 4a.
+- No real DeepSeek or Qwen DFlash pair is claimed. GPT-OSS has named valid pairs but no executor route-ahead path.
+- Required GPU fixture skips/unavailability are not rollout success; these Unreleased notes do not claim a release or unrun GPU validation.
 - Multi-node distributed inference is still unsupported.

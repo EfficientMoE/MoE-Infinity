@@ -89,3 +89,30 @@ def test_native_engine_autocorrects_kv_cache_ratio(monkeypatch):
             kv_cache_memory_ratio=0.0,
         )
     assert config.kv_cache_memory_ratio == pytest.approx(0.15)
+
+
+def test_paged_mla_admission_guard_defaults_are_safe(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    config = ArcherConfig(use_native_engine=False)
+
+    assert config.enable_deepseek_mla_paging is False
+    assert config.max_resident_paged_speculative_sessions == 1
+    assert config.min_free_mla_blocks_after_admission == 1
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("max_resident_paged_speculative_sessions", True),
+        ("max_resident_paged_speculative_sessions", -1),
+        ("min_free_mla_blocks_after_admission", False),
+        ("min_free_mla_blocks_after_admission", 0),
+    ],
+)
+def test_paged_mla_admission_guard_rejects_invalid_values(
+    monkeypatch, field_name, value
+):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+
+    with pytest.raises(ValueError, match=field_name):
+        ArcherConfig(use_native_engine=False, **{field_name: value})

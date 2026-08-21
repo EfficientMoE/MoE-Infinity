@@ -167,24 +167,63 @@ python -m moe_infinity.entrypoints.openai.api_server_v2 \
     --speculative-draft z-lab/gpt-oss-20b-DFlash
 ```
 
-Startup validates the drafter/target pair: hidden size, vocab size, mask-token bounds, target layer IDs, and drafter `fc` shape.
+Startup validates structural pairing (hidden size, vocabulary, mask-token
+bounds, target layers, block constraints, and drafter shape) separately from
+executor/route-ahead reachability.
 
-Delegation is server-wide and only applies when a request is:
+The persistent path creates one canonical session per eligible sequence. It
+preserves the request's temperature, top-k, top-p, budget, EOS set, and
+request-scoped generator. It does not silently turn sampled requests into
+greedy requests. Unsupported grammar/guided/logit-bias metadata, penalties,
+logprobs, or stop strings use the standard serving fallback before drafting.
+That fallback is not evidence of sampled serving.
 
-- a fresh singleton prefill request
-- greedy (`temperature=0`, no sampling)
-- `top_k <= 0`
-- `top_p >= 1.0`
-- `repetition_penalty == 1.0`
-- `logprobs <= 0`
-- no stop strings
-- within the current step token budget
+Two cache execution contexts are observable in `/admin/stats`:
 
-The exact gate is implemented in [`moe_infinity/serving/engine.py`](../moe_infinity/serving/engine.py) and also requires batch==1, no prior output tokens, and `max_tokens <= scheduler.max_tokens_per_step`.
+- `temporary_dynamic` is the Stage 4a compatibility mode. It keeps a temporary
+  private DynamicCache while the engine owns scheduling, callbacks,
+  cancellation, and request accounting. Sampled sessions and ineligible model
+  layouts remain here; this is not sampled paged-MLA serving.
+- `paged_mla` is the Stage 4b default-off target enabled by
+  `enable_deepseek_mla_paging=True`. It is restricted to eligible greedy
+  batch-1 DeepSeek V2/V3 MLA sessions. The engine owns packed latent/rope target
+  pages; the draft cache is separate. Admission is bounded by
+  `max_resident_paged_speculative_sessions` (default `1`) and must leave at
+  least `min_free_mla_blocks_after_admission` free blocks (default `1`) after
+  reserving the block-rounded peak for the full declared
+  `prompt + max_tokens` budget plus up to `DFlash block_size - 1` transient
+  verify tokens. Active sessions' committed and transient headroom that is not
+  yet allocated is included. A rejected eligible request immediately uses
+  `temporary_dynamic`; it does not wait for a paged seat, and its sampling
+  parameters are unchanged. That dense Stage 4a fallback owns a private target
+  cache and can therefore increase total GPU memory use even though it consumes
+  no MLA pages.
 
-The delegated path runs the speculative loop and emits tokens normally through SSE.
+Paged MLA is currently resident-only and has no preemption/swap implementation.
+The scheduler does not preempt DRAFT/VERIFY sessions. Qwen and hybrid layouts
+fall back to Stage 4a; hybrid paged rollback is not claimed. Cancellation after
+an in-flight backend call releases session resources, and per-sequence page
+ownership prevents one cancellation or rollback from truncating another row.
+Completion/cancellation frees ownership, so a later request can be admitted.
+`/admin/stats` reports active paged sessions, current free blocks, configured
+limits, and counters for `admitted`, `session_cap`, `free_block_reserve`, and
+`ineligible` decisions. `begin_failed` is recorded only when adapter/session
+construction fails; `admitted` increments only after construction succeeds.
 
-Route-ahead is internal to the DFlash verify path and is used only when speculative delegation is active.
+The guard is block-based admission control, not a general fairness proof. It
+does not preempt or swap admitted sessions. External cache consumers can still
+invalidate reserved headroom; such allocator failures clean up the affected
+request and are currently re-raised by the engine step.
+
+There is no real DeepSeek DFlash target/drafter pair validation in the repo.
+Stage 4b's tiny/local DeepSeek adapter tests establish ownership and attention
+metadata only. GPT-OSS has named valid pairs, but its resident expert path has
+no executor route-ahead. Qwen evidence is tiny-fixture only.
+
+Route-ahead is observer-only. Pairing evidence, executor reachability,
+prefetch-fired evidence, and cache ownership are reported as separate facts.
+See [DFlash unified execution](dflash.md) for direct batching, RNG caveats,
+benchmarks, and exact CPU/GPU gates.
 
 ## Operational Endpoints
 
