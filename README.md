@@ -123,7 +123,7 @@ sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build
 
 # 2. Build tools + PyTorch. Match PyTorch's CUDA build to your CUDA toolkit
 #    (pick the index URL for your CUDA version from https://pytorch.org).
-pip install "setuptools>=78.1.1,<82" wheel ninja py-cpuinfo
+pip install "setuptools>=78.1.1,<82" "setuptools-scm>=8" wheel ninja py-cpuinfo
 pip install torch --index-url https://download.pytorch.org/whl/cu128
 
 # 3. CUTLASS headers (header-only; no separate build required)
