@@ -11,6 +11,7 @@ from .batch import BatchBuilder, BatchMetadata, split_prefill_decode_batch
 from .kv_cache import PagedKVCache
 from .memory_manager import MemoryManager
 from .model_runner import ModelRunner
+from .prefix_cache import CacheNamespace, PrefixCache
 from .sampler import Sampler
 from .scheduler import Scheduler
 from .sequence import (
@@ -154,6 +155,9 @@ class ContinuousBatchingEngine:
         self._verify_scheduling_enabled = (
             self.scheduler.verify_scheduling_enabled
         )
+        self.prefix_cache: PrefixCache | None = None
+        self.cache_namespace: CacheNamespace | None = None
+        self._prefix_cache_disabled_reason: str = "prefix-caching-disabled"
 
         self._next_seq_id = 0
         self._sequences: dict[int, SequenceData] = {}
@@ -228,7 +232,7 @@ class ContinuousBatchingEngine:
                 return self._step_speculative_session(batch)
             return self._step_speculative(batch)
 
-        logits = self._execute_batch(batch)
+        logits = self._execute_and_commit(batch)
         last_token_logits = self._extract_last_token_logits(logits, batch)
         sampler_output = self.sampler.sample(
             last_token_logits,
@@ -316,8 +320,12 @@ class ContinuousBatchingEngine:
             return False
         if batch.is_prefill != [True]:
             return False
+        if batch.kv_seq_lengths != batch.query_lengths:
+            return False
 
         sequence = self._sequences[batch.seq_ids[0]]
+        if getattr(sequence, "has_prefix_lease", False):
+            return False
         params = sequence.sampling_params
         return (
             not sequence.output_token_ids
@@ -749,6 +757,44 @@ class ContinuousBatchingEngine:
         if split.decode_batch is not None:
             decode_logits = self.model_runner.execute(split.decode_batch)
         return split.recombine_outputs(prefill_logits, decode_logits)
+
+    def _execute_and_commit(self, batch: BatchMetadata) -> torch.Tensor:
+        logits = self._execute_batch(batch)
+        query_lengths = batch.query_lengths
+        is_prefill = batch.is_prefill
+        for index, seq_id in enumerate(batch.seq_ids):
+            if not is_prefill[index]:
+                continue
+            sequence = self._sequences.get(seq_id)
+            if sequence is None:
+                continue
+            sequence.committed_kv_tokens += query_lengths[index]
+            self._publish_committed_prefix(seq_id, sequence)
+        return logits
+
+    def _publish_committed_prefix(
+        self, seq_id: int, sequence: SequenceData
+    ) -> None:
+        if self.prefix_cache is None or self.cache_namespace is None:
+            return
+        committed = sequence.committed_kv_tokens
+        if committed <= 0 or committed > sequence.prompt_length:
+            committed = min(committed, sequence.prompt_length)
+        if committed <= 0:
+            return
+        block_size = self.kv_cache.block_size
+        full_blocks = committed // block_size
+        if full_blocks <= 0:
+            return
+        block_table = self.kv_cache.get_block_table(seq_id)
+        if len(block_table) < full_blocks:
+            return
+        self.prefix_cache.insert(
+            self.cache_namespace,
+            sequence.prompt_token_ids,
+            block_table[:full_blocks],
+            committed_tokens=full_blocks * block_size,
+        )
 
     @staticmethod
     def _extract_last_token_logits(

@@ -20,7 +20,12 @@ from moe_infinity.runtime.attention_backend import (
     LayeredPagedKVStore,
     PagedAttentionBackend,
 )
-from moe_infinity.runtime.attention_types import KVCacheSpec
+from moe_infinity.runtime.attention_types import (
+    KVCacheSpec,
+    PagedBatchLengths,
+)
+from moe_infinity.serving.batch import BatchMetadata
+from moe_infinity.serving.engine import ContinuousBatchingEngine
 from moe_infinity.serving.kv_cache import PagedKVCache, SequenceAllocationPlan
 from moe_infinity.serving.model_runner import ModelRunner
 from moe_infinity.serving.prefix_cache import CacheNamespace, PrefixCache
@@ -37,7 +42,10 @@ SHARED = list(range(8))
 
 __all__ = [
     "SHARED",
+    "BatchMetadata",
     "CacheNamespace",
+    "ContinuousBatchingEngine",
+    "PagedBatchLengths",
     "PrefixCache",
     "PrefixLease",
     "PrefixMatch",
@@ -49,10 +57,15 @@ __all__ = [
     "SequenceData",
     "SequenceGroup",
     "SequenceStatus",
+    "add_prefill",
+    "bind_prefix_runtime",
     "make_cache",
+    "make_dflash_engine_and_batch",
     "make_group",
     "make_namespace",
     "make_paged_backend",
+    "make_prefill_batch",
+    "make_prefix_capable_engine",
     "make_qwen_runner",
     "make_seeded_scheduler",
 ]
@@ -102,6 +115,7 @@ class RecordingLayeredPagedKVStore(LayeredPagedKVStore):
         head_dim: int = 8,
         dtype: torch.dtype = torch.float32,
         owner: object | None = None,
+        device: torch.device | None = None,
     ) -> None:
         owner = owner or SimpleNamespace()
         super().__init__(
@@ -112,7 +126,7 @@ class RecordingLayeredPagedKVStore(LayeredPagedKVStore):
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             dtype=dtype,
-            device=torch.device("cpu"),
+            device=device or torch.device("cpu"),
             use_flashinfer=True,
         )
         setattr(owner, "block_store", self)
@@ -277,3 +291,107 @@ def make_seeded_scheduler(
         cache_namespace=namespace,
     )
     return scheduler, cache, provider, namespace
+
+
+def make_prefill_batch(
+    sequence: SequenceData,
+    context_len: int,
+    query_tokens: list[int],
+    block_table: list[int],
+) -> BatchMetadata:
+    return BatchMetadata(
+        seq_ids=[sequence.seq_id],
+        input_token_ids=list(query_tokens),
+        lengths=PagedBatchLengths(
+            [len(query_tokens)],
+            [0, len(query_tokens)],
+            [context_len],
+            [context_len + len(query_tokens)],
+        ),
+        is_prefill=[True],
+        block_tables=[list(block_table)],
+        sampling_params=[sequence.sampling_params],
+    )
+
+
+def bind_prefix_runtime(
+    engine: ContinuousBatchingEngine,
+) -> RecordingLayeredPagedKVStore:
+    cache = engine.kv_cache
+    store = RecordingLayeredPagedKVStore(
+        num_layers=cache.num_layers,
+        num_blocks=cache.num_blocks,
+        block_size=cache.block_size,
+        num_kv_heads=cache.num_heads,
+        head_dim=cache.head_dim,
+        dtype=cache.dtype,
+        device=cache.device,
+    )
+    owner = store.owner
+    cache.set_block_store(store, owner=owner)
+    namespace = make_namespace(
+        num_layers=cache.num_layers,
+        num_kv_heads=cache.num_heads,
+        head_dim=cache.head_dim,
+        dtype=str(cache.dtype).removeprefix("torch."),
+    )
+    prefix = PrefixCache(
+        cache.block_size,
+        32,
+        on_retain=cache.block_allocator.retain,
+        on_release=cache.block_allocator.release,
+    )
+    engine.prefix_cache, engine.cache_namespace = prefix, namespace
+    engine.scheduler.prefix_lease_provider = prefix
+    engine.scheduler.cache_namespace = namespace
+    return store
+
+
+def make_prefix_capable_engine(cb_engine_factory) -> ContinuousBatchingEngine:
+    engine = cb_engine_factory(
+        config_overrides={"enable_prefix_caching": False}
+    )
+    bind_prefix_runtime(engine)
+    return engine
+
+
+def add_prefill(
+    engine: ContinuousBatchingEngine, prompt: list[int], committed: int
+) -> SequenceData:
+    request_id = f"synthetic-{len(engine._request_to_seq_ids)}"
+    engine.add_request(
+        request_id, prompt, SamplingParams(temperature=0.0, max_tokens=1)
+    )
+    seq_id = engine._request_to_seq_ids[request_id][0]
+    sequence = engine._sequences[seq_id]
+    sequence.set_status(SequenceStatus.PREFILL)
+    sequence.num_computed_tokens = committed
+    sequence.committed_kv_tokens = committed
+    engine.kv_cache.allocate_sequence(seq_id, len(prompt))
+    if committed:
+        engine.prefix_cache.insert(
+            engine.cache_namespace,
+            prompt,
+            engine.kv_cache.get_block_table(seq_id),
+            committed_tokens=committed,
+        )
+    return sequence
+
+
+def make_dflash_engine_and_batch(
+    cb_engine_factory, context_len: int, has_prefix_lease: bool
+):
+    engine = cb_engine_factory()
+    engine.speculative_draft = object()
+    sequence = SequenceData(
+        seq_id=77,
+        prompt_token_ids=list(range(context_len + 1)),
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=1),
+        status=SequenceStatus.PREFILL,
+        num_computed_tokens=context_len,
+    )
+    sequence.has_prefix_lease = has_prefix_lease
+    batch = make_prefill_batch(
+        sequence, context_len, [context_len], [0] * ((context_len + 4) // 4)
+    )
+    return engine, batch
