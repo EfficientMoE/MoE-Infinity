@@ -10,6 +10,9 @@ import torch
 from moe_infinity.runtime.attention_types import (
     AttentionMetadata as RuntimeAttentionMetadata,
 )
+from moe_infinity.runtime.attention_types import (
+    PagedBatchLengths,
+)
 
 from .batch import BatchMetadata
 
@@ -225,6 +228,15 @@ class ModelRunner:
         )
         num_decode_tokens = batch.total_tokens - num_prefill_tokens
 
+        lengths: PagedBatchLengths | None = None
+        if batch.seq_ids and all(length > 0 for length in batch.seq_lengths):
+            lengths = PagedBatchLengths(
+                query_lengths=list(batch.seq_lengths),
+                query_offsets=list(batch.token_offsets),
+                context_lengths=list(batch.context_lengths),
+                kv_seq_lengths=list(seq_lens_values),
+            )
+
         return RuntimeAttentionMetadata(
             block_tables=block_tables,
             seq_lens=seq_lens,
@@ -233,6 +245,7 @@ class ModelRunner:
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
             is_prefill=bool(batch.is_prefill and all(batch.is_prefill)),
+            lengths=lengths,
         )
 
     @staticmethod

@@ -14,6 +14,7 @@ from moe_infinity.runtime.attention_types import (
 )
 from moe_infinity.runtime.attention_types import (
     KVCacheSpec,
+    _as_int_list,
 )
 
 
@@ -324,6 +325,11 @@ class PagedAttentionBackend:
     def _fi_kv_cache(self) -> Optional[torch.Tensor]:
         store = self.block_store.fi_kv_cache
         return None if store is None else store[0]
+
+    @_fi_kv_cache.setter
+    def _fi_kv_cache(self, value: Optional[torch.Tensor]) -> None:
+        if value is None:
+            self.block_store.fi_kv_cache = None
 
     def write_kv(
         self,
@@ -649,13 +655,22 @@ class PagedAttentionBackend:
         seq_lens_i32 = seq_lens.to(self.device, dtype=torch.int32).reshape(-1)
         batch_size = int(seq_lens_i32.shape[0])
 
-        qo_indptr = torch.zeros(
-            batch_size + 1,
-            dtype=torch.int32,
-            device=self.device,
-        )
-        if batch_size > 0:
-            qo_indptr[1:] = torch.cumsum(seq_lens_i32, dim=0)
+        lengths = getattr(metadata, "lengths", None)
+        if lengths is not None:
+            query_offsets = torch.as_tensor(
+                [int(v) for v in _as_int_list(lengths.query_offsets)],
+                dtype=torch.int32,
+                device=self.device,
+            )
+            qo_indptr = query_offsets.reshape(-1)
+        else:
+            qo_indptr = torch.zeros(
+                batch_size + 1,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            if batch_size > 0:
+                qo_indptr[1:] = torch.cumsum(seq_lens_i32, dim=0)
 
         block_size = int(self.spec.block_size)
         kv_indptr_vals = [0]
