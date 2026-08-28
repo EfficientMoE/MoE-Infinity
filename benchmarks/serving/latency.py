@@ -119,6 +119,12 @@ def collect_routing_stats(model):
     return {key: int(value) for key, value in getter().items()}
 
 
+def _delta_pct(candidate, baseline):
+    if not baseline:
+        return None
+    return 100.0 * (candidate / baseline - 1.0)
+
+
 def build_result_payload(*, args, measurements, baseline_measurements, routing):
     comparison = {}
     reasons = []
@@ -126,10 +132,12 @@ def build_result_payload(*, args, measurements, baseline_measurements, routing):
         for level, candidate in measurements.items():
             baseline = baseline_measurements[level]
             comparison[level] = {
-                "tpot_p50_delta_pct": 100.0
-                * (candidate["tpot_p50_ms"] / baseline["tpot_p50_ms"] - 1.0),
-                "tpot_p99_delta_pct": 100.0
-                * (candidate["tpot_p99_ms"] / baseline["tpot_p99_ms"] - 1.0),
+                "tpot_p50_delta_pct": _delta_pct(
+                    candidate["tpot_p50_ms"], baseline["tpot_p50_ms"]
+                ),
+                "tpot_p99_delta_pct": _delta_pct(
+                    candidate["tpot_p99_ms"], baseline["tpot_p99_ms"]
+                ),
             }
             level_verdict = gpu_routing_verdict(
                 baseline,
@@ -243,7 +251,7 @@ def build_prompt_input_ids(
 
 
 def load_model_and_tokenizer(
-    model_name: str, offload_dir: str
+    model_name: str, offload_dir: str, config: dict | None = None
 ) -> tuple[Any, Any]:
     try:
         from transformers import AutoTokenizer
@@ -262,10 +270,11 @@ def load_model_and_tokenizer(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    config = {
-        "offload_path": offload_dir,
-        "device_memory_ratio": 0.75,
-    }
+    if config is None:
+        config = {
+            "offload_path": offload_dir,
+            "device_memory_ratio": 0.75,
+        }
     model = MoE(model_name, config)
     return model, tokenizer
 
@@ -462,12 +471,39 @@ def main() -> int:
         raise ValueError("--prompt-length must be > 0")
     if args.max_new_tokens <= 0:
         raise ValueError("--max-new-tokens must be > 0")
+    if args.warmup_rounds < 0:
+        raise ValueError("--warmup-rounds must be >= 0")
 
     concurrency_levels = [value for value in args.concurrency if value > 0]
     if not concurrency_levels:
         raise ValueError(
             "--concurrency must include at least one positive value"
         )
+
+    model_config = build_model_config(args)
+    routing_baseline = None
+    if args.gpu_only_expert_routing == "on":
+        if not args.routing_baseline_json:
+            print(
+                "on-mode requires --routing-baseline-json produced by an "
+                "off-mode run",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            routing_baseline = load_routing_baseline(
+                Path(args.routing_baseline_json),
+                expected_config={
+                    "model": args.model,
+                    "prompt_length": args.prompt_length,
+                    "max_new_tokens": args.max_new_tokens,
+                    "concurrency": list(args.concurrency),
+                    "device_memory_ratio": 0.75,
+                },
+            )
+        except (ValueError, OSError) as error:
+            print(f"routing baseline rejected: {error}", file=sys.stderr)
+            return 2
 
     env = environment_info()
     output_path = Path(args.output_json)
@@ -504,7 +540,7 @@ def main() -> int:
 
     try:
         model, tokenizer = load_model_and_tokenizer(
-            args.model, args.offload_dir
+            args.model, args.offload_dir, model_config
         )
     except Exception as exc:
         print(f"BLOCKED: {type(exc).__name__}: {exc}")
@@ -535,44 +571,22 @@ def main() -> int:
         model,
         tokenizer,
         concurrency_levels=concurrency_levels,
+        warmup_rounds=args.warmup_rounds,
         num_rounds=args.num_rounds,
         prompt_length=args.prompt_length,
         max_new_tokens=args.max_new_tokens,
     )
 
-    comparison: dict[str, dict[str, float | None]] = {}
-    for level, result in measurements.items():
-        baseline_ttft = baseline.get("ttft_ms")
-        baseline_itl = baseline.get("per_token_latency_ms")
-        ttft_p50 = result.get("ttft_p50_ms")
-        itl_p50 = result.get("itl_p50_ms")
-
-        comparison[level] = {
-            "ttft_delta_ms_vs_baseline": (
-                None
-                if baseline_ttft is None or ttft_p50 is None
-                else ttft_p50 - baseline_ttft
-            ),
-            "itl_delta_ms_vs_baseline": (
-                None
-                if baseline_itl is None or itl_p50 is None
-                else itl_p50 - baseline_itl
-            ),
-        }
-
-    payload = {
-        "status": "PASS",
-        "environment": env,
-        "measurement": measurements,
-        "baseline": baseline,
-        "comparison": comparison,
-        "requested_model": args.model,
-        "offload_dir": args.offload_dir,
-        "num_rounds": args.num_rounds,
-        "prompt_length": args.prompt_length,
-        "max_new_tokens": args.max_new_tokens,
-    }
+    routing = collect_routing_stats(model)
+    payload = build_result_payload(
+        args=args,
+        measurements=measurements,
+        baseline_measurements=routing_baseline,
+        routing=routing,
+    )
+    payload["environment"] = env
     write_json(output_path, payload)
+    print(f"verdict: {payload['verdict']}")
     return 0
 
 
