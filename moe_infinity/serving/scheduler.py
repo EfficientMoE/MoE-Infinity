@@ -814,6 +814,9 @@ class Scheduler:
             return
 
         for sequence in group.sequences:
+            lease = self._inflight_prefill.get(sequence.seq_id)
+            if lease is not None:
+                self._restore_leases([lease])
             if sequence.status not in (
                 SequenceStatus.FINISHED,
                 SequenceStatus.CANCELLED,
@@ -870,6 +873,10 @@ class Scheduler:
                 ):
                     continue
 
+                if self.chunked_prefill_enabled:
+                    self._swapped_resume_status[sequence.seq_id] = (
+                        sequence.status
+                    )
                 try:
                     self.kv_cache.swap_out(sequence.seq_id)
                 except KeyError:
@@ -920,7 +927,12 @@ class Scheduler:
                 continue
 
             for sequence in swapped_sequences:
-                sequence.set_status(SequenceStatus.DECODE)
+                resume = self._swapped_resume_status.pop(
+                    sequence.seq_id, SequenceStatus.DECODE
+                )
+                sequence.set_status(resume)
+                if resume is SequenceStatus.PREFILL:
+                    self._enqueue_prefill_once(sequence.seq_id)
 
             _ = self._swapped.remove(group)
             self._running.appendleft(group)
@@ -967,7 +979,16 @@ class Scheduler:
     def _drop_request_metadata(self, group: SequenceGroup) -> None:
         _ = self._request_map.pop(group.request_id, None)
         for sequence in group.sequences:
-            _ = self._sequence_map.pop(sequence.seq_id, None)
+            seq_id = sequence.seq_id
+            _ = self._sequence_map.pop(seq_id, None)
+            _ = self._prefill_wait_steps.pop(seq_id, None)
+            _ = self._swapped_resume_status.pop(seq_id, None)
+            _ = self._inflight_prefill.pop(seq_id, None)
+            _ = self._verify_demands.pop(seq_id, None)
+            if seq_id in self._prefill_queue:
+                self._prefill_queue = deque(
+                    queued for queued in self._prefill_queue if queued != seq_id
+                )
 
     def _required_blocks(self, sequence: SequenceData) -> int:
         if sequence.prompt_length == 0:

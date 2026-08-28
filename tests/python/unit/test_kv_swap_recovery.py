@@ -115,3 +115,46 @@ def test_free_gpu_blocks_preserves_cpu_buffer() -> None:
     assert 33 in sequence_tables
     assert kv_cache.get_block_table(33) == []
     assert kv_cache.block_allocator.num_free_blocks == 2
+
+
+def _make_paged_backend(num_blocks: int):
+    from moe_infinity.runtime.attention_backend import PagedAttentionBackend
+    from moe_infinity.runtime.attention_types import KVCacheSpec
+
+    return PagedAttentionBackend(
+        spec=KVCacheSpec(
+            num_kv_heads=1, head_dim=8, dtype=torch.float16, block_size=4
+        ),
+        num_gpu_blocks=num_blocks,
+        num_layers=1,
+        device=torch.device("cpu"),
+    )
+
+
+def test_partial_prefill_recovers_to_prefill_at_same_offset() -> None:
+    cache = _make_kv_cache(4)
+    cache.set_block_store(
+        _make_paged_backend(num_blocks=4).block_store,
+        logical_capacity=cache.num_blocks,
+    )
+    scheduler = Scheduler(
+        kv_cache=cache,
+        max_batch_size=1,
+        max_tokens_per_step=4,
+        enable_chunked_prefill=True,
+        prefill_chunk_size=4,
+    )
+    group = _make_group("partial", seq_id=41, prompt_len=8)
+    scheduler.add_request(group)
+    first = scheduler.schedule()
+    scheduler.commit_prefill_step(first.prefill_transaction_id)
+    assert group.sequences[0].num_computed_tokens == 4
+
+    preempted = scheduler._preempt_oldest_running_group()
+    assert preempted == [41]
+    assert group.sequences[0].status is SequenceStatus.SWAPPED
+    scheduler._recover_swapped_groups([group])
+
+    assert group.sequences[0].status is SequenceStatus.PREFILL
+    resumed = scheduler.schedule()
+    assert resumed.prefill_chunks[41].start_pos == 4
