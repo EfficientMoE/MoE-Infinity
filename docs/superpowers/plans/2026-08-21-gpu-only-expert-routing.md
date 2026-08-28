@@ -57,6 +57,7 @@ The implementation must preserve these invariants:
 - Create `tests/python/unit/test_gpu_only_expert_routing.py`: CPU-only orchestration, fallback, ordering, empty-mask, prefetch-correction, and adapter-contract tests with fakes.
 - Modify `tests/python/unit/test_gpt_oss_mxfp4_dispatch.py`: CUDA parity, no caller-stream synchronization, empty-mask, and multi-GPU ownership tests using its existing real native-extension fixture.
 - Create `tests/python/unit/test_gpu_routing_source_contract.py`: CPU-only source guards for route-state closure, forbidden hot-path synchronizers, explicit blocking timing APIs, and CLI/schema wiring.
+- Create `tests/python/unit/test_gpu_routing_documentation.py`: executable documentation-content checks for configuration, observability, benchmark acceptance, scope, and rollback guidance.
 - Modify `benchmarks/serving/validate_batched_dispatch.py`: source-contract checks for the new path and preserved adapter boundary.
 
 **Observability, benchmarks, and docs**
@@ -659,7 +660,6 @@ void ExpertDispatcher::FailDispatch(
   route_pending_.store(false, std::memory_order_release);
   pending_cv_.notify_all();
   route_callback_cv_.notify_all();
-  retirement_callback_cv_.notify_all();
 }
 
 void ExpertDispatcher::CompleteOne(std::uint64_t generation) noexcept {
@@ -1618,6 +1618,16 @@ Add these exact types and members to `expert_dispatcher.h`:
   std::mutex retirement_callback_mutex_;
   std::condition_variable retirement_callback_cv_;
 ```
+
+In the same step, extend the Task 2 `FailDispatch()` terminal notification block now that `retirement_callback_cv_` exists:
+
+```cpp
+  pending_cv_.notify_all();
+  route_callback_cv_.notify_all();
+  retirement_callback_cv_.notify_all();
+```
+
+Task 2 intentionally notifies only `pending_cv_` and `route_callback_cv_`; the retirement callback condition variable and its notification have one lifetime and are introduced together here.
 
 Start one `ExpertRetirementFunc` thread in the constructor. At the end of `OutputFunc`, after recording `output_done` and before decrementing `pending_`, enqueue a stream callback:
 
@@ -3116,12 +3126,78 @@ git commit -m "bench: gate gpu routing on p50 and p99 tpot"
 ### Task 8: Document operations, fallback, and phased landing
 
 **Files:**
+- Create: `tests/python/unit/test_gpu_routing_documentation.py`
 - Modify: `docs/configuration.md`
 - Modify: `docs/environment-variables.md`
 - Modify: `docs/benchmarking.md`
 - Modify: `benchmarks/expert_io_microbench/README.md`
 
-- [ ] **Step 1: Add the configuration contract**
+- [ ] **Step 1: Write a failing executable documentation-content test**
+
+Create `tests/python/unit/test_gpu_routing_documentation.py`:
+
+```python
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def _read(relative_path):
+    return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def test_gpu_routing_configuration_and_observability_are_documented():
+    configuration = _read("docs/configuration.md")
+    environment = _read("docs/environment-variables.md")
+
+    assert "`gpu_only_expert_routing`" in configuration
+    assert "single-host `dispatch_local`" in configuration
+    assert "`speculative_prefetch_overlap=true`" in configuration
+    assert "invalid combinations raise before engine construction" in configuration
+    assert "CPU masks" in configuration
+    assert "older native extensions" in configuration
+    assert "DFlash route-ahead" in configuration
+
+    for stage in (
+        "`gpu_route_submit`",
+        "`gpu_route_fallback`",
+        "`gpu_route_handoff`",
+        "`expert_completion_handoff`",
+    ):
+        assert stage in environment
+    assert "route_failures" in environment
+    assert "gpu_only_expert_routing=false" in environment
+
+
+def test_gpu_routing_benchmark_runbook_documents_keep_and_rollback():
+    for relative_path in (
+        "docs/benchmarking.md",
+        "benchmarks/expert_io_microbench/README.md",
+    ):
+        runbook = " ".join(_read(relative_path).split())
+        assert "concurrency 1, 2, and 4" in runbook
+        assert "TPOT p50 regression <=2%" in runbook
+        assert "TPOT p99 regression <=5%" in runbook
+        assert "zero route failures" in runbook
+        assert "zero unexpected eager fallbacks" in runbook
+        assert "gpu_only_expert_routing=false" in runbook
+        assert "speculative_prefetch_overlap=false" in runbook
+        assert "single-host personal-machine offloading" in runbook
+        assert "not multi-node results" in runbook
+```
+
+- [ ] **Step 2: Run the documentation-content test and verify RED**
+
+Run:
+
+```bash
+pytest -q tests/python/unit/test_gpu_routing_documentation.py
+```
+
+Expected: both tests fail because the configuration row, profiler/NVTX stages, KEEP thresholds, first-release conflict rule, single-host scope, and rollback instruction have not all been added to the four documentation files.
+
+- [ ] **Step 3: Add the configuration contract**
 
 Add this row to the `ArcherConfig` table in `docs/configuration.md`:
 
@@ -3131,7 +3207,7 @@ Add this row to the `ArcherConfig` table in `docs/configuration.md`:
 
 Do not add an environment variable: the rollout is per-model configuration and must be captured in benchmark JSON.
 
-- [ ] **Step 2: Document observability and operator action**
+- [ ] **Step 4: Document observability and operator action**
 
 Add to `docs/environment-variables.md` under `MOE_INFINITY_PROFILE_IO`:
 
@@ -3143,7 +3219,7 @@ With `gpu_only_expert_routing=true`, full sampling emits `gpu_route_submit`,
 rollback signal; set `gpu_only_expert_routing=false` and retain the eager path.
 ```
 
-- [ ] **Step 3: Add the exact benchmark runbook and interpretation**
+- [ ] **Step 5: Add the exact benchmark runbook and interpretation**
 
 Add the Task 7 A/B and Nsight commands to `docs/benchmarking.md` and `benchmarks/expert_io_microbench/README.md`. State all of the following:
 
@@ -3167,10 +3243,21 @@ Add the Task 7 A/B and Nsight commands to `docs/benchmarking.md` and `benchmarks
   multi-node results and are not promises of DeepEP or paper-level speedups.
 ```
 
-- [ ] **Step 4: Commit documentation**
+- [ ] **Step 6: Run executable documentation QA and verify GREEN**
+
+Run:
 
 ```bash
-git add docs/configuration.md \
+pytest -q tests/python/unit/test_gpu_routing_documentation.py
+```
+
+Expected: `2 passed`; the test confirms the documented opt-in and fallback cases, all four profiler/NVTX stage names, route-failure rollback signal, exact TPOT p50/p99 KEEP thresholds at concurrency 1/2/4, overlap exclusion, eager rollback command, and single-host/non-multi-node scope in the intended files.
+
+- [ ] **Step 7: Commit documentation**
+
+```bash
+git add tests/python/unit/test_gpu_routing_documentation.py \
+  docs/configuration.md \
   docs/environment-variables.md \
   docs/benchmarking.md \
   benchmarks/expert_io_microbench/README.md
