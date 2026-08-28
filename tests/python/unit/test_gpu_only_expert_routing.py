@@ -152,3 +152,42 @@ def test_synchronous_native_submission_error_is_not_replayed_eagerly():
     ):
         executor.dispatch_local(0, hidden, mask, mask.float())
     assert not any(call[0] == "enqueue_expert" for call in dispatcher.calls)
+
+
+def test_representative_adapters_keep_dispatch_wait_contract():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    for relative in (
+        "moe_infinity/models/qwen.py",
+        "moe_infinity/models/mixtral.py",
+        "moe_infinity/models/deepseek.py",
+    ):
+        source = (root / relative).read_text(encoding="utf-8")
+        dispatch_at = source.index("dispatch_local(")
+        wait_at = source.index("wait_dispatch_local()", dispatch_at)
+        assert dispatch_at < wait_at
+        # deepseek names the argument ``routing_mask`` while qwen/mixtral use
+        # ``router_mask``; both carry the routing mask through the boundary.
+        assert "mask" in source[dispatch_at:wait_at]
+
+
+def test_gpu_routing_exposes_host_list_only_after_wait():
+    executor, dispatcher = make_executor(enabled=True)
+    executor._can_use_gpu_only_routing = lambda mask: True
+    prefetcher = FakePrefetcher()
+    executor.set_prefetcher(prefetcher)
+    hidden = torch.ones(1, 2)
+    mask = torch.tensor([[True, False, True]])
+    logits = torch.tensor([[3.0, 1.0, 2.0]])
+
+    executor.dispatch_local(4, hidden, mask, mask.float(), router_logits=logits)
+
+    assert prefetcher.speculative == []
+    assert not any(
+        call[0] == "take_last_active_experts" for call in dispatcher.calls
+    )
+    _ = executor.wait_dispatch_local()
+    assert prefetcher.corrected == [(5, [0, 2])]
+    assert prefetcher.speculative == [(4, logits)]
+    assert dispatcher.calls[-1][0] == "take_last_active_experts"
