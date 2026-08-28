@@ -252,6 +252,36 @@ def test_fallback_decode_without_flashinfer(
     assert backend._fi_decode is None
 
 
+def test_export_import_checkpoint_restore_cover_every_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_fake_flashinfer(monkeypatch)
+    backend = attention_backend_module.PagedAttentionBackend(
+        spec=KVCacheSpec(2, 8, torch.float16, 4),
+        num_gpu_blocks=4,
+        device=torch.device("cpu"),
+    )
+    store = backend.create_layered_store(layer_count=3)
+    assert backend.block_store is store
+    assert store.owner is backend
+    assert backend.k_cache is store.k_cache
+    assert backend.v_cache is store.v_cache
+    assert backend._fi_kv_cache is store.fi_kv_cache
+    for layer in range(3):
+        store.k_cache[layer, 1].fill_(10 + layer)
+        store.v_cache[layer, 1].fill_(20 + layer)
+        store.fi_kv_cache[layer, 1].fill_(30 + layer)
+    payload = store.export_blocks([1])
+    store.import_blocks([2], payload)
+    checkpoint = store.checkpoint([2])
+    store.zero_blocks([2])
+    store.restore([2], checkpoint)
+    for layer in range(3):
+        assert torch.all(store.k_cache[layer, 2] == 10 + layer)
+        assert torch.all(store.v_cache[layer, 2] == 20 + layer)
+        assert torch.all(store.fi_kv_cache[layer, 2] == 30 + layer)
+
+
 @pytest.mark.skipif(
     not flashinfer_utils.HAS_FLASHINFER or not torch.cuda.is_available(),
     reason="requires flashinfer + CUDA",

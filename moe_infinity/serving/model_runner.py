@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 import torch
 
@@ -12,6 +12,9 @@ from moe_infinity.runtime.attention_types import (
 )
 
 from .batch import BatchMetadata
+
+if TYPE_CHECKING:
+    from moe_infinity.runtime.attention_backend import PrefixReuseCapability
 
 
 @runtime_checkable
@@ -283,10 +286,87 @@ class ModelRunner:
                 return backend
         return None
 
+    def get_prefix_reuse_capability(
+        self, cache: object | None = None
+    ) -> "PrefixReuseCapability":
+        from moe_infinity.runtime.attention_backend import (
+            LayerRegistration,
+            PrefixReuseCapability,
+        )
+
+        _ = cache
+        registrations = self._collect_qwen_layer_registrations()
+        expected_layers = self._resolve_expected_layers()
+        if expected_layers is None or expected_layers <= 0:
+            return PrefixReuseCapability.disabled(
+                "incomplete-paged-layer-registry"
+            )
+
+        layer_indices = [layer_idx for layer_idx, _ in registrations]
+        if len(set(layer_indices)) != len(layer_indices) or set(
+            layer_indices
+        ) != set(range(expected_layers)):
+            return PrefixReuseCapability.disabled(
+                "incomplete-paged-layer-registry"
+            )
+
+        backend = self._get_attention_backend()
+        if backend is None:
+            return PrefixReuseCapability.disabled(
+                "prefix-aware-prefill-unavailable"
+            )
+
+        flashinfer_enabled = getattr(backend, "_flashinfer_enabled", None)
+        if not callable(flashinfer_enabled) or not flashinfer_enabled():
+            return PrefixReuseCapability.disabled(
+                "prefix-aware-prefill-unavailable"
+            )
+
+        create_store = getattr(backend, "create_layered_store", None)
+        register_layers = getattr(backend, "register_layers", None)
+        if not callable(create_store) or not callable(register_layers):
+            return PrefixReuseCapability.disabled(
+                "prefix-aware-prefill-unavailable"
+            )
+
+        store = create_store(layer_count=expected_layers)
+        register_layers(
+            [
+                LayerRegistration(layer_idx=layer_idx, module_id=module_id)
+                for layer_idx, module_id in registrations
+            ]
+        )
+        return PrefixReuseCapability.active(backend, store)
+
+    def _collect_qwen_layer_registrations(self) -> list[tuple[int, int]]:
+        registrations: list[tuple[int, int]] = []
+        modules_fn = getattr(self.model, "modules", None)
+        if not callable(modules_fn):
+            return registrations
+        modules = modules_fn()
+        if not isinstance(modules, Iterable):
+            return registrations
+        for module in modules:
+            if module.__class__.__name__ != "Qwen3PagedAttention":
+                continue
+            layer_idx = getattr(module, "layer_idx", None)
+            if not isinstance(layer_idx, int):
+                continue
+            registrations.append((layer_idx, id(module)))
+        return registrations
+
+    def _resolve_expected_layers(self) -> int | None:
+        config = getattr(self.model, "config", None)
+        num_hidden_layers = getattr(config, "num_hidden_layers", None)
+        if isinstance(num_hidden_layers, int):
+            return num_hidden_layers
+        return None
+
     def _get_paged_attention_classes(self) -> list[type[Any]]:
         paged_class_names = {
             "DeepseekV2PagedAttention",
             "DeepseekV3PagedAttention",
+            "Qwen3PagedAttention",
         }
         classes: list[type[Any]] = []
         seen: set[type[Any]] = set()
