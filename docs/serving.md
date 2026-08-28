@@ -222,3 +222,14 @@ If you need timeout debugging, use the watchdog logs and the troubleshooting gui
 - `400`: invalid `n` / `best_of` / other request validation.
 - `finish_reason="error"`: JSON-object validation failure.
 - Penalties and `logit_bias` are accepted by the request models but are not applied in sampling.
+
+## Chunked prefill compatibility
+
+The first release does not support simultaneous chunked prefill and prefix
+caching. Startup rejects `enable_chunked_prefill=true` together with
+`enable_prefix_caching=true` with `ValueError: enable_chunked_prefill and
+enable_prefix_caching cannot both be true in the first release`. Roll back by
+removing `--enable-chunked-prefill` (or disabling prefix caching) and restart;
+no request or cache-format migration is required. PR #181 is design input for
+a future transaction-contract reconciliation only. This release neither
+depends on that PR nor copies any prefix implementation into chunk scheduling.

@@ -87,7 +87,11 @@ except Exception:
     uvicorn = SimpleNamespace(run=lambda *args, **kwargs: None)
 
 import moe_infinity.serving.watchdog as watchdog_module
-from moe_infinity.serving.engine import ContinuousBatchingEngine, RequestOutput
+from moe_infinity.serving.engine import (
+    ContinuousBatchingEngine,
+    RequestOutput,
+    validate_chunked_prefill_config,
+)
 from moe_infinity.serving.health import ServerHealthState
 from moe_infinity.serving.sequence import SamplingParams
 from moe_infinity.serving.stream import StreamManager
@@ -1860,8 +1864,13 @@ def _build_engine_config(
     }
     if eos_token_id is not None:
         config["eos_token_id"] = eos_token_id
-    if args.enable_prefix_caching:
-        config["enable_prefix_caching"] = True
+    config["enable_chunked_prefill"] = bool(
+        getattr(args, "enable_chunked_prefill", False)
+    )
+    config["enable_prefix_caching"] = bool(
+        getattr(args, "enable_prefix_caching", False)
+    )
+    validate_chunked_prefill_config(config)
     return config
 
 

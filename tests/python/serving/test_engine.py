@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 
+import pytest
 import torch
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -483,3 +484,22 @@ def test_engine_n_finished_when_all_complete() -> None:
     )
     assert engine.has_pending_requests() is True
     assert "req-n" not in engine._completed_request_ids
+
+
+def test_engine_rejects_chunked_prefill_with_prefix_caching() -> None:
+    config = _make_config()
+    config.update(
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "enable_chunked_prefill and enable_prefix_caching cannot both "
+            "be true in the first release"
+        ),
+    ):
+        ContinuousBatchingEngine(
+            model=MockModel(), engine=MockOffloadEngine(), config=config
+        )

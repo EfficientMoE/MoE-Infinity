@@ -43,6 +43,18 @@ _eviction_sync: Optional[EvictionSyncAdapter] = None
 
 _VERIFY_ADMISSION_MAX_RETRIES = 1024
 
+CHUNKED_PREFIX_INCOMPATIBLE = (
+    "enable_chunked_prefill and enable_prefix_caching cannot both be true "
+    "in the first release"
+)
+
+
+def validate_chunked_prefill_config(config: dict[str, object]) -> None:
+    if bool(config.get("enable_chunked_prefill", False)) and bool(
+        config.get("enable_prefix_caching", False)
+    ):
+        raise ValueError(CHUNKED_PREFIX_INCOMPATIBLE)
+
 
 def set_eviction_sync(adapter: Optional[EvictionSyncAdapter]) -> None:
     global _eviction_sync
@@ -89,6 +101,7 @@ class ContinuousBatchingEngine:
         tokenizer: Optional[object] = None,
         speculative_draft: SpeculativeGenerator | None = None,
     ) -> None:
+        validate_chunked_prefill_config(dict(config))
         self.model = model
         self.engine = engine
         self.config = dict(config)
