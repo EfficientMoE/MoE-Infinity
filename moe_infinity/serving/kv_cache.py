@@ -120,6 +120,22 @@ class BlockTable:
     def num_computed_tokens(self) -> int:
         return self._num_tokens
 
+    def ensure_num_tokens(self, total_tokens: int) -> None:
+        if total_tokens < self._num_tokens:
+            raise ValueError(
+                f"cannot shrink reservation from {self._num_tokens} "
+                f"to {total_tokens}"
+            )
+        current_blocks = len(self._block_ids)
+        required_blocks = (
+            total_tokens + self.block_size - 1
+        ) // self.block_size
+        new_ids = self.block_allocator.allocate(
+            required_blocks - current_blocks
+        )
+        self._block_ids.extend(new_ids)
+        self._num_tokens = total_tokens
+
     def has_blocks(self) -> bool:
         return bool(self._block_ids)
 
@@ -232,8 +248,7 @@ class PagedKVCache:
             raise ValueError(f"num_tokens must be >= 0, got {num_tokens}")
 
         block_table = BlockTable(block_allocator=self.block_allocator)
-        for _ in range(num_tokens):
-            block_table.append_token()
+        block_table.ensure_num_tokens(num_tokens)
         self._sequence_tables[seq_id] = block_table
 
         if self._cp_kv_manager is not None:
@@ -246,14 +261,64 @@ class PagedKVCache:
             except Exception:
                 pass
 
+    def ensure_sequence_capacity(self, seq_id: int, total_tokens: int) -> None:
+        if total_tokens < 0:
+            raise ValueError(f"total_tokens must be >= 0, got {total_tokens}")
+        block_table = self._sequence_tables.get(seq_id)
+        if block_table is None:
+            block_table = BlockTable(block_allocator=self.block_allocator)
+            block_table.ensure_num_tokens(total_tokens)
+            self._sequence_tables[seq_id] = block_table
+            return
+        block_table.ensure_num_tokens(total_tokens)
+
+    def get_num_reserved_tokens(self, seq_id: int) -> int:
+        return self._require_sequence(seq_id).num_computed_tokens()
+
+    def has_sequence(self, seq_id: int) -> bool:
+        return seq_id in self._sequence_tables
+
+    def get_block_ids_for_range(
+        self, seq_id: int, start: int, end: int
+    ) -> list[int]:
+        if not 0 <= start <= end <= self.get_num_reserved_tokens(seq_id):
+            raise ValueError("range is outside reserved sequence capacity")
+        table = self.get_block_table(seq_id)
+        first = start // self.block_size
+        last = (end + self.block_size - 1) // self.block_size
+        return list(dict.fromkeys(table[first:last]))
+
+    def rollback_sequence_reservation(
+        self,
+        *,
+        seq_id: int,
+        prior_table_existed: bool,
+        prior_block_ids: tuple[int, ...],
+        prior_reserved_tokens: int,
+        cow_block_ids: tuple[int, ...],
+    ) -> None:
+        table = self._require_sequence(seq_id)
+        current_ids = tuple(table.get_block_ids())
+        prior_set = set(prior_block_ids)
+        current_set = set(current_ids)
+        private_new_ids = tuple(
+            block_id for block_id in current_ids if block_id not in prior_set
+        )
+        table.restore_blocks(list(prior_block_ids), prior_reserved_tokens)
+        if private_new_ids:
+            self.block_allocator.free(list(private_new_ids))
+        _ = cow_block_ids
+        _ = current_set
+        if not prior_table_existed:
+            self._sequence_tables.pop(seq_id, None)
+
     def append_tokens(self, seq_id: int, num_new_tokens: int) -> None:
         if num_new_tokens < 0:
             raise ValueError(
                 f"num_new_tokens must be >= 0, got {num_new_tokens}"
             )
-        block_table = self._require_sequence(seq_id)
-        for _ in range(num_new_tokens):
-            block_table.append_token()
+        current = self.get_num_reserved_tokens(seq_id)
+        self.ensure_sequence_capacity(seq_id, current + num_new_tokens)
 
     def truncate_tokens(self, seq_id: int, new_len: int) -> None:
         """Roll a sequence back to ``new_len`` tokens, freeing tail blocks.
