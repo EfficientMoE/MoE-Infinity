@@ -189,6 +189,53 @@ class DistributedExpertExecutor:
             )
         return fired
 
+    def _can_use_gpu_only_routing(self, router_mask) -> bool:
+        if not self._gpu_only_expert_routing:
+            return False
+        if not torch.is_tensor(router_mask) or not router_mask.is_cuda:
+            return False
+        if not hasattr(self.expert_dispatcher, "dispatch_experts"):
+            return False
+        if not hasattr(self.expert_dispatcher, "take_last_active_experts"):
+            return False
+        route_ahead_ctx, _ = _load_route_ahead_impl()
+        if route_ahead_ctx.is_active():
+            return False
+        return True
+
+    def _dispatch_eager_local(self, layer_id, router_mask, num_expert):
+        expert_count = (
+            torch.sum(router_mask.view((-1, num_expert)), dim=0)
+            .cpu()
+            .numpy()
+            .flatten()
+        )
+        expert_list = (
+            np.arange(num_expert).astype(int)[expert_count > 0].tolist()
+        )
+        self.expert_dispatcher.set_expected_queue(len(expert_list))
+        total_gpus = torch.cuda.device_count()
+        for expert_id in expert_list:
+            self.expert_dispatcher.enqueue_expert(
+                layer_id, expert_id, expert_id % total_gpus, False
+            )
+        self.expert_dispatcher.notify_fetch_start()
+        return expert_list
+
+    def get_gpu_routing_stats(self):
+        stats = {
+            "route_batches": 0,
+            "route_failures": 0,
+            "last_active_experts": 0,
+            "last_route_handoff_us": 0,
+            "completion_events_retired": 0,
+        }
+        getter = getattr(self.expert_dispatcher, "get_routing_stats", None)
+        if getter is not None:
+            stats.update({key: int(value) for key, value in getter().items()})
+        stats["fallback_count"] = int(self._gpu_route_fallback_count)
+        return stats
+
     def dispatch_local(
         self,
         layer_id,
@@ -208,22 +255,17 @@ class DistributedExpertExecutor:
         with routing_nvtx_ctx:
             with routing_profiler_ctx:
                 num_expert = router_mask.shape[-1]
-                expert_count = (
-                    torch.sum(router_mask.view((-1, num_expert)), dim=0)
-                    .cpu()
-                    .numpy()
-                    .flatten()
+                native_requested = bool(
+                    self._gpu_only_expert_routing
+                    and torch.is_tensor(router_mask)
+                    and router_mask.is_cuda
                 )
-
-                expert_list = (
-                    np.arange(num_expert).astype(int)[expert_count > 0].tolist()
-                )
-                expected_wait_cnt = len(expert_list)
+                use_native_routing = self._can_use_gpu_only_routing(router_mask)
+                expert_list = None
 
         self.expert_dispatcher.set_inputs(
             hidden_states, router_mask.bool(), router_weights
         )
-        self.expert_dispatcher.set_expected_queue(expected_wait_cnt)
 
         # Route-ahead pin + enqueue must precede every enqueue_expert below
         # (A0 section 2). Inactive context: no-op, legacy flow unchanged.
@@ -239,13 +281,34 @@ class DistributedExpertExecutor:
         )
         with dispatch_nvtx_ctx:
             with dispatch_profiler_ctx:
-                total_gpus = torch.cuda.device_count()
-                for expert_id in expert_list:
-                    gpu_id = expert_id % total_gpus
-                    self.expert_dispatcher.enqueue_expert(
-                        layer_id, expert_id, gpu_id, False
-                    )
-        self.expert_dispatcher.notify_fetch_start()
+                if use_native_routing:
+                    with _nvtx_ctx("gpu_route_submit"):
+                        with (
+                            profiler.time(
+                                "gpu_route_submit", layer=layer_id, expert=-1
+                            )
+                            if profiler is not None
+                            else nullcontext()
+                        ):
+                            self.expert_dispatcher.dispatch_experts(layer_id)
+                else:
+                    if native_requested:
+                        self._gpu_route_fallback_count += 1
+                    with _nvtx_ctx("gpu_route_fallback"):
+                        with (
+                            profiler.time(
+                                "gpu_route_fallback",
+                                layer=layer_id,
+                                expert=-1,
+                            )
+                            if profiler is not None
+                            else nullcontext()
+                        ):
+                            expert_list = self._dispatch_eager_local(
+                                layer_id, router_mask, num_expert
+                            )
+
+        self._last_dispatch_used_native_routing = use_native_routing
 
         if prefetcher is None:
             prefetcher = self.prefetcher
@@ -282,12 +345,22 @@ class DistributedExpertExecutor:
         )
         with wait_nvtx_ctx:
             with wait_profiler_ctx:
-                result = self.expert_dispatcher.wait_expert()
+                completion_profiler_ctx = (
+                    profiler.time("expert_completion_handoff", expert=-1)
+                    if profiler is not None
+                    else nullcontext()
+                )
+                with completion_profiler_ctx:
+                    result = self.expert_dispatcher.wait_expert()
 
         pending = getattr(self, "_pending_prefetch", None)
         if pending is not None:
             prefetcher, layer_id, expert_list, router_logits = pending
             self._pending_prefetch = None
+            if expert_list is None and self._last_dispatch_used_native_routing:
+                expert_list = list(
+                    self.expert_dispatcher.take_last_active_experts()
+                )
             if prefetcher is not None:
                 prefetcher.correct_prefetch(layer_id + 1, expert_list)
             if router_logits is not None:
