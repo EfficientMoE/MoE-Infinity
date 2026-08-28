@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import torch
 
 from moe_infinity.runtime import flashinfer_utils
+from moe_infinity.serving.prefix_contract import PrefixLease
 
 if TYPE_CHECKING:
     from moe_infinity.runtime.attention_backend import (
@@ -50,6 +51,24 @@ class _FlashinferModuleLike(Protocol):
     BatchDecodeWithPagedKVCacheWrapper: Callable[
         [torch.Tensor, str], _FlashinferDecodeWrapperLike
     ]
+
+
+@dataclass(frozen=True)
+class SequenceAllocationPlan:
+    seq_id: int
+    total_tokens: int
+    prefix_tokens: int
+    pinned_block_ids: list[int]
+
+
+@dataclass
+class GroupAllocationReceipt:
+    owner: object
+    seq_ids: list[int]
+    new_block_ids: list[int]
+    staged_tables: "dict[int, BlockTable]"
+    leases: tuple[PrefixLease, ...]
+    state: str = "prepared"
 
 
 @dataclass
@@ -344,6 +363,110 @@ class PagedKVCache:
         except Exception:
             self.block_allocator.release([new])
             raise
+
+    def has_sequence(self, seq_id: int) -> bool:
+        return seq_id in self._sequence_tables
+
+    def prepare_group(
+        self,
+        plans: list[SequenceAllocationPlan],
+        leases: list[PrefixLease],
+    ) -> GroupAllocationReceipt:
+        if len(plans) != len(leases):
+            raise ValueError("one prefix lease is required per sequence plan")
+        seq_ids = [plan.seq_id for plan in plans]
+        if len(set(seq_ids)) != len(seq_ids) or any(
+            seq_id in self._sequence_tables for seq_id in seq_ids
+        ):
+            raise ValueError(
+                "group sequence ids must be unique and unallocated"
+            )
+        suffix_counts: list[int] = []
+        for plan in plans:
+            if plan.prefix_tokens < 0 or plan.prefix_tokens > plan.total_tokens:
+                raise ValueError("invalid pinned prefix length")
+            if plan.prefix_tokens % self.block_size != 0:
+                raise ValueError("pinned prefixes must end on a block boundary")
+            if len(plan.pinned_block_ids) != plan.prefix_tokens // (
+                self.block_size
+            ):
+                raise ValueError(
+                    "pinned block count does not match prefix length"
+                )
+            if any(
+                self.block_allocator.ref_count(block_id) <= 0
+                for block_id in plan.pinned_block_ids
+            ):
+                raise ValueError("pinned block lost its lease reference")
+            suffix = plan.total_tokens - plan.prefix_tokens
+            suffix_counts.append(
+                (suffix + self.block_size - 1) // self.block_size
+            )
+
+        owner = object()
+        new_ids: list[int] = []
+        staged: dict[int, BlockTable] = {}
+        try:
+            for plan, lease in zip(plans, leases):
+                match = lease.prepare_adoption(owner)
+                if match.num_tokens != plan.prefix_tokens or (
+                    match.block_ids != tuple(plan.pinned_block_ids)
+                ):
+                    raise ValueError(
+                        "lease match does not match sequence allocation plan"
+                    )
+            new_ids = self.block_allocator.allocate(sum(suffix_counts))
+            cursor = 0
+            for plan, count in zip(plans, suffix_counts):
+                owned = new_ids[cursor : cursor + count]
+                cursor += count
+                table = BlockTable(self.block_allocator)
+                table.restore_blocks(
+                    [*plan.pinned_block_ids, *owned], plan.total_tokens
+                )
+                staged[plan.seq_id] = table
+            return GroupAllocationReceipt(
+                owner, list(seq_ids), list(new_ids), staged, tuple(leases)
+            )
+        except Exception:
+            if new_ids:
+                self.block_allocator.release(new_ids)
+            for lease in reversed(leases):
+                if lease.state == "prepared":
+                    lease.abort(owner)
+                elif lease.state == "open":
+                    lease.abort()
+            raise
+
+    def commit_group(self, receipt: GroupAllocationReceipt) -> None:
+        if receipt.state != "prepared":
+            raise RuntimeError("group allocation receipt is not prepared")
+        if any(
+            not lease.is_prepared_for(receipt.owner) for lease in receipt.leases
+        ):
+            raise RuntimeError(
+                "all group leases must be prepared before commit"
+            )
+        if any(seq_id in self._sequence_tables for seq_id in receipt.seq_ids):
+            raise RuntimeError("group sequence became allocated before commit")
+        for lease in receipt.leases:
+            lease.commit_adoption(receipt.owner)
+        self._sequence_tables.update(receipt.staged_tables)
+        receipt.state = "committed"
+
+    def abort_group(self, receipt: GroupAllocationReceipt) -> None:
+        if receipt.state != "prepared":
+            raise RuntimeError("only a prepared group may be aborted")
+        for seq_id in receipt.seq_ids:
+            _ = self._sequence_tables.pop(seq_id, None)
+        if receipt.new_block_ids:
+            self.block_allocator.release(list(receipt.new_block_ids))
+        for lease in reversed(receipt.leases):
+            if lease.state == "prepared":
+                lease.abort(receipt.owner)
+            elif lease.state == "open":
+                lease.abort()
+        receipt.state = "aborted"
 
     def allocate_sequence(self, seq_id: int, num_tokens: int) -> None:
         if seq_id in self._sequence_tables:

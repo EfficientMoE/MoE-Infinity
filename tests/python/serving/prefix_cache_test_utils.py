@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 import dataclasses
+import sys as _sys
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import torch
+
+for _stale in [
+    name
+    for name in list(_sys.modules)
+    if name.startswith("moe_infinity.serving")
+    or name.startswith("moe_infinity.runtime")
+]:
+    del _sys.modules[_stale]
 
 from moe_infinity.runtime.attention_backend import (
     LayeredPagedKVPayload,
@@ -11,22 +21,40 @@ from moe_infinity.runtime.attention_backend import (
     PagedAttentionBackend,
 )
 from moe_infinity.runtime.attention_types import KVCacheSpec
-from moe_infinity.serving.kv_cache import PagedKVCache
+from moe_infinity.serving.kv_cache import PagedKVCache, SequenceAllocationPlan
 from moe_infinity.serving.model_runner import ModelRunner
 from moe_infinity.serving.prefix_cache import CacheNamespace, PrefixCache
 from moe_infinity.serving.prefix_contract import PrefixLease, PrefixMatch
+from moe_infinity.serving.scheduler import Scheduler
+from moe_infinity.serving.sequence import (
+    SamplingParams,
+    SequenceData,
+    SequenceGroup,
+    SequenceStatus,
+)
+
+SHARED = list(range(8))
 
 __all__ = [
+    "SHARED",
     "CacheNamespace",
     "PrefixCache",
     "PrefixLease",
     "PrefixMatch",
     "RecordingLayeredPagedKVStore",
+    "RecordingPrefixLeaseProvider",
     "RefRecorder",
+    "SamplingParams",
+    "SequenceAllocationPlan",
+    "SequenceData",
+    "SequenceGroup",
+    "SequenceStatus",
     "make_cache",
+    "make_group",
     "make_namespace",
     "make_paged_backend",
     "make_qwen_runner",
+    "make_seeded_scheduler",
 ]
 
 
@@ -179,3 +207,73 @@ def make_qwen_runner(
         get_attention_backend=lambda: backend, expert_layer_modules=[]
     )
     return ModelRunner(model, owner, device=torch.device("cpu"))
+
+
+class RecordingPrefixLeaseProvider:
+    def __init__(self, cache: PrefixCache) -> None:
+        self.cache = cache
+        self.events: list[str] = []
+
+    @property
+    def open_leases(self) -> int:
+        return self.cache.open_leases
+
+    def acquire_prefix_lease(
+        self,
+        namespace: CacheNamespace,
+        token_ids: list[int],
+        max_prefix_tokens: int,
+    ) -> PrefixLease:
+        self.events.append(f"pin:{token_ids[-1]}")
+        return self.cache.acquire_prefix_lease(
+            namespace, token_ids, max_prefix_tokens
+        )
+
+    def evict_until(self, predicate: Callable[[], bool]) -> None:
+        self.events.append("evict")
+        self.cache.evict_until(predicate)
+
+
+def make_group(
+    request_id: str, rows: list[tuple[int, list[int]]]
+) -> SequenceGroup:
+    return SequenceGroup(
+        request_id=request_id,
+        sequences=[
+            SequenceData(
+                seq_id=seq_id,
+                prompt_token_ids=tokens,
+                sampling_params=SamplingParams(),
+            )
+            for seq_id, tokens in rows
+        ],
+    )
+
+
+def make_seeded_scheduler(
+    *, num_blocks: int, max_batch_size: int
+) -> tuple[
+    Scheduler, PagedKVCache, RecordingPrefixLeaseProvider, CacheNamespace
+]:
+    store = RecordingLayeredPagedKVStore(num_blocks=num_blocks)
+    cache = make_cache(store=store, num_blocks=num_blocks)
+    namespace = make_namespace(num_layers=3)
+    prefix = PrefixCache(
+        block_size=4,
+        max_entries=8,
+        on_retain=cache.block_allocator.retain,
+        on_release=cache.block_allocator.release,
+    )
+    cache.allocate_sequence(999, 9)
+    seed_blocks = cache.get_block_table(999)
+    prefix.insert(namespace, SHARED + [99], seed_blocks, committed_tokens=8)
+    cache.free_sequence(999)
+    provider = RecordingPrefixLeaseProvider(prefix)
+    scheduler = Scheduler(
+        cache,
+        max_batch_size=max_batch_size,
+        max_tokens_per_step=64,
+        prefix_lease_provider=provider,
+        cache_namespace=namespace,
+    )
+    return scheduler, cache, provider, namespace

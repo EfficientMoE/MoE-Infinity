@@ -94,6 +94,7 @@ class PrefixCache:
         self._digest_buckets: dict[str, list[EntryId]] = {}
         self._lru: OrderedDict[EntryId, None] = OrderedDict()
         self._next_entry_id: EntryId = 1
+        self._leased_entry_counts: dict[EntryId, int] = {}
 
         self._hits = 0
         self._misses = 0
@@ -231,35 +232,68 @@ class PrefixCache:
             self._hits += 1
             self._on_retain(list(matched_block_ids))
             self._open_leases += 1
+            for entry_id in matched_entry_ids:
+                self._leased_entry_counts[entry_id] = (
+                    self._leased_entry_counts.get(entry_id, 0) + 1
+                )
             match = PrefixMatch(
                 num_tokens=len(matched_block_ids) * self.block_size,
                 block_ids=tuple(matched_block_ids),
                 entry_ids=tuple(matched_entry_ids),
             )
+            leased_entry_ids = tuple(matched_entry_ids)
             return PrefixLease(
                 match,
                 self._lease_release,
-                self._lease_terminal,
+                lambda: self._lease_terminal(leased_entry_ids),
             )
 
     def _lease_release(self, block_ids: list[int]) -> None:
         with self._lock:
             self._on_release(list(block_ids))
 
-    def _lease_terminal(self) -> None:
+    def _lease_terminal(self, entry_ids: tuple[int, ...]) -> None:
         with self._lock:
             self._open_leases -= 1
+            for entry_id in entry_ids:
+                count = self._leased_entry_counts.get(entry_id, 0)
+                if count <= 1:
+                    self._leased_entry_counts.pop(entry_id, None)
+                else:
+                    self._leased_entry_counts[entry_id] = count - 1
 
     def evict_until(self, predicate: Callable[[], bool]) -> None:
         with self._lock:
-            while not predicate() and self._lru:
-                oldest_entry_id = next(iter(self._lru))
-                self._remove_subtree(oldest_entry_id)
+            while not predicate():
+                victim = self._next_evictable_entry()
+                if victim is None:
+                    break
+                self._remove_subtree(victim)
 
     def _evict_to_capacity(self) -> None:
-        while len(self._entries) > self.max_entries and self._lru:
-            oldest_entry_id = next(iter(self._lru))
-            self._remove_subtree(oldest_entry_id)
+        while len(self._entries) > self.max_entries:
+            victim = self._next_evictable_entry()
+            if victim is None:
+                break
+            self._remove_subtree(victim)
+
+    def _next_evictable_entry(self) -> EntryId | None:
+        for entry_id in self._lru:
+            if self._subtree_is_leased(entry_id):
+                continue
+            return entry_id
+        return None
+
+    def _subtree_is_leased(self, entry_id: EntryId) -> bool:
+        if self._leased_entry_counts.get(entry_id, 0) > 0:
+            return True
+        entry = self._entries.get(entry_id)
+        if entry is None:
+            return False
+        return any(
+            self._subtree_is_leased(child_id)
+            for child_id in entry.child_entry_ids
+        )
 
     def _remove_subtree(self, entry_id: EntryId) -> None:
         entry = self._entries.get(entry_id)
