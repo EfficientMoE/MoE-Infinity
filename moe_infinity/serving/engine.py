@@ -7,7 +7,12 @@ from typing import Callable, Optional, Protocol, cast
 
 import torch
 
-from .batch import BatchBuilder, BatchMetadata, split_prefill_decode_batch
+from .batch import (
+    BatchBuilder,
+    BatchMetadata,
+    SchedulerOutput,
+    split_prefill_decode_batch,
+)
 from .kv_cache import PagedKVCache
 from .memory_manager import MemoryManager
 from .model_runner import ModelRunner
@@ -147,6 +152,13 @@ class ContinuousBatchingEngine:
             max_tokens_per_step=self._get_int_config(
                 "max_tokens_per_step", 2048
             ),
+            enable_chunked_prefill=bool(
+                self.config.get("enable_chunked_prefill", False)
+            ),
+            prefill_chunk_size=self._get_int_config("prefill_chunk_size", 512),
+            prefill_starvation_threshold_steps=self._get_int_config(
+                "prefill_starvation_threshold_steps", 8
+            ),
             verify_token_budget=self._get_optional_int_config(
                 "verify_token_budget"
             ),
@@ -167,6 +179,17 @@ class ContinuousBatchingEngine:
         self._verify_scheduling_enabled = (
             self.scheduler.verify_scheduling_enabled
         )
+
+        self._bind_layered_paged_kv_store()
+        paged_chunking = self.model_runner.supports_chunked_prefill()
+        self.scheduler.set_chunked_prefill_runtime_enabled(paged_chunking)
+        self._chunked_prefill_fallback_reason = (
+            None
+            if self.scheduler.chunked_prefill_enabled
+            or not self.scheduler.chunked_prefill_requested
+            else self.model_runner.chunked_prefill_unavailable_reason()
+        )
+        self._num_prefill_chunks = 0
 
         self._next_seq_id = 0
         self._sequences: dict[int, SequenceData] = {}
@@ -236,17 +259,39 @@ class ContinuousBatchingEngine:
                 "scheduler produced an empty batch; empty prompts are not supported"
             )
 
-        if self._can_delegate_speculative(batch):
+        if self._can_delegate_speculative(batch, scheduler_output):
             if self._can_drive_verify_rounds():
                 return self._step_speculative_session(batch)
             return self._step_speculative(batch)
 
-        logits = self._execute_batch(batch)
-        last_token_logits = self._extract_last_token_logits(logits, batch)
-        sampler_output = self.sampler.sample(
-            last_token_logits,
-            batch.sampling_params,
-        )
+        transaction_id = scheduler_output.prefill_transaction_id
+        sampled_indices = self._sampled_row_indices(batch)
+        try:
+            logits = self._execute_batch(batch)
+            sampler_output = None
+            sampled_logits = None
+            if sampled_indices:
+                sampled_logits = self._extract_last_token_logits(
+                    logits, batch, sampled_indices
+                )
+                sampled_params = [
+                    batch.sampling_params[index] for index in sampled_indices
+                ]
+                sampler_output = self.sampler.sample(
+                    sampled_logits, sampled_params
+                )
+        except BaseException:
+            self.scheduler.rollback_prefill_step(transaction_id)
+            raise
+
+        if transaction_id is not None:
+            self.scheduler.commit_prefill_step(transaction_id)
+        self._num_prefill_chunks += len(scheduler_output.prefill_chunks)
+
+        if sampler_output is None:
+            self._num_steps += 1
+            return []
+
         next_token_ids = sampler_output.token_ids
 
         outputs: list[RequestOutput] = []
@@ -254,11 +299,12 @@ class ContinuousBatchingEngine:
         new_decode_seq_ids: list[int] = []
         touched_request_ids: set[str] = set()
 
-        for index, seq_id in enumerate(batch.seq_ids):
+        for sampled_pos, index in enumerate(sampled_indices):
+            seq_id = batch.seq_ids[index]
             sequence = self._sequences[seq_id]
             request_id = self._sequence_to_request_id[seq_id]
             touched_request_ids.add(request_id)
-            token_id = int(next_token_ids[index].item())
+            token_id = int(next_token_ids[sampled_pos].item())
 
             sequence.append_output_token(token_id)
             self._request_outputs[request_id][seq_id].append(token_id)
@@ -280,12 +326,12 @@ class ContinuousBatchingEngine:
                     finished=finished,
                     finish_reason=finish_reason,
                     token_logprob=(
-                        sampler_output.token_logprobs[index]
+                        sampler_output.token_logprobs[sampled_pos]
                         if sampler_output.token_logprobs is not None
                         else None
                     ),
                     top_logprobs=(
-                        sampler_output.top_logprobs[index]
+                        sampler_output.top_logprobs[sampled_pos]
                         if sampler_output.top_logprobs is not None
                         else None
                     ),
@@ -317,17 +363,43 @@ class ContinuousBatchingEngine:
 
         return outputs
 
-    def _can_delegate_speculative(self, batch: BatchMetadata) -> bool:
+    def _sampled_row_indices(self, batch: BatchMetadata) -> list[int]:
+        indices: list[int] = []
+        for index, is_prefill in enumerate(batch.is_prefill):
+            if not is_prefill:
+                indices.append(index)
+            elif (
+                index < len(batch.prefill_is_terminal)
+                and batch.prefill_is_terminal[index]
+            ):
+                indices.append(index)
+        return indices
+
+    def _can_delegate_speculative(
+        self,
+        batch: BatchMetadata,
+        scheduler_output: SchedulerOutput | None = None,
+    ) -> bool:
         """Whether this fresh singleton request can use the proven sync loop.
 
         DFlash owns a separate ``DynamicCache`` here. The paged serving cache is
         used only for admission accounting and freed when the delegated request
         completes. Mixed batches, resumed decode rows, sampling, penalties, and
-        logprob requests stay on the existing serving path unchanged.
+        logprob requests stay on the existing serving path unchanged. A
+        partially-prefetched chunk is never delegated to DFlash mid-prompt.
         """
         if self.speculative_draft is None or len(batch.seq_ids) != 1:
             return False
         if batch.is_prefill != [True]:
+            return False
+
+        if scheduler_output is not None:
+            chunk = scheduler_output.prefill_chunks.get(batch.seq_ids[0])
+            if chunk is not None and (
+                chunk.start_pos != 0 or not chunk.is_terminal
+            ):
+                return False
+        if batch.context_lengths != [0] or batch.prefill_is_terminal != [True]:
             return False
 
         sequence = self._sequences[batch.seq_ids[0]]
@@ -606,8 +678,9 @@ class ContinuousBatchingEngine:
 
     def run_until_done(self) -> dict[str, list[int] | list[list[int]]]:
         while self.has_pending_requests():
+            steps_before = self._num_steps
             outputs = self.step()
-            if outputs:
+            if outputs or self._num_steps > steps_before:
                 continue
 
             pending_request_ids = self._pending_request_ids()
@@ -678,6 +751,14 @@ class ContinuousBatchingEngine:
             "kv_cache_free_blocks": self.kv_cache.block_allocator.num_free_blocks,
             "sequence_status_counts": status_counts,
             "memory": self.memory_manager.report(),
+            "num_prefill_chunks": self._num_prefill_chunks,
+            "chunked_prefill_requested": (
+                self.scheduler.chunked_prefill_requested
+            ),
+            "chunked_prefill_active": self.scheduler.chunked_prefill_enabled,
+            "chunked_prefill_fallback_reason": (
+                self._chunked_prefill_fallback_reason
+            ),
         }
 
     def get_config(self) -> dict[str, object]:
@@ -736,6 +817,35 @@ class ContinuousBatchingEngine:
         max_tokens_per_step = self._get_int_config("max_tokens_per_step", 1)
         return max(1, ceil(max_tokens_per_step / max(1, block_size)))
 
+    def _bind_layered_paged_kv_store(self) -> None:
+        from moe_infinity.runtime.attention_backend import (
+            LayerRegistration,
+            PagedAttentionBackend,
+        )
+
+        backend = self.model_runner.get_attention_backend()
+        if not isinstance(backend, PagedAttentionBackend):
+            return
+        try:
+            modules = self.model_runner._get_qwen3_paged_attention_modules()
+            backend.register_layers(
+                [
+                    LayerRegistration(int(module.layer_idx), id(module))
+                    for module in modules
+                ]
+            )
+            if (
+                backend.num_gpu_blocks >= self.kv_cache.num_blocks
+                and backend.block_store.physical_capacity
+                >= self.kv_cache.num_blocks
+            ):
+                self.kv_cache.set_block_store(
+                    backend.block_store,
+                    logical_capacity=self.kv_cache.num_blocks,
+                )
+        except (ValueError, RuntimeError):
+            return
+
     def _execute_batch(self, batch: BatchMetadata) -> torch.Tensor:
         has_prefill = any(batch.is_prefill)
         has_decode = any(not p for p in batch.is_prefill)
@@ -767,9 +877,16 @@ class ContinuousBatchingEngine:
     def _extract_last_token_logits(
         logits: torch.Tensor,
         batch: BatchMetadata,
+        row_indices: list[int] | None = None,
     ) -> torch.Tensor:
+        selected = (
+            list(range(len(batch.seq_lengths)))
+            if row_indices is None
+            else row_indices
+        )
         last_token_indices: list[int] = []
-        for index, seq_length in enumerate(batch.seq_lengths):
+        for index in selected:
+            seq_length = batch.seq_lengths[index]
             if seq_length <= 0:
                 raise RuntimeError(
                     "scheduled sequence has no tokens; empty prompts are not supported"

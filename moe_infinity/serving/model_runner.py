@@ -300,6 +300,7 @@ class ModelRunner:
         paged_class_names = {
             "DeepseekV2PagedAttention",
             "DeepseekV3PagedAttention",
+            "Qwen3PagedAttention",
         }
         classes: list[type[Any]] = []
         seen: set[type[Any]] = set()
@@ -326,6 +327,67 @@ class ModelRunner:
             classes.append(cls)
 
         return classes
+
+    def _get_qwen3_paged_attention_modules(self) -> list[Any]:
+        modules_fn = getattr(self.model, "modules", None)
+        if not callable(modules_fn):
+            return []
+        modules = modules_fn()
+        if not isinstance(modules, Iterable):
+            return []
+        found: list[Any] = []
+        for module in modules:
+            if module.__class__.__name__ == "Qwen3PagedAttention" and hasattr(
+                module, "layer_idx"
+            ):
+                found.append(module)
+        return found
+
+    def get_attention_backend(self) -> object | None:
+        return self._get_attention_backend()
+
+    def supports_chunked_prefill(self) -> bool:
+        from moe_infinity.runtime.attention_backend import (
+            LayeredPagedKVStore,
+            PagedAttentionBackend,
+        )
+
+        backend = self._get_attention_backend()
+        qwen_modules = self._get_qwen3_paged_attention_modules()
+        expected_layers = int(
+            getattr(self.model.config, "num_hidden_layers", 0)
+        )
+        layer_indices = [int(module.layer_idx) for module in qwen_modules]
+        return bool(
+            qwen_modules
+            and sorted(layer_indices) == list(range(expected_layers))
+            and len(set(layer_indices)) == len(layer_indices)
+            and isinstance(backend, PagedAttentionBackend)
+            and isinstance(backend.block_store, LayeredPagedKVStore)
+            and backend.supports_chunked_prefill()
+        )
+
+    def chunked_prefill_unavailable_reason(self) -> str:
+        from moe_infinity.runtime.attention_backend import (
+            LayeredPagedKVStore,
+            PagedAttentionBackend,
+        )
+
+        qwen_modules = self._get_qwen3_paged_attention_modules()
+        expected_layers = int(
+            getattr(self.model.config, "num_hidden_layers", 0)
+        )
+        indices = [int(module.layer_idx) for module in qwen_modules]
+        if not qwen_modules or sorted(indices) != list(range(expected_layers)):
+            return "incomplete_qwen3_paged_layer_registry"
+        backend = self._get_attention_backend()
+        if not isinstance(backend, PagedAttentionBackend) or not isinstance(
+            backend.block_store, LayeredPagedKVStore
+        ):
+            return "layered_paged_kv_store_unavailable"
+        if not backend.supports_chunked_prefill():
+            return "paged_backend_lacks_chunk_history"
+        return "none"
 
     def _resolve_vocab_size(self) -> int:
         config = getattr(self.model, "config", None)

@@ -288,7 +288,10 @@ class PagedKVCache:
         block_table.ensure_num_tokens(total_tokens)
 
     def get_num_reserved_tokens(self, seq_id: int) -> int:
-        return self._require_sequence(seq_id).num_computed_tokens()
+        block_table = self._sequence_tables.get(seq_id)
+        if block_table is None:
+            return 0
+        return block_table.num_computed_tokens()
 
     def ensure_writable_range(
         self, seq_id: int, start: int, end: int
