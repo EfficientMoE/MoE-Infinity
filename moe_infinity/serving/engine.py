@@ -120,8 +120,29 @@ class ContinuousBatchingEngine:
             head_dim=head_dim,
         )
 
+        self.model_runner = ModelRunner(model, engine, device=self.device)
+
+        self.prefix_cache: PrefixCache | None = None
+        self.cache_namespace: CacheNamespace | None = None
+        self._prefix_cache_enabled = self._get_bool_config(
+            "enable_prefix_caching", False
+        )
+        self._prefix_cache_disabled_reason = "prefix-caching-disabled"
+        self._runtime_epoch = 0
+        self._prefix_cache_invalidations = 0
+
+        capability = self._resolve_prefix_capability()
+        physical_blocks = (
+            capability.block_store.num_blocks
+            if capability is not None
+            and capability.supported
+            and capability.block_store is not None
+            else num_blocks
+        )
+        logical_num_blocks = min(num_blocks, physical_blocks)
+
         self.kv_cache = PagedKVCache(
-            num_blocks=num_blocks,
+            num_blocks=logical_num_blocks,
             block_size=block_size,
             num_layers=num_layers,
             num_heads=num_kv_heads,
@@ -129,11 +150,18 @@ class ContinuousBatchingEngine:
             dtype=self.dtype,
             device=self.device,
         )
+
+        provider = self._maybe_bind_prefix_cache(capability)
+
         self.scheduler = Scheduler(
             self.kv_cache,
             max_batch_size=self._get_int_config("max_batch_size", 32),
             max_tokens_per_step=self._get_int_config(
                 "max_tokens_per_step", 2048
+            ),
+            prefix_lease_provider=provider,
+            cache_namespace=(
+                self.cache_namespace if provider is not None else None
             ),
             verify_token_budget=self._get_optional_int_config(
                 "verify_token_budget"
@@ -148,16 +176,12 @@ class ContinuousBatchingEngine:
                 "verify_expert_byte_deficit_cap"
             ),
         )
-        self.model_runner = ModelRunner(model, engine, device=self.device)
         self.sampler = Sampler()
         self.batch_builder = BatchBuilder()
         self.speculative_draft = speculative_draft
         self._verify_scheduling_enabled = (
             self.scheduler.verify_scheduling_enabled
         )
-        self.prefix_cache: PrefixCache | None = None
-        self.cache_namespace: CacheNamespace | None = None
-        self._prefix_cache_disabled_reason: str = "prefix-caching-disabled"
 
         self._next_seq_id = 0
         self._sequences: dict[int, SequenceData] = {}
@@ -658,12 +682,106 @@ class ContinuousBatchingEngine:
     def has_pending_requests(self) -> bool:
         return bool(self._pending_request_ids())
 
+    def _resolve_prefix_capability(self) -> object | None:
+        getter = getattr(self.model_runner, "get_prefix_reuse_capability", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _build_cache_namespace(self) -> CacheNamespace:
+        return CacheNamespace(
+            model_id=str(self.config.get("model_id", "")),
+            model_revision=str(self.config.get("model_revision", "")),
+            tokenizer_id=str(self.config.get("tokenizer_id", "")),
+            tokenizer_revision=str(self.config.get("tokenizer_revision", "")),
+            tokenizer_config_digest=str(
+                self.config.get("tokenizer_config_digest", "")
+            ),
+            adapter_id=None,
+            adapter_revision=None,
+            dtype=str(self.dtype).removeprefix("torch."),
+            block_size=self.kv_cache.block_size,
+            num_layers=self.kv_cache.num_layers,
+            num_kv_heads=self.kv_cache.num_heads,
+            head_dim=self.kv_cache.head_dim,
+            attention_backend=str(
+                self.config.get("attention_backend", "flashinfer-paged")
+            ),
+            attention_layout=str(self.config.get("attention_layout", "NHD")),
+            position_config_digest=str(
+                self.config.get("position_config_digest", "")
+            ),
+            runtime_epoch=f"epoch-{self._runtime_epoch}",
+        )
+
+    def _maybe_bind_prefix_cache(
+        self, capability: object | None
+    ) -> object | None:
+        if not self._prefix_cache_enabled:
+            self._prefix_cache_disabled_reason = "prefix-caching-disabled"
+            return None
+        if capability is None or not getattr(capability, "supported", False):
+            self._prefix_cache_disabled_reason = (
+                getattr(capability, "reason", None)
+                or "prefix-aware-prefill-unavailable"
+            )
+            return None
+        backend = getattr(capability, "backend", None)
+        store = getattr(capability, "block_store", None)
+        if backend is None or store is None:
+            self._prefix_cache_disabled_reason = (
+                "prefix-aware-prefill-unavailable"
+            )
+            return None
+        try:
+            self.kv_cache.set_block_store(store, owner=backend)
+        except (RuntimeError, ValueError):
+            self._prefix_cache_disabled_reason = "kv-store-binding-mismatch"
+            return None
+        self.cache_namespace = self._build_cache_namespace()
+        self.prefix_cache = PrefixCache(
+            block_size=self.kv_cache.block_size,
+            max_entries=self._get_int_config("prefix_cache_max_entries", 1000),
+            on_retain=self.kv_cache.block_allocator.retain,
+            on_release=self.kv_cache.block_allocator.release,
+        )
+        self._prefix_cache_disabled_reason = ""
+        return self.prefix_cache
+
+    def invalidate_prefix_cache(self, reason: str) -> None:
+        _ = reason
+        self._runtime_epoch += 1
+        self._prefix_cache_invalidations += 1
+        if self.prefix_cache is not None:
+            self.cache_namespace = self._build_cache_namespace()
+            self.scheduler.cache_namespace = self.cache_namespace
+
+    def _prefix_cache_stats(self) -> dict[str, object]:
+        active = self.prefix_cache is not None
+        entries = self.prefix_cache.num_entries if active else 0
+        open_leases = self.prefix_cache.open_leases if active else 0
+        return {
+            "prefix_cache_enabled": self._prefix_cache_enabled,
+            "prefix_cache_active": active,
+            "prefix_cache_disabled_reason": (
+                "" if active else self._prefix_cache_disabled_reason
+            ),
+            "prefix_cache_entries": entries,
+            "prefix_cache_open_leases": open_leases,
+            "prefix_cache_invalidations_total": (
+                self._prefix_cache_invalidations
+            ),
+        }
+
     def get_stats(self) -> dict[str, object]:
         status_counts = {status.value: 0 for status in SequenceStatus}
         for sequence in self._sequences.values():
             status_counts[sequence.status.value] += 1
 
-        return {
+        stats: dict[str, object] = {
             "pending_requests": len(self._pending_request_ids()),
             "completed_requests": len(self._completed_request_ids),
             "cancelled_requests": len(self._cancelled_request_ids),
@@ -674,6 +792,8 @@ class ContinuousBatchingEngine:
             "sequence_status_counts": status_counts,
             "memory": self.memory_manager.report(),
         }
+        stats.update(self._prefix_cache_stats())
+        return stats
 
     def get_config(self) -> dict[str, object]:
         config: dict[str, object] = {}
@@ -1051,6 +1171,12 @@ class ContinuousBatchingEngine:
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{key} must be an integer value")
         return value
+
+    def _get_bool_config(self, key: str, default: bool = False) -> bool:
+        value = self.config.get(key, default)
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be a boolean value")
+        return bool(value)
 
 
 __all__ = [
