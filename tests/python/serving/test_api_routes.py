@@ -616,3 +616,19 @@ def test_build_engine_config_rejects_chunk_and_prefix_coenablement() -> None:
         ),
     ):
         srv._build_engine_config(args=args, model=_ConfigurableMockModel())
+
+
+def test_build_engine_config_propagates_chunked_prefill_flags() -> None:
+    args = SimpleNamespace(
+        device_memory_ratio=0.75,
+        kv_cache_ratio=0.25,
+        max_batch_size=8,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=True,
+        prefill_chunk_size=256,
+        prefill_starvation_threshold_steps=4,
+    )
+    config = srv._build_engine_config(args=args, model=_ConfigurableMockModel())
+    assert config["enable_chunked_prefill"] is True
+    assert config["prefill_chunk_size"] == 256
+    assert config["prefill_starvation_threshold_steps"] == 4

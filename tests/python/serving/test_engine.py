@@ -734,3 +734,25 @@ def test_terminal_sampling_exception_rolls_back_and_requeues_chunk(
     assert sequence.output_token_ids == []
     assert engine.kv_cache.get_num_reserved_tokens(0) == 0
     assert engine.scheduler.inflight_prefill_seq_ids == []
+
+
+def test_chunked_prefill_defaults_disabled() -> None:
+    engine = _make_engine()
+    assert engine.scheduler.chunked_prefill_requested is False
+    assert engine.get_config().get("enable_chunked_prefill", False) is False
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("prefill_chunk_size", 0), ("prefill_starvation_threshold_steps", 0)],
+)
+def test_chunked_prefill_config_requires_positive_integers(
+    key: str, value: int
+) -> None:
+    config = _make_config()
+    config["enable_chunked_prefill"] = True
+    config[key] = value
+    with pytest.raises(ValueError, match=key):
+        ContinuousBatchingEngine(
+            model=MockModel(), engine=MockOffloadEngine(), config=config
+        )
