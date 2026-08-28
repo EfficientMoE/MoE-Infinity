@@ -303,6 +303,7 @@ class PagedAttentionBackend:
     _fi_decode: Optional[Any]
     _block_store: Optional[LayeredPagedKVStore]
     _layer_registry: dict[int, int]
+    last_flashinfer_plan: Optional[Any]
 
     def __init__(
         self,
@@ -318,6 +319,7 @@ class PagedAttentionBackend:
         self.device = device
         self._block_store = None
         self._layer_registry = {}
+        self.last_flashinfer_plan = None
 
         x = 8
         self.k_cache = torch.zeros(
@@ -545,12 +547,17 @@ class PagedAttentionBackend:
             AttentionMetadata | RuntimeAttentionMetadata
         ] = None,
         layer_idx: int = 0,
+        metadata: Optional[AttentionMetadata | RuntimeAttentionMetadata] = None,
     ) -> torch.Tensor:
         _ = kv_cache
         metadata = (
-            attention_metadata
-            if attention_metadata is not None
-            else attn_metadata
+            metadata
+            if metadata is not None
+            else (
+                attention_metadata
+                if attention_metadata is not None
+                else attn_metadata
+            )
         )
         if metadata is None:
             raise ValueError("attention metadata is required")
@@ -737,28 +744,48 @@ class PagedAttentionBackend:
             and self._fi_kv_cache is not None
         )
 
+    def _resolve_query_and_kv_lengths(
+        self,
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+    ) -> tuple[list[int], list[int]]:
+        lengths = getattr(metadata, "lengths", None)
+        if lengths is not None:
+            query = [int(value) for value in lengths.query_lengths]
+            kv = [int(value) for value in lengths.kv_seq_lengths]
+            return query, kv
+
+        seq_lens = self._get_seq_lens(metadata)
+        if seq_lens is None:
+            raise ValueError(
+                "FlashInfer attention requires block_tables and seq lengths"
+            )
+        kv = [int(value) for value in seq_lens.reshape(-1).tolist()]
+        return list(kv), kv
+
     def _build_flashinfer_metadata(
         self,
         metadata: AttentionMetadata | RuntimeAttentionMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         block_tables = self._get_block_tables(metadata)
-        seq_lens = self._get_seq_lens(metadata)
-        if block_tables is None or seq_lens is None:
+        if block_tables is None:
             raise ValueError(
-                "FlashInfer attention requires block_tables and seq_lens"
+                "FlashInfer attention requires block_tables and seq lengths"
             )
 
+        query_lengths, kv_seq_lengths = self._resolve_query_and_kv_lengths(
+            metadata
+        )
         block_tables_i32 = block_tables.to(self.device, dtype=torch.int32)
-        seq_lens_i32 = seq_lens.to(self.device, dtype=torch.int32).reshape(-1)
-        batch_size = int(seq_lens_i32.shape[0])
+        batch_size = len(kv_seq_lengths)
 
-        qo_indptr = torch.zeros(
-            batch_size + 1,
+        query_offsets_vals = [0]
+        for query_len in query_lengths:
+            query_offsets_vals.append(query_offsets_vals[-1] + query_len)
+        qo_indptr = torch.tensor(
+            query_offsets_vals,
             dtype=torch.int32,
             device=self.device,
         )
-        if batch_size > 0:
-            qo_indptr[1:] = torch.cumsum(seq_lens_i32, dim=0)
 
         block_size = int(self.spec.block_size)
         kv_indptr_vals = [0]
@@ -771,7 +798,7 @@ class PagedAttentionBackend:
         total_pages = 0
 
         for i in range(batch_size):
-            seq_len = int(seq_lens_i32[i].item())
+            seq_len = int(kv_seq_lengths[i])
             num_pages = max((seq_len + block_size - 1) // block_size, 1)
             if num_pages > int(block_tables_i32.shape[1]):
                 raise ValueError(
@@ -804,7 +831,44 @@ class PagedAttentionBackend:
                 dtype=torch.int32,
             )
 
+        self._record_flashinfer_plan(
+            metadata, query_lengths, kv_seq_lengths, kv_indptr, kv_last_page_len
+        )
+
         return qo_indptr, kv_indptr, kv_indices, kv_last_page_len
+
+    def _record_flashinfer_plan(
+        self,
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+        query_lengths: list[int],
+        kv_seq_lengths: list[int],
+        kv_indptr: torch.Tensor,
+        kv_last_page_len: torch.Tensor,
+    ) -> None:
+        from moe_infinity.runtime.attention_types import (
+            FlashInferPlanMetadata,
+            PagedBatchLengths,
+        )
+
+        lengths = getattr(metadata, "lengths", None)
+        if lengths is None:
+            context_lengths = [
+                kv - query for kv, query in zip(kv_seq_lengths, query_lengths)
+            ]
+            query_offsets_vals = [0]
+            for query_len in query_lengths:
+                query_offsets_vals.append(query_offsets_vals[-1] + query_len)
+            lengths = PagedBatchLengths(
+                query_lengths=list(query_lengths),
+                query_offsets=query_offsets_vals,
+                context_lengths=context_lengths,
+                kv_seq_lengths=list(kv_seq_lengths),
+            )
+        self.last_flashinfer_plan = FlashInferPlanMetadata(
+            lengths=lengths,
+            kv_indptr=kv_indptr.detach().clone(),
+            kv_last_page_len=kv_last_page_len.detach().clone(),
+        )
 
     def _call_prefill_plan(
         self,
@@ -932,6 +996,15 @@ class PagedAttentionBackend:
     def _get_seq_lens(
         metadata: AttentionMetadata | RuntimeAttentionMetadata,
     ) -> Optional[torch.Tensor]:
+        lengths = getattr(metadata, "lengths", None)
+        if lengths is not None:
+            kv_seq_lengths = lengths.kv_seq_lengths
+            if isinstance(kv_seq_lengths, torch.Tensor):
+                return kv_seq_lengths
+            return torch.tensor(
+                [int(value) for value in kv_seq_lengths],
+                dtype=torch.int32,
+            )
         seq_lens = getattr(metadata, "seq_lens", None)
         if seq_lens is None:
             return None

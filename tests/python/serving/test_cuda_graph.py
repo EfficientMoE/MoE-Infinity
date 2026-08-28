@@ -53,6 +53,8 @@ _CUDA_GRAPH_MODULE = _load_module(
     ROOT / "moe_infinity" / "serving" / "cuda_graph.py",
 )
 
+from moe_infinity.runtime.attention_types import PagedBatchLengths  # noqa: E402
+
 SamplingParams = _SEQUENCE_MODULE.SamplingParams
 BatchMetadata = _BATCH_MODULE.BatchMetadata
 ModelRunner = _MODEL_RUNNER_MODULE.ModelRunner
@@ -116,11 +118,14 @@ def _make_decode_batch(
     return BatchMetadata(
         seq_ids=list(range(batch_size)),
         input_token_ids=input_token_ids,
-        seq_lengths=[1] * batch_size,
-        context_lengths=context_lengths,
+        lengths=PagedBatchLengths(
+            query_lengths=[1] * batch_size,
+            query_offsets=list(range(batch_size + 1)),
+            context_lengths=context_lengths,
+            kv_seq_lengths=[context_len + 1 for context_len in context_lengths],
+        ),
         is_prefill=[False] * batch_size,
         block_tables=[[0] for _ in range(batch_size)],
-        token_offsets=list(range(batch_size + 1)),
         sampling_params=[SamplingParams() for _ in range(batch_size)],
     )
 
@@ -137,21 +142,27 @@ def test_is_compatible_requires_decode_only_captured_batch() -> None:
     prefill_batch = BatchMetadata(
         seq_ids=[1, 2],
         input_token_ids=[11, 12],
-        seq_lengths=[1, 1],
-        context_lengths=[0, 0],
+        lengths=PagedBatchLengths(
+            query_lengths=[1, 1],
+            query_offsets=[0, 1, 2],
+            context_lengths=[0, 0],
+            kv_seq_lengths=[1, 1],
+        ),
         is_prefill=[True, False],
         block_tables=[[0], [0]],
-        token_offsets=[0, 1, 2],
         sampling_params=[SamplingParams(), SamplingParams()],
     )
     multi_token_batch = BatchMetadata(
         seq_ids=[1],
         input_token_ids=[11, 12],
-        seq_lengths=[2],
-        context_lengths=[0],
+        lengths=PagedBatchLengths(
+            query_lengths=[2],
+            query_offsets=[0, 2],
+            context_lengths=[0],
+            kv_seq_lengths=[2],
+        ),
         is_prefill=[False],
         block_tables=[[0]],
-        token_offsets=[0, 2],
         sampling_params=[SamplingParams()],
     )
 
@@ -184,11 +195,14 @@ def test_replay_empty_batch_returns_empty_logits_without_graph() -> None:
     empty_batch = BatchMetadata(
         seq_ids=[1],
         input_token_ids=[],
-        seq_lengths=[0],
-        context_lengths=[7],
+        lengths=PagedBatchLengths(
+            query_lengths=[0],
+            query_offsets=[0, 0],
+            context_lengths=[7],
+            kv_seq_lengths=[7],
+        ),
         is_prefill=[False],
         block_tables=[[0]],
-        token_offsets=[0, 0],
         sampling_params=[SamplingParams()],
     )
 

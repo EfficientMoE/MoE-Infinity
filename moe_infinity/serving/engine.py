@@ -756,12 +756,13 @@ class ContinuousBatchingEngine:
         batch: BatchMetadata,
     ) -> torch.Tensor:
         last_token_indices: list[int] = []
-        for index, seq_length in enumerate(batch.seq_lengths):
+        query_offsets = batch.query_offsets
+        for index, seq_length in enumerate(batch.query_lengths):
             if seq_length <= 0:
                 raise RuntimeError(
                     "scheduled sequence has no tokens; empty prompts are not supported"
                 )
-            last_token_indices.append(batch.token_offsets[index + 1] - 1)
+            last_token_indices.append(query_offsets[index + 1] - 1)
 
         return logits[last_token_indices]
 
