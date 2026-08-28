@@ -33,6 +33,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device-memory-ratio", type=float, default=0.5)
     p.add_argument("--speculative-prefetch", action="store_true")
     p.add_argument("--speculative-prefetch-overlap", action="store_true")
+    p.add_argument(
+        "--overlap-prefetch-policy",
+        choices=["off", "observe", "enforce"],
+        default="off",
+    )
+    p.add_argument("--overlap-prefetch-ewma-alpha", type=float, default=0.2)
+    p.add_argument("--overlap-prefetch-safety-factor", type=float, default=0.8)
+    p.add_argument("--overlap-prefetch-cold-start-experts", type=int, default=1)
     p.add_argument("--num-threads", type=int, default=1)
     p.add_argument("--output-json", required=True)
     return p.parse_args()
@@ -87,6 +95,14 @@ def main() -> int:
             "device_memory_ratio": args.device_memory_ratio,
             "speculative_prefetch": args.speculative_prefetch,
             "speculative_prefetch_overlap": args.speculative_prefetch_overlap,
+            "overlap_prefetch_policy": args.overlap_prefetch_policy,
+            "overlap_prefetch_ewma_alpha": args.overlap_prefetch_ewma_alpha,
+            "overlap_prefetch_safety_factor": (
+                args.overlap_prefetch_safety_factor
+            ),
+            "overlap_prefetch_cold_start_experts": (
+                args.overlap_prefetch_cold_start_experts
+            ),
             "num_threads": args.num_threads,
         },
     )
@@ -154,6 +170,15 @@ def main() -> int:
     use_width = max(link_width, link_width_after)
     use_gen = max(link_gen, link_gen_after)
 
+    overlap_stats = {}
+    try:
+        prefetcher = m.engine.expert_prefetcher
+        stats_getter = getattr(prefetcher, "overlap_prefetch_stats", None)
+        if callable(stats_getter):
+            overlap_stats = stats_getter()
+    except Exception:
+        overlap_stats = {}
+
     out = {
         "model": args.model,
         "mode": args.mode,
@@ -165,6 +190,8 @@ def main() -> int:
         "device_memory_ratio": args.device_memory_ratio,
         "speculative_prefetch": args.speculative_prefetch,
         "speculative_prefetch_overlap": args.speculative_prefetch_overlap,
+        "overlap_prefetch_policy": args.overlap_prefetch_policy,
+        "overlap_prefetch_stats": overlap_stats,
         "num_threads": args.num_threads,
         "decode_step_times_ns": decode_step_times_ns,
         "decode_step_total_ns": sum(decode_step_times_ns),
