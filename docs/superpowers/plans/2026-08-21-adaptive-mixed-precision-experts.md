@@ -4,9 +4,9 @@
 
 **Goal:** Add an opt-in, deterministic, fixed-HBM adaptive precision policy for general routed experts while preserving every validated GPT-OSS MXFP4, GLM FP8, DeepSeek-V4 FP4, GPTQ, and AWQ path exactly.
 
-**Architecture:** Keep checkpoint/storage format, cached representation format, and execution dtype as three explicit fields. Converter/build candidates are separate from a fingerprint-qualified released allowlist; serving accepts only a manifest whose checkpoint fingerprint, format, converter version, and quality attestation exactly match a released entry. Implementation is rebased after the phase-specific expert policy and extends its sole `core/prefetch/ExpertResidencyManager` authority with `(format, generation)` keys, variant-aware transactions, reservations, workspace, leases, and retirement; `TaskScheduler` and `ExpertDispatcher` remain clients of that one manager. Crash-safe derivative generations are journaled above canonical tensor/file IDs and become visible through one atomic `CURRENT` publication; protected model-specific paths bypass all of this.
+**Architecture:** Keep checkpoint/storage format, cached representation format, and execution dtype as three explicit fields. Converter/build candidates are separate from a fingerprint-qualified released allowlist; serving accepts only a manifest whose checkpoint fingerprint, format, converter version, and quality attestation exactly match a released entry. Task 0 creates the sole `core/prefetch/ExpertResidencyManager` authority and its fixed-size transaction/capacity/lease contract when that exact implementation is absent, then Task 5 extends the same files with `(format, generation)` keys, variant-aware transactions, reservations, workspace, leases, and retirement; `TaskScheduler` and `ExpertDispatcher` remain clients of that one manager. Crash-safe derivative generations are journaled above canonical tensor/file IDs and become visible through one atomic `CURRENT` publication; protected model-specific paths bypass all of this.
 
-**Tech Stack:** Python 3.10+, PyTorch, pytest, GoogleTest, safetensors, C++17, CUDA events/streams, pybind11, phase-policy `ExpertResidencyManager`, existing Archer tensor store/topology, existing FP8/MXFP4/Marlin kernels.
+**Tech Stack:** Python 3.10+, PyTorch, pytest, GoogleTest, safetensors, C++17, CUDA events/streams, pybind11, shared `ExpertResidencyManager`, existing Archer tensor store/topology, existing FP8/MXFP4/Marlin kernels.
 
 ---
 
@@ -16,7 +16,7 @@
 
 - `moe_infinity/runtime/model_offload.py:897-1045` detects packed formats while building the store; `:1008-1024` deliberately keeps GLM routed experts in FP8 and dequantizes non-routed weights; `:1091-1233` creates the native dispatcher and delivers GLM scales.
 - `moe_infinity/runtime/model_offload.py:1369-1505` keeps the high-residency GPT-OSS Python MXFP4 path resident; `:1506-1524` reconstructs GLM scales because they are not currently persisted in Archer; `:1658-1759` registers canonical expert tensor groups.
-- At base `b766f8f`, `core/parallel/expert_dispatcher.cpp:190-266` owns dispatch state, `:341-359` chooses LFU victims, and `:361-586` transfers canonical nodes under `cache_sizes_`; the required phase-policy rebase replaces the enabled path with manager clients before adaptive work starts. `:588-670` contains the protected GLM FP8 and GPT-OSS MXFP4 execution seams.
+- At base `b766f8f`, `core/parallel/expert_dispatcher.cpp:190-266` owns dispatch state, `:341-359` chooses LFU victims, and `:361-586` transfers canonical nodes under `cache_sizes_`; Task 0 introduces the manager-client path before adaptive work starts. `:588-670` contains the protected GLM FP8 and GPT-OSS MXFP4 execution seams.
 - `core/model/model_topology.h:40-82` and `core/model/model_topology.cpp:59-241` own node bytes, devices, pointers, and asynchronous H2D events. `model_topology.cpp:525-729` computes alignment-aware node bytes and preloads sparse host memory.
 - `core/aio/archer_tensor_handle.cpp:57-100` persists dtype, shape, size, partition, and offset in `TensorStorageMeta`; adaptive derivatives therefore need a separate manifest rather than overloading tensor dtype.
 - `moe_infinity/utils/fp8.py`, `moe_infinity/kernel/mxfp4_gemm.py`, `moe_infinity/kernel/marlin_gemm.py`, and `extensions/kernel/v4_fp4/v4_fp4_binding.cpp` already define validated format-specific math. They remain the only execution adapters for those formats.
@@ -38,16 +38,20 @@
 
 ### Required implementation base and ordering
 
-This Markdown plan remains independently reviewable on `plan/adaptive-mixed-precision-experts`, but its implementation must not start from base `b766f8f` or merge in parallel with phase policy. First land and validate `docs/superpowers/plans/2026-08-21-phase-specific-expert-policy.md` through its Task 5 `ExpertResidencyManager`, then create/rebase the adaptive implementation branch on that landed commit. Every implementation task below is blocked by Task 0.
+This Markdown plan remains independently reviewable on `plan/adaptive-mixed-precision-experts`, and its implementation is self-contained. PR #179 and `2026-08-21-phase-specific-expert-policy.md` are design-coordination inputs only; a plan-only commit is not implementation evidence and is never a rebase prerequisite. Task 0 runs first and establishes the exact fixed-size shared-manager API, build registration, singleton/client wiring, and real-manager tests required by every adaptive task.
 
-The prerequisite is satisfied only when the rebased tree contains `core/prefetch/expert_residency.h`, `core/prefetch/expert_residency.cpp`, one shared `kExpertResidencyManager`, `ExpertResidencyClient` instances for both demand dispatcher and prefetch scheduler, and the phase-policy real-manager tests. Adaptive precision extends those files and tests. It must not add another resident map, byte counter, lease registry, victim selector, or manager singleton.
+If PR #179 (or another predecessor) lands an implementation before execution begins, Task 0 validates the landed files against the exact API and tests in this plan and skips only duplicate file creation and duplicate registration. Any API mismatch is reconciled in the existing `core/prefetch/expert_residency.{h,cpp}` and tests within Task 0; it is not solved by adding an adapter manager or second ledger. If no matching implementation exists, Task 0 creates it. In both paths, completion means the tree contains `core/prefetch/expert_residency.h`, `core/prefetch/expert_residency.cpp`, one shared `kExpertResidencyManager`, `ExpertResidencyClient` instances for demand dispatcher and prefetch scheduler, exactly-once build registration, and passing real-manager transaction/capacity/lease tests. Tasks 1-13 are blocked only by that verified Task 0 result.
 
-Manager routing is enabled when `phase_specific_expert_policy || adaptive_expert_precision`. With both flags false, the phase-policy plan's exact legacy fallback remains. With adaptive enabled and phase policy disabled, scheduler/dispatcher still use `ExpertResidencyManager`, but phase-specific scoring, decode-first splitting, and phase telemetry remain disabled; canonical generation-0 wrappers preserve legacy admission semantics. With both enabled, the same manager applies phase utility to variant-aware transactions.
+Manager routing is enabled when `phase_specific_expert_policy || adaptive_expert_precision`. With both flags false, Task 0 preserves the exact legacy fallback. With adaptive enabled and phase policy disabled, scheduler/dispatcher still use `ExpertResidencyManager`, but phase-specific scoring, decode-first splitting, and phase telemetry remain disabled; canonical generation-0 wrappers preserve legacy admission semantics. If the separately coordinated phase feature is present and both flags are enabled, the same manager applies phase utility to variant-aware transactions.
 
 ## File structure
 
 ### New files
 
+- `core/prefetch/expert_residency.h` and `core/prefetch/expert_residency.cpp` — Task 0's sole synchronized fixed-size residency authority; created only when an exact landed implementation is absent, then extended in Task 5.
+- `core/prefetch/expert_policy.h` — coordinated phase/admission types and deterministic fixed-size utility helpers consumed by the shared manager; created only when absent.
+- `tests/cpp/unit/prefetch/expert_residency_test_fixture.h` and `tests/cpp/unit/prefetch/test_expert_residency.cpp` — real-manager capacity, transaction, lease, and shared-client foundation tests.
+- `tests/python/unit/test_native_phase_policy_wire.py` and `tests/python/unit/test_setup_sources.py` — one-manager client identity and exactly-once source registration regressions.
 - `moe_infinity/runtime/expert_precision.py` — immutable format IDs, storage/execution descriptors, model protection/converter-candidate rules, hardware probes, and registry resolution.
 - `moe_infinity/runtime/adaptive_precision_allowlist.py` — checked-in released entries keyed by checkpoint fingerprint, format, converter version, and quality-attestation digest; converter candidates do not imply serving approval.
 - `moe_infinity/runtime/expert_variant_manifest.py` — versioned JSON schema, released-entry validation, generation/index digests, tensor-ID ownership, and checkpoint/store compatibility checks.
@@ -64,6 +68,7 @@ Manager routing is enabled when `phase_specific_expert_policy || adaptive_expert
 - `tests/python/ops/test_adaptive_expert_dispatch.py` — native representation lifecycle, lease/event safety, accounting, and failure rollback tests.
 - `tests/python/integration/test_adaptive_precision_parity.py` — tiny checkpoint conversion, reload, canonical fallback, and generation parity/quality gates.
 - `tests/python/unit/test_adaptive_precision_benchmark_schema.py` — deterministic workload and complete result/attestation schema tests.
+- `tests/python/unit/test_adaptive_precision_docs.py` — executable documentation contract for configuration, manifests/attestations, benchmarks, rollout/rollback, and operational commands.
 - `benchmarks/adaptive_precision/bench_policy.py` — trace-replay policy simulation.
 - `benchmarks/adaptive_precision/bench_transfer.py` — H2D payload/latency and conversion-transition measurements.
 - `benchmarks/adaptive_precision/bench_e2e.py` — TTFT, TPOT, throughput, peak HBM, transfer, and quality A/B harness.
@@ -82,15 +87,15 @@ Manager routing is enabled when `phase_specific_expert_policy || adaptive_expert
 - `benchmarks/eval/perplexity.py` — emit checkpoint-quality measurements and raw result digests used by attestations.
 - `core/model/model_topology.h` and `core/model/model_topology.cpp` — detached representation nodes and alignment-aware byte metadata; canonical `Node::SetDevice` behavior remains unchanged.
 - `core/aio/archer_tensor_handle.h` and `core/aio/archer_tensor_handle.cpp` — expose canonical index snapshots and transactionally stage Python-validated derivative records without any C++ file parser or canonical-index rewrite.
-- `core/prefetch/expert_residency.h` and `core/prefetch/expert_residency.cpp` — extend the phase-policy `ExpertResidencyManager`, `ResidencyEntry`, lease records, and transactions for precision variants; no second residency authority is introduced.
+- `core/prefetch/expert_residency.h` and `core/prefetch/expert_residency.cpp` — extend Task 0's `ExpertResidencyManager`, `ResidencyEntry`, lease records, and transactions for precision variants; no second residency authority is introduced.
 - `core/parallel/expert_module.h` and `core/parallel/expert_module.cpp` — descriptor-driven parameter binding and existing-kernel execution dispatch.
 - `core/parallel/expert_dispatcher.h` and `core/parallel/expert_dispatcher.cpp` — immutable execution descriptors and manager-client transaction/lease IDs; residency, bytes, victim selection, and retirement stay in `ExpertResidencyManager`.
 - `core/prefetch/archer_prefetch_handle.h` and `core/prefetch/archer_prefetch_handle.cpp` — create detached nodes from existing tensor IDs without adding them to canonical pipeline stages.
 - `core/prefetch/task_scheduler.h` and `core/prefetch/task_scheduler.cpp` — remain phase-tagged prefetch clients of `ExpertResidencyManager` and submit variant-aware transactions instead of independently evicting representation storage.
 - `core/python/py_archer_prefetch.cpp` — pybind registration, target-plan, and metrics methods.
-- `setup.py` — retain phase-policy's single `core/prefetch/expert_residency.cpp` source registration and propagate `MOE_INFINITY_TESTING=1` when test-only bindings are requested.
+- `setup.py` — Task 0 registers `core/prefetch/expert_residency.cpp` exactly once; later tasks retain it and propagate `MOE_INFINITY_TESTING=1` when test-only bindings are requested.
 - `CMakeLists.txt`, `core/CMakeLists.txt`, and `extensions/CMakeLists.txt` — retain the existing manager source exactly once, add combined variant tests, and define/propagate the same test option.
-- `tests/cpp/unit/prefetch/CMakeLists.txt` and `tests/cpp/unit/prefetch/expert_residency_test_fixture.h` — register/reuse the phase-policy real-manager fixture for variant tests.
+- `tests/cpp/unit/prefetch/CMakeLists.txt` and `tests/cpp/unit/prefetch/expert_residency_test_fixture.h` — Task 0 registers the real-manager fixture; Task 5 reuses it for variant tests.
 - `tests/python/unit/test_setup_sources.py` and `tests/python/unit/test_native_phase_policy_wire.py` — assert one manager source, no alternate residency source, and identical manager identity for scheduler/dispatcher clients.
 - `tests/python/unit/test_utils_config.py`, `tests/python/unit/test_quant_regression.py`, `tests/python/unit/test_gptq_loading.py`, and `tests/python/unit/test_awq_loading.py` — config and existing quantization fallback regressions.
 - `tests/python/unit/test_glm_fp8_native_dequant.py` and `tests/test_mxfp4_kernel.py` — existing low-bit kernel correctness regressions.
@@ -378,66 +383,352 @@ resident_generation_aligned_bytes
 
 `ResidencyState::HOST_READY` representations consume zero HBM budget. Only device-resident active generations, device-resident retiring generations awaiting lease/event completion, transaction reservations, and execution workspace are counted. The policy never precharges the smallest representation for every catalogued expert; it chooses formats only for the current resident subset and demand/prefetch admission candidates. Temporary per-call dequant buffers are workspace, not transition bytes, and are released only after the execution-stream completion event. Payload bytes and alignment padding are reported separately.
 
-Composition is transaction-ordered through phase-policy's manager: Python chooses targets → scheduler/dispatcher clients call `BeginAdmission` or `BeginTransition` → the manager reserves resident/victim/workspace bytes → clients transfer/convert under manager-issued transfer leases → clients `CommitTransaction` or `AbortTransaction` → execution uses an execution lease → clients request retirement and the manager reaps only lease-free/event-complete generations. `TaskScheduler` and `ExpertDispatcher` use the same `ExpertResidencyManager`; neither maintains a representation resident map, byte counter, lease registry, or victim selector. Existing always-resident shared experts remain outside the adaptive budget and are reported as `external_shared_resident_bytes`; a routed representation generation is charged once even when both clients hold leases.
+Composition is transaction-ordered through Task 0's manager: Python chooses targets → scheduler/dispatcher clients call `BeginAdmission` or `BeginTransition` → the manager reserves resident/victim/workspace bytes → clients transfer/convert under manager-issued transfer leases → clients `CommitTransaction` or `AbortTransaction` → execution uses an execution lease → clients request retirement and the manager reaps only lease-free/event-complete generations. `TaskScheduler` and `ExpertDispatcher` use the same `ExpertResidencyManager`; neither maintains a representation resident map, byte counter, lease registry, or victim selector. Existing always-resident shared experts remain outside the adaptive budget and are reported as `external_shared_resident_bytes`; a routed representation generation is charged once even when both clients hold leases.
 
-## Task 0: Rebase on and verify the phase-policy residency prerequisite
+## Task 0: Establish the single shared residency foundation
 
 **Files:**
-- Verify: `core/prefetch/expert_residency.h`
-- Verify: `core/prefetch/expert_residency.cpp`
-- Verify: `core/prefetch/task_scheduler.h`
-- Verify: `core/parallel/expert_dispatcher.h`
-- Verify: `tests/cpp/unit/prefetch/test_expert_residency.cpp`
-- Verify: `tests/python/unit/test_native_phase_policy_wire.py`
-- Verify: `tests/python/unit/test_setup_sources.py`
+- Create if absent, otherwise validate/modify: `core/prefetch/expert_residency.h`
+- Create if absent, otherwise validate/modify: `core/prefetch/expert_residency.cpp`
+- Create if absent, otherwise validate/modify: `core/prefetch/expert_policy.h`
+- Modify: `setup.py:177-203`
+- Modify: `core/CMakeLists.txt:1-44`
+- Modify: `core/prefetch/archer_prefetch_handle.h:13-80`
+- Modify: `core/prefetch/archer_prefetch_handle.cpp:20-408`
+- Modify: `core/prefetch/task_scheduler.h:24-121`
+- Modify: `core/prefetch/task_scheduler.cpp:47-597`
+- Modify: `core/parallel/expert_dispatcher.h:40-194`
+- Modify: `core/parallel/expert_dispatcher.cpp:180-586`
+- Modify: `core/python/py_archer_prefetch.cpp:18-123`
+- Create if absent, otherwise validate/modify: `tests/cpp/unit/prefetch/expert_residency_test_fixture.h`
+- Create if absent, otherwise validate/modify: `tests/cpp/unit/prefetch/test_expert_residency.cpp`
+- Modify: `tests/cpp/unit/prefetch/CMakeLists.txt`
+- Create if absent, otherwise validate/modify: `tests/python/unit/test_native_phase_policy_wire.py`
+- Create if absent, otherwise validate/modify: `tests/python/unit/test_setup_sources.py`
 
-- [ ] **Step 1: Rebase the implementation branch after the landed phase-policy commit**
+- [ ] **Step 1: Detect whether the exact foundation already landed**
 
-Run on the implementation branch, not on this plan-only branch:
-
-```bash
-: "${PHASE_POLICY_COMMIT:?set PHASE_POLICY_COMMIT to the landed phase-policy implementation commit}"
-git cat-file -e "${PHASE_POLICY_COMMIT}^{commit}"
-git rebase "$PHASE_POLICY_COMMIT"
-test -f core/prefetch/expert_residency.h
-test -f core/prefetch/expert_residency.cpp
-```
-
-Expected: the supplied landed commit exists, rebase succeeds, and both manager files exist. Do not point `PHASE_POLICY_COMMIT` at the plan-only branch, copy the files, or merge the plans in parallel.
-
-- [ ] **Step 2: Verify the required single-authority API and clients**
-
-Run:
+PR #179 is design coordination only. Do not fetch, rebase onto, or cite a plan commit as implementation. Run this check against the implementation tree:
 
 ```bash
 python - <<'PY'
 from pathlib import Path
 
-header = Path("core/prefetch/expert_residency.h").read_text()
-dispatcher = Path("core/parallel/expert_dispatcher.h").read_text()
-scheduler = Path("core/prefetch/task_scheduler.h").read_text()
-for symbol in (
-    "class ExpertResidencyManager",
-    "struct ResidencyEntry",
-    "struct ResidencyTicket",
-    "struct LeaseRecord",
-    "class ExpertResidencyClient",
-):
-    assert symbol in header, symbol
-assert "ExpertResidencyClient" in dispatcher
-assert "ExpertResidencyClient" in scheduler
+paths = [
+    Path("core/prefetch/expert_residency.h"),
+    Path("core/prefetch/expert_residency.cpp"),
+    Path("tests/cpp/unit/prefetch/test_expert_residency.cpp"),
+]
+if not all(path.is_file() for path in paths):
+    print("CREATE_FOUNDATION")
+    raise SystemExit(0)
+header = paths[0].read_text()
+required = [
+    "class ExpertResidencyManager", "struct ResidencyTicket",
+    "struct ResidencyEntry", "struct LeaseRecord",
+    "class ExpertResidencyClient", "ConfigureCapacity(",
+    "BeginAdmission(", "EvictReserved(", "CommitAdmission(",
+    "AbortAdmission(", "AcquireLease(", "ReleaseLease(",
+    "ReplaceProtectedCandidates(", "RecordAccess(", "Snapshot(",
+    "ResidentBytes(", "ResidentCount(",
+]
+missing = [symbol for symbol in required if symbol not in header]
+print("VALIDATE_FOUNDATION" if not missing else "RECONCILE_FOUNDATION:" + ",".join(missing))
 PY
-pytest -q tests/python/unit/test_native_phase_policy_wire.py tests/python/unit/test_setup_sources.py
-cmake -S . -B build -DCUTLASS_DIR="$CUTLASS_DIR"
-cmake --build build --target test_expert_residency -j2
-ctest --test-dir build -R ExpertResidencyTests --output-on-failure
 ```
 
-Expected: all checks pass and `tests/python/unit/test_setup_sources.py` reports `core/prefetch/expert_residency.cpp` exactly once.
+Expected: a tree without implementation prints `CREATE_FOUNDATION`; an exact landed implementation prints `VALIDATE_FOUNDATION`; an incomplete or divergent implementation prints `RECONCILE_FOUNDATION:<symbols>`. Continue through every remaining Task 0 step in all cases. In the validate path, preserve matching definitions instead of recreating them; in the other paths, create or reconcile these same files. No path creates another manager, compatibility ledger, or wrapper authority.
 
-- [ ] **Step 3: Record the dependency without changing phase-policy behavior**
+- [ ] **Step 2: Write the failing build-registration and real-manager tests**
 
-Do not commit in this prerequisite task. Record the rebased phase-policy commit hash in the implementation session notes, then begin Task 1. If any prerequisite check fails, stop; do not implement a substitute manager in adaptive precision.
+`tests/python/unit/test_setup_sources.py` must parse, without importing `setup.py`, and assert:
+
+```python
+import ast
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def read_literal_list(path: Path, name: str) -> list[str]:
+    module = ast.parse(path.read_text())
+    for statement in module.body:
+        if not isinstance(statement, ast.Assign):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name
+               for target in statement.targets):
+            value = ast.literal_eval(statement.value)
+            assert isinstance(value, list)
+            return value
+    raise AssertionError(f"{name} not found in {path}")
+
+
+def test_store_sources_link_one_residency_authority() -> None:
+    sources = read_literal_list(ROOT / "setup.py", "_STORE_SOURCES")
+    residency = [p for p in sources if "residency" in p]
+    assert residency == ["core/prefetch/expert_residency.cpp"]
+
+
+def test_cmake_links_one_residency_authority() -> None:
+    text = (ROOT / "core/CMakeLists.txt").read_text()
+    assert text.count("prefetch/expert_residency.cpp") == 1
+    assert text.count("residency.cpp") == 1
+```
+
+Create the real-manager fixture with real `Node` objects and no fake accounting:
+
+```cpp
+#pragma once
+
+#include <gtest/gtest.h>
+#include <memory>
+#include <vector>
+
+#include "prefetch/expert_residency.h"
+
+class RecordingTransferOps final : public ResidencyTransferOps {
+ public:
+  bool MoveToHost(const NodePtr& node) override {
+    moved_ids.push_back(node->id);
+    node->device = node->default_host;
+    return true;
+  }
+  std::vector<std::size_t> moved_ids;
+};
+
+class ExpertResidencyManagerTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    transfer_ops = std::make_shared<RecordingTransferOps>();
+    manager = std::make_shared<ExpertResidencyManager>(transfer_ops);
+  }
+
+  NodePtr MakeNode(std::size_t id, std::int64_t bytes) {
+    auto node = std::make_shared<Node>();
+    node->id = id;
+    node->corr_id = id;
+    node->byte_size = bytes;
+    node->device = torch::Device(torch::kCPU);
+    node->default_device = torch::Device(torch::kCUDA, 0);
+    node->default_host = torch::Device(torch::kCPU);
+    return node;
+  }
+
+  std::shared_ptr<RecordingTransferOps> transfer_ops;
+  std::shared_ptr<ExpertResidencyManager> manager;
+};
+```
+
+Add these concrete tests to `test_expert_residency.cpp`:
+
+```cpp
+TEST_F(ExpertResidencyManagerTest, AdmissionRejectsUntilCapacityConfigured) {
+  auto node = MakeNode(1, 40);
+  auto rejected = manager->BeginAdmission(node, 0, ExpertPhase::DECODE,
+      AdmissionMode::CACHE, AdmissionSource::DEMAND);
+  EXPECT_FALSE(rejected.valid);
+  EXPECT_EQ(rejected.outcome, AdmissionOutcome::REJECTED);
+  EXPECT_EQ(manager->ResidentBytes(0), 0);
+  ASSERT_TRUE(manager->ConfigureCapacity(0, 100));
+  auto admitted = manager->BeginAdmission(node, 0, ExpertPhase::DECODE,
+      AdmissionMode::CACHE, AdmissionSource::DEMAND);
+  EXPECT_TRUE(admitted.valid);
+  EXPECT_TRUE(manager->AbortAdmission(admitted));
+}
+
+TEST_F(ExpertResidencyManagerTest, CapacityAndVictimTransactionAreAtomic) {
+  ASSERT_TRUE(manager->ConfigureCapacity(0, 100));
+  auto first = MakeNode(1, 60);
+  auto first_ticket = manager->BeginAdmission(first, 0, ExpertPhase::DECODE,
+      AdmissionMode::CACHE, AdmissionSource::DEMAND);
+  first->device = first->default_device;
+  ASSERT_TRUE(manager->CommitAdmission(first_ticket));
+  auto second = MakeNode(2, 60);
+  auto second_ticket = manager->BeginAdmission(second, 0, ExpertPhase::DECODE,
+      AdmissionMode::CACHE, AdmissionSource::PREFETCH);
+  ASSERT_EQ(second_ticket.reserved_victim, first);
+  ASSERT_TRUE(manager->EvictReserved(second_ticket));
+  second->device = second->default_device;
+  ASSERT_TRUE(manager->CommitAdmission(second_ticket));
+  EXPECT_EQ(manager->ResidentBytes(0), 60);
+  EXPECT_EQ(manager->ResidentCount(0), 1);
+}
+
+TEST_F(ExpertResidencyManagerTest, LeaseBlocksEvictionUntilReleased) {
+  ASSERT_TRUE(manager->ConfigureCapacity(0, 100));
+  auto first = MakeNode(1, 100);
+  auto ticket = manager->BeginAdmission(first, 0, ExpertPhase::DECODE,
+      AdmissionMode::CACHE, AdmissionSource::DEMAND);
+  first->device = first->default_device;
+  ASSERT_TRUE(manager->CommitAdmission(ticket));
+  const auto lease = manager->AcquireLease(first, LeaseKind::DEMAND);
+  EXPECT_FALSE(manager->BeginAdmission(MakeNode(2, 100), 0,
+      ExpertPhase::DECODE, AdmissionMode::CACHE,
+      AdmissionSource::DEMAND).valid);
+  EXPECT_TRUE(manager->ReleaseLease(lease));
+  EXPECT_FALSE(manager->ReleaseLease(lease));
+  auto retry = manager->BeginAdmission(MakeNode(3, 100), 0,
+      ExpertPhase::DECODE, AdmissionMode::CACHE, AdmissionSource::DEMAND);
+  EXPECT_EQ(retry.reserved_victim, first);
+  EXPECT_TRUE(manager->AbortAdmission(retry));
+}
+
+TEST_F(ExpertResidencyManagerTest, DemandAndPrefetchClientsShareAccounting) {
+  ASSERT_TRUE(manager->ConfigureCapacity(0, 100));
+  ExpertResidencyClient demand(manager, AdmissionSource::DEMAND);
+  ExpertResidencyClient prefetch(manager, AdmissionSource::PREFETCH);
+  auto node = MakeNode(1, 40);
+  auto admitted = demand.BeginAdmission(node, 0, ExpertPhase::DECODE,
+                                        AdmissionMode::CACHE);
+  node->device = node->default_device;
+  ASSERT_TRUE(manager->CommitAdmission(admitted));
+  auto duplicate = prefetch.BeginAdmission(node, 0, ExpertPhase::PREFILL,
+                                            AdmissionMode::CACHE);
+  EXPECT_EQ(duplicate.outcome, AdmissionOutcome::ALREADY_RESIDENT);
+  EXPECT_EQ(demand.manager().get(), prefetch.manager().get());
+  EXPECT_EQ(manager->ResidentBytes(0), 40);
+  EXPECT_EQ(manager->ResidentCount(0), 1);
+}
+```
+
+Run:
+
+```bash
+pytest -q tests/python/unit/test_setup_sources.py
+cmake -S . -B build -DBUILD_TESTING=ON -DCUTLASS_DIR="$CUTLASS_DIR"
+cmake --build build --target test_expert_residency -j2
+```
+
+Expected: on an absent foundation, the Python assertion and native compile fail because source registration and manager types are absent. On a landed exact foundation, they pass and protect its API before adaptive extension. On a divergent foundation, at least one assertion or compile fails and identifies what Task 0 must reconcile.
+
+- [ ] **Step 3: Create or reconcile the exact fixed-size manager API**
+
+Use the phase-policy plan as the naming contract, not as implementation evidence. `expert_residency.h` must expose exactly this fixed-size surface before Task 5 extends it:
+
+```cpp
+enum class AdmissionSource : std::uint8_t { DEMAND = 0, PREFETCH = 1 };
+enum class AdmissionOutcome : std::uint8_t {
+  ADMIT = 0, ALREADY_RESIDENT = 1, TRANSIENT = 2, REJECTED = 3
+};
+enum class LeaseKind : std::uint8_t { DEMAND = 0, PREFETCH = 1, TRANSFER = 2 };
+
+class ResidencyTransferOps {
+ public:
+  virtual ~ResidencyTransferOps() = default;
+  virtual bool MoveToHost(const NodePtr& node) = 0;
+};
+
+struct ResidencyTicket {
+  std::uint64_t id = 0;
+  NodePtr incoming;
+  NodePtr reserved_victim;
+  int gpu_id = -1;
+  ExpertPhase phase = ExpertPhase::MIXED;
+  AdmissionSource source = AdmissionSource::DEMAND;
+  AdmissionOutcome outcome = AdmissionOutcome::REJECTED;
+  bool transient = false;
+  bool valid = false;
+};
+struct ResidencyEntry { NodePtr node; std::int64_t bytes = 0; std::uint32_t lease_count = 0; };
+struct LeaseRecord { std::uint64_t id = 0; NodePtr node; LeaseKind kind = LeaseKind::DEMAND; };
+using ExpertPolicyStats = std::unordered_map<std::string, std::int64_t>;
+
+class ExpertResidencyManager {
+ public:
+  explicit ExpertResidencyManager(std::shared_ptr<ResidencyTransferOps> transfer_ops);
+  bool ConfigureCapacity(int gpu_id, std::int64_t capacity_bytes);
+  bool IsCapacityConfigured(int gpu_id) const;
+  std::int64_t CapacityBytes(int gpu_id) const;
+  ResidencyTicket BeginAdmission(const NodePtr& incoming, int gpu_id,
+      ExpertPhase phase, AdmissionMode mode, AdmissionSource source);
+  bool EvictReserved(const ResidencyTicket& ticket);
+  bool CommitAdmission(const ResidencyTicket& ticket);
+  bool AbortAdmission(const ResidencyTicket& ticket);
+  std::uint64_t AcquireLease(const NodePtr& node, LeaseKind kind);
+  bool ReleaseLease(std::uint64_t lease_id);
+  void ReplaceProtectedCandidates(const NodePtrList& candidates);
+  void RecordAccess(const NodePtr& node, ExpertPhase phase, bool hit);
+  ExpertPolicyStats Snapshot() const;
+  std::int64_t ResidentBytes(int gpu_id) const;
+  std::size_t ResidentCount(int gpu_id) const;
+};
+
+class ExpertResidencyClient {
+ public:
+  ExpertResidencyClient(std::shared_ptr<ExpertResidencyManager> manager,
+                        AdmissionSource source)
+      : manager_(std::move(manager)), source_(source) {}
+  ResidencyTicket BeginAdmission(const NodePtr& incoming, int gpu_id,
+      ExpertPhase phase, AdmissionMode mode) {
+    return manager_->BeginAdmission(incoming, gpu_id, phase, mode, source_);
+  }
+  std::shared_ptr<ExpertResidencyManager> manager() const { return manager_; }
+ private:
+  std::shared_ptr<ExpertResidencyManager> manager_;
+  AdmissionSource source_;
+};
+```
+
+`expert_policy.h` supplies the phase plan's exact `ExpertPhase`, `AdmissionMode`, `PhasePolicyConfig`, `ExpertPolicyMetadata`, stable `VictimLess`, and `EffectivePhase` definitions. Implement `expert_residency.cpp` with one mutex-protected per-GPU resident map, byte totals, pending tickets, leases, protected candidates, and optional capacities. Capacity begins unconfigured; invalid/pending-ticket reconfiguration is atomic; duplicate admission is `ALREADY_RESIDENT`; victim reservation uses one lease; commit/abort/release are idempotent Boolean operations; only `EvictReserved` removes and only `CommitAdmission` adds persistent membership.
+
+Use these exact policy definitions required by that API:
+
+```cpp
+enum class ExpertPhase : std::uint8_t { PREFILL = 0, DECODE = 1, MIXED = 2 };
+enum class AdmissionMode : std::uint8_t {
+  CACHE = 0, TRANSIENT_ON_PRESSURE = 1
+};
+struct PhasePolicyConfig {
+  bool enabled = false;
+  AdmissionMode prefill_admission = AdmissionMode::TRANSIENT_ON_PRESSURE;
+  AdmissionMode decode_admission = AdmissionMode::CACHE;
+  double prefill_eviction_weight = 1.0;
+  double decode_eviction_weight = 4.0;
+  std::uint32_t starvation_limit = 8;
+};
+struct ExpertPolicyMetadata {
+  std::uint64_t prefill_accesses = 0;
+  std::uint64_t decode_accesses = 0;
+  std::uint64_t last_prefill_sequence = 0;
+  std::uint64_t last_decode_sequence = 0;
+};
+inline ExpertPhase EffectivePhase(ExpertPhase phase) {
+  return phase == ExpertPhase::MIXED ? ExpertPhase::DECODE : phase;
+}
+```
+
+- [ ] **Step 4: Register and wire the one authority**
+
+Add `core/prefetch/expert_residency.cpp` exactly once to `_STORE_SOURCES` and exactly once to `ARCHER_CORE_CXX_SOURCES`. Register `test_expert_residency` as `ExpertResidencyTests` in `tests/cpp/unit/prefetch/CMakeLists.txt`. Create one shared, initially unconfigured `kExpertResidencyManager` at the native topology/task-pool lifetime; construct demand and prefetch `ExpertResidencyClient`s from that same `shared_ptr`. After each successful `SetTopology` and `SetTopologyV2`, configure each GPU from `GetSparseCacheLimit(device)`; no constructor, dispatcher, scheduler, or Python config call may infer capacity.
+
+Route manager-enabled dispatcher and scheduler admissions through `BeginAdmission` → optional `EvictReserved` → transfer lease → `CommitAdmission`/`AbortAdmission`. Bind the shared `Snapshot()` as `get_expert_policy_stats()` in `py_archer_prefetch.cpp`; bindings expose a view only and own no map or ledger. `test_native_phase_policy_wire.py` must assert the demand and prefetch clients expose the same manager identity and one non-duplicated resident-byte snapshot.
+
+- [ ] **Step 5: Verify the fixed-size foundation**
+
+Run:
+
+```bash
+pytest -q tests/python/unit/test_setup_sources.py tests/python/unit/test_native_phase_policy_wire.py
+cmake -S . -B build -DBUILD_TESTING=ON -DCUTLASS_DIR="$CUTLASS_DIR"
+cmake --build build --target test_expert_residency -j2
+ctest --test-dir build -R '^ExpertResidencyTests$' --output-on-failure
+pip install --no-build-isolation -e .
+python -c 'from moe_infinity import _store; assert hasattr(_store, "expert_dispatcher")'
+```
+
+Expected: source tests find exactly one residency implementation in each build graph; the four concrete real-manager tests pass; admission is rejected until topology-derived capacity is configured; transaction and lease operations are idempotent and capacity-safe; dispatcher and scheduler report the same manager identity and one byte count; `_store` links without undefined manager symbols.
+
+- [ ] **Step 6: Commit the self-contained foundation when Task 0 changed it**
+
+```bash
+if ! git diff --quiet -- setup.py core/CMakeLists.txt core/prefetch core/parallel/expert_dispatcher.h core/parallel/expert_dispatcher.cpp core/python/py_archer_prefetch.cpp tests/cpp/unit/prefetch tests/python/unit/test_native_phase_policy_wire.py tests/python/unit/test_setup_sources.py; then
+  git add setup.py core/CMakeLists.txt core/prefetch/expert_policy.h core/prefetch/expert_residency.h core/prefetch/expert_residency.cpp core/prefetch/archer_prefetch_handle.h core/prefetch/archer_prefetch_handle.cpp core/prefetch/task_scheduler.h core/prefetch/task_scheduler.cpp core/parallel/expert_dispatcher.h core/parallel/expert_dispatcher.cpp core/python/py_archer_prefetch.cpp tests/cpp/unit/prefetch/CMakeLists.txt tests/cpp/unit/prefetch/expert_residency_test_fixture.h tests/cpp/unit/prefetch/test_expert_residency.cpp tests/python/unit/test_native_phase_policy_wire.py tests/python/unit/test_setup_sources.py
+  git commit -m "feat: establish shared expert residency manager"
+fi
+```
+
+Expected: create/reconcile path produces the foundation commit. If an exact implementation had already landed and every Task 0 check passed without modification, the conditional makes no duplicate or empty commit.
 
 ## Task 1: Add strict opt-in configuration, converter candidates, and released entries
 
@@ -1121,7 +1412,7 @@ git add moe_infinity/memory/adaptive_precision_policy.py tests/python/unit/test_
 git commit -m "feat: add deterministic mixed precision cache policy"
 ```
 
-## Task 5: Extend phase-policy's ExpertResidencyManager for precision variants
+## Task 5: Extend the Task 0 ExpertResidencyManager for precision variants
 
 **Files:**
 - Modify: `core/prefetch/expert_residency.h`
@@ -1137,7 +1428,7 @@ git commit -m "feat: add deterministic mixed precision cache policy"
 
 - [ ] **Step 1: Write failing real-manager variant transaction tests**
 
-Add `test_expert_residency_variants.cpp` using phase-policy's real `ExpertResidencyManagerTest` fixture. Cover these exact cases:
+Add `test_expert_residency_variants.cpp` using Task 0's real `ExpertResidencyManagerTest` fixture. Cover these exact cases:
 
 ```cpp
 TEST_F(ExpertResidencyManagerTest, HostReadyVariantsConsumeNoCapacity) {
@@ -1224,7 +1515,7 @@ Expected: compile fails because variant keys, transition transactions, workspace
 
 - [ ] **Step 3: Extend the existing manager's records and transaction API**
 
-In `core/prefetch/expert_residency.h`, extend rather than replace the phase-policy API:
+In `core/prefetch/expert_residency.h`, extend rather than replace the exact Task 0 API coordinated with the phase-policy plan:
 
 ```cpp
 enum class ExpertFormat : std::uint8_t {
@@ -1323,7 +1614,7 @@ struct ResidencyTicket {
 };
 ```
 
-`logical_expert_key` remains the phase-policy key `(uint64_t(layer_id) << 32) | uint32_t(expert_id)`. Phase is request metadata and is not added to identity; adaptive identity extends only with `(format, generation)`.
+`logical_expert_key` remains the coordinated shared key `(uint64_t(layer_id) << 32) | uint32_t(expert_id)`. Phase is request metadata and is not added to identity; adaptive identity extends only with `(format, generation)`.
 
 Extend `ExpertResidencyManager` and `ExpertResidencyClient` with:
 
@@ -1371,11 +1662,11 @@ ResidencyTicket BeginTransition(const ResidencyVariantKey& current,
 
 Expose `AcquireLease`, `ReleaseLease`, `RecordLastUse`, `RecordWorkspaceUse`, `ReapWorkspace`, `RequestRetirement`, `ReapRetired`, `Snapshot`, and `manager()` only as thin manager delegates. Clients store no pending transaction, lease, member, or byte state beyond IDs needed to finish their current operation.
 
-Include `<optional>` and `<tuple>`. Change the manager's per-GPU resident map key from logical `uint64_t` to `ResidencyVariantKey`, and add manager-owned `registered_variants_` plus `workspace_records_`; do not add parallel maps in either client. Retain phase-policy's fixed-size wrappers by mapping a canonical `Node` to `(logical_expert_key, ExpertFormat::BF16, generation=0, aligned_bytes=node->byte_size, workspace_bytes=0)`. Existing phase tests and disabled behavior therefore remain valid. The manager alone owns registered variants, resident/retiring membership, pending transactions, reservations, workspace records, leases, victim reservation, and counters. `CommitTransaction` converts aligned-byte reservations to one active charge, keeps reserved workspace charged in a `WorkspaceRecord`, and marks a replaced generation retiring; `AbortTransaction` releases all reservations/transition leases; `RecordWorkspaceUse` associates completion, and `ReapWorkspace` releases bytes only after its event completes. `ReapRetired` frees only zero-lease, event-complete retiring entries.
+Include `<optional>` and `<tuple>`. Change the manager's per-GPU resident map key from logical `uint64_t` to `ResidencyVariantKey`, and add manager-owned `registered_variants_` plus `workspace_records_`; do not add parallel maps in either client. Retain Task 0's fixed-size wrappers by mapping a canonical `Node` to `(logical_expert_key, ExpertFormat::BF16, generation=0, aligned_bytes=node->byte_size, workspace_bytes=0)`. Existing fixed-size manager tests and disabled behavior therefore remain valid. The manager alone owns registered variants, resident/retiring membership, pending transactions, reservations, workspace records, leases, victim reservation, and counters. `CommitTransaction` converts aligned-byte reservations to one active charge, keeps reserved workspace charged in a `WorkspaceRecord`, and marks a replaced generation retiring; `AbortTransaction` releases all reservations/transition leases; `RecordWorkspaceUse` associates completion, and `ReapWorkspace` releases bytes only after its event completes. `ReapRetired` frees only zero-lease, event-complete retiring entries.
 
 Keep phase telemetry semantics: `resident_experts` and `ResidentCount` count unique logical experts with an `ACTIVE` generation. Add `resident_generations`/`ResidentGenerationCount` for active plus retiring copies. `resident_bytes` includes all active and retiring generation bytes until reaped.
 
-Preserve the phase-policy steady-state invariant as: one `ACTIVE` generation per `(gpu_id, logical_expert_key)`. A transition may additionally have one reserved incoming generation and one or more `RETIRING` generations whose leases/events have not completed; every byte remains charged until reaped. Reject a second concurrent transition for the same logical expert. Fixed-size phase-only operation uses generation 0 and therefore still has exactly one copy.
+Preserve the shared-manager steady-state invariant as: one `ACTIVE` generation per `(gpu_id, logical_expert_key)`. A transition may additionally have one reserved incoming generation and one or more `RETIRING` generations whose leases/events have not completed; every byte remains charged until reaped. Reject a second concurrent transition for the same logical expert. Fixed-size operation uses generation 0 and therefore still has exactly one copy.
 
 - [ ] **Step 4: Implement detached variant nodes as manager-owned records**
 
@@ -1391,7 +1682,7 @@ ctest --test-dir build -R 'ExpertResidency(Variant)?Tests' --output-on-failure
 pytest -q tests/python/unit/test_setup_sources.py tests/python/unit/test_native_phase_policy_wire.py
 ```
 
-Expected: original fixed-size phase-policy manager tests and new variant tests pass. Source tests report `core/prefetch/expert_residency.cpp` exactly once and reject every additional residency-authority source.
+Expected: Task 0's original fixed-size manager tests and new variant tests pass. Source tests report `core/prefetch/expert_residency.cpp` exactly once and reject every additional residency-authority source.
 
 - [ ] **Step 6: Commit**
 
@@ -1505,9 +1796,9 @@ Expected: fails because representation registration, target setting, leases, and
 
 - [ ] **Step 3: Wire the test-only compile definition through both build systems**
 
-In `setup.py`, keep phase-policy's existing `core/prefetch/expert_residency.cpp` entry exactly once in `_STORE_SOURCES`; add no residency source. Append `-DMOE_INFINITY_TESTING=1` to both `COMMON_CXX_ARGS` and `COMMON_NVCC_ARGS` only when `os.environ.get("MOE_INFINITY_TESTING") == "1"`. Because `_store` compiles `py_archer_prefetch.cpp`, dispatcher C++, and CUDA sources with these lists, declarations and bindings see the same definition.
+In `setup.py`, keep Task 0's existing `core/prefetch/expert_residency.cpp` entry exactly once in `_STORE_SOURCES`; add no residency source. Append `-DMOE_INFINITY_TESTING=1` to both `COMMON_CXX_ARGS` and `COMMON_NVCC_ARGS` only when `os.environ.get("MOE_INFINITY_TESTING") == "1"`. Because `_store` compiles `py_archer_prefetch.cpp`, dispatcher C++, and CUDA sources with these lists, declarations and bindings see the same definition.
 
-In root `CMakeLists.txt`, add `option(MOE_INFINITY_TESTING "Expose native test-only bindings" OFF)`. Keep phase-policy's existing `core/prefetch/expert_residency.cpp` entry exactly once in `ARCHER_CORE_CXX_SOURCES`; add no residency source. When enabled, add `MOE_INFINITY_TESTING=1` to `archer_core` and `prefetch_op` with `target_compile_definitions`; `extensions/CMakeLists.txt` must explicitly define it for `prefetch_op` because that target compiles the pybind translation unit separately. Extend `tests/python/unit/test_setup_sources.py` to collect every source path containing `residency` from `_STORE_SOURCES` and `ARCHER_CORE_CXX_SOURCES` and assert each list equals `["core/prefetch/expert_residency.cpp"]` after path normalization.
+In root `CMakeLists.txt`, add `option(MOE_INFINITY_TESTING "Expose native test-only bindings" OFF)`. Keep Task 0's existing `core/prefetch/expert_residency.cpp` entry exactly once in `ARCHER_CORE_CXX_SOURCES`; add no residency source. When enabled, add `MOE_INFINITY_TESTING=1` to `archer_core` and `prefetch_op` with `target_compile_definitions`; `extensions/CMakeLists.txt` must explicitly define it for `prefetch_op` because that target compiles the pybind translation unit separately. Extend `tests/python/unit/test_setup_sources.py` to collect every source path containing `residency` from `_STORE_SOURCES` and `ARCHER_CORE_CXX_SOURCES` and assert each list equals `["core/prefetch/expert_residency.cpp"]` after path normalization.
 
 Build checks:
 
@@ -1543,7 +1834,7 @@ get_residency_manager_id()
 configure_residency_manager(manager_enabled, phase_policy_enabled)
 ```
 
-Extend native `Task` with a `ResidencyVariantKey` plus only the current manager ticket/lease IDs. The scheduler client resolves a registered variant, calls `BeginAdmission`, and completes the same transaction sequence as demand; it does not maintain variant membership. Preserve phase-policy's priority and starvation fields unchanged.
+Extend native `Task` with a `ResidencyVariantKey` plus only the current manager ticket/lease IDs. The scheduler client resolves a registered variant, calls `BeginAdmission`, and completes the same transaction sequence as demand; it does not maintain variant membership. When the separately coordinated phase feature is present, preserve its priority and starvation fields unchanged; without it, use Task 0's neutral `MIXED` metadata and existing scheduler priority.
 
 Required transition sequence:
 
@@ -1553,9 +1844,9 @@ Required transition sequence:
 4. After event completion, call `CommitTransaction`; on allocation/copy/conversion/event failure call `AbortTransaction`. Both terminal calls are idempotent and release transaction reservations/leases. The old generation remains active after abort.
 5. Execution obtains the current key from `ExpertResidencyManager::ActiveGeneration`, acquires its `EXECUTION` lease, records its last-use event, calls `RecordWorkspaceUse(transaction_id, completion_event)` for transaction workspace, and releases the lease after enqueueing completion. If a destination is still pending, `ActiveGeneration` continues to return the old key.
 6. `CommitTransaction` marks a replaced transition generation `RETIRING`; policy-only eviction calls `RequestRetirement`. Clients may trigger `ReapWorkspace` and `ReapRetired`, but only the manager applies event/eligibility checks, releases bytes, and invokes transfer ops. Dispatcher and scheduler contain no representation victim scan or resident-byte mutation.
-7. Destruction stops workers, aborts pending client transactions, releases client leases, asks the shared manager to reap retired generations, then destroys streams. The manager lifetime remains owned by phase-policy's native runtime singleton.
+7. Destruction stops workers, aborts pending client transactions, releases client leases, asks the shared manager to reap retired generations, then destroys streams. The manager lifetime remains owned by Task 0's native runtime singleton.
 
-Cache victim selection remains exclusively in `ExpertResidencyManager` and applies phase-policy's deterministic utility plus variant byte feasibility. Always-resident shared experts are excluded from adaptive transactions and reported separately.
+Cache victim selection remains exclusively in `ExpertResidencyManager` and applies variant byte feasibility; when phase policy is present and enabled, it also applies the coordinated deterministic phase utility. Always-resident shared experts are excluded from adaptive transactions and reported separately.
 
 Set `manager_enabled = phase_policy_config.enabled || adaptive_precision_enabled` once during native configuration. Dispatcher and scheduler enter manager-client paths whenever `manager_enabled`; only both-false uses legacy `cached_experts_`, `cache_sizes_`, and scheduler topology scans. When adaptive is true and phase policy false, pass `ExpertPhase::MIXED`, disable phase weighting/starvation changes, and use canonical wrapper behavior for unconverted experts. When both are true, preserve the propagated request phase and phase-policy victim utility.
 
@@ -2138,12 +2429,87 @@ git commit -m "bench: measure adaptive expert precision tradeoffs"
 - Modify: `docs/configuration.md`
 - Modify: `docs/model-compatibility.md`
 - Modify: `docs/benchmarking.md`
+- Create: `tests/python/unit/test_adaptive_precision_docs.py`
 
-- [ ] **Step 1: Write the documentation**
+- [ ] **Step 1: Write the failing executable documentation contract**
+
+Create `tests/python/unit/test_adaptive_precision_docs.py` with exact content checks rather than a manual-review instruction:
+
+```python
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[3]
+ADAPTIVE = (ROOT / "docs/adaptive-expert-precision.md").read_text()
+CONFIG = (ROOT / "docs/configuration.md").read_text()
+COMPAT = (ROOT / "docs/model-compatibility.md").read_text()
+BENCH = (ROOT / "docs/benchmarking.md").read_text()
+
+
+def _contains_all(text: str, values: tuple[str, ...]) -> None:
+    missing = [value for value in values if value not in text]
+    assert not missing, f"missing documentation contracts: {missing}"
+
+
+def test_documents_disabled_default_and_configuration_units() -> None:
+    _contains_all(CONFIG + ADAPTIVE, (
+        "adaptive_expert_precision", "false", "adaptive_hbm_budget_bytes",
+        "bytes", "adaptive_policy_epoch_tokens", "adaptive_hotness_decay",
+        "adaptive_promotion_threshold", "adaptive_demotion_threshold",
+        "adaptive_min_residency_epochs", "adaptive_transition_cooldown_epochs",
+        "adaptive_variant_build", "adaptive_derivative_root",
+    ))
+
+
+def test_documents_manifest_index_and_attestation_validation() -> None:
+    _contains_all(ADAPTIVE, (
+        "CURRENT", "derivative-index.v1.json", "manifest.v1.json",
+        "quality-attestation.v1.json", "checkpoint_fingerprint",
+        "converter_version", "quality_attestation_sha256",
+        "ReleasedAdaptiveEntry", "manifest_unapproved", "canonical fallback",
+    ))
+
+
+def test_documents_support_and_four_flag_rollout_matrix() -> None:
+    _contains_all(ADAPTIVE + COMPAT, (
+        "GPT-OSS MXFP4", "GLM-5.2 FP8", "DeepSeek-V4-Flash FP4",
+        "DeepSeek-V3 FP8", "GPTQ/AWQ", "Phase policy",
+        "Adaptive precision", "off | off", "on | off", "off | on", "on | on",
+        "ExpertResidencyManager",
+    ))
+
+
+def test_documents_benchmark_and_attestation_acceptance() -> None:
+    _contains_all(BENCH + ADAPTIVE, (
+        "deterministic-v1", "canonical", "static-low", "adaptive",
+        "H2D", "peak_accounted_bytes", "TTFT", "TPOT", "p50", "p90", "p99",
+        "throughput", "release_gate", "quality-attestation", "five",
+        "no speedup is guaranteed",
+    ))
+
+
+def test_documents_executable_build_benchmark_report_and_rollback_commands() -> None:
+    _contains_all(ADAPTIVE, (
+        "python benchmarks/adaptive_precision/bench_e2e.py",
+        "--adaptive-variant-build", "--build-only",
+        "python benchmarks/adaptive_precision/bench_policy.py",
+        "python benchmarks/adaptive_precision/report.py",
+        '"adaptive_expert_precision": false', "restart",
+        "preserve", "adaptive_derivatives", "CURRENT",
+    ))
+```
+
+- [ ] **Step 2: Run documentation QA and verify RED**
+
+Run: `pytest -q tests/python/unit/test_adaptive_precision_docs.py`
+
+Expected: FAIL because `docs/adaptive-expert-precision.md` is absent or one or more required configuration, manifest/attestation, support-matrix, benchmark, rollout/rollback, or command strings are not yet documented.
+
+- [ ] **Step 3: Write the documentation**
 
 Document:
 
-- phase-policy implementation prerequisite and dependency-ordered rebase;
+- Task 0's self-contained manager foundation and PR #179's design-coordination-only status;
 - `ExpertResidencyManager` as the sole authority and the four feature-flag combinations;
 - disabled-by-default configuration and byte units;
 - the three-way distinction among checkpoint storage, cached representation, and execution dtype;
@@ -2154,7 +2520,8 @@ Document:
 - quality and release gates;
 - commands below;
 - statement that SliceMoE and DynaExq are motivation only;
-- statement that no speedup is guaranteed.
+- exact statement `no speedup is guaranteed`;
+- benchmark protocol wording `five measured repetitions` so documentation QA can distinguish the release gate from a one-off run.
 
 Use this support matrix:
 
@@ -2173,12 +2540,12 @@ Also include this composition matrix:
 
 | Phase policy | Adaptive precision | Native residency path |
 |---:|---:|---|
-| off | off | phase-policy's exact legacy fallback |
+| off | off | Task 0's preserved legacy fallback |
 | on | off | `ExpertResidencyManager`, canonical generation 0, phase utility enabled |
 | off | on | `ExpertResidencyManager`, variant transactions, neutral mixed-phase/legacy-equivalent utility |
 | on | on | the same `ExpertResidencyManager`, variant transactions plus phase utility |
 
-- [ ] **Step 2: Document exact operational commands**
+- [ ] **Step 4: Document exact operational commands and rollback**
 
 ```bash
 # Build derivative candidates explicitly; serving does not build or approve them.
@@ -2209,12 +2576,41 @@ python benchmarks/adaptive_precision/bench_e2e.py \
 
 # Validate and summarize without claiming unmeasured gains.
 python benchmarks/adaptive_precision/report.py results.jsonl --output report.json
+
+# Roll back serving without deleting derivatives or rewriting canonical store files.
+python - "$CONFIG_JSON" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+config = json.loads(path.read_text())
+config["adaptive_expert_precision"] = False
+tmp = path.with_suffix(path.suffix + ".tmp")
+tmp.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+os.replace(tmp, path)
+PY
+# Restart the serving process with "$CONFIG_JSON", then verify fallback reason "disabled".
 ```
 
-- [ ] **Step 3: Commit**
+Also show the declarative rollback fragment `{"adaptive_expert_precision": false}`. State explicitly that rollback preserves `adaptive_derivatives`, `CURRENT`, canonical Archer files, and manifests for diagnosis; serving must not load or mutate them while disabled. After restart, verify fallback reason `disabled`, zero adaptive transition activity, and successful canonical requests.
+
+- [ ] **Step 5: Run executable documentation QA**
+
+Run:
 
 ```bash
-git add docs/adaptive-expert-precision.md docs/configuration.md docs/model-compatibility.md docs/benchmarking.md
+pytest -q tests/python/unit/test_adaptive_precision_docs.py
+python -m compileall benchmarks/adaptive_precision
+```
+
+Expected: the five documentation tests pass. They prove that configuration/defaults and byte units are present; manifest/index/attestation and exact release approval are explained; all protected paths and four rollout combinations are listed; benchmark arms, metrics, five repetitions, quality attestation, and release gate are specified; and copy-pastable build, policy replay, benchmark, report, and rollback commands are present. `compileall` exits 0 for every documented Python entry point.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add docs/adaptive-expert-precision.md docs/configuration.md docs/model-compatibility.md docs/benchmarking.md tests/python/unit/test_adaptive_precision_docs.py
 git commit -m "docs: describe adaptive expert precision policy"
 ```
 
@@ -2247,6 +2643,7 @@ pytest -q \
   tests/python/unit/test_adaptive_precision_wiring.py \
   tests/python/unit/test_expert_variant_conversion.py \
   tests/python/unit/test_adaptive_precision_benchmark_schema.py \
+  tests/python/unit/test_adaptive_precision_docs.py \
   tests/python/unit/test_setup_sources.py \
   tests/python/unit/test_native_phase_policy_wire.py \
   tests/python/unit/test_quantization_detection.py \
@@ -2275,7 +2672,7 @@ cmake --build build-testing --target prefetch_op test_expert_residency test_expe
 ctest --test-dir build-testing -R 'ExpertResidency(Variant)?Tests' --output-on-failure
 ```
 
-Expected: normal `_store` omits test bindings; setuptools and CMake testing builds expose them consistently; both build systems compile phase-policy's `expert_residency.cpp` exactly once and no other residency authority; original and variant manager tests pass. `_marlin` and `_v4_fp4` availability is reported by the build; unavailable optional extensions disable only their registered formats.
+Expected: normal `_store` omits test bindings; setuptools and CMake testing builds expose them consistently; both build systems compile Task 0's `expert_residency.cpp` exactly once and no other residency authority; original and variant manager tests pass. `_marlin` and `_v4_fp4` availability is reported by the build; unavailable optional extensions disable only their registered formats.
 
 - [ ] **Step 4: Run single-GPU native and integration tests**
 
@@ -2285,13 +2682,12 @@ Run:
 CUDA_VISIBLE_DEVICES=0 MOE_INFINITY_TESTING=1 pytest -q \
   tests/python/ops/test_adaptive_expert_dispatch.py \
   tests/python/integration/test_phase_adaptive_residency.py \
-  tests/python/integration/test_phase_specific_expert_policy.py \
   tests/python/integration/test_adaptive_precision_parity.py \
   tests/python/unit/test_glm_fp8_native_dequant.py \
   tests/python/unit/test_gpt_oss_mxfp4_dispatch.py
 ```
 
-Expected: all tests supported by the built extensions pass; the combined test reports one manager identity and one resident-byte snapshot with both flags enabled; unavailable checkpoint/extension cases are explicit skips, not silent passes.
+Expected: all tests supported by the built extensions pass; the combined test reports one manager identity and one resident-byte snapshot for each routing combination without importing a separately landed phase-policy test module; unavailable checkpoint/extension cases are explicit skips, not silent passes.
 
 - [ ] **Step 5: Run DeepSeek-V4 protected-path tests in its validated environment**
 
@@ -2323,9 +2719,9 @@ Expected: `git diff --check` exits 0. The second command shows no kernel-math re
 
 | Condition | Required behavior | Metric/reason |
 |---|---|---|
-| Implementation base lacks phase-policy `ExpertResidencyManager` API/tests | Stop before Task 1; do not implement or build adaptive precision | prerequisite failure, no runtime fallback |
-| Adaptive feature disabled | Do not read adaptive manifests or register variants; preserve phase-policy enabled/disabled behavior exactly | `disabled` |
-| GPT-OSS/GLM/V4/DeepSeek-V3/GPTQ/AWQ | Run current model-specific path; preserve phase-policy behavior where applicable; do not invoke general adaptive conversion | the exact `protected:gpt_oss_mxfp4`, `protected:glm_fp8`, `protected:deepseek_v4_fp4`, `protected:existing_fp8`, `protected:gptq`, or `protected:awq` reason |
+| Task 0 initially finds no exact `ExpertResidencyManager` API/tests | Create or reconcile the exact foundation, register it once, and pass its real-manager tests before Task 1 | foundation setup; no runtime fallback |
+| Adaptive feature disabled | Do not read adaptive manifests or register variants; preserve Task 0's legacy/manager behavior selected by the phase flag | `disabled` |
+| GPT-OSS/GLM/V4/DeepSeek-V3/GPTQ/AWQ | Run current model-specific path; preserve any enabled phase behavior where applicable; do not invoke general adaptive conversion | the exact `protected:gpt_oss_mxfp4`, `protected:glm_fp8`, `protected:deepseek_v4_fp4`, `protected:existing_fp8`, `protected:gptq`, or `protected:awq` reason |
 | Model is not a converter candidate | Do not build derivatives; run canonical path | `unsupported:converter_candidate` |
 | Candidate manifest lacks an exact released four-field entry | Reject the entire derivative generation before overlay load; run canonical | `manifest_unapproved` |
 | Required extension/capability absent | Remove only that format; use next validated format or canonical | `unsupported:capability` |
@@ -2336,7 +2732,7 @@ Expected: `git diff --check` exits 0. The second command shows no kernel-math re
 | Async copy/conversion/event fails | Keep old active generation and reclaim destination | `transition_failed` |
 | Requested format unavailable for one expert shape | Keep that expert canonical; other validated experts may adapt | `expert_capability_miss` |
 | Policy raises or emits stale epoch | Ignore plan; keep current targets | `policy_error` or `stale_epoch` |
-| Dispatcher and scheduler do not expose the same manager identity | Disable adaptive registration before overlay load and retain the phase-policy/canonical path | `residency_manager_mismatch` |
+| Dispatcher and scheduler do not expose the same manager identity | Disable adaptive registration before overlay load and retain Task 0's canonical path | `residency_manager_mismatch` |
 | Manager transaction or shared-lease invariant is violated | Keep generation resident, abort the transaction, stop adaptive admission for the epoch, and use canonical on demand | `residency_transaction_error` |
 
 No fallback path changes tensor values silently. The chosen storage and execution formats are visible in metrics and logs.
@@ -2345,11 +2741,11 @@ No fallback path changes tensor values silently. The chosen storage and executio
 
 | Risk | Mitigation and required test |
 |---|---|
-| Adaptive implementation starts before/rebases around phase policy | Task 0 hard-blocks all implementation on the landed manager files, clients, source registration, and original real-manager tests. |
+| Adaptive implementation assumes a plan-only manager exists | Task 0 creates or reconciles the exact manager files, clients, source registration, and real-manager tests; PR #179 is design coordination only. |
 | A parallel merge recreates two native authorities | Adaptive modifies only `core/prefetch/expert_residency.{h,cpp}` and existing clients; source tests reject every additional residency-authority source. |
 | Double-counting or undercounting HBM because Archer aligns each tensor | Track payload and aligned bytes separately; enforce the invariant with native tests. |
 | Charging all host-ready experts makes adaptive mode incompatible with sparse residency | Policy inputs contain only resident/retiring generations and current admission candidates; host-ready catalog bytes are zero. |
-| Prefetch and dispatcher charge or evict the same generation independently | One phase-policy `ExpertResidencyManager`, manager-issued leases/transactions, and shared-client tests. |
+| Prefetch and dispatcher charge or evict the same generation independently | One Task 0 `ExpertResidencyManager`, manager-issued leases/transactions, and shared-client tests. |
 | Adaptive enabled while phase flag is disabled falls back into legacy private caches | `manager_enabled = phase_enabled || adaptive_enabled` matrix test forces both clients through the manager whenever adaptive is active. |
 | Destination plus old generation temporarily exceeds budget | Reserve destination/workspace before allocation; retire old bytes only after lease and event completion. |
 | Use-after-free between fetch, conversion, and execution streams | Stable generations, atomic active pointer, lease counts, ready/last-use events, and shutdown-order tests. |
@@ -2367,16 +2763,16 @@ No fallback path changes tensor values silently. The chosen storage and executio
 
 ## Completion criteria
 
-- This plan-only branch remains independently reviewable as a Markdown-only change; implementation begins only after Task 0 on a rebased implementation branch.
+- This plan-only branch remains independently reviewable as a Markdown-only change; implementation begins with Task 0 on the implementation branch.
 - Adaptive mode is opt-in and deterministic.
-- The implementation branch is rebased after the landed phase-policy manager and passes its unchanged prerequisite tests before adaptive changes begin.
-- No new residency-authority source, singleton, resident map, byte counter, lease registry, or victim selector exists; setup/CMake register only phase-policy's `expert_residency.cpp`.
+- Task 0 either validates an already-landed exact manager or creates/reconciles it, then passes exactly-once build registration and concrete capacity/transaction/lease tests before adaptive changes begin.
+- No second residency-authority source, singleton, resident map, byte counter, lease registry, or victim selector exists; setup/CMake register only Task 0's `expert_residency.cpp`.
 - Converter/build candidates are separate from released serving entries; unapproved manifests are rejected before derivative index loading.
 - Every derivative representation has explicit storage format, execution kind, roles, scale owner, payload/aligned/workspace bytes, source format, converter version, quality-attestation digest, and generation.
 - Derivative tensor/file IDs are journaled strictly above canonical maxima; crash/retry cannot collide and `CURRENT` atomically names one complete index/manifest generation.
 - Native accounting charges only resident/retiring generations, transition reservations, and workspace; host-ready variants charge zero, and the total never exceeds the fixed HBM budget.
-- Prefetch, dispatch, execution, and retirement compose through phase-policy's single `ExpertResidencyManager` transaction API; one generation is charged once regardless of client or lease count.
-- All four phase/adaptive flag combinations are tested; adaptive enabled always routes scheduler and dispatcher through the manager, while both disabled preserves the phase-policy legacy fallback.
+- Prefetch, dispatch, execution, and retirement compose through Task 0's single `ExpertResidencyManager` transaction API; one generation is charged once regardless of client or lease count.
+- `test_phase_adaptive_residency.py` exercises all four Boolean routing combinations against Task 0's manager contract without assuming a separately landed phase implementation; adaptive enabled always routes scheduler and dispatcher through the manager, while both disabled preserves the legacy fallback. When the phase feature is present, its own behavior tests also run unchanged.
 - A forward pass uses only a fully published generation; failed transitions preserve the old generation.
 - Protected GPT-OSS MXFP4, GLM FP8, DeepSeek-V4 FP4, DeepSeek-V3 FP8, GPTQ, and AWQ paths pass their existing parity tests and never enter general adaptive conversion.
 - Legacy stores and unsupported hardware fall back exactly without file mutation.
@@ -2384,3 +2780,4 @@ No fallback path changes tensor values silently. The chosen storage and executio
 - Kernel, checkpoint, perplexity, and token-agreement gates produce a digest-qualified candidate; only a separate exact released entry enables serving.
 - Benchmark workloads are generated deterministically by `workloads.py`; no undeclared prompts file is required.
 - Benchmark output includes raw memory, transfer, TTFT, TPOT p50/p90/p99, throughput, policy, fallback, quality, hardware, software, fingerprint, format, converter version, and attestation fields without claiming unmeasured speedups.
+- Executable documentation QA passes for configuration/defaults, manifests/indexes/attestations, support and four-flag rollout, benchmark/release gates, and build/replay/benchmark/report/rollback commands.
