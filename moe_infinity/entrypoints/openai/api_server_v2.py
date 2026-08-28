@@ -87,7 +87,11 @@ except Exception:
     uvicorn = SimpleNamespace(run=lambda *args, **kwargs: None)
 
 import moe_infinity.serving.watchdog as watchdog_module
-from moe_infinity.serving.engine import ContinuousBatchingEngine, RequestOutput
+from moe_infinity.serving.engine import (
+    ContinuousBatchingEngine,
+    RequestOutput,
+    validate_chunked_prefill_config,
+)
 from moe_infinity.serving.health import ServerHealthState
 from moe_infinity.serving.sequence import SamplingParams
 from moe_infinity.serving.stream import StreamManager
@@ -482,6 +486,9 @@ def initialize_with_model(
     kv_cache_ratio: float = 0.25,
     max_batch_size: int = 32,
     enable_prefix_caching: bool = False,
+    enable_chunked_prefill: bool = False,
+    prefill_chunk_size: int = 512,
+    prefill_starvation_threshold_steps: int = 8,
     speculative_draft: Optional[Any] = None,
 ) -> None:
     """Initialize the v2 server with a pre-loaded MoE model.
@@ -502,6 +509,9 @@ def initialize_with_model(
         kv_cache_ratio=kv_cache_ratio,
         max_batch_size=max_batch_size,
         enable_prefix_caching=enable_prefix_caching,
+        enable_chunked_prefill=enable_chunked_prefill,
+        prefill_chunk_size=prefill_chunk_size,
+        prefill_starvation_threshold_steps=(prefill_starvation_threshold_steps),
     )
     engine_config = _build_engine_config(args=args, model=hf_model)
 
@@ -1860,8 +1870,17 @@ def _build_engine_config(
     }
     if eos_token_id is not None:
         config["eos_token_id"] = eos_token_id
-    if args.enable_prefix_caching:
-        config["enable_prefix_caching"] = True
+    config["enable_chunked_prefill"] = bool(
+        getattr(args, "enable_chunked_prefill", False)
+    )
+    config["enable_prefix_caching"] = bool(
+        getattr(args, "enable_prefix_caching", False)
+    )
+    config["prefill_chunk_size"] = int(getattr(args, "prefill_chunk_size", 512))
+    config["prefill_starvation_threshold_steps"] = int(
+        getattr(args, "prefill_starvation_threshold_steps", 8)
+    )
+    validate_chunked_prefill_config(config)
     return config
 
 
@@ -1887,6 +1906,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-waiting-requests", type=int, default=0)
     parser.add_argument("--max-n", type=int, default=16)
     parser.add_argument("--enable-prefix-caching", action="store_true")
+    parser.add_argument("--enable-chunked-prefill", action="store_true")
+    parser.add_argument("--prefill-chunk-size", type=int, default=512)
+    parser.add_argument(
+        "--prefill-starvation-threshold-steps", type=int, default=8
+    )
     parser.add_argument(
         "--startup-timeout",
         type=float,

@@ -14,6 +14,7 @@ from moe_infinity.runtime.attention_types import (
 )
 from moe_infinity.runtime.attention_types import (
     KVCacheSpec,
+    _as_int_list,
 )
 
 
@@ -23,6 +24,173 @@ class AttentionMetadata:
     block_table: Optional[torch.Tensor]
     slot_mapping: Optional[torch.Tensor]
     seq_lens: Optional[torch.Tensor] = None
+
+
+@dataclass(frozen=True)
+class LayerRegistration:
+    layer_idx: int
+    module_id: int
+
+
+@dataclass(frozen=True)
+class FlashInferPlanMetadata:
+    query_lengths: torch.Tensor
+    query_offsets: torch.Tensor
+    kv_seq_lengths: torch.Tensor
+    kv_indptr: torch.Tensor
+    kv_last_page_len: torch.Tensor
+
+
+@dataclass(frozen=True)
+class LayeredPagedKVPayload:
+    source_block_ids: list[int]
+    k_cache: torch.Tensor
+    v_cache: torch.Tensor
+    fi_kv_cache: torch.Tensor | None
+
+
+@dataclass(frozen=True)
+class LayeredPagedKVCheckpoint:
+    source_block_ids: list[int]
+    k_cache_cpu: torch.Tensor
+    v_cache_cpu: torch.Tensor
+    fi_kv_cache_cpu: torch.Tensor | None
+
+
+class LayeredPagedKVStore:
+    """Layer-aware owner of the standard and FlashInfer paged K/V tensors.
+
+    ``physical_capacity`` is the immutable number of physical blocks backing the
+    tensors. The mutation API is exactly ``export_blocks``, ``import_blocks``,
+    ``checkpoint``, and ``restore``; nothing else may swap or snapshot the
+    active model K/V storage.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_layers: int,
+        num_blocks: int,
+        spec: KVCacheSpec,
+        device: torch.device,
+        enable_flashinfer: bool,
+    ) -> None:
+        if num_layers <= 0:
+            raise ValueError(f"num_layers must be > 0, got {num_layers}")
+        self.num_layers = int(num_layers)
+        self.physical_capacity = int(num_blocks)
+        self.block_size = int(spec.block_size)
+        self.num_kv_heads = int(spec.num_kv_heads)
+        self.head_dim = int(spec.head_dim)
+        self.dtype = spec.dtype
+        self.device = device
+        self._x = 8
+        self.k_cache = torch.zeros(
+            self.num_layers,
+            self.physical_capacity,
+            self.num_kv_heads,
+            self.head_dim // self._x,
+            self.block_size,
+            self._x,
+            dtype=self.dtype,
+            device=device,
+        )
+        self.v_cache = torch.zeros(
+            self.num_layers,
+            self.physical_capacity,
+            self.num_kv_heads,
+            self.head_dim,
+            self.block_size,
+            dtype=self.dtype,
+            device=device,
+        )
+        self.fi_kv_cache: Optional[torch.Tensor] = None
+        if enable_flashinfer:
+            self.fi_kv_cache = torch.zeros(
+                self.num_layers,
+                self.physical_capacity,
+                2,
+                self.block_size,
+                self.num_kv_heads,
+                self.head_dim,
+                dtype=self.dtype,
+                device=device,
+            )
+
+    def export_blocks(self, block_ids: list[int]) -> LayeredPagedKVPayload:
+        index = torch.tensor(block_ids, dtype=torch.long, device=self.device)
+        fi_slice = (
+            self.fi_kv_cache.index_select(1, index).clone()
+            if self.fi_kv_cache is not None
+            else None
+        )
+        return LayeredPagedKVPayload(
+            source_block_ids=list(block_ids),
+            k_cache=self.k_cache.index_select(1, index).clone(),
+            v_cache=self.v_cache.index_select(1, index).clone(),
+            fi_kv_cache=fi_slice,
+        )
+
+    def import_blocks(
+        self, block_ids: list[int], payload: LayeredPagedKVPayload
+    ) -> None:
+        if len(block_ids) != len(payload.source_block_ids):
+            raise ValueError("import block count mismatch")
+        index = torch.tensor(block_ids, dtype=torch.long, device=self.device)
+        self.k_cache.index_copy_(
+            1, index, payload.k_cache.to(self.device, dtype=self.dtype)
+        )
+        self.v_cache.index_copy_(
+            1, index, payload.v_cache.to(self.device, dtype=self.dtype)
+        )
+        if self.fi_kv_cache is not None and payload.fi_kv_cache is not None:
+            self.fi_kv_cache.index_copy_(
+                1,
+                index,
+                payload.fi_kv_cache.to(self.device, dtype=self.dtype),
+            )
+
+    def checkpoint(self, block_ids: list[int]) -> LayeredPagedKVCheckpoint:
+        index = torch.tensor(block_ids, dtype=torch.long, device=self.device)
+        fi_cpu = (
+            self.fi_kv_cache.index_select(1, index).detach().to("cpu").clone()
+            if self.fi_kv_cache is not None
+            else None
+        )
+        return LayeredPagedKVCheckpoint(
+            source_block_ids=list(block_ids),
+            k_cache_cpu=self.k_cache.index_select(1, index)
+            .detach()
+            .to("cpu")
+            .clone(),
+            v_cache_cpu=self.v_cache.index_select(1, index)
+            .detach()
+            .to("cpu")
+            .clone(),
+            fi_kv_cache_cpu=fi_cpu,
+        )
+
+    def restore(
+        self, block_ids: list[int], checkpoint: LayeredPagedKVCheckpoint
+    ) -> None:
+        if len(block_ids) != len(checkpoint.source_block_ids):
+            raise ValueError("restore block count mismatch")
+        index = torch.tensor(block_ids, dtype=torch.long, device=self.device)
+        self.k_cache.index_copy_(
+            1, index, checkpoint.k_cache_cpu.to(self.device, dtype=self.dtype)
+        )
+        self.v_cache.index_copy_(
+            1, index, checkpoint.v_cache_cpu.to(self.device, dtype=self.dtype)
+        )
+        if (
+            self.fi_kv_cache is not None
+            and checkpoint.fi_kv_cache_cpu is not None
+        ):
+            self.fi_kv_cache.index_copy_(
+                1,
+                index,
+                checkpoint.fi_kv_cache_cpu.to(self.device, dtype=self.dtype),
+            )
 
 
 @runtime_checkable
@@ -78,12 +246,11 @@ class PlaceholderAttentionBackend:
 class PagedAttentionBackend:
     spec: KVCacheSpec
     num_gpu_blocks: int
+    num_layers: int
     device: torch.device
-    k_cache: torch.Tensor
-    v_cache: torch.Tensor
+    block_store: LayeredPagedKVStore
     _use_flashinfer: bool
     _fi_workspace: Optional[torch.Tensor]
-    _fi_kv_cache: Optional[torch.Tensor]
     _fi_prefill: Optional[Any]
     _fi_decode: Optional[Any]
 
@@ -92,38 +259,22 @@ class PagedAttentionBackend:
         spec: KVCacheSpec,
         num_gpu_blocks: int,
         device: torch.device,
+        num_layers: int = 1,
     ) -> None:
         if spec.head_dim % 8 != 0:
             raise ValueError("spec.head_dim must be divisible by 8")
 
         self.spec = spec
         self.num_gpu_blocks = int(num_gpu_blocks)
+        self.num_layers = int(num_layers)
         self.device = device
-
-        x = 8
-        self.k_cache = torch.zeros(
-            self.num_gpu_blocks,
-            spec.num_kv_heads,
-            spec.head_dim // x,
-            spec.block_size,
-            x,
-            dtype=spec.dtype,
-            device=device,
-        )
-        self.v_cache = torch.zeros(
-            self.num_gpu_blocks,
-            spec.num_kv_heads,
-            spec.head_dim,
-            spec.block_size,
-            dtype=spec.dtype,
-            device=device,
-        )
+        self._registered_layers: dict[int, int] = {}
 
         self._use_flashinfer = False
         self._fi_workspace = None
-        self._fi_kv_cache = None
         self._fi_prefill = None
         self._fi_decode = None
+        enable_flashinfer = False
         if flashinfer_utils.HAS_FLASHINFER:
             flashinfer_module = cast(
                 Any,
@@ -133,15 +284,6 @@ class PagedAttentionBackend:
                 try:
                     workspace = flashinfer_utils.get_workspace(device)
                     self._fi_workspace = workspace
-                    self._fi_kv_cache = torch.zeros(
-                        self.num_gpu_blocks,
-                        2,
-                        spec.block_size,
-                        spec.num_kv_heads,
-                        spec.head_dim,
-                        dtype=spec.dtype,
-                        device=device,
-                    )
                     self._fi_prefill = (
                         flashinfer_module.BatchPrefillWithPagedKVCacheWrapper(
                             workspace,
@@ -155,18 +297,56 @@ class PagedAttentionBackend:
                         )
                     )
                     self._use_flashinfer = True
+                    enable_flashinfer = True
                 except Exception:
                     self._use_flashinfer = False
                     self._fi_workspace = None
-                    self._fi_kv_cache = None
                     self._fi_prefill = None
                     self._fi_decode = None
+                    enable_flashinfer = False
+
+        self.block_store = LayeredPagedKVStore(
+            num_layers=self.num_layers,
+            num_blocks=self.num_gpu_blocks,
+            spec=spec,
+            device=device,
+            enable_flashinfer=enable_flashinfer,
+        )
+        self.last_flashinfer_plan: Optional[FlashInferPlanMetadata] = None
+
+    def register_layers(self, registrations: list[LayerRegistration]) -> None:
+        self._registered_layers = {
+            registration.layer_idx: registration.module_id
+            for registration in registrations
+        }
+
+    def supports_chunked_prefill(self) -> bool:
+        return self._flashinfer_enabled()
+
+    @property
+    def k_cache(self) -> torch.Tensor:
+        return self.block_store.k_cache[0]
+
+    @property
+    def v_cache(self) -> torch.Tensor:
+        return self.block_store.v_cache[0]
+
+    @property
+    def _fi_kv_cache(self) -> Optional[torch.Tensor]:
+        store = self.block_store.fi_kv_cache
+        return None if store is None else store[0]
+
+    @_fi_kv_cache.setter
+    def _fi_kv_cache(self, value: Optional[torch.Tensor]) -> None:
+        if value is None:
+            self.block_store.fi_kv_cache = None
 
     def write_kv(
         self,
         key: torch.Tensor,
         value: torch.Tensor,
         slot_mapping: torch.Tensor,
+        layer_idx: int = 0,
     ) -> None:
         if key.shape != value.shape:
             raise ValueError("key and value must have the same shape")
@@ -183,11 +363,13 @@ class PagedAttentionBackend:
         if head_dim != self.spec.head_dim:
             raise ValueError("head_dim mismatch with cache spec")
 
-        x = self.k_cache.shape[-1]
+        k_store = self.block_store.k_cache[layer_idx]
+        v_store = self.block_store.v_cache[layer_idx]
+        x = k_store.shape[-1]
         block_size = self.spec.block_size
 
-        k_src = key.to(device=self.device, dtype=self.k_cache.dtype)
-        v_src = value.to(device=self.device, dtype=self.v_cache.dtype)
+        k_src = key.to(device=self.device, dtype=k_store.dtype)
+        v_src = value.to(device=self.device, dtype=v_store.dtype)
         slots = slot_mapping.to(device=self.device, dtype=torch.long)
 
         for i in range(num_tokens):
@@ -202,20 +384,21 @@ class PagedAttentionBackend:
                     "slot_mapping points past allocated GPU blocks"
                 )
 
-            self.k_cache[block_id, :, :, token_offset, :] = k_src[i].reshape(
+            k_store[block_id, :, :, token_offset, :] = k_src[i].reshape(
                 self.spec.num_kv_heads,
                 self.spec.head_dim // x,
                 x,
             )
-            self.v_cache[block_id, :, :, token_offset] = v_src[i]
+            v_store[block_id, :, :, token_offset] = v_src[i]
 
     def write_kv_flashinfer(
         self,
         key: torch.Tensor,
         value: torch.Tensor,
         slot_mapping: torch.Tensor,
+        layer_idx: int = 0,
     ) -> None:
-        if self._fi_kv_cache is None:
+        if self.block_store.fi_kv_cache is None:
             raise RuntimeError("FlashInfer KV cache is not initialized")
         if key.shape != value.shape:
             raise ValueError("key and value must have the same shape")
@@ -232,6 +415,7 @@ class PagedAttentionBackend:
         if head_dim != self.spec.head_dim:
             raise ValueError("head_dim mismatch with cache spec")
 
+        fi_store = self.block_store.fi_kv_cache[layer_idx]
         k_src = key.to(device=self.device, dtype=self.spec.dtype)
         v_src = value.to(device=self.device, dtype=self.spec.dtype)
         slots = slot_mapping.to(device=self.device, dtype=torch.long)
@@ -249,8 +433,8 @@ class PagedAttentionBackend:
                     "slot_mapping points past allocated GPU blocks"
                 )
 
-            self._fi_kv_cache[block_id, 0, token_offset] = k_src[i]
-            self._fi_kv_cache[block_id, 1, token_offset] = v_src[i]
+            fi_store[block_id, 0, token_offset] = k_src[i]
+            fi_store[block_id, 1, token_offset] = v_src[i]
 
     def forward(
         self,
@@ -265,6 +449,7 @@ class PagedAttentionBackend:
         attention_metadata: Optional[
             AttentionMetadata | RuntimeAttentionMetadata
         ] = None,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         _ = kv_cache
         metadata = (
@@ -279,18 +464,23 @@ class PagedAttentionBackend:
             slot_mapping = self._get_slot_mapping(metadata)
             if slot_mapping is None:
                 raise ValueError("prefill requires slot_mapping")
-            self.write_kv(key, value, slot_mapping)
+            self.write_kv(key, value, slot_mapping, layer_idx=layer_idx)
             if self._flashinfer_enabled():
-                self.write_kv_flashinfer(key, value, slot_mapping)
+                self.write_kv_flashinfer(
+                    key, value, slot_mapping, layer_idx=layer_idx
+                )
             return self._prefill_forward(
                 query,
                 key,
                 value,
                 metadata=metadata,
                 scale=scale,
+                layer_idx=layer_idx,
             )
 
-        return self._decode_forward(query, metadata, scale=scale)
+        return self._decode_forward(
+            query, metadata, scale=scale, layer_idx=layer_idx
+        )
 
     def _prefill_forward(
         self,
@@ -299,16 +489,22 @@ class PagedAttentionBackend:
         value: torch.Tensor,
         metadata: Optional[AttentionMetadata | RuntimeAttentionMetadata] = None,
         scale: Optional[float] = None,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         if query.ndim != 3 or key.ndim != 3 or value.ndim != 3:
             raise ValueError(
                 "prefill query/key/value must have shape [num_tokens, num_heads, head_dim]"
             )
 
+        fi_layer_cache = (
+            self.block_store.fi_kv_cache[layer_idx]
+            if self.block_store.fi_kv_cache is not None
+            else None
+        )
         if self._flashinfer_enabled():
             if metadata is None:
                 raise ValueError("prefill requires attention metadata")
-            if self._fi_prefill is None or self._fi_kv_cache is None:
+            if self._fi_prefill is None or fi_layer_cache is None:
                 raise RuntimeError(
                     "FlashInfer prefill wrappers are unavailable"
                 )
@@ -326,9 +522,12 @@ class PagedAttentionBackend:
                 kv_last_page_len,
                 num_qo_heads,
             )
+            self._record_flashinfer_plan(
+                metadata, qo_indptr, kv_indptr, kv_last_page_len
+            )
             return cast(
                 torch.Tensor,
-                self._fi_prefill.run(query_src, self._fi_kv_cache),
+                self._fi_prefill.run(query_src, fi_layer_cache),
             )
 
         q = (
@@ -387,6 +586,7 @@ class PagedAttentionBackend:
         query: torch.Tensor,
         metadata: AttentionMetadata | RuntimeAttentionMetadata,
         scale: Optional[float] = None,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         if query.ndim == 2:
             query = query.unsqueeze(0)
@@ -395,8 +595,13 @@ class PagedAttentionBackend:
                 "decode query must have shape [batch_size, num_heads, head_dim]"
             )
 
+        fi_layer_cache = (
+            self.block_store.fi_kv_cache[layer_idx]
+            if self.block_store.fi_kv_cache is not None
+            else None
+        )
         if self._flashinfer_enabled():
-            if self._fi_decode is None or self._fi_kv_cache is None:
+            if self._fi_decode is None or fi_layer_cache is None:
                 raise RuntimeError("FlashInfer decode wrappers are unavailable")
 
             query_src = query.to(self.device, dtype=self.spec.dtype)
@@ -413,7 +618,7 @@ class PagedAttentionBackend:
             )
             return cast(
                 torch.Tensor,
-                self._fi_decode.run(query_src, self._fi_kv_cache),
+                self._fi_decode.run(query_src, fi_layer_cache),
             )
 
         block_tables = self._get_block_tables(metadata)
@@ -430,8 +635,8 @@ class PagedAttentionBackend:
 
         return paged_attention_fwd(
             query=query.to(self.device, dtype=self.spec.dtype),
-            key_cache=self.k_cache,
-            value_cache=self.v_cache,
+            key_cache=self.block_store.k_cache[layer_idx],
+            value_cache=self.block_store.v_cache[layer_idx],
             block_tables=block_tables.to(self.device),
             seq_lens=seq_lens.to(self.device),
             scale=attn_scale,
@@ -463,13 +668,22 @@ class PagedAttentionBackend:
         seq_lens_i32 = seq_lens.to(self.device, dtype=torch.int32).reshape(-1)
         batch_size = int(seq_lens_i32.shape[0])
 
-        qo_indptr = torch.zeros(
-            batch_size + 1,
-            dtype=torch.int32,
-            device=self.device,
-        )
-        if batch_size > 0:
-            qo_indptr[1:] = torch.cumsum(seq_lens_i32, dim=0)
+        lengths = getattr(metadata, "lengths", None)
+        if lengths is not None:
+            query_offsets = torch.as_tensor(
+                [int(v) for v in _as_int_list(lengths.query_offsets)],
+                dtype=torch.int32,
+                device=self.device,
+            )
+            qo_indptr = query_offsets.reshape(-1)
+        else:
+            qo_indptr = torch.zeros(
+                batch_size + 1,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            if batch_size > 0:
+                qo_indptr[1:] = torch.cumsum(seq_lens_i32, dim=0)
 
         block_size = int(self.spec.block_size)
         kv_indptr_vals = [0]
@@ -585,6 +799,36 @@ class PagedAttentionBackend:
                 pos_encoding_mode="NONE",
                 data_type=query_dtype,
             )
+
+    def _record_flashinfer_plan(
+        self,
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+        qo_indptr: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_last_page_len: torch.Tensor,
+    ) -> None:
+        lengths = getattr(metadata, "lengths", None)
+        if lengths is None:
+            query_lengths = torch.diff(qo_indptr.detach())
+            kv_seq_lengths = query_lengths.clone()
+        else:
+            query_lengths = torch.as_tensor(
+                [int(v) for v in _as_int_list(lengths.query_lengths)],
+                dtype=torch.int32,
+                device=qo_indptr.device,
+            )
+            kv_seq_lengths = torch.as_tensor(
+                [int(v) for v in _as_int_list(lengths.kv_seq_lengths)],
+                dtype=torch.int32,
+                device=qo_indptr.device,
+            )
+        self.last_flashinfer_plan = FlashInferPlanMetadata(
+            query_lengths=query_lengths.detach().clone(),
+            query_offsets=qo_indptr.detach().clone(),
+            kv_seq_lengths=kv_seq_lengths.detach().clone(),
+            kv_indptr=kv_indptr.detach().clone(),
+            kv_last_page_len=kv_last_page_len.detach().clone(),
+        )
 
     @classmethod
     def get_kv_cache_shape(

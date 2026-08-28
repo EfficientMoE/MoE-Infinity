@@ -422,6 +422,7 @@ class MoE:
                 spec=kv_spec,
                 num_gpu_blocks=num_gpu_blocks,
                 device=device,
+                num_layers=max(1, int(num_layers)),
             )
         except Exception:
             attention_backend = None
@@ -920,6 +921,9 @@ class MoE:
         kv_cache_ratio: float = 0.25,
         max_batch_size: int = 32,
         enable_prefix_caching: bool = False,
+        enable_chunked_prefill: bool = False,
+        prefill_chunk_size: int = 512,
+        prefill_starvation_threshold_steps: int = 8,
         offload_dir: Optional[str] = None,
         speculative_draft: Optional[object] = None,
     ) -> None:
@@ -965,6 +969,11 @@ class MoE:
             kv_cache_ratio=kv_cache_ratio,
             max_batch_size=max_batch_size,
             enable_prefix_caching=enable_prefix_caching,
+            enable_chunked_prefill=enable_chunked_prefill,
+            prefill_chunk_size=prefill_chunk_size,
+            prefill_starvation_threshold_steps=(
+                prefill_starvation_threshold_steps
+            ),
             speculative_draft=serving_speculator,
         )
 
