@@ -737,6 +737,16 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
 
     {
       std::lock_guard<std::mutex> lock(accum_mutex_);
+      // Drop stragglers from a failed or superseded generation: after
+      // FailDispatch zeros pending_, a late worker must not accumulate into a
+      // reused final_hidden_states_ or leave a stray completion event that
+      // would trip the next dispatch's empty-events check.
+      if (current_generation_.load(std::memory_order_acquire) !=
+              args.generation ||
+          failed_generation_.load(std::memory_order_acquire) ==
+              args.generation) {
+        return true;
+      }
       if (batch_size == 1) {
         final_hidden_states_.add_(
             output_tensor *
@@ -1077,6 +1087,9 @@ void CUDART_CB ExpertDispatcher::RouteReadyCallback(void* opaque) {
   }
   if (dispatcher->pending_route_callbacks_.fetch_sub(
           1, std::memory_order_acq_rel) == 1) {
+    // Serialize with the destructor's predicate load to close the
+    // notify-after-check lost-wakeup window on the drain condition variable.
+    std::lock_guard<std::mutex> lock(dispatcher->route_callback_mutex_);
     dispatcher->route_callback_cv_.notify_all();
   }
 }
@@ -1228,6 +1241,8 @@ void CUDART_CB ExpertDispatcher::CompletionWaitsConsumedCallback(void* opaque) {
   }
   if (dispatcher->pending_completion_retirement_callbacks_.fetch_sub(
           1, std::memory_order_acq_rel) == 1) {
+    std::lock_guard<std::mutex> lock(
+        dispatcher->completion_retirement_callback_mutex_);
     dispatcher->completion_retirement_callback_cv_.notify_all();
   }
 }
@@ -1272,13 +1287,14 @@ void CUDART_CB ExpertDispatcher::ExpertReadyToRetireCallback(void* opaque) {
   try {
     dispatcher->retirement_queue_.Push(*retire);
   } catch (...) {
-    dispatcher->FailDispatch(
-        retire->generation, std::current_exception(),
-        {FailureContext{retire->expert_node, retire->gpu_id, false, false,
-                        retire->evict}});
+    // Runs on a CUDA host-callback thread, so pass no FailureContext: node/
+    // cache restoration issues CUDA calls that are forbidden here. State is
+    // still closed and waiters notified; the destructor resets node state.
+    dispatcher->FailDispatch(retire->generation, std::current_exception());
   }
   if (dispatcher->pending_retirement_callbacks_.fetch_sub(
           1, std::memory_order_acq_rel) == 1) {
+    std::lock_guard<std::mutex> lock(dispatcher->retirement_callback_mutex_);
     dispatcher->retirement_callback_cv_.notify_all();
   }
 }
