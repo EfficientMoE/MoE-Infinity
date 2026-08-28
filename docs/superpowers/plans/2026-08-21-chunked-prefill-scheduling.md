@@ -4,7 +4,7 @@
 
 **Goal:** Add opt-in, bounded prompt chunking to MoE-Infinity continuous serving so active decode rows run every feasible scheduler step while long prefills make fair progress within the existing per-step token and batch limits.
 
-**Architecture:** Keep the current whole-prefill scheduler as a separate default path. The opt-in path records committed prompt progress on `SequenceData`, reserves logical blocks backed by the production `LayeredPagedKVStore`, emits transactional chunks carrying canonical `PagedBatchLengths(query_lengths, query_offsets, context_lengths, kv_seq_lengths)`, runs decode rows first, and samples only decode rows or terminal prefill chunks. Each row is recorded immediately after table creation/reservation and before COW/checkpoint; multi-row prepare and execution/sampling share reverse-order rollback. `commit_prefill_step` and every participating canonical `PrefixLease` form one two-phase group transaction: prepare all participants, commit all participants, and abort/restore the entire group if prepare or any commit fails. The allocator's clamped logical capacity is at most the store's immutable physical capacity. Activation requires complete real Qwen3 paged-layer registration and real FlashInfer history-aware execution; an optional canonical `PrefixLeaseProvider` from `serving/prefix_contract.py` may supply reuse, while `None` remains a fully functional cold/chunk path. Sarathi-Serve ([arXiv:2403.02310](https://arxiv.org/abs/2403.02310)) is motivation only.
+**Architecture:** Keep the whole-prefill default path separate. The opt-in path records committed prompt progress, reserves logical blocks against the production layered store, emits exact chunk/query-vs-KV metadata, prioritizes decode, and samples only decode or terminal-prefill rows. Scheduler-owned KV transactions checkpoint every touched block and publish prompt progress only after execution and terminal sampling succeed. The first release rejects simultaneous prefix caching at validated startup, so this plan is executable from base without importing or recreating any prefix implementation.
 
 **Tech Stack:** Python 3.10+, dataclasses and deque-based scheduling, PyTorch, MoE-Infinity paged KV and attention metadata, pytest, CUDA + FlashInfer integration tests, OpenAI-compatible streaming benchmark client.
 
@@ -20,21 +20,20 @@ This is one serving-scheduler change, not P/D worker disaggregation. It does not
 2. With chunking active, `max_tokens_per_step` counts every scheduled prompt token plus one token for every decode row. `max_batch_size` counts scheduled sequence rows.
 3. Decode SLO policy is step-based: every runnable decode is selected before any prefill, in running FCFS order, unless the configured token/row cap is already exhausted. Prefill never preempts or displaces a selected decode.
 4. A prefill chunk has `0 < num_tokens <= prefill_chunk_size`, starts exactly at `SequenceData.num_computed_tokens`, and ends no later than `prompt_length`. A terminal chunk ends exactly at `prompt_length`.
-5. Scheduler output is a transaction lease. A scheduled chunk is removed from the ready queue, recorded in `_inflight_prefill`, and retains its prior reserved length plus backend checkpoint. Prompt progress and prefix publication commit only after model execution succeeds and terminal sampling succeeds. Execution or sampling failure restores every active backend cache representation, truncates newly reserved blocks, clears the in-flight lease, and requeues the same sequence at the head with unchanged committed progress.
+5. Scheduler output is a transaction lease. A scheduled chunk is removed from the ready queue, recorded in `_inflight_prefill`, and retains its prior reserved length plus backend checkpoint. Prompt progress commits only after model execution succeeds and terminal sampling succeeds. Execution or sampling failure restores every active backend cache representation, truncates newly reserved blocks, clears the in-flight lease, and requeues the same sequence at the head with unchanged committed progress.
 6. While `status is PREFILL`, `output_token_ids` is empty and `0 <= num_computed_tokens <= prompt_length`. The first sampled token is produced only by a terminal chunk; afterward `num_computed_tokens == prompt_length + len(output_token_ids)`.
 7. Fairness is round-robin among partial prefills. `prefill_starvation_threshold_steps` promotes an aged prefill ahead of other prefills only; it never jumps ahead of decode. The guarantee is bounded progress when at least one row and one token of post-decode capacity are feasible. Saturated decode load is reported as prefill backpressure, not hidden by violating decode priority.
 8. `PagedKVCache` owns allocation, references, block tables, and leases; the bound `PagedAttentionBackend` owns the actual K/V tensors used by model attention (standard and FlashInfer layouts). Swap/export/import/checkpoint/rollback always operate through that bound active storage. The allocator-only cache must never snapshot a disconnected `_kv_cache` while the model writes elsewhere.
 9. Query shape and KV history use exactly one canonical `PagedBatchLengths(query_lengths, query_offsets, context_lengths, kv_seq_lengths)` value from `runtime/attention_types.py`. Query fields describe packed tokens executed now; `context_lengths` describes prior committed history; `kv_seq_lengths=context+query` describes total visible KV after the forward. `BatchMetadata` and `AttentionMetadata` each carry this value as `lengths`; they do not redeclare or alias its four fields. FlashInfer passes `qo_indptr=lengths.query_offsets` and derives page metadata only from `lengths.kv_seq_lengths`.
-10. Mixed paged batches continue to split into homogeneous prefill/decode launches. Chunk slot mappings cover only query positions. Prefix-reused committed blocks remain in KV page tables and `kv_seq_lengths` but never appear in query offsets or slot mappings.
-11. Prefix reuse imports `PrefixLease`, `PrefixLeaseProvider`, and `PrefixMatch` only from `moe_infinity/serving/prefix_contract.py`. No chunk-local lease type, lifecycle, or provider protocol exists. Incremental writes use copy-on-write before modifying a shared page; only committed full block ranges are published, and rollback never publishes in-flight data. Every lease supports the canonical `prepare_commit()`, `commit()`, and `abort()` lifecycle; `abort()` is compensating and idempotent after prepare or commit so a later participant's commit failure can roll back the whole group.
-12. A prefill transaction's scheduler progress and all open prefix leases are one two-phase group transaction. Phase 1 validates every row and calls every participant's `prepare_commit()` without exposing progress. Phase 2 commits participants in deterministic row order. Any prepare/commit exception calls `abort()` on all lease participants in reverse order, restores every sequence snapshot and layered-store checkpoint, rolls back reservations/COW, removes all in-flight rows, and requeues them. No partial progress, publication, or transferred lease ownership survives.
-13. DFlash delegation remains eligible only when the combined predicate is true: singleton terminal one-shot prefill, `start_pos == 0`, no acquired prefix blocks, no previous chunk, and all existing sampling constraints. Partial or prefix-reused requests use ordinary paged prefill/decode; no DFlash session is entered midway through a prompt.
+10. Mixed paged batches continue to split into homogeneous prefill/decode launches. Chunk slot mappings cover only query positions; committed history remains in KV page tables and `kv_seq_lengths` but never appears in query offsets or slot mappings.
+11. The first release requires `not (enable_chunked_prefill and enable_prefix_caching)`. Engine construction and every CLI/programmatic startup path reject co-enablement with `ValueError("enable_chunked_prefill and enable_prefix_caching cannot both be true in the first release")` before scheduler or KV allocation begins.
+12. Chunking owns only scheduler rows and KV reservations/checkpoints. It does not import, create, adapt, or duplicate prefix contracts, cache indexes, providers, refcounts, or test helpers. PR #181 is referenced only as future reconciliation design input, never as an implementation prerequisite.
+13. DFlash delegation remains eligible only when the combined predicate is true: singleton terminal one-shot prefill, `start_pos == 0`, no previous chunk, and all existing sampling constraints. Partial requests use ordinary paged prefill/decode; no DFlash session is entered midway through a prompt.
 
 ### Files to create or modify
 
 - Modify `moe_infinity/serving/sequence.py`: prompt-progress helpers and invariants; no new sequence status.
 - Modify `moe_infinity/serving/kv_cache.py`: idempotent incremental token reservation and observable reserved-token count.
-- Reuse unchanged `moe_infinity/serving/prefix_contract.py`: import canonical `PrefixLease`, `PrefixLeaseProvider`, and `PrefixMatch`; this plan never creates or edits a prefix contract/cache implementation.
 - Modify `moe_infinity/serving/batch.py`: immutable `PrefillChunk`, scheduler output mapping, and exact chunk slicing.
 - Modify `moe_infinity/serving/scheduler.py`: preserve legacy schedule path; add decode-first chunk path, round-robin/age accounting, partial-KV admission, commit, cancellation, and preemption recovery.
 - Modify `moe_infinity/serving/model_runner.py`: canonical metadata and complete real-Qwen3 layer registry used by the engine gate.
@@ -53,13 +52,17 @@ This is one serving-scheduler change, not P/D worker disaggregation. It does not
 - Modify `tests/python/serving/test_cancellation.py`: cancellation and no-leak tests during partial prefill.
 - Modify `tests/python/serving/test_engine.py`: progress-only steps, terminal sampling, eager fallback, and DFlash eligibility tests.
 - Modify `tests/python/serving/test_flashinfer_model_runner.py`: query/KV metadata and real `Qwen3PagedAttention` detection.
-- Modify `tests/python/serving/test_scheduler.py` and `tests/python/serving/test_engine.py`: consume test leases from the prefix plan's shared utilities and cover provider-absent behavior plus two-phase group rollback; do not create a chunk-local contract test.
+- Modify `tests/python/serving/test_api_routes.py`: startup/config propagation and co-enablement rejection tests.
 - Create `tests/python/serving/test_qwen3_paged_attention_cuda.py`: real Qwen3 invocation through real CUDA FlashInfer and the production paged backend.
 - Modify `tests/python/integration/test_flashinfer_e2e.py`: CUDA paged mixed chunk/decode metadata and output parity.
 - Create `benchmarks/serving/chunked_prefill_latency.py`: paired disabled/enabled streaming TTFT/TPOT-tail workload.
 - Create `tests/python/serving/test_chunked_prefill_benchmark.py`: CPU tests for benchmark aggregation and paired result schema.
 - Modify `docs/serving.md`: semantics, limitations, controls, metrics, and rollout.
 - Modify `docs/benchmarking.md`: reproducible paired benchmark commands and interpretation.
+
+### Mandatory implementation order
+
+Execute Tasks 1, 2, 2A, 2B, and 3 in order, then continue with Tasks 4–10. Task 2B is an isolated configuration guard and has no prefix-file prerequisite; Tasks 2A–3 establish the layered-store and metadata contracts used by standalone chunk scheduling. This order is executable directly from base `b766f8f`.
 
 ### Source-review blocker closure
 
@@ -70,14 +73,14 @@ This is one serving-scheduler change, not P/D worker disaggregation. It does not
 | Swap snapshots the wrong tensor owner | Task 2A binds allocator metadata to layer-aware `PagedAttentionBackend` storage and tests export/import plus uninterrupted-vs-preempted logits/output parity in Task 7. |
 | Capability detection omits Qwen3 | Tasks 5 and 7 add real `Qwen3PagedAttention` detection and a separately collected real-class forward test. |
 | Invalid commands and incomplete benchmarks | Tasks 8–10 use existing test modules, exact token-ID prompts from the served tokenizer, measured output-token throughput, and polled peak KV block/utilization fields. |
-| Prefix reuse contract unspecified | Task 2B imports `PrefixLease`, `PrefixLeaseProvider`, and `PrefixMatch` only from `serving/prefix_contract.py`, preserves provider-absent cold behavior, and keeps prefix-leased rows out of DFlash. |
+| Absent prefix files block execution | Task 2B adds only a validated co-enablement rejection. No prefix production file, test helper, import, or copied implementation is required from base. |
 | Prepare order and multi-row atomicity | Task 4 creates/reserves each table first, records the row immediately, then COW/checkpoints; a transaction-level exception handler restores all earlier rows. |
 | Production capacity mismatch | Task 2A uses canonical `LayeredPagedKVStore.physical_capacity`, chooses `min(memory_budget_blocks, physical_capacity)`, and passes that clamped logical capacity to `set_block_store`; tests prove unequal logical/physical capacities activate safely. |
-| Canonical shared interfaces | Tasks 2A–3 use only `LayeredPagedKVStore` and `PagedBatchLengths(query_lengths, query_offsets, context_lengths, kv_seq_lengths)`; Task 2B imports canonical prefix types from `serving/prefix_contract.py` without another lifecycle/cache/refcount implementation. |
-| Partial commit across scheduler and prefix leases | Tasks 2B, 4, and 5 make scheduler progress plus all `PrefixLease` participants one prepare/commit/abort group and inject failures at every prepare/commit position to prove full rollback. |
+| Canonical shared interfaces | Tasks 2A–3 use only `LayeredPagedKVStore` and `PagedBatchLengths(query_lengths, query_offsets, context_lengths, kv_seq_lengths)`; chunking adds no cross-plan interface. |
+| Partial scheduler commit | Tasks 4 and 5 inject every fallible scheduler-preflight position and require progress publication only after complete execution and sampling. |
 | Real Qwen path still mocked | Task 7 invokes actual `Qwen3PagedAttention` through actual CUDA FlashInfer wrappers and production `PagedAttentionBackend`; recording/fake backends cannot satisfy rollout. |
-| Provider-absent integration | Task 2B tests scheduler and engine with `PrefixLeaseProvider=None`; chunking remains active/cold when all non-prefix capabilities pass. |
-| Cross-plan test/acceptance drift | Tasks 7–10 use canonical file/API names and require prepare rollback, unequal-capacity activation, real-Qwen PASS, provider-none parity, throughput, and peak-KV evidence. |
+| Prefix/chunk coexistence undefined | Task 2B rejects both flags together at config/startup with one exact error and documents rollback plus future reconciliation against PR #181 as design only. |
+| Cross-plan test/acceptance drift | Tasks 7–10 use canonical file/API names and require prepare rollback, unequal-capacity activation, real-Qwen PASS, co-enablement rejection, throughput, and peak-KV evidence. |
 
 ## Task 1: Make prompt progress explicit on sequences
 
@@ -135,7 +138,7 @@ Expected: FAIL with `AttributeError: 'SequenceData' object has no attribute 'adv
 
 - [ ] **Step 3: Implement the sequence invariants**
 
-Add `committed_kv_tokens: int = 0` and `has_prefix_lease: bool = False` fields to `SequenceData`, matching the prefix-reuse plan. Add these members immediately before `_validate_transition`:
+Add `committed_kv_tokens: int = 0` to `SequenceData`. Add these members immediately before `_validate_transition`:
 
 ```python
     @property
@@ -165,7 +168,7 @@ Add `committed_kv_tokens: int = 0` and `has_prefix_lease: bool = False` fields t
         self.committed_kv_tokens = new_total
 ```
 
-Update `append_output_token` to set both `num_computed_tokens` and `committed_kv_tokens` to prompt plus output length. Prefix adoption initializes both counters to `PrefixMatch.num_tokens`; scheduling/reservation never mutates either counter.
+Update `append_output_token` to set both `num_computed_tokens` and `committed_kv_tokens` to prompt plus output length. Scheduling and reservation never mutate either counter; only successful transaction publication does.
 
 - [ ] **Step 4: Run the focused and existing sequence tests**
 
@@ -313,7 +316,7 @@ Add these methods to `PagedKVCache` after `allocate_sequence` and make `allocate
             self._sequence_tables.pop(seq_id, None)
 ```
 
-Keep `append_tokens` as the decode-facing compatibility method; implement it as `ensure_sequence_capacity(seq_id, get_num_reserved_tokens(seq_id) + num_new_tokens)`. When the prefix branch is present, its checked refcount-aware `release` replaces the private-block `free` call above without changing this method signature; `cow_block_ids` must be a subset of `private_new_ids` or rollback raises before mutation.
+Keep `append_tokens` as the decode-facing compatibility method; implement it as `ensure_sequence_capacity(seq_id, get_num_reserved_tokens(seq_id) + num_new_tokens)`. Use the allocator's existing ownership-aware release operation for COW blocks; `cow_block_ids` must be a subset of `private_new_ids` or rollback raises before mutation.
 
 - [ ] **Step 4: Run KV unit tests**
 
@@ -406,7 +409,7 @@ Expected: FAIL with missing canonical `LayeredPagedKVStore` or `set_block_store`
 
 - [ ] **Step 3: Define one active paged-KV storage protocol**
 
-Add the canonical prefix-plan payload/checkpoint/store classes to `moe_infinity/runtime/attention_backend.py` (or reuse them unchanged if that branch landed first):
+Add these payload/checkpoint/store classes to `moe_infinity/runtime/attention_backend.py`:
 
 ```python
 @dataclass(frozen=True)
@@ -560,115 +563,115 @@ git add moe_infinity/runtime/attention_backend.py moe_infinity/serving/kv_cache.
 git commit -m "fix(serving): unify paged KV storage ownership"
 ```
 
-## Task 2B: Consume the canonical optional prefix transaction contract
+## Task 2B: Reject chunked-prefill and prefix-caching co-enablement
 
 **Files:**
-- Reuse unchanged: `moe_infinity/serving/prefix_contract.py`
-- Reuse unchanged: `tests/python/serving/prefix_cache_test_utils.py`
-- Modify: `moe_infinity/serving/scheduler.py:204-328`
-- Modify: `moe_infinity/serving/engine.py:122-206`
-- Modify: `tests/python/serving/test_scheduler.py`
 - Modify: `tests/python/serving/test_engine.py`
+- Modify: `tests/python/serving/test_api_routes.py`
+- Modify: `moe_infinity/serving/engine.py:84-156`
+- Modify: `moe_infinity/entrypoints/openai/api_server_v2.py:475-522,1849-1919`
+- Modify: `docs/serving.md`
 
-- [ ] **Step 1: Write failing canonical-import and provider-absent tests**
+- [ ] **Step 1: Write failing engine and startup validation tests**
 
-Import the shared types and test utility; do not define substitutes in chunk files:
-
-```python
-from moe_infinity.serving.prefix_contract import (
-    PrefixLease,
-    PrefixLeaseProvider,
-    PrefixMatch,
-)
-from tests.python.serving.prefix_cache_test_utils import (
-    RecordingPrefixLeaseProvider,
-    make_test_cache_namespace,
-)
-
-
-def test_chunk_scheduler_operates_without_prefix_provider() -> None:
-    scheduler = _make_chunk_scheduler(prefix_lease_provider=None)
-    scheduler.add_request(_make_group("cold", 1, 6))
-    output = scheduler.schedule()
-    assert output.prefill_chunks[1].start_pos == 0
-
-
-def test_chunk_scheduler_uses_canonical_prefix_match() -> None:
-    provider = RecordingPrefixLeaseProvider(
-        match=PrefixMatch(num_tokens=4, block_ids=(0,), entry_ids=(10,))
-    )
-    scheduler = _make_chunk_scheduler(prefix_lease_provider=provider)
-    scheduler.add_request(_make_group("warm", 1, 9))
-    output = scheduler.schedule()
-    assert provider.acquire_calls == 1
-    assert output.prefill_chunks[1].start_pos == 4
-    scheduler.commit_prefill_step(output.prefill_transaction_id)
-    assert provider.events == ["acquire", "prepare_commit", "commit"]
-```
-
-- [ ] **Step 2: Run RED**
-
-Run: `python -m pytest -q tests/python/serving/test_scheduler.py -k 'without_prefix_provider or canonical_prefix_match'`
-
-Expected: FAIL because chunk scheduling does not yet import `serving.prefix_contract` or join the canonical lease transaction.
-
-- [ ] **Step 3: Wire the optional provider without creating another lifecycle**
-
-Add optional `prefix_lease_provider: PrefixLeaseProvider | None` and canonical namespace arguments to `ContinuousBatchingEngine.__init__` and pass them unchanged to `Scheduler`. Import `PrefixLease`, `PrefixLeaseProvider`, and `PrefixMatch` only from `moe_infinity.serving.prefix_contract`. Do not create an alternate contract module, local protocol/dataclass, chunk-specific namespace, `PrefixCache`, refcount table, eviction policy, provider implementation, or lifecycle adapter.
-
-If provider or namespace is absent, admission is exactly cold and no prefix method is called. If both exist, acquire once before a sequence's first chunk with `max_prefix_tokens=floor((prompt_length - 1) / block_size) * block_size`, keep the returned canonical lease open on `InFlightPrefill`, and stage adoption of `lease.match.block_ids` through the canonical allocator APIs. Do **not** call `lease.commit()` during scheduling/admission. Prefix progress, `has_prefix_lease`, sequence ownership transfer, and the first chunk become visible only through Task 4's shared two-phase `commit_prefill_step`. A scheduling failure calls canonical `lease.abort()` and rolls back staged adoption.
-
-- [ ] **Step 4: Write prepare/commit failure matrix tests**
-
-Add a parameterized test using `RecordingPrefixLeaseProvider`'s canonical fault injection:
+Add `import pytest` if the module does not already import it, then append to `tests/python/serving/test_engine.py`:
 
 ```python
-@pytest.mark.parametrize(
-    ("failure", "expected_prefix"),
-    [
-        ("prepare:0", ["acquire", "abort"]),
-        ("prepare:1", ["acquire", "prepare_commit", "abort"]),
-        ("commit:0", ["acquire", "prepare_commit", "commit", "abort"]),
-        ("commit:1", ["acquire", "prepare_commit", "commit", "abort"]),
-    ],
-)
-def test_prefix_and_chunk_group_transaction_rolls_back_every_failure(
-    failure: str, expected_prefix: list[str]
-) -> None:
-    provider = RecordingPrefixLeaseProvider(fail_at=failure)
-    scheduler = _make_chunk_scheduler(
-        max_batch_size=2, prefix_lease_provider=provider
+def test_engine_rejects_chunked_prefill_with_prefix_caching() -> None:
+    config = _make_config()
+    config.update(
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
     )
-    scheduler.add_request(_make_group("a", 1, 8))
-    scheduler.add_request(_make_group("b", 2, 8))
-    before = scheduler.kv_cache.block_allocator.num_free_blocks
-    output = scheduler.schedule()
 
-    with pytest.raises(RuntimeError, match="injected transaction failure"):
-        scheduler.commit_prefill_step(output.prefill_transaction_id)
-
-    assert scheduler.kv_cache.block_allocator.num_free_blocks == before
-    assert scheduler.inflight_prefill_seq_ids == []
-    assert scheduler._sequence_map[1].num_computed_tokens == 0
-    assert scheduler._sequence_map[2].num_computed_tokens == 0
-    assert provider.events[: len(expected_prefix)] == expected_prefix
-    assert provider.open_leases == 0
-    assert scheduler.schedule().prefill_seq_ids == [1, 2]
+    with pytest.raises(
+        ValueError,
+        match=(
+            "enable_chunked_prefill and enable_prefix_caching cannot both "
+            "be true in the first release"
+        ),
+    ):
+        ContinuousBatchingEngine(
+            model=MockModel(), engine=MockOffloadEngine(), config=config
+        )
 ```
 
-The shared recorder must target each participant by index, so the full suite covers first and later prepare failures plus first and later commit failures. The assertions must additionally compare pre-transaction block tables/refcounts and `has_prefix_lease` flags; no publication event may occur.
+Add `import pytest` if needed, then append to `tests/python/serving/test_api_routes.py`, using its existing configurable mock model helper:
 
-- [ ] **Step 5: Run shared-contract and chunk interaction tests**
+```python
+def test_build_engine_config_rejects_chunk_and_prefix_coenablement() -> None:
+    args = SimpleNamespace(
+        device_memory_ratio=0.75,
+        kv_cache_ratio=0.25,
+        max_batch_size=8,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        prefill_chunk_size=256,
+        prefill_starvation_threshold_steps=4,
+    )
 
-Run: `python -m pytest -q tests/python/serving/test_scheduler.py tests/python/serving/test_engine.py tests/python/contextpilot/test_cp_scheduler_v2.py`
+    with pytest.raises(
+        ValueError,
+        match=(
+            "enable_chunked_prefill and enable_prefix_caching cannot both "
+            "be true in the first release"
+        ),
+    ):
+        srv._build_engine_config(args=args, model=_ConfigurableMockModel())
+```
 
-Expected: PASS with identical cold chunks when provider is `None`, one acquisition per warm sequence, canonical prepare/commit/abort events, and complete rollback for every injected participant failure.
+- [ ] **Step 2: Run RED and verify co-enablement reaches startup**
 
-- [ ] **Step 6: Commit only chunk consumers and tests**
+Run: `python -m pytest -q tests/python/serving/test_engine.py tests/python/serving/test_api_routes.py -k 'rejects_chunked_prefill_with_prefix_caching or rejects_chunk_and_prefix_coenablement'`
+
+Expected: FAIL because both flags are currently accepted; the expected error is `ValueError: enable_chunked_prefill and enable_prefix_caching cannot both be true in the first release`.
+
+- [ ] **Step 3: Add one shared validation rule before resource construction**
+
+Add this function in `moe_infinity/serving/engine.py` and import it in `api_server_v2.py`:
+
+```python
+CHUNKED_PREFIX_INCOMPATIBLE = (
+    "enable_chunked_prefill and enable_prefix_caching cannot both be true "
+    "in the first release"
+)
+
+
+def validate_chunked_prefill_config(config: dict[str, object]) -> None:
+    if bool(config.get("enable_chunked_prefill", False)) and bool(
+        config.get("enable_prefix_caching", False)
+    ):
+        raise ValueError(CHUNKED_PREFIX_INCOMPATIBLE)
+```
+
+Call `validate_chunked_prefill_config(config)` as the first statement in `ContinuousBatchingEngine.__init__`, before backend discovery, scheduler construction, or KV allocation. In `_build_engine_config`, build the dictionary into a local `config`, include both `"enable_chunked_prefill": bool(getattr(args, "enable_chunked_prefill", False))` and `"enable_prefix_caching": bool(getattr(args, "enable_prefix_caching", False))`, call the same validator, and then return `config`. These `getattr` defaults keep this task executable even when the independent prefix-caching CLI has not landed. Task 8 later adds the chunk CLI/programmatic arguments and numeric controls; every path then converges on this validator and engine construction. Do not add a second error string or silently disable either requested feature.
+
+- [ ] **Step 4: Run GREEN and independent-mode regression tests**
+
+Run: `python -m pytest -q tests/python/serving/test_engine.py tests/python/serving/test_api_routes.py -k 'chunked_prefill or prefix_caching or config'`
+
+Expected: PASS. Chunking-only, prefix-caching-only, and both-disabled configurations remain accepted; only both-enabled startup raises the exact error above.
+
+- [ ] **Step 5: Document rollback and future reconciliation**
+
+Add a “Chunked prefill compatibility” subsection to `docs/serving.md` (Task 8 later incorporates it into the full experimental-feature section):
+
+```markdown
+The first release does not support simultaneous chunked prefill and prefix
+caching. Startup rejects `enable_chunked_prefill=true` together with
+`enable_prefix_caching=true` with `ValueError: enable_chunked_prefill and
+enable_prefix_caching cannot both be true in the first release`. Roll back by
+removing `--enable-chunked-prefill` (or disabling prefix caching) and restart;
+no request or cache-format migration is required. PR #181 is design input for
+a future transaction-contract reconciliation only. This release neither
+depends on that PR nor copies any prefix implementation into chunk scheduling.
+```
+
+- [ ] **Step 6: Commit the compatibility guard**
 
 ```bash
-git add moe_infinity/serving/scheduler.py moe_infinity/serving/engine.py tests/python/serving/test_scheduler.py tests/python/serving/test_engine.py
-git commit -m "feat(serving): join prefix and chunk commit transactions"
+git add moe_infinity/serving/engine.py moe_infinity/entrypoints/openai/api_server_v2.py tests/python/serving/test_engine.py tests/python/serving/test_api_routes.py docs/serving.md
+git commit -m "fix(serving): reject chunk and prefix co-enablement"
 ```
 
 ## Task 3: Carry exact chunk descriptors through batch construction
@@ -880,14 +883,11 @@ def _make_chunk_cache(num_blocks: int = 8) -> PagedKVCache:
     return cache
 
 
-def _make_chunk_scheduler(
-    *, max_batch_size: int = 8,
-    prefix_lease_provider: PrefixLeaseProvider | None = None,
-) -> Scheduler:
+def _make_chunk_scheduler(*, max_batch_size: int = 8) -> Scheduler:
     return Scheduler(
         _make_chunk_cache(), max_batch_size=max_batch_size,
         max_tokens_per_step=8, enable_chunked_prefill=True,
-        prefill_chunk_size=4, prefix_lease_provider=prefix_lease_provider,
+        prefill_chunk_size=4,
     )
 
 
@@ -982,7 +982,7 @@ def test_commit_rejects_already_completed_transaction() -> None:
 
 
 @pytest.mark.parametrize("fail_row", [0, 1])
-def test_row_commit_failure_aborts_entire_two_phase_group(
+def test_row_preflight_failure_aborts_entire_group(
     fail_row: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     scheduler = _make_chunk_scheduler(max_batch_size=2)
@@ -990,19 +990,19 @@ def test_row_commit_failure_aborts_entire_two_phase_group(
     scheduler.add_request(_make_group("b", 2, 4))
     before_free = scheduler.kv_cache.block_allocator.num_free_blocks
     output = scheduler.schedule()
-    original = _PrefillRowCommit.commit
+    original = _PrefillRowCommit.prepare_commit
     calls = 0
 
-    def fail_selected(participant: _PrefillRowCommit) -> None:
+    def fail_selected_preflight(participant: _PrefillRowCommit) -> None:
         nonlocal calls
         current = calls
         calls += 1
         original(participant)
         if current == fail_row:
-            raise RuntimeError("injected row commit failure")
+            raise RuntimeError("injected row preflight failure")
 
-    monkeypatch.setattr(_PrefillRowCommit, "commit", fail_selected)
-    with pytest.raises(RuntimeError, match="injected row commit failure"):
+    monkeypatch.setattr(_PrefillRowCommit, "prepare_commit", fail_selected_preflight)
+    with pytest.raises(RuntimeError, match="injected row preflight failure"):
         scheduler.commit_prefill_step(output.prefill_transaction_id)
 
     assert scheduler.kv_cache.block_allocator.num_free_blocks == before_free
@@ -1238,19 +1238,13 @@ On `add_request`, append each sequence ID to `_prefill_queue` and initialize its
 
     def commit_prefill_step(self, transaction_id: int | None) -> None:
         rows = self._leases_for_transaction(transaction_id)
-        participants: list[CommitParticipant] = []
-        for row in rows:
-            participants.append(_PrefillRowCommit(self, row))
-            if row.prefix_lease is not None:
-                participants.append(row.prefix_lease)
+        row_commits = [_PrefillRowCommit(self, row) for row in rows]
         try:
-            for participant in participants:
+            for participant in row_commits:
                 participant.prepare_commit()
-            for participant in participants:
-                participant.commit()
         except BaseException as original:
             rollback_errors: list[BaseException] = []
-            for participant in reversed(participants):
+            for participant in reversed(row_commits):
                 try:
                     participant.abort()
                 except BaseException as rollback_error:
@@ -1265,6 +1259,9 @@ On `add_request`, append each sequence ID to `_prefill_queue` and initialize its
                     f"{original}; transaction rollback errors: {details}"
                 ) from original
             raise
+        # Everything below publishes scheduler-owned progress after preflight.
+        for participant in row_commits:
+            participant.commit()
         for row in rows:
             self._inflight_prefill.pop(row.seq_id)
             if not row.chunk.is_terminal:
@@ -1307,17 +1304,15 @@ class InFlightPrefill:
     write_checkpoint: LayeredPagedKVCheckpoint | None = None
     cow_block_ids: tuple[int, ...] = ()
     was_removed_from_ready_queue: bool = False
-    prefix_lease: PrefixLease | None = None
     prior_num_computed_tokens: int = 0
     prior_committed_kv_tokens: int = 0
-    prior_has_prefix_lease: bool = False
 ```
 
-Define `CommitParticipant` as the structural protocol with `prepare_commit() -> None`, `commit() -> None`, and `abort() -> None`. `_PrefillRowCommit.prepare_commit` validates that `chunk.start_pos` equals either current committed progress (cold/subsequent chunk) or the staged canonical `PrefixMatch.num_tokens` (first warm chunk), then snapshots all three sequence fields. Its `commit` first applies the staged prefix match (`num_computed_tokens=committed_kv_tokens=match.num_tokens`, `has_prefix_lease=True`) and then advances exactly `chunk.num_tokens`; it stages publication bookkeeping without exposing it. Its idempotent `abort` restores `num_computed_tokens`, `committed_kv_tokens`, and `has_prefix_lease` even when `commit` already returned. Canonical `PrefixLease.abort` has the same compensating guarantee. Publication is finalized only after every participant commits; it is discarded by abort. Never catch/ignore an abort error: attempt every abort and restore, then re-raise the original prepare/commit exception; on Python 3.10, wrap it only when rollback itself also failed and include every rollback error in the wrapper.
+Define `_PrefillRowCommit.prepare_commit()` as fallible preflight only: validate `chunk.start_pos`, every table/checkpoint/publication precondition, and snapshot all sequence fields. After every row passes, `_PrefillRowCommit.commit()` publishes scheduler-owned progress. Before that boundary, `_PrefillRowCommit.abort()` restores scheduler state.
 
-`_rollback_prepared_transaction` uses the same reverse-order physical restore loop as `rollback_prefill_step` and also aborts every still-open canonical prefix lease. Thus a second/third row reservation, COW, checkpoint, prepare, or commit exception restores every earlier row before propagating. No in-flight ID remains in `_prefill_queue`. `abort_request` encountering an in-flight lease marks it cancelled and invokes the same rollback before freeing its sequence lease; it cannot free blocks while a model call owns the checkpoint.
+`_rollback_prepared_transaction` uses the same reverse-order physical restore loop as `rollback_prefill_step`. Thus a second/third row reservation, COW, checkpoint, prepare, or commit exception restores every earlier row before propagating. No in-flight ID remains in `_prefill_queue`. `abort_request` encountering an in-flight transaction marks it cancelled and invokes the same rollback before freeing its sequence reservation; it cannot free blocks while a model call owns the checkpoint.
 
-Add the concrete helpers below. CP prefix-reuse scoring may reorder never-started groups before IDs enter the round-robin order, but must not reorder partial prefills.
+Add the concrete helpers below. Existing admission scoring may reorder never-started groups before IDs enter the round-robin order, but must not reorder partial prefills.
 
 ```python
     def _ordered_prefill_candidates(self) -> list[int]:
@@ -1496,20 +1491,6 @@ def test_dflash_is_not_delegated_after_partial_prefill() -> None:
     assert speculator.calls == 0
 
 
-def test_dflash_is_not_delegated_with_acquired_prefix_lease() -> None:
-    speculator = MockSpeculator()
-    provider = RecordingPrefixLeaseProvider(match_tokens=4, block_ids=(3,))
-    engine = _make_chunk_engine(
-        prompt=[10, 11, 12, 13, 14], chunk_size=4,
-        speculator=speculator, prefix_lease_provider=provider,
-    )
-
-    _ = engine.run_until_done()
-
-    assert provider.acquire_calls == 1
-    assert speculator.calls == 0
-
-
 def test_execution_exception_rolls_back_and_requeues_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1623,7 +1604,7 @@ In `ContinuousBatchingEngine.__init__`, construct `ModelRunner` and resolve/regi
 
 - [ ] **Step 5: Keep chunks in-flight through execution and terminal sampling**
 
-Replace the ordinary execution/sampling region in `step()` with a transaction boundary. Compute sampled tokens into local values before mutating `SequenceData`, request output maps, callbacks, or committed-prefix state:
+Replace the ordinary execution/sampling region in `step()` with a transaction boundary. Compute sampled tokens into local values before mutating `SequenceData`, request output maps, callbacks, or committed progress:
 
 ```python
         transaction_id = scheduler_output.prefill_transaction_id
@@ -1645,9 +1626,8 @@ Replace the ordinary execution/sampling region in `step()` with a transaction bo
             self.scheduler.rollback_prefill_step(transaction_id)
             raise
 
-        # commit_prefill_step owns the complete two-phase group transaction.
-        # If any scheduler/prefix participant fails, it aborts every participant,
-        # restores KV/sequence state, requeues every row, and re-raises.
+        # If scheduler preflight fails, commit_prefill_step restores KV/sequence
+        # state, requeues every row, and re-raises.
         self.scheduler.commit_prefill_step(transaction_id)
         self._num_prefill_chunks += len(scheduler_output.prefill_chunks)
         self._num_steps += 1
@@ -1655,7 +1635,7 @@ Replace the ordinary execution/sampling region in `step()` with a transaction bo
             return []
 ```
 
-`commit_prefill_step` must not return until all row-progress and canonical prefix-lease participants commit. A commit exception is already fully compensated by the scheduler; the engine must not append sampled output, mutate request output maps, invoke callbacks, or increment counters before it returns successfully. Add an engine test that injects a second-lease `commit()` failure after valid model execution/sampling and asserts no output/callback/counter/progress/publication survives and both rows are requeued.
+`commit_prefill_step` must not return until all row-progress participants commit. A preflight or publication exception is fully compensated by the scheduler; the engine must not append sampled output, mutate request output maps, invoke callbacks, or increment counters before it returns successfully. Add an engine test that injects a second-row publication failure after valid model execution/sampling and asserts no output/callback/counter/progress survives and both rows are requeued.
 
 Iterate over `sampled_indices` rather than every batch row when appending output. Change `_extract_last_token_logits` to accept `row_indices: list[int] | None = None` and select only `batch.lengths.query_offsets[index + 1] - 1`. Remove the old unconditional `_num_steps += 1` at the bottom of `step()`. `_step_speculative` and `_step_speculative_session` receive the transaction ID: successful completion commits the same group transaction, while generator/session exceptions roll it back before re-raising.
 
@@ -1680,11 +1660,9 @@ Change `_can_delegate_speculative` to receive `scheduler_output` and require:
             return False
         if batch.lengths.context_lengths != [0] or batch.prefill_is_terminal != [True]:
             return False
-        if self._sequences[batch.seq_ids[0]].has_prefix_lease:
-            return False
 ```
 
-Pass `scheduler_output` at its call site. This combined predicate preserves one-shot DFlash behavior and explicitly rejects mid-prompt or prefix-reused delegation.
+Pass `scheduler_output` at its call site. This combined predicate preserves one-shot DFlash behavior and explicitly rejects mid-prompt delegation.
 
 - [ ] **Step 7: Run CPU engine, batch, and correctness tests**
 
@@ -2169,7 +2147,7 @@ Place the final test in `tests/python/serving/test_api_routes.py` and use that f
 
 Run: `pytest -q tests/python/serving/test_engine.py -k 'chunked_prefill_defaults or chunked_prefill_config'`
 
-Expected: FAIL because the settings are not yet part of engine construction.
+Expected: FAIL on the non-positive numeric controls; Task 2B already added the boolean flag and co-enablement guard, but chunk-size validation is not implemented yet.
 
 - [ ] **Step 3: Wire CLI and programmatic controls**
 
@@ -2183,10 +2161,9 @@ Add these CLI arguments in `parse_args()`:
     )
 ```
 
-Add matching keyword arguments and defaults to `initialize_with_model()` and `MoE.serve()`, place them on the namespace passed to `_build_engine_config`, and add these keys there:
+Add matching keyword arguments and defaults to `initialize_with_model()` and `MoE.serve()` and place them on the namespace passed to `_build_engine_config`. Task 2B already propagates and validates `enable_chunked_prefill`; add the two numeric controls here:
 
 ```python
-        "enable_chunked_prefill": bool(args.enable_chunked_prefill),
         "prefill_chunk_size": int(args.prefill_chunk_size),
         "prefill_starvation_threshold_steps": int(
             args.prefill_starvation_threshold_steps
@@ -2215,13 +2192,16 @@ and the canonical production `LayeredPagedKVStore`. Logical block capacity is
 valid. If any capability is unavailable,
 the engine reports `chunked_prefill_active=false` and
 an explicit `chunked_prefill_fallback_reason`, then uses the
-unchanged whole-prefill path. The canonical `PrefixLeaseProvider` from
-`serving/prefix_contract.py` is optional: `None` means cold chunking, not feature
-failure. Prefix leases and scheduler progress commit through one two-phase group;
-any prepare or commit failure aborts all participants and restores the chunk.
-DFlash is used only for singleton prompts
-completed in one prefill launch with no prefix lease; partially prefetched or
-prefix-reused prompts stay on ordinary paged decode.
+unchanged whole-prefill path. The first release rejects simultaneous
+`enable_chunked_prefill=true` and `enable_prefix_caching=true` at startup with
+`ValueError: enable_chunked_prefill and enable_prefix_caching cannot both be
+true in the first release`. Chunk transactions are standalone scheduler/KV
+transactions and do not import or duplicate a prefix implementation. Roll back
+by removing `--enable-chunked-prefill` (or disabling prefix caching) and
+restarting; no request or cache-format migration is required. PR #181 is design
+input for a future reconciliation only, not an implementation dependency.
+DFlash is used only for singleton prompts completed in one prefill launch;
+partially prefetched prompts stay on ordinary paged decode.
 
 Operational risks are extra scheduler launches for long prompts, page-boundary
 fragmentation, prefill backpressure under saturated decode load, model/backend
@@ -2643,10 +2623,10 @@ single run.
 Before latency canarying, the direct real-Qwen3/real-FlashInfer test must PASS
 (not skip), the valid unequal-capacity test must report
 `logical_blocks=min(memory_budget_blocks, block_store.physical_capacity)`, and
-the later-row prepare-failure plus every row/lease commit-failure test must
-restore all progress/rows/refs/tables and leave zero open leases. Run the suite
-once with `PrefixLeaseProvider=None`; if the prefix branch is present, also run
-with its canonical provider and require identical output tokens.
+the later-row reservation/checkpoint plus every scheduler-preflight failure test
+must restore all progress, rows, block references, and tables. Confirm that a
+server with both feature flags fails startup with the documented exact error;
+benchmark only the supported both-disabled and chunking-only configurations.
 
 Latency acceptance requires output-token parity, zero request errors, no final
 KV-block leak, non-null measured throughput and peak-KV fields, candidate p99
@@ -2672,6 +2652,8 @@ git commit -m "bench(serving): measure chunked prefill TTFT and TPOT tails"
 Run: `python -m pytest -q tests/python/serving tests/python/unit/test_kv_edge_cases.py tests/python/unit/test_kv_swap_recovery.py tests/python/contextpilot/test_cp_scheduler_v2.py tests/python/contextpilot/test_request_id_lifecycle.py`
 
 Expected: PASS. Existing whole-prefill scheduling, eager execution, DFlash deficit scheduling, cancellation, ContextPilot ordering, and KV lifecycle tests remain green.
+
+The collected config tests must include the both-enabled startup case and assert the exact first-release incompatibility error. A silent fallback, automatic flag override, or missing-prefix import is a failure.
 
 - [ ] **Step 2: Run static diagnostics on every changed Python file**
 
@@ -2706,11 +2688,11 @@ Do not create an empty or verification-only commit. A failed gate returns work t
 ## Risks and explicit non-goals
 
 - **Decode saturation:** strict decode priority can indefinitely defer prefill when decode alone consumes all row/token capacity. The scheduler exposes backpressure steps; the first release does not weaken decode SLO to guarantee prefill service.
-- **KV reservation lead:** capacity is reserved before model execution and committed afterward. Any prepare/execution/sampling/participant-commit exception aborts every scheduler/prefix participant, restores the canonical store checkpoint, sequence snapshot, lease ownership, and pre-transaction block table, then requeues the entire group. No asynchronous second batch may be scheduled before rollback/commit resolves.
+- **KV reservation lead:** capacity is reserved before model execution and committed afterward. Any prepare/execution/sampling/participant-commit exception aborts every scheduler participant, restores the canonical store checkpoint, sequence snapshot, and pre-transaction block table, then requeues the entire group. No asynchronous second batch may be scheduled before rollback/commit resolves.
 - **Page fragmentation:** small chunks can reserve partially filled pages and increase launch count. Chunk-size sweeps, free-block telemetry, and rollback gates address this without claiming a universal optimum.
 - **Attention compatibility:** eager/Hugging Face cache execution lacks the paged history contract required for independent chunks. It falls back to whole prefill rather than attempting incorrect attention.
 - **Mixed-batch correctness:** paged prefill and decode remain separate model-runner launches and are recombined in original row order. Chunking does not introduce a mixed kernel.
 - **DFlash:** no partial-prompt DFlash handoff and no changes to DRAFT/VERIFY deficit scheduling. One-shot singleton eligibility remains intact.
-- **Prefix reuse:** This branch implements no prefix index/refcount policy or lease lifecycle. It imports `PrefixLease`, `PrefixLeaseProvider`, and `PrefixMatch` only from `moe_infinity/serving/prefix_contract.py`; `None` remains cold and functional. ContextPilot may rank never-started requests but cannot provide correctness hits.
+- **Prefix caching coexistence:** The first release rejects co-enablement before scheduler/KV initialization. It does not copy, import, or modify prefix-caching code. Reconcile the two transaction models in a future plan using PR #181 as design input only.
 - **No P/D disaggregation:** no new workers, RPC, cache transfer protocol, or process topology.
 - **No performance promise:** benchmark thresholds are rollout safety criteria. Results must be measured on named hardware/model/workloads before any claim.
