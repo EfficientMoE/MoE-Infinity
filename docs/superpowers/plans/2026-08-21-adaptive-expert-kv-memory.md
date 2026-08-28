@@ -229,11 +229,12 @@ def test_cost_moves_one_bounded_step_toward_kv() -> None:
                        swaps=8, swap_ms=40.0))
     target = ctl.propose(device_id=0, step=1, total_bytes=2048*MIB, model_bytes=512*MIB,
         activation_reserve_bytes=128*MIB, kv_block_bytes=16*MIB,
-        current_expert_bytes=704*MIB, current_kv_blocks=40)
+        current_expert_bytes=704*MIB, current_kv_blocks=36)
     assert target.direction is ResizeDirection.EXPERT_TO_KV
-    assert target.expert_bytes == 640*MIB
-    assert target.kv_blocks == 44
-    assert target.expert_bytes + target.kv_blocks*16*MIB <= 1280*MIB
+     assert target.expert_bytes == 640*MIB
+     assert target.kv_blocks == 40
+     # One 64 MiB bounded step: 640 MiB + 40 * 16 MiB = 1280 MiB.
+     assert target.expert_bytes + target.kv_blocks*16*MIB == 1280*MIB
 
 def test_hysteresis_and_cooldown_prevent_oscillation() -> None:
     ctl = AdaptiveMemoryController(AdaptiveMemoryConfig(
