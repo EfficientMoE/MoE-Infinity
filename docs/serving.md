@@ -54,6 +54,8 @@ Stable options from `api_server_v2.py`:
 | `--max-waiting-requests` | `0` | Queue depth backpressure threshold; `0` disables |
 | `--max-n` | `16` | Cap for parallel sampling `n` / `best_of` |
 | `--enable-prefix-caching` | off | Enable prefix-cache bookkeeping flag |
+| `--kv-cache-format` | `native` | KV storage format: `native` or `int8_sym` (opt-in) |
+| `--no-kv-cache-format-fallback` | off | Refuse a native fallback when `int8_sym` is unsupported |
 | `--startup-timeout` | none | Startup watchdog timeout, seconds |
 | `--decode-step-timeout` | none | Decode watchdog timeout, seconds |
 | `--enable-pyspy-dump` | off | Scaffolded flag; currently accepted and stored, but no py-spy dump is triggered |
@@ -66,6 +68,38 @@ Internal / deprecated:
   `MoE.serve(...)` is the continuous-batching HTTP transition path, not a
   drop-in in-process call replacement.
 - `--max-waiting-requests` and `--max-n` feed internal module state used by middleware.
+
+## KV-cache quantization (opt-in)
+
+`--kv-cache-format int8_sym` opts into symmetric INT8 KV storage. It is
+disabled by default; `native` remains the default and one-setting rollback.
+See [Configuration](./configuration.md) for the storage/transfer/execution
+precision contract, memory formula, and MLA fallback behavior.
+
+```bash
+# Opt in to INT8 KV storage
+python -m moe_infinity.entrypoints.openai.api_server_v2 \
+    --model Qwen/Qwen3-30B-A3B --offload-dir /local/ssd/qwen3-kv \
+    --host 127.0.0.1 --kv-cache-format int8_sym
+
+# Strict qualification: refuse any fallback
+python -m moe_infinity.entrypoints.openai.api_server_v2 \
+    --model Qwen/Qwen3-30B-A3B --offload-dir /local/ssd/qwen3-kv \
+    --host 127.0.0.1 --kv-cache-format int8_sym \
+    --no-kv-cache-format-fallback
+
+# Immediate rollback; native remains the default
+python -m moe_infinity.entrypoints.openai.api_server_v2 \
+    --model Qwen/Qwen3-30B-A3B --offload-dir /local/ssd/qwen3-kv \
+    --host 127.0.0.1 --kv-cache-format native
+```
+
+Engine stats and `/v1/config` expose `requested_kv_cache_format`,
+`effective_kv_cache_format`, `kv_cache_execution_backend`, and
+`kv_cache_format_decision_reason` so operators can confirm the effective
+format and detect a fallback. If `effective_kv_cache_format` reports `native`
+after requesting `int8_sym`, the request fell back (for example
+`mla_not_validated`) and storage is not quantized.
 
 ## Python Startup
 
