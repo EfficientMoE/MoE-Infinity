@@ -756,3 +756,66 @@ def test_chunked_prefill_config_requires_positive_integers(
         ContinuousBatchingEngine(
             model=MockModel(), engine=MockOffloadEngine(), config=config
         )
+
+
+def test_execution_exception_on_disabled_path_surfaces_original_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _make_engine()
+    engine.add_request(
+        "req",
+        [10, 11],
+        SamplingParams(temperature=0.0, max_tokens=2),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_execute_batch",
+        lambda batch: (_ for _ in ()).throw(RuntimeError("forward boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="forward boom"):
+        engine.step()
+
+
+def test_dflash_generate_failure_rolls_back_chunk_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingSpeculator:
+        calls = 0
+
+        def generate(self, *args: object, **kwargs: object) -> object:
+            self.calls += 1
+            raise RuntimeError("dflash generate boom")
+
+    config = _make_config()
+    config.update(
+        enable_chunked_prefill=True,
+        prefill_chunk_size=4,
+        max_tokens_per_step=4,
+        num_kv_blocks=16,
+    )
+    engine = ContinuousBatchingEngine(
+        model=MockModel(),
+        engine=MockOffloadEngine(),
+        config=config,
+        speculative_draft=_FailingSpeculator(),
+    )
+    backend = make_flashinfer_backend(
+        num_blocks=engine.kv_cache.num_blocks,
+        num_layers=1,
+        device=engine.kv_cache.device,
+    )
+    engine.kv_cache.set_block_store(
+        backend.block_store, logical_capacity=engine.kv_cache.num_blocks
+    )
+    engine.scheduler.set_chunked_prefill_runtime_enabled(True)
+    engine.add_request(
+        "long", [10, 11], SamplingParams(temperature=0.0, max_tokens=1)
+    )
+
+    with pytest.raises(RuntimeError, match="dflash generate boom"):
+        engine.step()
+
+    assert engine.scheduler.inflight_prefill_seq_ids == []
+    assert engine._sequences[0].num_computed_tokens == 0
+    assert engine.scheduler.schedule().prefill_chunks[0].start_pos == 0

@@ -260,9 +260,12 @@ class ContinuousBatchingEngine:
             )
 
         if self._can_delegate_speculative(batch, scheduler_output):
+            speculative_transaction_id = scheduler_output.prefill_transaction_id
             if self._can_drive_verify_rounds():
-                return self._step_speculative_session(batch)
-            return self._step_speculative(batch)
+                return self._step_speculative_session(
+                    batch, speculative_transaction_id
+                )
+            return self._step_speculative(batch, speculative_transaction_id)
 
         transaction_id = scheduler_output.prefill_transaction_id
         sampled_indices = self._sampled_row_indices(batch)
@@ -281,7 +284,8 @@ class ContinuousBatchingEngine:
                     sampled_logits, sampled_params
                 )
         except BaseException:
-            self.scheduler.rollback_prefill_step(transaction_id)
+            if transaction_id is not None:
+                self.scheduler.rollback_prefill_step(transaction_id)
             raise
 
         if transaction_id is not None:
@@ -415,12 +419,18 @@ class ContinuousBatchingEngine:
             and params.logprobs <= 0
         )
 
-    def _step_speculative(self, batch: BatchMetadata) -> list[RequestOutput]:
+    def _step_speculative(
+        self,
+        batch: BatchMetadata,
+        transaction_id: int | None = None,
+    ) -> list[RequestOutput]:
         """Complete one eligible request through DFlash's own DynamicCache.
 
         ``DFlashSpeculator.generate`` is the already GPU-proven greedy loop. A
         single serving ``step`` may therefore emit several accepted tokens;
         each is still recorded and streamed as an individual ``RequestOutput``.
+        A generator failure rolls back the in-flight chunk transaction so the
+        prompt is requeued rather than stranded in ``PREFILL``.
         """
         speculator = self.speculative_draft
         if speculator is None:
@@ -446,14 +456,22 @@ class ContinuousBatchingEngine:
                 top_k=sequence.sampling_params.top_k,
                 top_p=sequence.sampling_params.top_p,
             )
+        except BaseException:
+            if transaction_id is not None:
+                self.scheduler.rollback_prefill_step(transaction_id)
+            raise
         finally:
             if owner is not None:
                 setattr(owner, "_cached_past_key_values", None)
 
         if generated.ndim != 2 or generated.shape[0] != 1:
+            if transaction_id is not None:
+                self.scheduler.rollback_prefill_step(transaction_id)
             raise RuntimeError(
                 "speculative generator must return token ids with shape [1, seq]"
             )
+        if transaction_id is not None:
+            self.scheduler.commit_prefill_step(transaction_id)
         prompt_len = sequence.prompt_length
         generated_ids = cast(
             list[int], generated[0, prompt_len:].to(device="cpu").tolist()
@@ -515,7 +533,9 @@ class ContinuousBatchingEngine:
         )
 
     def _step_speculative_session(
-        self, batch: BatchMetadata
+        self,
+        batch: BatchMetadata,
+        transaction_id: int | None = None,
     ) -> list[RequestOutput]:
         """Drive one eligible request through the scheduled single-round seam.
 
@@ -546,6 +566,7 @@ class ContinuousBatchingEngine:
             setattr(owner, "_cached_past_key_values", None)
 
         outputs: list[RequestOutput] = []
+        committed_transaction = False
         try:
             session = speculator.begin_session(
                 prompt,
@@ -556,6 +577,9 @@ class ContinuousBatchingEngine:
                 top_p=params.top_p,
                 collect_route_union=True,
             )
+            if transaction_id is not None and not committed_transaction:
+                self.scheduler.commit_prefill_step(transaction_id)
+                committed_transaction = True
             sequence.set_status(SequenceStatus.DRAFT)
 
             streamed = 0
@@ -583,6 +607,10 @@ class ContinuousBatchingEngine:
                 streamed = len(session.emitted)
                 if self._output_finished(outputs):
                     break
+        except BaseException:
+            if transaction_id is not None and not committed_transaction:
+                self.scheduler.rollback_prefill_step(transaction_id)
+            raise
         finally:
             if owner is not None:
                 setattr(owner, "_cached_past_key_values", None)

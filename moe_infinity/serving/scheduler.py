@@ -592,6 +592,12 @@ class Scheduler:
             if not row.chunk.is_terminal:
                 self._enqueue_prefill_once(row.seq_id)
         self._completed_prefill_transactions.add(int(transaction_id))
+        if len(self._completed_prefill_transactions) > 4096:
+            self._completed_prefill_transactions = {
+                tid
+                for tid in self._completed_prefill_transactions
+                if tid > self._next_prefill_transaction_id - 2048
+            }
 
     def rollback_prefill_step(self, transaction_id: int | None) -> None:
         leases = self._leases_for_transaction(transaction_id)
