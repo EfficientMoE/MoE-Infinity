@@ -32,6 +32,7 @@ from typing import Any
 NVTX_REPORT = "nvtx_pushpop_sum"
 MEMCPY_REPORT = "cuda_gpu_mem_size_sum"
 GPU_TRACE_REPORT = "cuda_gpu_sum"
+CUDA_API_REPORT = "cuda_api_sum"
 
 REQUIRED_RANGE_NAMES: tuple[str, ...] = (
     "cpu_to_gpu",
@@ -40,6 +41,10 @@ REQUIRED_RANGE_NAMES: tuple[str, ...] = (
     "cuda_stream_sync",
     "expert_compute",
     "expert_wait_barrier",
+    "gpu_route_submit",
+    "gpu_route_handoff",
+    "gpu_route_fallback",
+    "expert_completion_handoff",
 )
 
 PCIE_LANE_GBPS: dict[int, float] = {
@@ -116,6 +121,7 @@ def parse_nsys_report(rep_path: str) -> dict[str, Any]:
     nvtx_rows = _run_nsys_stats(rep_path, NVTX_REPORT)
     memcpy_rows = _run_nsys_stats(rep_path, MEMCPY_REPORT)
     gpu_trace_rows = _run_nsys_stats(rep_path, GPU_TRACE_REPORT)
+    cuda_api_rows = _run_nsys_stats(rep_path, CUDA_API_REPORT)
 
     ranges: dict[str, dict[str, float | int]] = {}
     for r in nvtx_rows:
@@ -172,6 +178,21 @@ def parse_nsys_report(rep_path: str) -> dict[str, Any]:
         elif "Device-to-Device" in name:
             gpu_memcpy_ns["d2d"] = total_ns
 
+    cuda_api = {
+        "stream_synchronize_count": sum(
+            int(row.get("Instances", 0) or row.get("Count", 0) or 0)
+            for row in cuda_api_rows
+            if "cudaStreamSynchronize"
+            in str(row.get("Name") or row.get("Operation") or "")
+        ),
+        "device_synchronize_count": sum(
+            int(row.get("Instances", 0) or row.get("Count", 0) or 0)
+            for row in cuda_api_rows
+            if "cudaDeviceSynchronize"
+            in str(row.get("Name") or row.get("Operation") or "")
+        ),
+    }
+
     duration_ns = 0
     for name, stats in ranges.items():
         duration_ns = max(duration_ns, int(stats["total_ns"]))
@@ -180,6 +201,7 @@ def parse_nsys_report(rep_path: str) -> dict[str, Any]:
         "ranges": ranges,
         "memcpy": memcpy,
         "gpu_memcpy_ns": gpu_memcpy_ns,
+        "cuda_api": cuda_api,
         "duration_ns": duration_ns,
     }
 
@@ -283,7 +305,27 @@ def summarise(
         util_pcie=util_pcie,
     )
 
+    cuda_api = report.get(
+        "cuda_api",
+        {"stream_synchronize_count": 0, "device_synchronize_count": 0},
+    )
+    d2h_count = int(memcpy["d2h_count"])
+    d2h_bytes = int(memcpy["d2h_bytes"])
+    routing_sync = {
+        "gpu_route_submit_ns": _range_total("gpu_route_submit"),
+        "gpu_route_handoff_ns": _range_total("gpu_route_handoff"),
+        "gpu_route_fallback_ns": _range_total("gpu_route_fallback"),
+        "expert_completion_handoff_ns": _range_total(
+            "expert_completion_handoff"
+        ),
+        "device_to_host_memcpy_count": d2h_count,
+        "device_to_host_memcpy_bytes": d2h_bytes,
+        "stream_synchronize_count": int(cuda_api["stream_synchronize_count"]),
+        "device_synchronize_count": int(cuda_api["device_synchronize_count"]),
+    }
+
     return {
+        "routing_sync": routing_sync,
         "T_step_ns": t_step,
         "T_h2d_ns": t_h2d,
         "T_disk_ns": t_disk,
