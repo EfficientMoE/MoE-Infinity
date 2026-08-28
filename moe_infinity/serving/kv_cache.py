@@ -3,11 +3,17 @@ from __future__ import annotations
 import heapq
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 
 from moe_infinity.runtime import flashinfer_utils
+
+if TYPE_CHECKING:
+    from moe_infinity.runtime.attention_backend import (
+        LayeredPagedKVCheckpoint,
+        LayeredPagedKVStore,
+    )
 
 
 class CPAwareKVManager(Protocol):
@@ -172,6 +178,9 @@ class PagedKVCache:
     _swapped_num_tokens: dict[int, int] = field(
         init=False, default_factory=dict
     )
+    _swapped_store_checkpoints: dict[int, "LayeredPagedKVCheckpoint"] = field(
+        init=False, default_factory=dict
+    )
     _swapped_out_sequences: set[int] = field(init=False, default_factory=set)
     _kv_cache: torch.Tensor = field(init=False)
     _use_flashinfer: bool = field(init=False, default=False)
@@ -183,6 +192,7 @@ class PagedKVCache:
         init=False, default=None
     )
     _cp_kv_manager: CPAwareKVManager | None = field(init=False, default=None)
+    _block_store: "LayeredPagedKVStore | None" = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         if self.num_layers <= 0:
@@ -386,6 +396,31 @@ class PagedKVCache:
     def set_cp_kv_manager(self, manager: CPAwareKVManager) -> None:
         self._cp_kv_manager = manager
 
+    def set_block_store(
+        self, store: "LayeredPagedKVStore", *, logical_capacity: int
+    ) -> None:
+        if logical_capacity != self.num_blocks:
+            raise ValueError("logical capacity must match allocator capacity")
+        if logical_capacity <= 0 or logical_capacity > store.physical_capacity:
+            raise ValueError("logical cache exceeds layered store capacity")
+        if store.num_layers != self.num_layers:
+            raise ValueError("paged KV layer-count mismatch")
+        if store.block_size != self.block_size:
+            raise ValueError("paged KV block-size mismatch")
+        if store.num_kv_heads != self.num_heads:
+            raise ValueError("paged KV head-count mismatch")
+        if store.head_dim != self.head_dim:
+            raise ValueError("paged KV head-dimension mismatch")
+        if store.dtype != self.dtype or store.device != self.device:
+            raise ValueError("paged KV dtype/device mismatch")
+        self._block_store = store
+
+    @property
+    def block_store(self) -> "LayeredPagedKVStore":
+        if self._block_store is None:
+            raise RuntimeError("layered paged KV store is not bound")
+        return self._block_store
+
     def free_gpu_blocks(self, seq_id: int) -> None:
         block_table = self._sequence_tables.get(seq_id)
         if block_table is None:
@@ -411,9 +446,14 @@ class PagedKVCache:
         self._swapped_num_tokens[seq_id] = block_table.num_computed_tokens()
         block_ids = block_table.get_block_ids()
         if block_ids:
-            self._swapped_cpu_buffers[seq_id] = (
-                self._kv_cache[:, block_ids, ...].detach().to("cpu").clone()
-            )
+            if self._block_store is not None:
+                self._swapped_store_checkpoints[seq_id] = (
+                    self._block_store.checkpoint(block_ids)
+                )
+            else:
+                self._swapped_cpu_buffers[seq_id] = (
+                    self._kv_cache[:, block_ids, ...].detach().to("cpu").clone()
+                )
         self._swapped_out_sequences.add(seq_id)
 
     def swap_in(self, seq_id: int) -> None:
@@ -421,8 +461,26 @@ class PagedKVCache:
         if seq_id not in self._swapped_out_sequences:
             return
 
-        cpu_buffer = self._swapped_cpu_buffers.pop(seq_id, None)
         saved_num_tokens = self._swapped_num_tokens.pop(seq_id, 0)
+        if self._block_store is not None:
+            checkpoint = self._swapped_store_checkpoints.pop(seq_id, None)
+            if checkpoint is not None:
+                num_blocks_needed = len(checkpoint.source_block_ids)
+                if not block_table.has_blocks():
+                    restored_block_ids = self.block_allocator.allocate(
+                        num_blocks_needed,
+                    )
+                    block_table.restore_blocks(
+                        restored_block_ids,
+                        num_tokens=saved_num_tokens,
+                    )
+                block_ids = block_table.get_block_ids()
+                if block_ids:
+                    self._block_store.restore(block_ids, checkpoint)
+            self._swapped_out_sequences.discard(seq_id)
+            return
+
+        cpu_buffer = self._swapped_cpu_buffers.pop(seq_id, None)
         if cpu_buffer is not None:
             if not block_table.has_blocks():
                 num_blocks_needed = int(cpu_buffer.shape[1])

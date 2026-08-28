@@ -67,13 +67,47 @@ _ = _load_module(
     ROOT / "moe_infinity" / "serving" / "engine.py",
 )
 
+from moe_infinity.runtime.attention_backend import (  # type: ignore[reportMissingImports]
+    PagedAttentionBackend,
+)
+from moe_infinity.runtime.attention_types import (  # type: ignore[reportMissingImports]
+    KVCacheSpec,
+)
 from moe_infinity.serving.engine import (  # type: ignore[reportMissingImports]
     ContinuousBatchingEngine,
     RequestOutput,
 )
+from moe_infinity.serving.kv_cache import (  # type: ignore[reportMissingImports]
+    PagedKVCache,
+)
 from moe_infinity.serving.sequence import (  # type: ignore[reportMissingImports]
     SamplingParams,
 )
+
+
+def make_flashinfer_backend(
+    num_blocks: int, num_layers: int
+) -> PagedAttentionBackend:
+    return PagedAttentionBackend(
+        spec=KVCacheSpec(
+            num_kv_heads=2, head_dim=8, dtype=torch.float16, block_size=4
+        ),
+        num_gpu_blocks=num_blocks,
+        device=torch.device("cpu"),
+        num_layers=num_layers,
+    )
+
+
+def make_serving_cache(num_blocks: int, num_layers: int) -> PagedKVCache:
+    return PagedKVCache(
+        num_blocks=num_blocks,
+        block_size=4,
+        num_layers=num_layers,
+        num_heads=2,
+        head_dim=8,
+        dtype=torch.float16,
+        device=torch.device("cpu"),
+    )
 
 
 @dataclass
@@ -484,6 +518,16 @@ def test_engine_n_finished_when_all_complete() -> None:
     )
     assert engine.has_pending_requests() is True
     assert "req-n" not in engine._completed_request_ids
+
+
+def test_set_block_store_rejects_unclamped_logical_capacity() -> None:
+    store = make_flashinfer_backend(num_blocks=8, num_layers=1).block_store
+    cache = make_serving_cache(num_blocks=6, num_layers=1)
+    with pytest.raises(ValueError, match="logical capacity must match"):
+        cache.set_block_store(store, logical_capacity=8)
+    cache.set_block_store(store, logical_capacity=6)
+    assert cache.num_blocks == 6
+    assert cache.block_store.physical_capacity == 8
 
 
 def test_engine_rejects_chunked_prefill_with_prefix_caching() -> None:

@@ -6,6 +6,7 @@ import torch
 from moe_infinity.runtime import attention_backend as attention_backend_module
 from moe_infinity.runtime import flashinfer_utils
 from moe_infinity.runtime.attention_types import AttentionMetadata, KVCacheSpec
+from moe_infinity.serving.kv_cache import PagedKVCache
 
 
 class _FakePrefillWrapper:
@@ -250,6 +251,70 @@ def test_fallback_decode_without_flashinfer(
     )
     assert out.shape == (1, 4, 8)
     assert backend._fi_decode is None
+
+
+def _make_serving_cache(num_blocks: int, block_size: int) -> PagedKVCache:
+    return PagedKVCache(
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_layers=1,
+        num_heads=2,
+        head_dim=8,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+
+def test_layered_store_checkpoint_restores_both_layouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_fake_flashinfer(monkeypatch)
+    backend = attention_backend_module.PagedAttentionBackend(
+        spec=_spec(), num_gpu_blocks=4, device=torch.device("cpu")
+    )
+    checkpoint = backend.block_store.checkpoint([1])
+    key = torch.full((2, 2, 8), 7.0)
+    value = torch.full((2, 2, 8), 9.0)
+    slots = torch.tensor([4, 5])
+    backend.write_kv(key, value, slots)
+    backend.write_kv_flashinfer(key, value, slots)
+
+    backend.block_store.restore([1], checkpoint)
+
+    payload = backend.block_store.export_blocks([1])
+    assert torch.count_nonzero(payload.k_cache) == 0
+    assert torch.count_nonzero(payload.v_cache) == 0
+    assert torch.count_nonzero(payload.fi_kv_cache) == 0
+
+
+def test_swap_exports_and_restores_runtime_backend_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_fake_flashinfer(monkeypatch)
+    backend = attention_backend_module.PagedAttentionBackend(
+        spec=_spec(), num_gpu_blocks=4, device=torch.device("cpu")
+    )
+    cache = _make_serving_cache(num_blocks=4, block_size=4)
+    cache.set_block_store(
+        backend.block_store, logical_capacity=cache.num_blocks
+    )
+    cache.allocate_sequence(3, num_tokens=4)
+    key = torch.arange(64, dtype=torch.float32).reshape(4, 2, 8)
+    value = key + 100.0
+    backend.write_kv(key, value, torch.arange(4))
+    backend.write_kv_flashinfer(key, value, torch.arange(4))
+
+    cache.swap_out(3)
+    cache.free_gpu_blocks(3)
+    cache.swap_in(3)
+
+    restored = backend.block_store.export_blocks(cache.get_block_table(3))
+    torch.testing.assert_close(
+        restored.fi_kv_cache[0, :, 0], key.reshape(1, 4, 2, 8)
+    )
+    torch.testing.assert_close(
+        restored.fi_kv_cache[0, :, 1], value.reshape(1, 4, 2, 8)
+    )
 
 
 @pytest.mark.skipif(
