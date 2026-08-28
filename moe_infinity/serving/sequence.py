@@ -94,6 +94,7 @@ class SequenceData:
                 SequenceStatus.CANCELLED,
             },
             SequenceStatus.PREFILL: {
+                SequenceStatus.WAITING,
                 SequenceStatus.DECODE,
                 SequenceStatus.DRAFT,
                 SequenceStatus.FINISHED,

@@ -16,6 +16,11 @@ if TYPE_CHECKING:
     )
 
 
+@dataclass(frozen=True)
+class _WritableRange:
+    new_block_ids: tuple[int, ...]
+
+
 class CPAwareKVManager(Protocol):
     def notify_blocks_allocated(
         self, seq_id: int, block_hashes: list[int]
@@ -284,6 +289,14 @@ class PagedKVCache:
 
     def get_num_reserved_tokens(self, seq_id: int) -> int:
         return self._require_sequence(seq_id).num_computed_tokens()
+
+    def ensure_writable_range(
+        self, seq_id: int, start: int, end: int
+    ) -> "_WritableRange":
+        if not 0 <= start <= end:
+            raise ValueError("invalid writable range")
+        self.ensure_sequence_capacity(seq_id, end)
+        return _WritableRange(new_block_ids=())
 
     def has_sequence(self, seq_id: int) -> bool:
         return seq_id in self._sequence_tables
