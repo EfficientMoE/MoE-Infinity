@@ -1862,6 +1862,10 @@ def _build_engine_config(
         config["eos_token_id"] = eos_token_id
     if args.enable_prefix_caching:
         config["enable_prefix_caching"] = True
+    config["kv_cache_format"] = getattr(args, "kv_cache_format", "native")
+    config["kv_cache_allow_fallback"] = getattr(
+        args, "kv_cache_allow_fallback", True
+    )
     return config
 
 
@@ -1887,6 +1891,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-waiting-requests", type=int, default=0)
     parser.add_argument("--max-n", type=int, default=16)
     parser.add_argument("--enable-prefix-caching", action="store_true")
+    parser.add_argument(
+        "--kv-cache-format",
+        choices=("native", "int8_sym"),
+        default="native",
+        help="KV cache storage format (default: native).",
+    )
+    parser.add_argument(
+        "--no-kv-cache-format-fallback",
+        dest="kv_cache_allow_fallback",
+        action="store_false",
+        default=True,
+        help="Refuse a native fallback when the requested KV format is unsupported.",
+    )
     parser.add_argument(
         "--startup-timeout",
         type=float,

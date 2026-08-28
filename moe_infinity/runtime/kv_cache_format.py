@@ -50,6 +50,41 @@ class KVCacheModelInfo:
     is_mla: bool
 
 
+def model_info_from_config(config: object) -> KVCacheModelInfo:
+    text_config = config
+    getter = getattr(config, "get_text_config", None)
+    if callable(getter):
+        try:
+            text_config = getter()
+        except Exception:
+            text_config = config
+    num_attention_heads = int(
+        getattr(text_config, "num_attention_heads", 0) or 0
+    )
+    num_kv_heads = int(
+        getattr(text_config, "num_key_value_heads", None)
+        or num_attention_heads
+        or 1
+    )
+    head_dim = getattr(text_config, "head_dim", None)
+    if head_dim is None and num_attention_heads > 0:
+        hidden = int(getattr(text_config, "hidden_size", 0) or 0)
+        head_dim = hidden // num_attention_heads if num_attention_heads else 0
+    head_dim = int(head_dim or 0)
+    kv_lora_rank = getattr(text_config, "kv_lora_rank", None)
+    is_mla = (
+        kv_lora_rank is not None
+        or getattr(text_config, "qk_nope_head_dim", None) is not None
+        or getattr(text_config, "qk_rope_head_dim", None) is not None
+    )
+    return KVCacheModelInfo(
+        num_attention_heads=num_attention_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        is_mla=bool(is_mla),
+    )
+
+
 @dataclass(frozen=True)
 class KVCacheFormatDecision:
     requested_format: KVCacheFormat
