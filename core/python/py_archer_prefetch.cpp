@@ -135,11 +135,33 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul, "Fused GeLU-tanh(gate) * up");
   m.def("fatrelu_and_mul", &fatrelu_and_mul, "Fused FatReLU(gate) * up");
 
+  py::class_<ExpertComputeSample>(m, "expert_compute_sample")
+      .def_readonly("invocation_id", &ExpertComputeSample::invocation_id)
+      .def_readonly("layer_id", &ExpertComputeSample::layer_id)
+      .def_readonly("expert_id", &ExpertComputeSample::expert_id)
+      .def_readonly("gpu_id", &ExpertComputeSample::gpu_id)
+      .def_readonly("kernel_start_offset_ns",
+                    &ExpertComputeSample::kernel_start_offset_ns)
+      .def_readonly("kernel_end_offset_ns",
+                    &ExpertComputeSample::kernel_end_offset_ns)
+      .def_readonly("kernel_duration_ns",
+                    &ExpertComputeSample::kernel_duration_ns)
+      .def_readonly("forward_return_host_ns",
+                    &ExpertComputeSample::forward_return_host_ns)
+      .def_readonly("output_complete_host_ns",
+                    &ExpertComputeSample::output_complete_host_ns)
+      .def_readonly("output_delay_ns", &ExpertComputeSample::output_delay_ns);
+
   py::class_<ExpertDispatcher>(m, "expert_dispatcher")
       .def(py::init<int, int, int, int, int>())
       .def("register_expert", &ExpertDispatcher::RegisterExpert)
       .def("enqueue_expert", &ExpertDispatcher::EnqueueExpert)
       .def("set_inputs", &ExpertDispatcher::SetInputs)
+      .def("set_inputs_with_invocation",
+           &ExpertDispatcher::SetInputsWithInvocation)
+      .def("set_overlap_compute_timing_enabled",
+           &ExpertDispatcher::SetOverlapComputeTimingEnabled)
+      .def("drain_compute_samples", &ExpertDispatcher::DrainComputeSamples)
       .def("set_expected_queue", &ExpertDispatcher::SetExpectedQueue)
       .def("wait_expert", &ExpertDispatcher::WaitHiddenStates)
       .def("notify_fetch_start", &ExpertDispatcher::NotifyFetchStart)
