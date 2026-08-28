@@ -20,8 +20,21 @@ from moe_infinity.runtime.attention_types import (
     AttentionMetadata as RuntimeAttentionMetadata,
 )
 from moe_infinity.runtime.attention_types import (
+    FlashInferPlanMetadata,
     KVCacheSpec,
+    PagedBatchLengths,
 )
+
+__all__ = [
+    "FlashInferPlanMetadata",
+    "LayerRegistration",
+    "LayeredPagedKVCheckpoint",
+    "LayeredPagedKVPayload",
+    "LayeredPagedKVStore",
+    "PagedAttentionBackend",
+    "PagedBatchLengths",
+    "PrefixReuseCapability",
+]
 
 if TYPE_CHECKING:
     pass
@@ -845,11 +858,6 @@ class PagedAttentionBackend:
         kv_indptr: torch.Tensor,
         kv_last_page_len: torch.Tensor,
     ) -> None:
-        from moe_infinity.runtime.attention_types import (
-            FlashInferPlanMetadata,
-            PagedBatchLengths,
-        )
-
         lengths = getattr(metadata, "lengths", None)
         if lengths is None:
             context_lengths = [
