@@ -149,3 +149,285 @@ def quantize_tokenwise_symmetric(
         torch.round(x.float() / scale.float().unsqueeze(-1)), -127, 127
     )
     return q.to(torch.int8), scale
+
+
+@dataclass(frozen=True)
+class LayeredKVPageChunk:
+    page_ids: tuple[int, ...]
+    format: KVCacheFormat
+    payload: torch.Tensor
+    scales: torch.Tensor | None = None
+
+
+@dataclass
+class LayeredPagedKVStore:
+    owner_id: str
+    format: KVCacheFormat
+    num_layers: int
+    num_pages: int
+    block_size: int
+    num_kv_heads: int
+    head_dim: int
+    execution_dtype: torch.dtype
+    payload: torch.Tensor
+    scales: torch.Tensor | None = None
+
+    @property
+    def tensors(
+        self,
+    ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]:
+        if self.scales is not None:
+            return self.payload, self.scales
+        return (self.payload,)
+
+    @property
+    def nbytes(self) -> int:
+        return sum(t.numel() * t.element_size() for t in self.tensors)
+
+    def write_chunk(
+        self,
+        *,
+        layer_idx: int,
+        key_chunk: torch.Tensor,
+        value_chunk: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        expected = (key_chunk.shape[0], self.num_kv_heads, self.head_dim)
+        if key_chunk.shape != expected or value_chunk.shape != expected:
+            raise ValueError(f"K/V chunk must have shape {expected}")
+        if not 0 <= layer_idx < self.num_layers:
+            raise ValueError("layer_idx outside LayeredPagedKVStore")
+        slots = slot_mapping.to(self.payload.device, dtype=torch.long)
+        pages, offsets = slots // self.block_size, slots % self.block_size
+        if bool(torch.any(slots < 0)) or bool(
+            torch.any(pages >= self.num_pages)
+        ):
+            raise ValueError("slot_mapping points outside allocated KV pages")
+        key_chunk = key_chunk.to(
+            self.payload.device, dtype=self.execution_dtype
+        )
+        value_chunk = value_chunk.to(
+            self.payload.device, dtype=self.execution_dtype
+        )
+        if self.format.name is KVCacheFormatName.NATIVE:
+            self.payload[layer_idx, pages, 0, offsets] = key_chunk
+            self.payload[layer_idx, pages, 1, offsets] = value_chunk
+            return
+        if self.scales is None:
+            raise RuntimeError("int8_sym storage requires K/V scales")
+        key_q, key_scale = quantize_tokenwise_symmetric(key_chunk)
+        value_q, value_scale = quantize_tokenwise_symmetric(value_chunk)
+        self.payload[layer_idx, pages, 0, offsets] = key_q
+        self.payload[layer_idx, pages, 1, offsets] = value_q
+        self.scales[layer_idx, pages, 0, offsets] = key_scale
+        self.scales[layer_idx, pages, 1, offsets] = value_scale
+
+    def read_prefix(
+        self,
+        *,
+        layer_idx: int,
+        block_table: torch.Tensor,
+        seq_len: int,
+        execution_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return _read_layer_prefix(
+            self, layer_idx, block_table, seq_len, execution_dtype
+        )
+
+    def snapshot_page_chunk(
+        self, page_ids: list[int], target_device: torch.device
+    ) -> LayeredKVPageChunk:
+        return _snapshot_page_chunk_blocking(self, page_ids, target_device)
+
+    def restore_page_chunk(
+        self, destination_page_ids: list[int], chunk: LayeredKVPageChunk
+    ) -> None:
+        _restore_page_chunk_blocking(self, destination_page_ids, chunk)
+
+    def paged_kernel_layer_view(
+        self, layer_idx: int
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None
+    ]:
+        layer = self.payload[layer_idx]
+        key = (
+            layer[:, 0]
+            .reshape(
+                self.num_pages,
+                self.block_size,
+                self.num_kv_heads,
+                self.head_dim // 8,
+                8,
+            )
+            .permute(0, 2, 3, 1, 4)
+        )
+        value = layer[:, 1].permute(0, 2, 3, 1)
+        if self.scales is None:
+            return key, value, None, None
+        return (
+            key,
+            value,
+            self.scales[layer_idx, :, 0].permute(0, 2, 1),
+            self.scales[layer_idx, :, 1].permute(0, 2, 1),
+        )
+
+    def flashinfer_layer_view(self, layer_idx: int) -> torch.Tensor:
+        if self.format.name is not KVCacheFormatName.NATIVE:
+            raise RuntimeError(
+                "FlashInfer layer view requires native KV format"
+            )
+        return self.payload[layer_idx]
+
+
+def _read_layer_prefix(
+    store: LayeredPagedKVStore,
+    layer_idx: int,
+    block_table: torch.Tensor,
+    seq_len: int,
+    execution_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    page_count = (seq_len + store.block_size - 1) // store.block_size
+    page_ids = block_table[:page_count].to(
+        store.payload.device, dtype=torch.long
+    )
+    pages = store.payload[layer_idx].index_select(0, page_ids)
+    key = pages[:, 0].reshape(
+        page_count * store.block_size, store.num_kv_heads, store.head_dim
+    )[:seq_len]
+    value = pages[:, 1].reshape(
+        page_count * store.block_size, store.num_kv_heads, store.head_dim
+    )[:seq_len]
+    if store.scales is None:
+        return key.to(execution_dtype), value.to(execution_dtype)
+    scales = store.scales[layer_idx].index_select(0, page_ids)
+    key_scale = scales[:, 0].reshape(
+        page_count * store.block_size, store.num_kv_heads
+    )[:seq_len]
+    value_scale = scales[:, 1].reshape(
+        page_count * store.block_size, store.num_kv_heads
+    )[:seq_len]
+    return (
+        key.to(execution_dtype) * key_scale.to(execution_dtype).unsqueeze(-1),
+        value.to(execution_dtype)
+        * value_scale.to(execution_dtype).unsqueeze(-1),
+    )
+
+
+def _snapshot_page_chunk_blocking(
+    store: LayeredPagedKVStore,
+    page_ids: list[int],
+    target_device: torch.device,
+) -> LayeredKVPageChunk:
+    index = torch.tensor(
+        page_ids, device=store.payload.device, dtype=torch.long
+    )
+    payload = (
+        store.payload.index_select(1, index)
+        .to(target_device, non_blocking=False)
+        .clone()
+    )
+    scales = None
+    if store.scales is not None:
+        scales = (
+            store.scales.index_select(1, index)
+            .to(target_device, non_blocking=False)
+            .clone()
+        )
+    return LayeredKVPageChunk(tuple(page_ids), store.format, payload, scales)
+
+
+def _restore_page_chunk_blocking(
+    store: LayeredPagedKVStore,
+    destination_page_ids: list[int],
+    chunk: LayeredKVPageChunk,
+) -> None:
+    if store.format != chunk.format or len(destination_page_ids) != len(
+        chunk.page_ids
+    ):
+        raise ValueError(
+            "page chunk format/count does not match destination store"
+        )
+    expected = (
+        store.num_layers,
+        len(destination_page_ids),
+        2,
+        store.block_size,
+        store.num_kv_heads,
+        store.head_dim,
+    )
+    if tuple(chunk.payload.shape) != expected:
+        raise ValueError(f"page chunk payload must have shape {expected}")
+    index = torch.tensor(
+        destination_page_ids, device=store.payload.device, dtype=torch.long
+    )
+    store.payload.index_copy_(
+        1, index, chunk.payload.to(store.payload.device, non_blocking=False)
+    )
+    if store.scales is not None:
+        if chunk.scales is None:
+            raise ValueError("INT8 page chunk is missing scales")
+        store.scales.index_copy_(
+            1, index, chunk.scales.to(store.scales.device, non_blocking=False)
+        )
+
+
+def allocate_layered_paged_kv_store(
+    *,
+    owner_id: str,
+    format_name: str,
+    num_layers: int,
+    num_blocks: int,
+    block_size: int,
+    num_kv_heads: int,
+    head_dim: int,
+    execution_dtype: torch.dtype,
+    device: torch.device,
+) -> LayeredPagedKVStore:
+    if not owner_id:
+        raise ValueError("LayeredPagedKVStore requires a non-empty owner_id")
+    for name, dim in (
+        ("num_layers", num_layers),
+        ("num_blocks", num_blocks),
+        ("block_size", block_size),
+        ("num_kv_heads", num_kv_heads),
+        ("head_dim", head_dim),
+    ):
+        if dim <= 0:
+            raise ValueError(f"{name} must be positive, got {dim}")
+    fmt = KVCacheFormat.parse(format_name)
+    if fmt.name is KVCacheFormatName.INT8_SYM and head_dim % 8 != 0:
+        raise ValueError("int8_sym requires head_dim divisible by 8")
+    payload_shape = (
+        num_layers,
+        num_blocks,
+        2,
+        block_size,
+        num_kv_heads,
+        head_dim,
+    )
+    if fmt.name is KVCacheFormatName.NATIVE:
+        payload = torch.zeros(
+            payload_shape, dtype=execution_dtype, device=device
+        )
+        scales = None
+    else:
+        payload = torch.zeros(
+            payload_shape, dtype=fmt.payload_dtype, device=device
+        )
+        scales = torch.zeros(
+            (num_layers, num_blocks, 2, block_size, num_kv_heads),
+            dtype=fmt.scale_dtype,
+            device=device,
+        )
+    return LayeredPagedKVStore(
+        owner_id=owner_id,
+        format=fmt,
+        num_layers=num_layers,
+        num_pages=num_blocks,
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        execution_dtype=execution_dtype,
+        payload=payload,
+        scales=scales,
+    )
