@@ -143,6 +143,73 @@ def test_missing_int8_binding_and_sdpa_strict_mode_raises() -> None:
         )
 
 
+def _build_engine(kv_cache_format: str, is_mla: bool):
+    from moe_infinity.serving.engine import ContinuousBatchingEngine
+
+    if is_mla:
+        model_config = SimpleNamespace(
+            num_attention_heads=16,
+            num_key_value_heads=1,
+            head_dim=64,
+            kv_lora_rank=512,
+        )
+        num_kv_heads, head_dim = 1, 64
+    else:
+        model_config = SimpleNamespace(
+            num_attention_heads=8,
+            num_key_value_heads=8,
+            head_dim=16,
+            hidden_size=128,
+        )
+        num_kv_heads, head_dim = 8, 16
+    model = SimpleNamespace(config=model_config)
+    config = {
+        "device_memory_ratio": 0.75,
+        "kv_cache_ratio": 0.25,
+        "block_size": 16,
+        "num_layers": 2,
+        "num_kv_heads": num_kv_heads,
+        "head_dim": head_dim,
+        "dtype": "float16",
+        "max_batch_size": 4,
+        "max_tokens_per_step": 64,
+        "num_kv_blocks": 8,
+        "kv_cache_format": kv_cache_format,
+        "kv_cache_allow_fallback": True,
+    }
+    return ContinuousBatchingEngine(model, object(), config)
+
+
+def test_engine_stats_report_effective_format_for_int8_request() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("engine store allocation targets the resolved device")
+    engine = _build_engine("int8_sym", is_mla=False)
+    stats = engine.get_stats()
+    assert stats["requested_kv_cache_format"] == "int8_sym"
+    assert stats["effective_kv_cache_format"] == "int8_sym"
+    assert engine.kv_cache.store.format.name == "int8_sym"
+    config = engine.get_config()
+    assert config["effective_kv_cache_format"] == "int8_sym"
+
+
+def test_engine_stats_report_native_fallback_for_mla_request() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("engine store allocation targets the resolved device")
+    engine = _build_engine("int8_sym", is_mla=True)
+    stats = engine.get_stats()
+    assert stats["requested_kv_cache_format"] == "int8_sym"
+    assert stats["effective_kv_cache_format"] == "native"
+    assert stats["kv_cache_format_decision_reason"] == "mla_not_validated"
+    assert engine.kv_cache.store.format.name == "native"
+
+
+def test_native_request_engine_stats_are_native() -> None:
+    engine = _build_engine("native", is_mla=False)
+    stats = engine.get_stats()
+    assert stats["effective_kv_cache_format"] == "native"
+    assert engine.kv_cache.store.format.name == "native"
+
+
 def test_cpu_falls_back_to_sdpa_dequant() -> None:
     decision = resolve_kv_cache_format(
         requested="int8_sym",
