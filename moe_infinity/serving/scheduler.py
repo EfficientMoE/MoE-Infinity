@@ -484,10 +484,11 @@ class Scheduler:
                     continue
 
                 try:
-                    self.kv_cache.swap_out(sequence.seq_id)
+                    self.kv_cache.swap_out(
+                        sequence.seq_id, release_gpu_blocks=True
+                    )
                 except KeyError:
                     pass
-                self.kv_cache.free_gpu_blocks(sequence.seq_id)
                 sequence.set_status(SequenceStatus.SWAPPED)
                 preempted_seq_ids.append(sequence.seq_id)
 
