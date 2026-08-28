@@ -1382,7 +1382,61 @@ Stage 3: consider changing defaults in a separate change with production data.
 
 Rollback is a config change to `kv_swap_mode="sync"` plus engine restart/drain; never switch backends while transfers are in flight.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Run executable documentation QA**
+
+From the repository root, run this documentation contract check before committing:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import re
+
+docs = {
+    "configuration": Path("docs/configuration.md").read_text(),
+    "serving": Path("docs/serving.md").read_text(),
+    "benchmarking": Path("docs/benchmarking.md").read_text(),
+    "changelog": Path("CHANGELOG.md").read_text(),
+}
+
+required = {
+    "configuration": [
+        "kv_swap_mode", "kv_swap_host_memory_bytes", "kv_swap_max_inflight_bytes",
+        "kv_swap_checksum", "kv_swap_max_retries", "kv_swap_allow_sync_fallback",
+        "PageableCPUBufferRecord", "pinned", "sync",
+    ],
+    "serving": [
+        "GPU_RESIDENT", "HOST_RESIDENT", "SWAP_OUT_IN_FLIGHT",
+        "SWAP_IN_IN_FLIGHT", "CANCEL_PENDING", "SequenceStatus",
+        "poll_transfers", "retire", "rollback", "reprefill", "reload",
+    ],
+    "benchmarking": [
+        "p99", "kv_swap", "warmup", "backpressure", "bytes",
+    ],
+    "changelog": ["async", "hierarchical", "KV"],
+}
+for name, needles in required.items():
+    missing = [needle for needle in needles if needle not in docs[name]]
+    assert not missing, f"{name} missing documented terms: {missing}"
+
+assert "ExternalKVStore" in docs["serving"] or "ExternalKVStore" in docs["configuration"]
+assert "no external" in docs["serving"].lower() or "no external" in docs["configuration"].lower()
+assert "kv_swap_mode=\"sync\"" in docs["serving"] or "kv_swap_mode=\"sync\"" in docs["configuration"]
+assert "restart" in docs["serving"].lower() or "restart" in docs["configuration"].lower()
+
+for path, text in docs.items():
+    for target in re.findall(r"\[[^]]+\]\(([^)#]+)(?:#[^)]+)?\)", text):
+        if target.startswith(("http://", "https://", "mailto:")):
+            continue
+        resolved = (Path("docs") / target).resolve() if path != "changelog" else Path(target).resolve()
+        assert resolved.exists(), f"{path}: broken Markdown link target {target}"
+print("documentation contract, lifecycle, metrics/benchmark, external-tier limits, rollout/rollback, and links: PASS")
+PY
+git diff --check
+```
+
+Expected: the Python command prints the `documentation contract ... PASS` line, exits 0, and `git diff --check` exits 0 with no output. If the check fails, update the documentation (or add the missing focused assertion to this command), rerun it, and do not commit until both commands pass.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add docs/configuration.md docs/serving.md docs/benchmarking.md CHANGELOG.md
