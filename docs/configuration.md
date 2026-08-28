@@ -45,6 +45,58 @@ config layer with names like `offload_dir`, `device_memory_ratio`, and
 | `enable_attention_offload` | `bool` | `False` | `True` / `False` | Enables attention offload scaffolding. | Stock code does not yet branch on this flag. The actual backend object is created inside `big_modeling`. Experimental. |
 | `enable_kv_cache_offload` | `bool` | `False` | `True` / `False` | Enables KV cache offload scaffolding in the native engine. | Registers offload handlers when a native KV manager is present, but tensor wiring is still partial. Experimental. |
 | `attention_backend` | `str` | `"default"` | any string accepted by parsing, only `default` has a documented meaning today | Legacy reserved field for attention backend selection. | The stock runtime does not consume this string. The active backend object comes from `big_modeling`. Reserved. |
+| `overlap_prefetch_policy` | `str` | `"off"` | `off` / `observe` / `enforce` | Selects overlap-window byte admission for speculative expert prefetch. `off` keeps the legacy path byte-for-byte; `observe` computes decisions/metrics but issues the same transfers; `enforce` applies admission, cancellation, and native queue limits. | Eager-routing-only when active in the first release. `enforce` requires the rebuilt native extension for cancellation/backpressure; otherwise it fails closed. Experimental. |
+| `overlap_prefetch_ewma_alpha` | `float` | `0.2` | `(0.0, 1.0]` | EWMA smoothing for compute/bandwidth/queue/issue calibration. | Only consumed under `observe`/`enforce`. |
+| `overlap_prefetch_safety_factor` | `float` | `0.8` | `(0.0, 1.0]` | Fraction of measured compute time usable as the overlap transfer window. | Conservative < 1.0 leaves compute headroom. |
+| `overlap_prefetch_cold_start_experts` | `int` | `1` | `>= 0` | Max experts admitted before both a compute and a transfer sample exist. | Cold start still enforces `overlap_prefetch_max_inflight_bytes`. |
+| `overlap_prefetch_max_window_bytes` | `int` | `256*1024*1024` | `>= 0` | Upper bound on the per-layer admitted prefetch window in bytes. | Must be `<= overlap_prefetch_max_inflight_bytes` when policy is `enforce`. |
+| `overlap_prefetch_max_inflight_bytes` | `int` | `512*1024*1024` | `>= 0` | Upper bound on outstanding speculative prefetch bytes. | Enforced by native backpressure under `enforce`. |
+| `gpu_only_expert_routing` | `bool` | `False` | `True` / `False` | Shared field for the GPU-only expert routing plan; not implemented here. | Rejected together with `overlap_prefetch_policy=observe|enforce` in the first release (see compatibility table below). |
+
+## Overlap-aware expert prefetch
+
+The overlap-prefetch policy budgets speculative expert transfers by measured
+transfer bandwidth and the current layer's measured compute time. It never
+changes routing: the native router remains the sole source of masks, weights,
+and the dispatched expert set. Budgeting applies only to early cache warming.
+
+Per layer `l`, after warm calibration:
+
+```text
+T_window_ns(l) = max(0,
+    safety_factor * compute_ewma_ns[l]
+    - queue_wait_ewma_ns
+    - issue_overhead_ewma_ns)
+B_window(l) = floor(bandwidth_ewma_bytes_per_ns * T_window_ns(l))
+B_admit(l)  = clamp(B_window(l) - current_inflight_bytes,
+                    0, max_prefetch_window_bytes)
+```
+
+Admission is whole-expert greedy packing over candidates stable-sorted by
+`(-score, original_position, expert_id)` using exact stored expert bytes.
+
+- **Cold start** is conservative: until both a valid compute sample for the
+  target layer and a valid transfer sample exist, at most
+  `overlap_prefetch_cold_start_experts` experts are admitted, still bounded by
+  `overlap_prefetch_max_inflight_bytes`.
+- **Fail-closed:** a missing byte map, missing native telemetry API, invalid
+  sample, or non-native engine causes `enforce` to admit nothing. It never
+  fabricates average sizes or guessed bandwidth. `off` and `observe` retain
+  compatibility behavior.
+- **Rollout:** ship `off` (default), then `observe` to verify output equality
+  and complete metrics, then `enforce` for the same model/hardware pair with
+  `gpu_only_expert_routing=False`. `enforce` requires the rebuilt native
+  extension for cancellation and backpressure.
+
+### Cross-plan compatibility with GPU-only expert routing
+
+First-release compatibility is deliberately fail-closed:
+
+| `gpu_only_expert_routing` | `overlap_prefetch_policy` | Result |
+| --- | --- | --- |
+| `False` | `off`, `observe`, or `enforce` | Valid eager-routing configuration |
+| `True` | `off` | Valid GPU-routing configuration; this plan is inactive |
+| `True` | `observe` or `enforce` | `ValueError` during `ArcherConfig` construction/loading |
 
 ## Memory ratio rules
 
