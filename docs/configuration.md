@@ -98,6 +98,55 @@ First-release compatibility is deliberately fail-closed:
 | `True` | `off` | Valid GPU-routing configuration; this plan is inactive |
 | `True` | `observe` or `enforce` | `ValueError` during `ArcherConfig` construction/loading |
 
+### Rollout and rollback
+
+Roll out per model/hardware pair, one stage at a time:
+
+1. Ship code with `overlap_prefetch_policy="off"`; verify legacy latency and
+   native queue behavior are unchanged.
+2. Enable `observe`; require output equality and complete non-negative metrics
+   for at least the benchmark's configured measured iterations. Compare decision
+   overhead and budget distributions, but do not block on a predetermined
+   speedup.
+3. Enable `enforce` only for the same model/hardware pair with
+   `gpu_only_expert_routing=False`; examine p50/p95 latency, throughput,
+   coverage, waste, late bytes, cancellation, queue rejection, and cache-pressure
+   warnings together.
+4. Keep independent allowlisting by model, quantization/storage format, GPU,
+   PCIe generation/width, and host-vs-disk mode. DFlash and non-DFlash runs
+   receive separate evidence; neither gates the other's availability.
+
+Rollback requires no code or router change: set
+`overlap_prefetch_policy="off"` and restart the worker. This restores the old
+`prefetch_tensors` path and disables controller calls, cancellation, bounded
+admission, and telemetry polling. If the rebuilt extension itself is suspect,
+deploy the prior package: old Python never calls the new binding names. Do not
+use `observe` as a rollback target — it still executes controller overhead.
+
+Rollback triggers are measured regressions or instability, not promises: output
+mismatch, native queue/accounting invariant failure, crash/deadlock, sustained
+cache-lock warnings, an unbounded inflight gauge, or a model/hardware-specific
+latency/throughput regression judged unacceptable by the owner.
+
+### Risks and mitigations
+
+| Risk | Detection | Mitigation |
+| --- | --- | --- |
+| EWMA reacts to transient bandwidth | bandwidth/queue EWMAs and p95 late bytes | conservative safety factor; per-process warmup; switch to `off` |
+| Disk and host transfer samples mix | sample source in telemetry and host-only/disk arms | treat the EWMA as conservative effective bandwidth, reset calibration when offload mode changes, keep the safety factor |
+| Queue debt double-counts capacity | inflight invariant and queue-reject bytes | subtract the native gauge; native max-inflight admission under one lock |
+| Cancellation races with worker pop | cancel-after-start test | only remove queued tasks under the scheduler mutex; running tasks complete |
+| Queue removal bypasses byte retirement | per-reason invariant tests; zero inflight after reset/replacement | centralized terminal helpers on every removal path |
+| A worker operation throws | standard/unknown-exception no-throw worker tests and failed-byte invariant | per-task RAII failure retirement; never let an exception escape a native `std::thread` |
+| Timing event comes from the disabled-timing pool | CUDA elapsed-time smoke and checked return codes | dispatcher owns timing-enabled epoch/start/stop events; never pool them |
+| Forward throws with timing events in an unspecified state | fake-CUDA quarantine lifecycle tests | fence the same stream; retain until query/synchronize proves completion; never sample exception tickets |
+| Output/host delay inflates the compute budget | kernel offsets versus output-delay fields | time only `ForwardHelper`; exclude `OutputFunc` and host completion from the EWMA |
+| Delayed sample attributed to a newer execution of the same layer | mixed-invocation unit test | stamp every sample with a nonzero invocation id; calibrate only an exact invocation/layer match |
+| GPU-only routing conflicts with correction/event ownership | config matrix tests | reject `gpu_only_expert_routing=True` with `observe`/`enforce` in the first release |
+| `wait_expert` throws with admitted work outstanding | wait-error/failing-cleanup tests | cancel owned generations and drain native samples in error/finally without masking the original error |
+| Missing/incorrect expert sizes | uncosted candidate metric | fail closed in `enforce`; never use an average |
+| Native extension version skew | capability detection | `enforce` fails closed; `off` uses the legacy API |
+
 ## Memory ratio rules
 
 `__post_init__` does not enforce a hard invariant up front.
