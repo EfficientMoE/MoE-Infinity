@@ -33,6 +33,15 @@ class LayerRegistration:
 
 
 @dataclass(frozen=True)
+class FlashInferPlanMetadata:
+    query_lengths: torch.Tensor
+    query_offsets: torch.Tensor
+    kv_seq_lengths: torch.Tensor
+    kv_indptr: torch.Tensor
+    kv_last_page_len: torch.Tensor
+
+
+@dataclass(frozen=True)
 class LayeredPagedKVPayload:
     source_block_ids: list[int]
     k_cache: torch.Tensor
@@ -303,6 +312,7 @@ class PagedAttentionBackend:
             device=device,
             enable_flashinfer=enable_flashinfer,
         )
+        self.last_flashinfer_plan: Optional[FlashInferPlanMetadata] = None
 
     def register_layers(self, registrations: list[LayerRegistration]) -> None:
         self._registered_layers = {
@@ -511,6 +521,9 @@ class PagedAttentionBackend:
                 kv_indices,
                 kv_last_page_len,
                 num_qo_heads,
+            )
+            self._record_flashinfer_plan(
+                metadata, qo_indptr, kv_indptr, kv_last_page_len
             )
             return cast(
                 torch.Tensor,
@@ -786,6 +799,36 @@ class PagedAttentionBackend:
                 pos_encoding_mode="NONE",
                 data_type=query_dtype,
             )
+
+    def _record_flashinfer_plan(
+        self,
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+        qo_indptr: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_last_page_len: torch.Tensor,
+    ) -> None:
+        lengths = getattr(metadata, "lengths", None)
+        if lengths is None:
+            query_lengths = torch.diff(qo_indptr.detach())
+            kv_seq_lengths = query_lengths.clone()
+        else:
+            query_lengths = torch.as_tensor(
+                [int(v) for v in _as_int_list(lengths.query_lengths)],
+                dtype=torch.int32,
+                device=qo_indptr.device,
+            )
+            kv_seq_lengths = torch.as_tensor(
+                [int(v) for v in _as_int_list(lengths.kv_seq_lengths)],
+                dtype=torch.int32,
+                device=qo_indptr.device,
+            )
+        self.last_flashinfer_plan = FlashInferPlanMetadata(
+            query_lengths=query_lengths.detach().clone(),
+            query_offsets=qo_indptr.detach().clone(),
+            kv_seq_lengths=kv_seq_lengths.detach().clone(),
+            kv_indptr=kv_indptr.detach().clone(),
+            kv_last_page_len=kv_last_page_len.detach().clone(),
+        )
 
     @classmethod
     def get_kv_cache_shape(

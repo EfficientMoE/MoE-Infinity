@@ -231,10 +231,26 @@ class ModelRunner:
         lengths: PagedBatchLengths | None = None
         if batch.seq_ids and all(length > 0 for length in batch.seq_lengths):
             lengths = PagedBatchLengths(
-                query_lengths=list(batch.seq_lengths),
-                query_offsets=list(batch.token_offsets),
-                context_lengths=list(batch.context_lengths),
-                kv_seq_lengths=list(seq_lens_values),
+                query_lengths=torch.tensor(
+                    list(batch.seq_lengths),
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
+                query_offsets=torch.tensor(
+                    list(batch.token_offsets),
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
+                context_lengths=torch.tensor(
+                    list(batch.context_lengths),
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
+                kv_seq_lengths=torch.tensor(
+                    list(seq_lens_values),
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
             )
 
         return RuntimeAttentionMetadata(

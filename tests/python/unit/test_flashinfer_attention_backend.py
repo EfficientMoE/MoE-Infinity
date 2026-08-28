@@ -5,7 +5,11 @@ import torch
 
 from moe_infinity.runtime import attention_backend as attention_backend_module
 from moe_infinity.runtime import flashinfer_utils
-from moe_infinity.runtime.attention_types import AttentionMetadata, KVCacheSpec
+from moe_infinity.runtime.attention_types import (
+    AttentionMetadata,
+    KVCacheSpec,
+    PagedBatchLengths,
+)
 from moe_infinity.serving.kv_cache import PagedKVCache
 
 
@@ -251,6 +255,41 @@ def test_fallback_decode_without_flashinfer(
     )
     assert out.shape == (1, 4, 8)
     assert backend._fi_decode is None
+
+
+def test_flashinfer_qo_indptr_uses_chunk_queries_not_total_kv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_fake_flashinfer(monkeypatch)
+    backend = attention_backend_module.PagedAttentionBackend(
+        spec=_spec(), num_gpu_blocks=8, device=torch.device("cpu")
+    )
+    metadata = AttentionMetadata(
+        block_tables=torch.tensor([[0, 1, 0], [2, 3, 4]], dtype=torch.int32),
+        lengths=PagedBatchLengths(
+            query_lengths=torch.tensor([2, 3], dtype=torch.int32),
+            query_offsets=torch.tensor([0, 2, 5], dtype=torch.int32),
+            context_lengths=torch.tensor([4, 6], dtype=torch.int32),
+            kv_seq_lengths=torch.tensor([6, 9], dtype=torch.int32),
+        ),
+        max_seq_len=9,
+        num_prefill_tokens=5,
+        num_decode_tokens=0,
+        slot_mapping=torch.tensor([4, 5, 14, 15, 16]),
+        is_prefill=True,
+    )
+    backend.forward(
+        query=torch.randn(5, 4, 8),
+        key=torch.randn(5, 2, 8),
+        value=torch.randn(5, 2, 8),
+        attention_metadata=metadata,
+    )
+
+    assert backend._fi_prefill is not None
+    plan_args = backend._fi_prefill.plan_args[0]
+    assert plan_args[0].tolist() == [0, 2, 5]
+    assert plan_args[1].tolist() == [0, 2, 5]
+    assert plan_args[3].tolist() == [2, 1]
 
 
 def _make_serving_cache(num_blocks: int, block_size: int) -> PagedKVCache:
