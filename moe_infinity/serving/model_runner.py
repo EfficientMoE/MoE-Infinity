@@ -35,11 +35,42 @@ class ModelRunner:
         model: object,
         engine: object,
         device: Optional[torch.device] = None,
+        *,
+        kv_store: object | None = None,
+        attention_backend: object | None = None,
+        owner_id: str | None = None,
     ) -> None:
         self.model = model
         self.engine = engine
         self.device = self._resolve_device(device)
         self.seq_id_list = []
+        self.kv_store = kv_store
+        self._bound_attention_backend = attention_backend
+        self._owner_id = owner_id
+        if kv_store is not None or attention_backend is not None:
+            self._validate_store_identity(kv_store, attention_backend, owner_id)
+
+    @staticmethod
+    def _validate_store_identity(
+        kv_store: object | None,
+        attention_backend: object | None,
+        owner_id: str | None,
+    ) -> None:
+        if kv_store is None or attention_backend is None:
+            raise RuntimeError(
+                "ModelRunner requires both kv_store and attention_backend "
+                "when either is provided"
+            )
+        backend_store = getattr(attention_backend, "store", None)
+        if backend_store is not kv_store:
+            raise RuntimeError(
+                "KV store identity mismatch between ModelRunner and backend"
+            )
+        store_owner = getattr(kv_store, "owner_id", None)
+        if owner_id is not None and store_owner != owner_id:
+            raise RuntimeError(
+                "KV store identity mismatch: owner_id does not match store"
+            )
 
     def prepare_inputs(self, batch: BatchMetadata) -> dict[str, torch.Tensor]:
         num_seqs = len(batch.seq_ids)
@@ -267,6 +298,8 @@ class ModelRunner:
         return 1
 
     def _get_attention_backend(self) -> object | None:
+        if self._bound_attention_backend is not None:
+            return self._bound_attention_backend
         getter = getattr(self.engine, "get_attention_backend", None)
         if callable(getter):
             backend = getter()

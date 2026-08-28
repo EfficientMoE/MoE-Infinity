@@ -86,6 +86,18 @@ class ArcherConfig:
             "help": "Attention backend name. 'default' = no-op PlaceholderAttentionBackend."
         },
     )
+    kv_cache_format: str = field(
+        default="native",
+        metadata={
+            "help": "KV storage format: native or int8_sym; default preserves model dtype."
+        },
+    )
+    kv_cache_allow_fallback: bool = field(
+        default=True,
+        metadata={
+            "help": "Allow a visible native fallback when requested KV format is unsupported."
+        },
+    )
 
     @classmethod
     def load_from_file(cls, config_path: Union[str, os.PathLike]):
@@ -160,3 +172,7 @@ class ArcherConfig:
             raise ValueError(
                 f"device_memory_ratio ({self.device_memory_ratio}) + kv_cache_memory_ratio ({self.kv_cache_memory_ratio}) > 1.0"
             )
+
+        from moe_infinity.runtime.kv_cache_format import KVCacheFormat
+
+        KVCacheFormat.parse(self.kv_cache_format)
