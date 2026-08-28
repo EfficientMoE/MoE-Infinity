@@ -42,6 +42,15 @@ class ArcherConfig:
             "help": "When True, fire speculative prefetch BEFORE the layer-L barrier in dispatch_local so PCIe transfers overlap with layer-L compute. When False (default), prefetch fires after the barrier (legacy behavior). Requires speculative_prefetch=True. Currently exposes a cache-pressure failure mode (see .sisyphus/findings/ibp-feasibility/SUMMARY.md) when device_memory_ratio is high; lower device_memory_ratio if you enable this and observe 'All cached expert locked' warnings."
         },
     )
+    gpu_only_expert_routing: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Use native CUDA active-expert discovery for single-host local "
+                "dispatch. Falls back to eager Python routing when unavailable."
+            )
+        },
+    )
     device_memory_ratio: float = field(
         default=0.9,
         metadata={"help": "Ratio of device memory to use"},
@@ -87,6 +96,22 @@ class ArcherConfig:
         },
     )
 
+    @staticmethod
+    def _validate_gpu_routing_overlap(
+        gpu_only_expert_routing: bool,
+        speculative_prefetch_overlap: bool,
+        overlap_prefetch_mode: str = "off",
+    ) -> None:
+        if gpu_only_expert_routing and (
+            speculative_prefetch_overlap
+            or overlap_prefetch_mode in {"observe", "enforce"}
+        ):
+            raise ValueError(
+                "gpu_only_expert_routing cannot be combined with overlap "
+                "prefetch in the first release; disable "
+                "speculative_prefetch_overlap and overlap_prefetch_mode"
+            )
+
     @classmethod
     def load_from_file(cls, config_path: Union[str, os.PathLike]):
         parser = HfArgumentParser(cls)
@@ -110,6 +135,12 @@ class ArcherConfig:
         return config
 
     def __post_init__(self):
+        self._validate_gpu_routing_overlap(
+            self.gpu_only_expert_routing,
+            self.speculative_prefetch_overlap,
+            getattr(self, "overlap_prefetch_mode", "off"),
+        )
+
         self.perfect_cache_file = os.path.join(
             self.offload_path, "perfect_cache"
         )

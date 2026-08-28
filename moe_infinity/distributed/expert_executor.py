@@ -103,6 +103,11 @@ class DistributedExpertExecutor:
         self._speculative_prefetch_overlap = bool(
             getattr(archer_config, "speculative_prefetch_overlap", False)
         )
+        self._gpu_only_expert_routing = bool(
+            getattr(archer_config, "gpu_only_expert_routing", False)
+        )
+        self._last_dispatch_used_native_routing = False
+        self._gpu_route_fallback_count = 0
         self._pending_prefetch = None
 
     def set_expert_dispatcher(self, expert_dispatcher):
