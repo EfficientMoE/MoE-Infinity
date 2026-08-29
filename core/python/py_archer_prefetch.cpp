@@ -159,6 +159,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              fallback_counts["transition_failed"] =
                  failed == metrics.end() ? 0 : failed->second;
              result["fallback_counts"] = fallback_counts;
+             py::dict leases_by_kind;
+             for (const char* kind :
+                  {"demand", "prefetch", "transfer", "execution", "transition"})
+               leases_by_kind[kind] = 0;
+             result["leases_by_kind"] = leases_by_kind;
+             result["resident_generation_entries"] = py::list();
+             result["by_format"] = py::dict();
              return result;
            })
       .def("get_policy_stats", &ExpertDispatcher::GetPrecisionMetrics)
