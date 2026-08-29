@@ -97,3 +97,94 @@ def test_graph_safe_kv_write_persists_current_token_per_layer() -> None:
     )
     _assert_slots_equal(storage, layer_idx=1, slots=slots, key=key, value=value)
     assert torch.count_nonzero(storage.value_cache[0]).item() == 0
+
+
+@requires_cuda
+def test_graph_safe_kv_write_under_cuda_graph_capture_persists() -> None:
+    """The Triton current-token write must be capturable: replaying a captured
+    graph after refilling the fixed-address inputs persists the new K/V at the
+    fixed slot without any allocation on the write path."""
+    storage = _make_storage(
+        num_layers=2, num_blocks=4, block_size=4, device=torch.device("cuda")
+    )
+    slots = torch.tensor([1], dtype=torch.int64, device="cuda")
+    key = torch.zeros(1, 2, 8, device="cuda", dtype=torch.float32)
+    value = torch.zeros(1, 2, 8, device="cuda", dtype=torch.float32)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        paged_kv_write_(
+            storage, layer_idx=1, key=key, value=value, slot_mapping=slots
+        )
+    torch.cuda.current_stream().wait_stream(stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        paged_kv_write_(
+            storage, layer_idx=1, key=key, value=value, slot_mapping=slots
+        )
+
+    new_key = torch.arange(2 * 8, device="cuda", dtype=torch.float32).reshape(
+        1, 2, 8
+    )
+    new_value = new_key + 100
+    key.copy_(new_key)
+    value.copy_(new_value)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    _assert_slots_equal(
+        storage, layer_idx=1, slots=slots, key=new_key, value=new_value
+    )
+
+
+def test_second_decode_token_eager_observes_first_token_kv() -> None:
+    """Task 3 semantic parity: after an eager decode step writes current-token
+    K/V at the authoritative slot, a subsequent decode token attends over the
+    prior token's persisted K/V. Graph replay equivalence (``try_execute``) is
+    completed in Task 4; here we prove the eager write-before-attend
+    persistence contract only, on CPU (the CUDA paged-attention kernel image is
+    unavailable in this environment, so the SDPA fallback path is exercised)."""
+    from moe_infinity.runtime.attention_backend import PagedAttentionBackend
+    from moe_infinity.runtime.attention_types import (
+        AttentionMetadata as RuntimeAttentionMetadata,
+    )
+
+    storage = _make_storage(num_layers=1, num_blocks=4, block_size=4)
+    backend = PagedAttentionBackend(storage=storage, use_flashinfer=False)
+
+    def _decode(token_offset: int, key_val: float) -> torch.Tensor:
+        query = torch.ones(1, 4, 8, dtype=torch.float32)
+        key = torch.full((1, 2, 8), key_val, dtype=torch.float32)
+        value = key + 1.0
+        metadata = RuntimeAttentionMetadata(
+            block_tables=torch.tensor([[0]], dtype=torch.int32),
+            seq_lens=torch.tensor([token_offset + 1], dtype=torch.int32),
+            max_seq_len=token_offset + 1,
+            num_prefill_tokens=0,
+            num_decode_tokens=1,
+            slot_mapping=torch.tensor([token_offset], dtype=torch.int64),
+            is_prefill=False,
+            kv_storage_owner_id=storage.owner_id,
+        )
+        return backend.forward(
+            query=query,
+            key=key,
+            value=value,
+            attention_metadata=metadata,
+            layer_idx=0,
+        )
+
+    _ = _decode(token_offset=0, key_val=3.0)
+    torch.testing.assert_close(
+        storage.value_cache[0, 0, :, :, 0], torch.full((2, 8), 4.0)
+    )
+    out_second = _decode(token_offset=1, key_val=7.0)
+    torch.testing.assert_close(
+        storage.value_cache[0, 0, :, :, 1], torch.full((2, 8), 8.0)
+    )
+    torch.testing.assert_close(
+        storage.value_cache[0, 0, :, :, 0], torch.full((2, 8), 4.0)
+    )
+    assert out_second.shape == (1, 4, 8)

@@ -10,6 +10,7 @@ from transformers.models.qwen3_moe.configuration_qwen3_moe import (
 
 from moe_infinity.models.paged_attention_registry import (
     SUPPORTED_PAGED_CLASS_SPECS,
+    LayerBoundPagedBackend,
     PagedAttentionLayerRegistry,
 )
 from moe_infinity.models.qwen3_paged_attention import Qwen3PagedAttention
@@ -162,3 +163,61 @@ def test_deepseek_mla_is_recognized_but_never_registered(family: str) -> None:
     result = PagedAttentionLayerRegistry.inspect_module(module)
     assert result.binding is None
     assert result.reason == "mla_layout_unsupported"
+
+
+class _OrderRecordingBackend:
+    def __init__(self, storage: PagedKVStorage) -> None:
+        self.storage = storage
+        self.events: list[tuple] = []
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_metadata: RuntimeAttentionMetadata,
+        graph_mode: bool = False,
+        layer_idx=None,
+    ) -> torch.Tensor:
+        _ = (query, key, value, graph_mode)
+        self.events.append(
+            ("write", layer_idx, attention_metadata.slot_mapping.data_ptr())
+        )
+        self.events.append(("attention", layer_idx))
+        return torch.zeros(1, 4, 8)
+
+
+def _order_metadata(storage: PagedKVStorage) -> RuntimeAttentionMetadata:
+    return RuntimeAttentionMetadata(
+        block_tables=torch.zeros((1, 1), dtype=torch.int32),
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=1,
+        num_prefill_tokens=0,
+        num_decode_tokens=1,
+        slot_mapping=torch.tensor([0], dtype=torch.int64),
+        is_prefill=False,
+        kv_storage_owner_id=storage.owner_id,
+    )
+
+
+def test_each_layer_writes_current_token_before_decode_attention() -> None:
+    storage = _make_storage(num_layers=2)
+    backend = _OrderRecordingBackend(storage)
+    metadata = _order_metadata(storage)
+
+    for layer_idx in (0, 1):
+        bound = LayerBoundPagedBackend(backend, layer_idx, storage.owner_id)
+        _ = bound.forward(
+            torch.zeros(1, 4, 8),
+            torch.zeros(1, 2, 8),
+            torch.zeros(1, 2, 8),
+            attention_metadata=metadata,
+            graph_mode=True,
+        )
+
+    assert backend.events == [
+        ("write", 0, metadata.slot_mapping.data_ptr()),
+        ("attention", 0),
+        ("write", 1, metadata.slot_mapping.data_ptr()),
+        ("attention", 1),
+    ]

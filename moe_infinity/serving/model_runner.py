@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any, Optional, Protocol, runtime_checkable
 
 import torch
@@ -22,6 +24,32 @@ class _ExpertTracerLike(Protocol):
 @runtime_checkable
 class _ExpertLayerModuleLike(Protocol):
     seq_id_list: list[object]
+
+
+@dataclass
+class PreparedDecodeBuffers:
+    input_ids: torch.Tensor
+    position_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    active_rows: torch.Tensor
+    attention_metadata: RuntimeAttentionMetadata
+    batch_bucket: int
+    context_bucket: int
+    real_batch_size: int = 0
+
+    def data_ptrs(self) -> tuple[int, ...]:
+        return tuple(tensor.data_ptr() for tensor in self.tensor_values())
+
+    def tensor_values(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self.input_ids,
+            self.position_ids,
+            self.attention_mask,
+            self.active_rows,
+            self.attention_metadata.block_tables,
+            self.attention_metadata.seq_lens,
+            self.attention_metadata.slot_mapping,
+        )
 
 
 class ModelRunner:
@@ -190,22 +218,21 @@ class ModelRunner:
             "attention_mask": attention_mask,
         }
 
+    def prepare_batch_side_effects(self, batch: BatchMetadata) -> None:
+        self._configure_expert_tracing(len(batch.seq_ids))
+        self._advance_request_id()
+
     def execute(
         self,
         batch: BatchMetadata,
         past_key_values: object = None,
     ) -> torch.Tensor:
-        self._configure_expert_tracing(len(batch.seq_ids))
-        self._advance_request_id()
+        self.prepare_batch_side_effects(batch)
 
         if batch.total_tokens == 0:
             return self._empty_logits()
 
         model_inputs = self.prepare_inputs(batch)
-
-        eval_fn = getattr(self.model, "eval", None)
-        if callable(eval_fn):
-            _ = eval_fn()
 
         forward_kwargs: dict[str, object] = {
             **model_inputs,
@@ -214,28 +241,9 @@ class ModelRunner:
         if past_key_values is not None:
             forward_kwargs["past_key_values"] = past_key_values
 
-        forward_fn = getattr(self.model, "forward", None)
-        if not callable(forward_fn):
-            raise ValueError("model must define callable forward()")
-
-        paged_attention_classes = self._get_paged_attention_classes()
-        backend = self._get_attention_backend()
-        use_paged_context = bool(
-            paged_attention_classes and backend is not None
+        outputs = self._forward_with_optional_paged_context(
+            forward_kwargs, batch=batch
         )
-
-        with torch.no_grad():
-            if not use_paged_context:
-                outputs = forward_fn(**forward_kwargs)
-            else:
-                metadata = self._build_runtime_attention_metadata(batch)
-                for attn_cls in paged_attention_classes:
-                    attn_cls.set_paged_context(backend, metadata)
-                try:
-                    outputs = forward_fn(**forward_kwargs)
-                finally:
-                    for attn_cls in paged_attention_classes:
-                        attn_cls.clear_paged_context()
 
         logits = self._extract_logits(outputs)
         if logits.dim() == 3:
@@ -253,6 +261,207 @@ class ModelRunner:
                 f"packed logits row count must match batch.total_tokens; got {logits.size(0)} vs {batch.total_tokens}"
             )
         return logits
+
+    def _forward_with_optional_paged_context(
+        self,
+        forward_kwargs: dict[str, object],
+        *,
+        batch: BatchMetadata,
+    ) -> object:
+        eval_fn = getattr(self.model, "eval", None)
+        if callable(eval_fn):
+            _ = eval_fn()
+
+        forward_fn = getattr(self.model, "forward", None)
+        if not callable(forward_fn):
+            raise ValueError("model must define callable forward()")
+
+        paged_attention_classes = self._get_paged_attention_classes()
+        backend = self._get_attention_backend()
+        use_paged_context = bool(
+            paged_attention_classes and backend is not None
+        )
+
+        with torch.no_grad():
+            if not use_paged_context:
+                return forward_fn(**forward_kwargs)
+            metadata = self._build_runtime_attention_metadata(batch)
+            for attn_cls in paged_attention_classes:
+                attn_cls.set_paged_context(backend, metadata)
+            try:
+                return forward_fn(**forward_kwargs)
+            finally:
+                for attn_cls in paged_attention_classes:
+                    attn_cls.clear_paged_context()
+
+    def _require_paged_kv_storage(self) -> Any:
+        storage = self.paged_kv_storage
+        if storage is None:
+            raise ValueError("ModelRunner has no bound PagedKVStorage")
+        return storage
+
+    def allocate_decode_buffers(
+        self, *, batch_bucket: int, context_bucket: int
+    ) -> PreparedDecodeBuffers:
+        from moe_infinity.runtime.paged_kv_storage import canonical_device
+
+        storage = self._require_paged_kv_storage()
+        device = storage.spec.device
+        if canonical_device(self.device) != canonical_device(device):
+            raise ValueError(
+                "ModelRunner device does not match PagedKVStorage device"
+            )
+
+        max_blocks = math.ceil(context_bucket / storage.spec.block_size)
+        metadata = RuntimeAttentionMetadata(
+            block_tables=torch.zeros(
+                (batch_bucket, max_blocks), dtype=torch.int32, device=device
+            ),
+            seq_lens=torch.ones(batch_bucket, dtype=torch.int32, device=device),
+            max_seq_len=context_bucket,
+            num_prefill_tokens=0,
+            num_decode_tokens=batch_bucket,
+            slot_mapping=torch.zeros(
+                batch_bucket, dtype=torch.int64, device=device
+            ),
+            is_prefill=False,
+            kv_storage_owner_id=storage.owner_id,
+        )
+        return PreparedDecodeBuffers(
+            input_ids=torch.zeros(
+                (batch_bucket, 1), dtype=torch.long, device=device
+            ),
+            position_ids=torch.zeros(
+                (batch_bucket, 1), dtype=torch.long, device=device
+            ),
+            attention_mask=torch.ones(
+                (batch_bucket, 1), dtype=torch.long, device=device
+            ),
+            active_rows=torch.zeros(
+                batch_bucket, dtype=torch.bool, device=device
+            ),
+            attention_metadata=metadata,
+            batch_bucket=batch_bucket,
+            context_bucket=context_bucket,
+        )
+
+    def copy_decode_batch(
+        self,
+        batch: BatchMetadata,
+        buffers: PreparedDecodeBuffers,
+        scratch_block_ids: list[int],
+    ) -> None:
+        storage = self._require_paged_kv_storage()
+        device = storage.spec.device
+        for tensor in buffers.tensor_values():
+            if tensor.device != device:
+                raise ValueError(
+                    "prepared buffer device does not match storage device"
+                )
+
+        real = len(batch.seq_ids)
+        if real > buffers.batch_bucket:
+            raise ValueError("batch size exceeds prepared batch bucket")
+        if any(length != 1 for length in batch.seq_lengths):
+            raise ValueError("prepared decode requires one-token sequences")
+        if any(batch.is_prefill):
+            raise ValueError("prepared decode cannot contain prefill rows")
+
+        metadata = buffers.attention_metadata
+        if metadata.kv_storage_owner_id != storage.owner_id:
+            raise ValueError("prepared buffers have a foreign storage owner")
+
+        block_size = storage.spec.block_size
+        max_blocks = metadata.block_tables.shape[1]
+        for row in batch.block_tables:
+            for block_id in row:
+                if not 0 <= block_id < storage.num_blocks:
+                    raise ValueError(
+                        f"block id {block_id} outside authoritative storage"
+                    )
+
+        padded = buffers.batch_bucket - real
+        scratch = list(scratch_block_ids)
+        if len(scratch) != padded:
+            raise ValueError(
+                "one unique scratch block id is required per padded row"
+            )
+        if len(set(scratch)) != len(scratch):
+            raise ValueError("scratch block ids must be unique")
+        reserved = storage.graph_scratch_blocks
+        for block_id in scratch:
+            if block_id not in reserved:
+                raise ValueError(f"scratch block id {block_id} is not reserved")
+
+        buffers.input_ids.zero_()
+        buffers.position_ids.zero_()
+        buffers.attention_mask.fill_(1)
+        buffers.active_rows.zero_()
+        metadata.block_tables.zero_()
+        metadata.seq_lens.fill_(1)
+        metadata.slot_mapping.zero_()
+
+        for row_idx in range(real):
+            context_len = batch.context_lengths[row_idx]
+            seq_len = context_len + 1
+            block_table = batch.block_tables[row_idx]
+            if seq_len > buffers.context_bucket:
+                raise ValueError("sequence length exceeds context bucket")
+            token_pos = context_len
+            block_idx = token_pos // block_size
+            if block_idx >= max_blocks or block_idx >= len(block_table):
+                raise ValueError("block table too short for prepared context")
+            start = batch.token_offsets[row_idx]
+            token_id = batch.input_token_ids[start]
+
+            buffers.input_ids[row_idx, 0] = token_id
+            buffers.position_ids[row_idx, 0] = context_len
+            buffers.active_rows[row_idx] = True
+            for col, block_id in enumerate(block_table):
+                metadata.block_tables[row_idx, col] = block_id
+            metadata.seq_lens[row_idx] = seq_len
+            slot = block_table[block_idx] * block_size + token_pos % block_size
+            metadata.slot_mapping[row_idx] = slot
+
+        for offset, block_id in enumerate(scratch):
+            row_idx = real + offset
+            metadata.block_tables[row_idx, 0] = block_id
+            metadata.slot_mapping[row_idx] = block_id * block_size
+
+        buffers.real_batch_size = real
+
+    def forward_prepared_decode(
+        self, buffers: PreparedDecodeBuffers
+    ) -> torch.Tensor:
+        registry = self.paged_attention_registry
+        if registry is None:
+            raise ValueError(
+                "prepared decode requires a paged attention registry"
+            )
+
+        eval_fn = getattr(self.model, "eval", None)
+        if callable(eval_fn):
+            _ = eval_fn()
+        forward_fn = getattr(self.model, "forward", None)
+        if not callable(forward_fn):
+            raise ValueError("model must define callable forward()")
+
+        registry.install_metadata(buffers.attention_metadata)
+        try:
+            with torch.no_grad():
+                outputs = forward_fn(
+                    input_ids=buffers.input_ids,
+                    position_ids=buffers.position_ids,
+                    attention_mask=buffers.attention_mask,
+                    use_cache=True,
+                )
+        finally:
+            registry.clear_metadata()
+
+        logits = self._extract_logits(outputs)
+        if logits.dim() == 3:
+            logits = logits[:, -1, :]
+        return logits[: buffers.real_batch_size]
 
     def _configure_expert_tracing(self, num_sequences: int) -> None:
         tracer = getattr(self.engine, "expert_tracer", None)

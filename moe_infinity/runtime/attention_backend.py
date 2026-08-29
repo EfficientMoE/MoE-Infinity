@@ -344,8 +344,9 @@ class PagedAttentionBackend:
             AttentionMetadata | RuntimeAttentionMetadata
         ] = None,
         layer_idx: Optional[int] = None,
+        graph_mode: bool = False,
     ) -> torch.Tensor:
-        _ = kv_cache
+        _ = (kv_cache, graph_mode)
         metadata = (
             attention_metadata
             if attention_metadata is not None
@@ -373,7 +374,29 @@ class PagedAttentionBackend:
                 scale=scale,
             )
 
+        self._write_decode_kv(key, value, metadata)
         return self._decode_forward(query, metadata, scale=scale)
+
+    def _write_decode_kv(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        metadata: AttentionMetadata | RuntimeAttentionMetadata,
+    ) -> None:
+        if self.storage is None:
+            return
+        slot_mapping = self._get_slot_mapping(metadata)
+        if slot_mapping is None:
+            raise ValueError("decode requires slot_mapping")
+        from moe_infinity.kernel.paged_kv_write import paged_kv_write_
+
+        paged_kv_write_(
+            self.storage,
+            layer_idx=self._layer_idx or 0,
+            key=key,
+            value=value,
+            slot_mapping=slot_mapping,
+        )
 
     def _prefill_forward(
         self,
