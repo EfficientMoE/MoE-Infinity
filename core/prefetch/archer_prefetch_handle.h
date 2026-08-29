@@ -31,7 +31,8 @@ class ArcherPrefetchHandle {
   void ReplaceCacheCandidates(const std::vector<std::uint32_t>& tensor_ids);
   void EnqueuePrefetch(const uint32_t tensor_id, int gpu_id);
   void EnqueuePrefetchTensors(const std::vector<std::uint32_t>& tensor_ids,
-                              std::uint32_t priority = kRouteAheadPriority);
+                              std::uint32_t priority = kRouteAheadPriority,
+                              int phase = static_cast<int>(ExpertPhase::MIXED));
 
   void OffloadTensor(torch::Tensor& tensor, const std::uint32_t tensor_id);
   void RegisterTensor(torch::Tensor& tensor, const std::uint32_t tensor_id);

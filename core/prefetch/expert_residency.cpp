@@ -70,6 +70,8 @@ void ExpertResidencyManager::EnsureDeviceLocked(int gpu_id) {
   if (capacity_bytes_.size() < needed) capacity_bytes_.resize(needed);
   if (pending_ticket_counts_.size() < needed)
     pending_ticket_counts_.resize(needed, 0);
+  if (transient_ticket_counts_.size() < needed)
+    transient_ticket_counts_.resize(needed, 0);
 }
 
 bool ExpertResidencyManager::IsConfiguredLocked(int gpu_id) const {
@@ -131,11 +133,13 @@ EvictionState ExpertResidencyManager::ProjectStateLocked(
 }
 
 VictimCandidate ExpertResidencyManager::CandidateForLocked(
-    const NodePtr& node) const {
+    const NodePtr& node, ExpertPhase phase) const {
   const auto& m = node->policy_metadata;
-  const double utility = VictimUtility(m, ExpertPhase::DECODE, config_);
-  const std::uint64_t last_sequence =
-      std::max(m.last_prefill_sequence, m.last_decode_sequence);
+  const ExpertPhase active = EffectivePhase(phase);
+  const double utility = VictimUtility(m, active, config_);
+  const std::uint64_t last_sequence = active == ExpertPhase::PREFILL
+                                          ? m.last_prefill_sequence
+                                          : m.last_decode_sequence;
   const std::int64_t layer_id =
       static_cast<std::int64_t>(node->corr_id & 0xFFFFFFFF);
   const std::int64_t expert_id = static_cast<std::int64_t>(node->corr_id >> 32);
@@ -151,7 +155,7 @@ std::optional<NodePtr> ExpertResidencyManager::ReserveVictimLocked(
     const auto& node = entry.node;
     const auto state = ProjectStateLocked(node, entry.lease_count);
     if (!IsEvictionEligible(state)) continue;
-    auto candidate = CandidateForLocked(node);
+    auto candidate = CandidateForLocked(node, phase);
     by_key[static_cast<std::int64_t>(node->corr_id)] = node;
     candidates.push_back(candidate);
   }
@@ -208,11 +212,20 @@ ResidencyTicket ExpertResidencyManager::BeginAdmission(const NodePtr& incoming,
   }
 
   if (mode == AdmissionMode::TRANSIENT_ON_PRESSURE) {
+    if (transient_ticket_counts_[idx] != 0) {
+      ticket.valid = false;
+      ticket.outcome = AdmissionOutcome::REJECTED;
+      if (source == AdmissionSource::PREFETCH) {
+        counters_[std::string(PhasePrefix(phase)) + "_prefetch_rejected"] += 1;
+      }
+      return ticket;
+    }
     ticket.valid = true;
     ticket.transient = true;
     ticket.outcome = AdmissionOutcome::TRANSIENT;
     counters_[std::string(PhasePrefix(phase)) + "_transient"] += 1;
     pending_ticket_counts_[idx] += 1;
+    transient_ticket_counts_[idx] += 1;
     pending_tickets_[ticket.id] = ticket;
     return ticket;
   }
@@ -282,6 +295,7 @@ bool ExpertResidencyManager::CommitAdmission(const ResidencyTicket& ticket) {
     ReleaseReservationLocked(live);
     pending_tickets_.erase(it);
     pending_ticket_counts_[idx] -= 1;
+    transient_ticket_counts_[idx] -= 1;
     return true;
   }
 
@@ -315,6 +329,7 @@ bool ExpertResidencyManager::AbortAdmission(const ResidencyTicket& ticket) {
   const std::size_t idx = static_cast<std::size_t>(live.gpu_id);
   pending_tickets_.erase(it);
   pending_ticket_counts_[idx] -= 1;
+  if (live.transient) transient_ticket_counts_[idx] -= 1;
   return true;
 }
 
@@ -383,6 +398,28 @@ void ExpertResidencyManager::ConfigurePolicy(const PhasePolicyConfig& config) {
   std::lock_guard<std::mutex> lock(mutex_);
   config_ = config;
   counters_["enabled"] = config.enabled ? 1 : 0;
+}
+
+bool ExpertResidencyManager::PolicyEnabled() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return config_.enabled;
+}
+
+AdmissionMode ExpertResidencyManager::AdmissionFor(ExpertPhase phase) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return EffectivePhase(phase) == ExpertPhase::PREFILL
+             ? config_.prefill_admission
+             : config_.decode_admission;
+}
+
+std::uint32_t ExpertResidencyManager::StarvationLimit() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return config_.starvation_limit;
+}
+
+void ExpertResidencyManager::RecordStarvationPromotion() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  counters_["starvation_promotions"] += 1;
 }
 
 std::int64_t ExpertResidencyManager::ResidentBytes(int gpu_id) const {

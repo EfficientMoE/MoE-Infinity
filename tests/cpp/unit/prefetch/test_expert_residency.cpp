@@ -30,6 +30,32 @@ TEST_F(ExpertResidencyManagerTest, DevicesConfigureIndependently) {
   EXPECT_TRUE(manager->AbortAdmission(gpu1));
 }
 
+TEST_F(ExpertResidencyManagerTest, AllowsOnlyOneTransientOverflowPerDevice) {
+  ASSERT_TRUE(manager->ConfigureCapacity(0, 40));
+  auto resident = MakeNode(1, 40);
+  Admit(resident, AdmissionSource::DEMAND);
+
+  auto first = manager->BeginAdmission(MakeNode(2, 40), 0, ExpertPhase::PREFILL,
+                                       AdmissionMode::TRANSIENT_ON_PRESSURE,
+                                       AdmissionSource::DEMAND);
+  auto second = manager->BeginAdmission(
+      MakeNode(3, 40), 0, ExpertPhase::PREFILL,
+      AdmissionMode::TRANSIENT_ON_PRESSURE, AdmissionSource::DEMAND);
+
+  ASSERT_TRUE(first.valid);
+  EXPECT_EQ(first.outcome, AdmissionOutcome::TRANSIENT);
+  EXPECT_FALSE(second.valid);
+  EXPECT_EQ(second.outcome, AdmissionOutcome::REJECTED);
+  EXPECT_TRUE(manager->AbortAdmission(first));
+
+  auto after_release = manager->BeginAdmission(
+      MakeNode(4, 40), 0, ExpertPhase::PREFILL,
+      AdmissionMode::TRANSIENT_ON_PRESSURE, AdmissionSource::DEMAND);
+  EXPECT_TRUE(after_release.valid);
+  EXPECT_EQ(after_release.outcome, AdmissionOutcome::TRANSIENT);
+  EXPECT_TRUE(manager->AbortAdmission(after_release));
+}
+
 TEST_F(ExpertResidencyManagerTest, CapacityUpdateIsAtomicAndPerDevice) {
   ASSERT_TRUE(manager->ConfigureCapacity(0, 100));
   auto resident = MakeNode(1, 60);

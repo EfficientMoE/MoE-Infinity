@@ -106,6 +106,10 @@ class ExpertResidencyManager {
   void RecordAccess(const NodePtr& node, ExpertPhase phase, bool hit);
 
   void ConfigurePolicy(const PhasePolicyConfig& config);
+  bool PolicyEnabled() const;
+  AdmissionMode AdmissionFor(ExpertPhase phase) const;
+  std::uint32_t StarvationLimit() const;
+  void RecordStarvationPromotion();
 
   ExpertPolicyStats Snapshot() const;
   std::int64_t ResidentBytes(int gpu_id) const;
@@ -122,7 +126,8 @@ class ExpertResidencyManager {
                                              ExpertPhase phase);
   EvictionState ProjectStateLocked(const NodePtr& node,
                                    std::uint32_t lease_count) const;
-  VictimCandidate CandidateForLocked(const NodePtr& node) const;
+  VictimCandidate CandidateForLocked(const NodePtr& node,
+                                     ExpertPhase phase) const;
   void ReleaseReservationLocked(const ResidencyTicket& ticket);
 
   static std::uint64_t KeyFor(const NodePtr& node);
@@ -133,6 +138,7 @@ class ExpertResidencyManager {
   std::vector<std::map<std::uint64_t, ResidencyEntry>> residents_;
   std::vector<std::optional<std::int64_t>> capacity_bytes_;
   std::vector<int> pending_ticket_counts_;
+  std::vector<int> transient_ticket_counts_;
 
   std::unordered_map<std::uint64_t, LeaseRecord> leases_;
   std::unordered_map<std::uint64_t, ResidencyTicket> pending_tickets_;
@@ -146,6 +152,8 @@ class ExpertResidencyManager {
 
   ExpertPolicyStats counters_;
 };
+
+extern std::shared_ptr<ExpertResidencyManager> kExpertResidencyManager;
 
 class ExpertResidencyClient {
  public:

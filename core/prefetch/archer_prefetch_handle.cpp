@@ -279,7 +279,11 @@ void ArcherPrefetchHandle::ReplaceCacheCandidates(
     candidates.push_back(node);
   }
 
-  kTaskPool->ReplaceCacheCandidates(candidates);
+  if (kExpertResidencyManager && kExpertResidencyManager->PolicyEnabled()) {
+    kExpertResidencyManager->ReplaceProtectedCandidates(candidates);
+  } else {
+    kTaskPool->ReplaceCacheCandidates(candidates);
+  }
 }
 void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
                                            int gpu_id) {
@@ -300,13 +304,18 @@ void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
 }
 
 void ArcherPrefetchHandle::EnqueuePrefetchTensors(
-    const std::vector<std::uint32_t>& tensor_ids, std::uint32_t priority) {
+    const std::vector<std::uint32_t>& tensor_ids, std::uint32_t priority,
+    int phase) {
+  TORCH_CHECK(phase >= static_cast<int>(ExpertPhase::PREFILL) &&
+                  phase <= static_cast<int>(ExpertPhase::MIXED),
+              "invalid expert phase: ", phase);
   for (std::uint32_t tensor_id : tensor_ids) {
     auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
     auto task = std::make_shared<Task>();
     task->priority = priority;
     task->node = node;
     task->on_demand = false;
+    task->phase = static_cast<ExpertPhase>(phase);
     task->src_device = node->device;
     task->dst_device = node->default_device;
     kTaskPool->EnqueueTask(task);

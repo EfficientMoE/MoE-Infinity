@@ -26,6 +26,7 @@
 #include "base/thread.h"
 #include "utils/threadsafe_queue.h"
 #include "expert_module.h"
+#include "prefetch/expert_residency.h"
 
 enum MUTEX_TYPE {
   INPUT_MUTEX = 0,
@@ -45,6 +46,7 @@ class ExpertDispatcher : public base::noncopyable {
     int gpu_id = -1;
     bool remote = false;
     bool wait_for_prefetch = false;
+    ExpertPhase phase = ExpertPhase::MIXED;
   } CallArgs;
   typedef struct {
     torch::Tensor hidden_states =
@@ -54,6 +56,8 @@ class ExpertDispatcher : public base::noncopyable {
     torch::ScalarType out_dtype = torch::kFloat32;
     bool evict = false;
     bool hit = false;
+    bool managed_transient = false;
+    std::uint64_t residency_lease = 0;
     cudaEvent_t transfer_event = nullptr;
   } ExecArgs;
   typedef std::tuple<torch::Tensor, int, int, int> CallResult;
@@ -101,7 +105,8 @@ class ExpertDispatcher : public base::noncopyable {
                  const torch::Tensor& router_weight);
 
   void EnqueueExpert(int layer_idx, int expert_idx, int gpu_id = -1,
-                     bool remote = false);
+                     bool remote = false,
+                     int phase = static_cast<int>(ExpertPhase::MIXED));
   void NotifyFetchStart();
 
   void RegisterExpert(int layer_idx, int expert_idx,
