@@ -86,6 +86,64 @@ class ArcherConfig:
             "help": "Attention backend name. 'default' = no-op PlaceholderAttentionBackend."
         },
     )
+    adaptive_expert_precision: bool = field(
+        default=False,
+        metadata={
+            "help": "Opt-in adaptive mixed-precision expert policy. Default False. Never enabled by default; validated only when True."
+        },
+    )
+    adaptive_hbm_budget_bytes: int = field(
+        default=0,
+        metadata={
+            "help": "Fixed HBM budget in bytes for adaptive expert representations. Must be positive when adaptive_expert_precision is True."
+        },
+    )
+    adaptive_policy_epoch_tokens: int = field(
+        default=128,
+        metadata={"help": "Tokens per adaptive policy epoch. Nonnegative."},
+    )
+    adaptive_hotness_decay: float = field(
+        default=0.95,
+        metadata={
+            "help": "Per-epoch hotness decay factor. Must satisfy 0 < decay <= 1."
+        },
+    )
+    adaptive_promotion_threshold: float = field(
+        default=0.70,
+        metadata={
+            "help": "Hotness at or above which an expert is promoted. Must satisfy demotion < promotion <= 1."
+        },
+    )
+    adaptive_demotion_threshold: float = field(
+        default=0.30,
+        metadata={
+            "help": "Hotness below which an expert is demoted. Must satisfy 0 <= demotion < promotion."
+        },
+    )
+    adaptive_min_residency_epochs: int = field(
+        default=2,
+        metadata={
+            "help": "Minimum epochs a representation stays resident before transition. Nonnegative."
+        },
+    )
+    adaptive_transition_cooldown_epochs: int = field(
+        default=2,
+        metadata={
+            "help": "Cooldown epochs between transitions for an expert. Nonnegative."
+        },
+    )
+    adaptive_variant_build: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable explicit candidate-build mode for derivative variants. Default False."
+        },
+    )
+    adaptive_derivative_root: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Root for adaptive derivative artifacts. Resolves to <offload_path>/adaptive_derivatives when None and adaptive precision is enabled."
+        },
+    )
 
     @classmethod
     def load_from_file(cls, config_path: Union[str, os.PathLike]):
@@ -160,3 +218,39 @@ class ArcherConfig:
             raise ValueError(
                 f"device_memory_ratio ({self.device_memory_ratio}) + kv_cache_memory_ratio ({self.kv_cache_memory_ratio}) > 1.0"
             )
+
+        if self.adaptive_expert_precision:
+            if self.adaptive_hbm_budget_bytes <= 0:
+                raise ValueError(
+                    "adaptive_hbm_budget_bytes must be positive when "
+                    "adaptive_expert_precision is enabled"
+                )
+            if self.adaptive_policy_epoch_tokens < 0:
+                raise ValueError(
+                    "adaptive_policy_epoch_tokens must be a nonnegative integer"
+                )
+            if self.adaptive_min_residency_epochs < 0:
+                raise ValueError(
+                    "adaptive_min_residency_epochs must be a nonnegative integer"
+                )
+            if self.adaptive_transition_cooldown_epochs < 0:
+                raise ValueError(
+                    "adaptive_transition_cooldown_epochs must be a nonnegative integer"
+                )
+            if not 0.0 < self.adaptive_hotness_decay <= 1.0:
+                raise ValueError(
+                    "adaptive_hotness_decay must satisfy 0 < decay <= 1"
+                )
+            if not (
+                0.0
+                <= self.adaptive_demotion_threshold
+                < self.adaptive_promotion_threshold
+                <= 1.0
+            ):
+                raise ValueError(
+                    "adaptive thresholds must satisfy 0 <= demotion < promotion <= 1"
+                )
+            if self.adaptive_derivative_root is None:
+                self.adaptive_derivative_root = os.path.join(
+                    self.offload_path, "adaptive_derivatives"
+                )
