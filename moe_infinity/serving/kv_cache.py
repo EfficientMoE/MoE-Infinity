@@ -1100,10 +1100,7 @@ class PagedKVCache:
 
         # Release remaining host storage directly.
         for record in list(self._kv_records.values()):
-            try:
-                self._release_host_storage(record)
-            except RuntimeError:
-                pass
+            self._release_host_storage(record)
 
         self._backend.close()
         if self._pinned_pool is not None:
