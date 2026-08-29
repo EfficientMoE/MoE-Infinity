@@ -483,3 +483,51 @@ int ArcherPrefetchHandle::GetNodeDevice(
 //     auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
 //     node->cache_priority = priority;
 // }
+
+std::string ResizeOutcomeToString(ResizeOutcome outcome) {
+  switch (outcome) {
+    case ResizeOutcome::COMMITTED:
+      return "committed";
+    case ResizeOutcome::REJECTED:
+      return "rejected";
+    case ResizeOutcome::ROLLED_BACK:
+      return "rolled_back";
+    case ResizeOutcome::PARTIAL_DONOR_COMMITTED:
+      return "partial_donor_committed";
+  }
+  return "rejected";
+}
+
+std::unordered_map<std::string, std::int64_t>
+ArcherPrefetchHandle::ResizeExpertCache(int device_id,
+                                        std::int64_t target_bytes) {
+  auto reservation =
+      kTaskPool->ReserveSparseCacheVictims(device_id, target_bytes);
+  if (!reservation.ready) {
+    return {{ResizeOutcomeToString(ResizeOutcome::REJECTED), 1},
+            {"device_id", device_id},
+            {"target_bytes", target_bytes},
+            {"resident_bytes", reservation.resident_bytes}};
+  }
+  auto result = kTaskPool->CommitSparseCacheReservation(reservation.id);
+  return {{ResizeOutcomeToString(result.outcome), 1},
+          {"device_id", result.device_id},
+          {"target_bytes", result.target_bytes},
+          {"resident_bytes", result.resident_bytes}};
+}
+
+std::int64_t ArcherPrefetchHandle::GetExpertCacheLimit(int device_id) {
+  return kTopologyHandle->GetSparseCacheLimit(
+      torch::Device(torch::kCUDA, device_id));
+}
+
+std::uint64_t ArcherPrefetchHandle::BeginMemoryResize(int device_id,
+                                                      int timeout_ms) {
+  (void)timeout_ms;
+  kTopologyHandle->SetSparseCacheLimitOverride(
+      device_id, kTopologyHandle->GetSparseCacheLimit(
+                     torch::Device(torch::kCUDA, device_id)));
+  return static_cast<std::uint64_t>(device_id) + 1;
+}
+
+void ArcherPrefetchHandle::EndMemoryResize(std::uint64_t token) { (void)token; }
