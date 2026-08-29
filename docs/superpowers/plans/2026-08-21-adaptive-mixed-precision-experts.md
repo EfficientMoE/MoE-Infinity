@@ -1304,7 +1304,7 @@ git commit -m "feat: publish crash-safe derivative generations"
 - Create: `moe_infinity/memory/adaptive_precision_policy.py`
 - Test: `tests/python/unit/test_adaptive_precision_policy.py`
 
-- [ ] **Step 1: Write failing deterministic policy tests**
+- [x] **Step 1: Write failing deterministic policy tests**
 
 ```python
 from moe_infinity.memory.adaptive_precision_policy import AdaptivePrecisionPolicy, ExpertKey
@@ -1379,13 +1379,13 @@ def test_simulation_replay_is_byte_for_byte_reproducible():
     assert one.to_json() == two.to_json()
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `pytest -q tests/python/unit/test_adaptive_precision_policy.py`
 
 Expected: collection fails because the policy module does not exist.
 
-- [ ] **Step 3: Implement deterministic selection**
+- [x] **Step 3: Implement deterministic selection**
 
 Use integer routed-token counts as observations. At each policy epoch:
 
@@ -1399,13 +1399,13 @@ Use integer routed-token counts as observations. At each policy epoch:
 
 If existing resident/retiring bytes already exceed the budget, emit no admission/promotion and request eviction only for idle, unleased generations in deterministic order. Never evict an active lease to force the accounting result. `simulate()` uses no CUDA, wall clock, random number, unordered set iteration, or platform-dependent hash ordering.
 
-- [ ] **Step 4: Run the test and verify GREEN**
+- [x] **Step 4: Run the test and verify GREEN**
 
 Run: `pytest -q tests/python/unit/test_adaptive_precision_policy.py`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add moe_infinity/memory/adaptive_precision_policy.py tests/python/unit/test_adaptive_precision_policy.py
