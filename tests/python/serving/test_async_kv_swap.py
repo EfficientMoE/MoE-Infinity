@@ -77,6 +77,13 @@ class FakeBackend:
         return None
 
 
+def _cpu_test_pool(capacity_bytes: int) -> PinnedBufferPool:
+    return PinnedBufferPool(
+        capacity_bytes=capacity_bytes,
+        allocator=lambda shape, dtype: torch.empty(shape, dtype=dtype),
+    )
+
+
 def make_cache(backend: FakeBackend) -> PagedKVCache:
     return PagedKVCache(
         num_blocks=2,
@@ -87,7 +94,7 @@ def make_cache(backend: FakeBackend) -> PagedKVCache:
         dtype=torch.float16,
         device=torch.device("cpu"),
         transfer_backend=backend,
-        host_pool_bytes=1024,
+        pinned_pool=_cpu_test_pool(1024),
     )
 
 
@@ -233,7 +240,7 @@ def make_async_cache(
         dtype=torch.float16,
         device=torch.device("cpu"),
         transfer_backend=backend,
-        host_pool_bytes=host_pool_bytes,
+        pinned_pool=_cpu_test_pool(host_pool_bytes),
     )
 
 
