@@ -9,7 +9,7 @@ import os
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
-from threading import Event, Lock
+from threading import Event, Lock, RLock
 from types import SimpleNamespace
 from typing import Any, Literal, Optional, cast
 
@@ -128,6 +128,7 @@ runtime_max_seq_length: int = 4096
 
 _engine_task: Optional[asyncio.Task[None]] = None
 _engine_shutdown_event: Optional[asyncio.Event] = None
+_engine_lifecycle_lock = RLock()
 _model_init_task: Optional[asyncio.Task[None]] = None
 _startup_args: Optional[argparse.Namespace] = None
 _health_state = ServerHealthState()
@@ -980,21 +981,46 @@ async def _chat_event_generator(
             return
 
 
+def _run_engine_step_once() -> None:
+    with _engine_lifecycle_lock:
+        current_engine = engine
+        if current_engine is not None:
+            _ = current_engine.step()
+
+
+def _replace_engine(new_engine: ContinuousBatchingEngine) -> None:
+    global engine
+    with _engine_lifecycle_lock:
+        old_engine = engine
+        engine = new_engine
+        if old_engine is not None and old_engine is not new_engine:
+            old_engine.shutdown()
+
+
 async def _engine_loop() -> None:
     while (
         _engine_shutdown_event is not None
         and not _engine_shutdown_event.is_set()
     ):
-        if engine is None:
+        with _engine_lifecycle_lock:
+            current_engine = engine
+        if current_engine is None:
             await asyncio.sleep(0.01)
             continue
 
-        if engine.has_pending_requests():
-            if _decode_watchdog is not None:
-                _decode_watchdog.activate()
-            _ = engine.step()
-            if _decode_watchdog is not None:
-                _decode_watchdog.feed()
+        with _engine_lifecycle_lock:
+            current_engine = engine
+            has_pending_requests = (
+                current_engine is not None
+                and current_engine.has_pending_requests()
+            )
+            if has_pending_requests:
+                if _decode_watchdog is not None:
+                    _decode_watchdog.activate()
+                _ = current_engine.step()
+                if _decode_watchdog is not None:
+                    _decode_watchdog.feed()
+        if has_pending_requests:
             await asyncio.sleep(0)
             continue
 
@@ -1095,7 +1121,7 @@ async def _initialize_model() -> None:
         if stream_manager is None:
             stream_manager = StreamManager()
 
-        engine = initialized_engine
+        _replace_engine(initialized_engine)
         configured_max_seq_length = engine_config.get("max_seq_length")
         if isinstance(configured_max_seq_length, int):
             runtime_max_seq_length = configured_max_seq_length
@@ -1166,10 +1192,10 @@ async def shutdown_event() -> None:
         _decode_watchdog.join(timeout=1.0)
         _decode_watchdog = None
 
-    if engine is not None:
-        shutdown_fn = getattr(engine, "shutdown", None)
-        if callable(shutdown_fn):
-            shutdown_fn()
+    with _engine_lifecycle_lock:
+        current_engine = engine
+        if current_engine is not None:
+            current_engine.shutdown()
 
 
 @app.get("/health")
@@ -1716,13 +1742,17 @@ async def reload_modules(payload: dict[str, Any]) -> JSONResponse:
         )
     reloaded = []
     errors = []
-    for module_name in modules:
-        try:
-            mod = importlib.import_module(module_name)
-            importlib.reload(mod)
-            reloaded.append(module_name)
-        except Exception as e:
-            errors.append({"module": module_name, "error": str(e)})
+    with _engine_lifecycle_lock:
+        current_engine = engine
+        if current_engine is not None:
+            current_engine.invalidate_cuda_graphs("module_reload")
+        for module_name in modules:
+            try:
+                mod = importlib.import_module(module_name)
+                importlib.reload(mod)
+                reloaded.append(module_name)
+            except Exception as e:
+                errors.append({"module": module_name, "error": str(e)})
     status = "ok" if not errors else "partial"
     return JSONResponse(
         content={"status": status, "reloaded": reloaded, "errors": errors}
