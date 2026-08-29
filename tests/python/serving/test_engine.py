@@ -577,7 +577,7 @@ def _make_graph_safe_native_paged_engine() -> ContinuousBatchingEngine:
 
 def _make_paged_engine() -> ContinuousBatchingEngine:
     engine = _make_engine()
-    engine.model_runner._get_paged_attention_classes = lambda: [object]
+    engine.paged_attention_registry = SimpleNamespace(bindings=[object()])
     return engine
 
 

@@ -828,17 +828,7 @@ class ContinuousBatchingEngine:
     def _execute_batch(self, batch: BatchMetadata) -> torch.Tensor:
         has_prefill = any(batch.is_prefill)
         has_decode = any(not p for p in batch.is_prefill)
-        paged_classes_getter = getattr(
-            self.model_runner,
-            "_get_paged_attention_classes",
-            None,
-        )
-        paged_classes: list[object] = []
-        if callable(paged_classes_getter):
-            maybe_paged_classes: object = paged_classes_getter()
-            if isinstance(maybe_paged_classes, list):
-                paged_classes = cast(list[object], maybe_paged_classes)
-        uses_paged = bool(paged_classes)
+        uses_paged = bool(self.paged_attention_registry.bindings)
 
         if not (has_prefill and has_decode):
             if has_decode and not has_prefill:
