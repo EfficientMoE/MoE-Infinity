@@ -237,6 +237,22 @@ def test_shutdown_closes_cuda_graph_runner_once() -> None:
     graph_runner.close.assert_called_once_with()
 
 
+def test_stats_include_bounded_cuda_graph_and_memory_usage() -> None:
+    engine = _make_engine()
+
+    stats = engine.get_stats()
+
+    cuda_graph = stats["cuda_graph"]
+    memory = stats["memory"]
+    assert isinstance(cuda_graph, dict)
+    assert isinstance(memory, dict)
+    assert cuda_graph["capability_reason"] == "missing_capability"
+    assert cuda_graph["capability_safe"] is False
+    assert cuda_graph["registered_paged_layers"] == 0
+    assert cuda_graph["proved_write_layers"] == 0
+    assert memory["cuda_graph_total_bytes"] == 0
+
+
 def test_engine_single_request_run_until_done() -> None:
     engine = _make_engine(tokenizer=MockTokenizer())
     callback_outputs: list[RequestOutput] = []

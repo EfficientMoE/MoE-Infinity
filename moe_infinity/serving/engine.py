@@ -10,6 +10,7 @@ import torch
 from moe_infinity.models.paged_attention_registry import (
     PagedAttentionLayerRegistry,
 )
+from moe_infinity.runtime.attention_types import DECODE_GRAPH_REASONS
 
 from .batch import BatchBuilder, BatchMetadata, split_prefill_decode_batch
 from .cuda_graph import CudaGraphRunner
@@ -711,6 +712,50 @@ class ContinuousBatchingEngine:
         for sequence in self._sequences.values():
             status_counts[sequence.status.value] += 1
 
+        cuda_graph_stats = self.cuda_graph_runner.stats()
+        storage = self.kv_cache.storage
+        scratch_kv_bytes = 0
+        if storage is not None:
+            scratch_kv_bytes = (
+                storage.num_graph_scratch_blocks
+                * storage.spec.block_size
+                * storage.spec.num_layers
+                * 2
+                * storage.spec.num_kv_heads
+                * storage.spec.head_dim
+                * torch.empty((), dtype=storage.spec.dtype).element_size()
+            )
+        graph_pool_bytes = int(cuda_graph_stats["graph_pool_bytes"])
+        self.memory_manager.set_cuda_graph_usage(
+            graph_pool_bytes=graph_pool_bytes,
+            scratch_kv_bytes=scratch_kv_bytes,
+        )
+
+        capability = self.model_runner.decode_graph_capability()
+        capability_reason = (
+            capability.reason
+            if capability.reason in DECODE_GRAPH_REASONS
+            else "missing_capability"
+        )
+        bindings = tuple(self.paged_attention_registry.bindings)
+        proved_write_layers = sum(
+            1 for binding in bindings if binding.has_write_proof
+        )
+        cuda_graph_stats.update(
+            {
+                "scratch_kv_bytes": scratch_kv_bytes,
+                "kv_storage_owner_id": (
+                    storage.owner_id if storage is not None else None
+                ),
+                "capability_safe": (
+                    capability.safe and capability_reason == "eligible"
+                ),
+                "capability_reason": capability_reason,
+                "registered_paged_layers": len(bindings),
+                "proved_write_layers": proved_write_layers,
+            }
+        )
+
         return {
             "pending_requests": len(self._pending_request_ids()),
             "completed_requests": len(self._completed_request_ids),
@@ -721,6 +766,7 @@ class ContinuousBatchingEngine:
             "kv_cache_free_blocks": self.kv_cache.block_allocator.num_free_blocks,
             "sequence_status_counts": status_counts,
             "memory": self.memory_manager.report(),
+            "cuda_graph": cuda_graph_stats,
         }
 
     def get_config(self) -> dict[str, object]:
