@@ -5,6 +5,7 @@
 
 #include "archer_prefetch_handle.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cuda_runtime_api.h>
 #include <torch/extension.h>
@@ -17,6 +18,18 @@
 #include "task_scheduler.h"
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
+
+namespace {
+
+std::optional<ExpertFormat> ParsePrefetchFormat(const std::string& value) {
+  if (value == "bf16") return ExpertFormat::BF16;
+  if (value == "fp8_e4m3_block128") return ExpertFormat::FP8_E4M3_BLOCK128;
+  if (value == "marlin_int4_group128")
+    return ExpertFormat::MARLIN_INT4_GROUP128;
+  return std::nullopt;
+}
+
+}  // namespace
 
 ArcherPrefetchHandle::ArcherPrefetchHandle(const std::string& prefix,
                                            const double device_memory_ratio)
@@ -457,6 +470,81 @@ ArcherPrefetchHandle::GetExpertPolicyStats() const {
     return {};
   }
   return kExpertResidencyManager->Snapshot();
+}
+
+std::uintptr_t ArcherPrefetchHandle::GetResidencyManagerId() const {
+  return reinterpret_cast<std::uintptr_t>(kExpertResidencyManager.get());
+}
+
+void ArcherPrefetchHandle::ConfigureResidencyManager(
+    bool manager_enabled, bool phase_policy_enabled) {
+  manager_enabled_ = manager_enabled;
+  phase_policy_enabled_ = phase_policy_enabled;
+}
+
+bool ArcherPrefetchHandle::SetAdaptiveHbmBudgetBytes(std::int64_t bytes) {
+  if (bytes <= 0 || kExpertResidencyManager == nullptr) return false;
+  int device_count = 0;
+  cudaGetDeviceCount(&device_count);
+  for (int gpu_id = 0; gpu_id < std::max(device_count, 1); ++gpu_id) {
+    if (!kExpertResidencyManager->ConfigureCapacity(gpu_id, bytes))
+      return false;
+  }
+  return true;
+}
+
+std::size_t ArcherPrefetchHandle::PrefetchExpertVariants(
+    const std::vector<std::tuple<int, int, std::string, std::uint64_t>>& keys,
+    std::uint32_t priority, const std::string& phase) {
+  if (!manager_enabled_ || kExpertResidencyManager == nullptr ||
+      kPrefetchResidencyClient == nullptr) {
+    return 0;
+  }
+  const ExpertPhase expert_phase = phase == "prefill"  ? ExpertPhase::PREFILL
+                                   : phase == "decode" ? ExpertPhase::DECODE
+                                                       : ExpertPhase::MIXED;
+  std::size_t admitted = 0;
+  for (const auto& item : keys) {
+    const auto format = ParsePrefetchFormat(std::get<2>(item));
+    if (!format.has_value()) continue;
+    const auto logical_key = (static_cast<std::uint64_t>(
+                                  static_cast<std::uint32_t>(std::get<0>(item)))
+                              << 32) |
+                             static_cast<std::uint32_t>(std::get<1>(item));
+    ResidencyVariantKey key{logical_key, *format, std::get<3>(item)};
+    const auto variant = kExpertResidencyManager->RegisteredVariant(key);
+    if (!variant.has_value()) continue;
+    const int gpu_id = std::get<1>(item) % std::max(kNumDevices(), 1);
+    auto transaction = kPrefetchResidencyClient->BeginAdmission(
+        *variant, gpu_id, expert_phase, AdmissionMode::CACHE);
+    if (transaction.outcome == AdmissionOutcome::ALREADY_RESIDENT) {
+      ++admitted;
+      continue;
+    }
+    if (!transaction.valid) continue;
+    if (transaction.reserved_victim_key.has_value() &&
+        !kExpertResidencyManager->EvictReserved(transaction)) {
+      kExpertResidencyManager->AbortTransaction(transaction);
+      continue;
+    }
+    try {
+      cudaEvent_t event = nullptr;
+      variant->node->SetDevice(CUDA_DEVICE(gpu_id), false, nullptr, &event);
+      if (event != nullptr) {
+        cudaEventSynchronize(event);
+        kCudaEventPool->Release(event);
+      }
+      if (kExpertResidencyManager->CommitTransaction(transaction)) {
+        kExpertResidencyManager->RecordWorkspaceUse(transaction.id, nullptr);
+        kExpertResidencyManager->ReapWorkspace(gpu_id);
+        ++admitted;
+      }
+    } catch (const std::exception&) {
+      kExpertResidencyManager->AbortTransaction(transaction);
+    }
+  }
+  (void)priority;
+  return admitted;
 }
 
 bool ArcherPrefetchHandle::IsTensorOffloaded(const std::uint32_t tensor_id) {

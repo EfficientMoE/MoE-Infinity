@@ -63,6 +63,13 @@ class ArcherPrefetchHandle {
   NodePtr CreateDetachedNode(const std::vector<TensorID>& tensor_ids,
                              int gpu_id);
   std::unordered_map<std::string, std::int64_t> GetExpertPolicyStats() const;
+  std::uintptr_t GetResidencyManagerId() const;
+  void ConfigureResidencyManager(bool manager_enabled,
+                                 bool phase_policy_enabled);
+  bool SetAdaptiveHbmBudgetBytes(std::int64_t bytes);
+  std::size_t PrefetchExpertVariants(
+      const std::vector<std::tuple<int, int, std::string, std::uint64_t>>& keys,
+      std::uint32_t priority, const std::string& phase);
   void UpdateTensorMap(std::uint64_t old_ptr, std::uint64_t new_ptr);
   bool IsTensorIndexInitialized() const;
   bool IsTensorOnDevice(const torch::Tensor& tensor) const;
@@ -95,6 +102,8 @@ class ArcherPrefetchHandle {
   uint64_t last_layer_id_;
   NodePtr last_node_;
   bool has_cleaned_up_resources_;
+  bool manager_enabled_ = false;
+  bool phase_policy_enabled_ = false;
 
   std::unordered_map<std::uint64_t, std::unordered_set<NodePtr>>
       request_id_to_nodes_;
