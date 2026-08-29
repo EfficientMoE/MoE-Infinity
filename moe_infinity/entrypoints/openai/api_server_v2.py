@@ -485,6 +485,18 @@ def initialize_with_model(
     max_batch_size: int = 32,
     enable_prefix_caching: bool = False,
     speculative_draft: Optional[Any] = None,
+    enable_decode_cuda_graphs: bool = False,
+    decode_cuda_graph_batch_sizes: tuple[int, ...] = (1, 2, 4, 8, 16, 32),
+    decode_cuda_graph_context_sizes: tuple[int, ...] = (
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+    ),
+    decode_cuda_graph_warmup_iters: int = 2,
+    decode_cuda_graph_max_memory_bytes: int = 0,
 ) -> None:
     """Initialize the v2 server with a pre-loaded MoE model.
 
@@ -504,6 +516,11 @@ def initialize_with_model(
         kv_cache_ratio=kv_cache_ratio,
         max_batch_size=max_batch_size,
         enable_prefix_caching=enable_prefix_caching,
+        enable_decode_cuda_graphs=enable_decode_cuda_graphs,
+        decode_cuda_graph_batch_sizes=decode_cuda_graph_batch_sizes,
+        decode_cuda_graph_context_sizes=decode_cuda_graph_context_sizes,
+        decode_cuda_graph_warmup_iters=decode_cuda_graph_warmup_iters,
+        decode_cuda_graph_max_memory_bytes=decode_cuda_graph_max_memory_bytes,
     )
     engine_config = _build_engine_config(args=args, model=hf_model)
 
@@ -521,6 +538,7 @@ def initialize_with_model(
         config=engine_config,
         tokenizer=tokenizer,
         speculative_draft=speculative_draft,
+        decode_graph_capability_provider=moe_model,
     )
     if stream_manager is None:
         stream_manager = StreamManager()
@@ -1156,6 +1174,7 @@ async def _initialize_model() -> None:
             config=engine_config,
             tokenizer=tokenizer,
             speculative_draft=speculative_draft,
+            decode_graph_capability_provider=moe_model,
         )
         if stream_manager is None:
             stream_manager = StreamManager()
@@ -1926,6 +1945,29 @@ def _build_engine_config(
         "num_kv_heads": num_kv_heads,
         "head_dim": head_dim,
         "dtype": _resolve_dtype(model),
+        "enable_decode_cuda_graphs": bool(
+            getattr(args, "enable_decode_cuda_graphs", False)
+        ),
+        "decode_cuda_graph_batch_sizes": tuple(
+            getattr(
+                args,
+                "decode_cuda_graph_batch_sizes",
+                (1, 2, 4, 8, 16, 32),
+            )
+        ),
+        "decode_cuda_graph_context_sizes": tuple(
+            getattr(
+                args,
+                "decode_cuda_graph_context_sizes",
+                (128, 256, 512, 1024, 2048, 4096),
+            )
+        ),
+        "decode_cuda_graph_warmup_iters": getattr(
+            args, "decode_cuda_graph_warmup_iters", 2
+        ),
+        "decode_cuda_graph_max_memory_bytes": getattr(
+            args, "decode_cuda_graph_max_memory_bytes", 0
+        ),
     }
     if eos_token_id is not None:
         config["eos_token_id"] = eos_token_id
@@ -1956,6 +1998,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-waiting-requests", type=int, default=0)
     parser.add_argument("--max-n", type=int, default=16)
     parser.add_argument("--enable-prefix-caching", action="store_true")
+    parser.add_argument(
+        "--enable-decode-cuda-graphs",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--decode-cuda-graph-batch-sizes",
+        nargs="+",
+        type=int,
+        default=[1, 2, 4, 8, 16, 32],
+    )
+    parser.add_argument(
+        "--decode-cuda-graph-context-sizes",
+        nargs="+",
+        type=int,
+        default=[128, 256, 512, 1024, 2048, 4096],
+    )
+    parser.add_argument(
+        "--decode-cuda-graph-warmup-iters",
+        type=int,
+        default=2,
+    )
+    parser.add_argument(
+        "--decode-cuda-graph-max-memory-bytes",
+        type=int,
+        default=0,
+    )
     parser.add_argument(
         "--startup-timeout",
         type=float,

@@ -1,6 +1,7 @@
 # pyright: reportAny=false, reportCallIssue=false, reportExplicitAny=false, reportMissingParameterType=false, reportMissingTypeArgument=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownVariableType=false
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, cast
@@ -50,6 +51,40 @@ def _completion_payload() -> dict[str, Any]:
         "prompt": "hello",
         "max_tokens": 4,
     }
+
+
+def _mock_model() -> SimpleNamespace:
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            hidden_size=32,
+            head_dim=8,
+            max_position_embeddings=128,
+            eos_token_id=2,
+            dtype="float32",
+        ),
+        dtype="float32",
+    )
+
+
+def _parse_args(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    extra: list[str] | None = None,
+) -> Any:
+    argv = [
+        "api_server_v2.py",
+        "--model",
+        "test-model",
+        "--offload-dir",
+        "/tmp/offload",
+    ]
+    if extra:
+        argv.extend(extra)
+    monkeypatch.setattr(sys, "argv", argv)
+    return srv.parse_args()
 
 
 def _configure_auth_state(
@@ -163,19 +198,7 @@ def test_initialize_with_model_forwards_speculative_draft(
         return MagicMock()
 
     monkeypatch.setattr(srv, "ContinuousBatchingEngine", _capture_engine)
-    model = SimpleNamespace(
-        config=SimpleNamespace(
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            hidden_size=32,
-            head_dim=8,
-            max_position_embeddings=128,
-            eos_token_id=2,
-            dtype="float32",
-        ),
-        dtype="float32",
-    )
+    model = _mock_model()
     offload_engine = object()
     moe_model = SimpleNamespace(model=model, engine=offload_engine)
     speculator = object()
@@ -191,6 +214,47 @@ def test_initialize_with_model_forwards_speculative_draft(
     assert captured["model"] is model
     assert captured["engine"] is offload_engine
     assert captured["speculative_draft"] is speculator
+    assert captured["decode_graph_capability_provider"] is moe_model
+
+
+def test_decode_cuda_graphs_are_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _parse_args(monkeypatch)
+
+    assert args.enable_decode_cuda_graphs is False
+    config = srv._build_engine_config(args, _mock_model())
+    assert config["enable_decode_cuda_graphs"] is False
+
+
+def test_decode_cuda_graph_cli_values_reach_engine_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _parse_args(
+        monkeypatch,
+        extra=[
+            "--enable-decode-cuda-graphs",
+            "--decode-cuda-graph-batch-sizes",
+            "1",
+            "2",
+            "4",
+            "--decode-cuda-graph-context-sizes",
+            "128",
+            "256",
+            "--decode-cuda-graph-warmup-iters",
+            "3",
+            "--decode-cuda-graph-max-memory-bytes",
+            "1073741824",
+        ],
+    )
+
+    config = srv._build_engine_config(args, _mock_model())
+
+    assert config["enable_decode_cuda_graphs"] is True
+    assert config["decode_cuda_graph_batch_sizes"] == (1, 2, 4)
+    assert config["decode_cuda_graph_context_sizes"] == (128, 256)
+    assert config["decode_cuda_graph_warmup_iters"] == 3
+    assert config["decode_cuda_graph_max_memory_bytes"] == 1073741824
 
 
 def test_list_models_engine_not_ready(client: TestClient) -> None:
