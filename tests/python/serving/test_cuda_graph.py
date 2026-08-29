@@ -1,6 +1,7 @@
 # pyright: reportAny=false, reportImplicitOverride=false, reportPrivateUsage=false
 
 import importlib.util
+import os
 import sys
 import types
 from dataclasses import dataclass
@@ -186,6 +187,7 @@ def _make_cpu_gate_runner(
     storage_device: torch.device | None = None,
     runner_device: torch.device | None = None,
     device: torch.device | None = None,
+    capability_reason: str = "eligible",
 ) -> CudaGraphRunner:
     base = device or torch.device("cpu")
     storage_device = storage_device or base
@@ -194,7 +196,11 @@ def _make_cpu_gate_runner(
     storage = _FakeStorage(storage_device)
     storage.owner_id = owner_id
     registry = _make_registry([("pkg.Qwen3PagedAttention", 0)], owner_id)
-    capability = _eligible_capability_for_registry(registry, owner_id)
+    capability = (
+        _eligible_capability_for_registry(registry, owner_id)
+        if capability_reason == "eligible"
+        else DecodeGraphCapability(False, capability_reason)
+    )
     model_runner = _FakeModelRunner(runner_device, registry, capability)
     runner = CudaGraphRunner(
         model_runner,
@@ -300,6 +306,26 @@ def test_disabled_by_default_and_environment_kill_switch(monkeypatch) -> None:
     assert (
         runner.check_eligibility(_make_decode_batch()).reason == "kill_switch"
     )
+
+
+@pytest.mark.parametrize(
+    "capability_reason",
+    ["native_paged_required", "expert_dispatcher"],
+    ids=["resident_non_paged", "offloaded_moe"],
+)
+def test_unsafe_runtime_executes_eager_without_capture(
+    capability_reason: str,
+) -> None:
+    runner = _make_cpu_gate_runner(capability_reason=capability_reason)
+
+    assert runner.try_execute(_make_decode_batch()) is None
+    assert runner.stats()["captures"] == 0
+    expected_reason = (
+        "kill_switch"
+        if os.environ.get("MOE_DISABLE_CUDA_GRAPHS") == "1"
+        else capability_reason
+    )
+    assert runner.stats()["fallback_reasons"][expected_reason] == 1
 
 
 def test_capture_failure_quarantines_key_and_returns_eager_signal(
