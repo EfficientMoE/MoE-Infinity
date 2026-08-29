@@ -8,6 +8,7 @@ All notable changes to MoE-Infinity will be documented in this file.
 
 - Documentation hub at `docs/README.md` for users, operators, contributors, and project-history readers.
 - DFlash documentation that distinguishes direct batch-1 greedy and sampled draft/verify from the greedy-gated `MoE.generate` and serving integrations, explains the current batch>1 greedy-only constraint, and limits continuous-batching and route-ahead claims to validated paths.
+- Opt-in asynchronous hierarchical KV swap between GPU and bounded pinned host memory, with event-driven scheduling, cancellation tombstones, telemetry, and a synchronous fallback. The external tier remains an interface only; no external or distributed store is implemented.
 
 ### Changed
 
