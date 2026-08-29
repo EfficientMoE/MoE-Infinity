@@ -44,7 +44,45 @@ def _delay(stream: torch.cuda.Stream) -> None:
     if sleep is None:
         pytest.skip("torch.cuda._sleep unavailable")
     with torch.cuda.stream(stream):
-        sleep(1_000_000_000)
+        sleep(5_000_000_000)
+
+
+def _prime_host_pool(cache: PagedKVCache, block_count: int) -> None:
+    pool = cache._pinned_pool
+    assert pool is not None
+    lease = pool.acquire(
+        (
+            cache.num_layers,
+            block_count,
+            2,
+            cache.block_size,
+            cache.num_heads,
+            cache.head_dim,
+        ),
+        cache.dtype,
+    )
+    assert lease is not None
+    pool.release(lease)
+
+
+def _delay_recorded_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_event = torch.cuda.Event
+
+    class DelayedEvent:
+        def __init__(self) -> None:
+            self._event = original_event()
+
+        def record(self, stream: torch.cuda.Stream) -> None:
+            _delay(stream)
+            self._event.record(stream)
+
+        def query(self) -> bool:
+            return self._event.query()
+
+        def synchronize(self) -> None:
+            self._event.synchronize()
+
+    monkeypatch.setattr(torch.cuda, "Event", DelayedEvent)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -82,10 +120,13 @@ def test_cuda_swap_round_trip_is_exact_and_uses_pinned_host(
     cache.shutdown()
 
 
-def test_async_submission_returns_before_transfer_event_completion() -> None:
+def test_async_submission_returns_before_transfer_event_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cache, backend = _cache()
     cache.allocate_sequence(1, num_tokens=8)
-    _delay(backend._transfer_stream)
+    _prime_host_pool(cache, block_count=2)
+    _delay_recorded_events(monkeypatch)
 
     assert cache.request_swap_out(1)
 
@@ -98,6 +139,7 @@ def test_async_submission_returns_before_transfer_event_completion() -> None:
 def test_cancel_during_d2h_does_not_reuse_source_blocks_early() -> None:
     cache, backend = _cache(num_blocks=2)
     cache.allocate_sequence(1, num_tokens=8)
+    _prime_host_pool(cache, block_count=2)
     _delay(backend._transfer_stream)
     assert cache.request_swap_out(1)
     ticket = cache._kv_records[1].ticket
@@ -162,10 +204,13 @@ def test_ticket_consumer_stream_waits_for_restore_event_before_read() -> None:
     cache.shutdown()
 
 
-def test_ticket_retire_keeps_staging_alive_until_event_completion() -> None:
+def test_ticket_retire_keeps_staging_alive_until_event_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cache, backend = _cache(num_blocks=2)
     cache.allocate_sequence(1, num_tokens=8)
-    _delay(backend._transfer_stream)
+    _prime_host_pool(cache, block_count=2)
+    _delay_recorded_events(monkeypatch)
     assert cache.request_swap_out(1)
     ticket = cache._kv_records[1].ticket
     assert ticket is not None
@@ -247,6 +292,6 @@ def test_repeated_swap_cancel_cycles_have_no_block_or_pinned_leak() -> None:
     stats = cache.get_swap_stats()
     assert cache.block_allocator.num_free_blocks == cache.num_blocks
     assert stats["host_in_use_bytes"] == 0
-    assert stats["num_retiring"] == 0
+    assert stats["retiring_records"] == 0
     assert all(ticket.retired for ticket in completed_tickets)
     cache.shutdown()
