@@ -244,7 +244,15 @@ ExpertPolicyStats ExpertDispatcher::GetPrecisionMetrics() const {
   metrics["manager_instance_id"] =
       static_cast<std::int64_t>(GetResidencyManagerId());
   metrics["manager_enabled"] = manager_enabled_ ? 1 : 0;
+  metrics["phase_policy_enabled"] = phase_policy_enabled_ ? 1 : 0;
   metrics["transition_failed"] = transition_failed_count_;
+  for (const char* name :
+       {"h2d_payload_bytes", "h2d_transfers", "conversion_input_bytes",
+        "conversion_output_bytes", "conversion_seconds", "promotions",
+        "demotions", "representation_hits", "representation_misses",
+        "policy_epochs", "external_shared_resident_bytes"}) {
+    metrics.emplace(name, 0);
+  }
   return metrics;
 }
 

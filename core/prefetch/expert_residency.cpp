@@ -609,6 +609,7 @@ ExpertPolicyStats ExpertResidencyManager::Snapshot() const {
   std::lock_guard<std::mutex> lock(mutex_);
   ExpertPolicyStats stats;
   std::int64_t resident_bytes = 0;
+  std::int64_t resident_payload_bytes = 0;
   std::int64_t capacity_bytes = 0;
   std::int64_t transition_reserved_bytes = 0;
   std::int64_t workspace_bytes = 0;
@@ -623,6 +624,7 @@ ExpertPolicyStats ExpertResidencyManager::Snapshot() const {
     resident_generations +=
         static_cast<std::int64_t>(gpu.second.entries.size());
     for (const auto& entry : gpu.second.entries) {
+      resident_payload_bytes += entry.payload_bytes;
       if (entry.state == ResidencyState::ACTIVE) {
         resident_experts.emplace(gpu.first, entry.key.logical_expert_key);
       } else if (entry.state == ResidencyState::RETIRING) {
@@ -631,6 +633,8 @@ ExpertPolicyStats ExpertResidencyManager::Snapshot() const {
     }
   }
   stats["resident_bytes"] = resident_bytes;
+  stats["resident_payload_bytes"] = resident_payload_bytes;
+  stats["alignment_padding_bytes"] = resident_bytes - resident_payload_bytes;
   stats["resident_count"] = static_cast<std::int64_t>(resident_experts.size());
   stats["resident_experts"] =
       static_cast<std::int64_t>(resident_experts.size());
@@ -643,6 +647,10 @@ ExpertPolicyStats ExpertResidencyManager::Snapshot() const {
       static_cast<std::int64_t>(registered_variants_.size());
   stats["active_leases"] = static_cast<std::int64_t>(leases_.size());
   stats["pending_tickets"] = static_cast<std::int64_t>(pending_tickets_.size());
+  stats["pending_transactions"] =
+      static_cast<std::int64_t>(pending_tickets_.size());
+  stats["peak_accounted_bytes"] =
+      resident_bytes + transition_reserved_bytes + workspace_bytes;
   return stats;
 }
 
