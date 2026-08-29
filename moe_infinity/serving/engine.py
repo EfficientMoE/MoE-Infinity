@@ -10,6 +10,7 @@ import torch
 from moe_infinity.models.paged_attention_registry import (
     PagedAttentionLayerRegistry,
 )
+from moe_infinity.runtime.attention_backend import PagedAttentionBackend
 from moe_infinity.runtime.attention_types import DECODE_GRAPH_REASONS
 
 from .batch import BatchBuilder, BatchMetadata, split_prefill_decode_batch
@@ -1071,7 +1072,9 @@ class ContinuousBatchingEngine:
     @classmethod
     def _resolve_backend_storage(cls, engine: object) -> object | None:
         backend = cls._resolve_attention_backend(engine)
-        return getattr(backend, "storage", None)
+        if not isinstance(backend, PagedAttentionBackend):
+            return None
+        return backend.storage
 
     @staticmethod
     def _resolve_model_memory_bytes(model: object) -> int:
