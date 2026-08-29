@@ -77,6 +77,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_topology_snapshot", &ArcherPrefetchHandle::GetTopologySnapshot)
       .def("get_expert_policy_stats",
            &ArcherPrefetchHandle::GetExpertPolicyStats)
+      .def("get_policy_stats", &ArcherPrefetchHandle::GetExpertPolicyStats)
+      .def("get_residency_manager_id",
+           &ArcherPrefetchHandle::GetResidencyManagerId)
+      .def("configure_residency_manager",
+           &ArcherPrefetchHandle::ConfigureResidencyManager)
+      .def("set_adaptive_hbm_budget_bytes",
+           &ArcherPrefetchHandle::SetAdaptiveHbmBudgetBytes)
+      .def("prefetch_expert_variants",
+           &ArcherPrefetchHandle::PrefetchExpertVariants, py::arg("keys"),
+           py::arg("priority") = kBackgroundPrefetchPriority,
+           py::arg("phase") = "mixed")
       .def("update_tensor_map",
            (void(ArcherPrefetchHandle::*)(std::uint64_t, std::uint64_t)) &
                ArcherPrefetchHandle::UpdateTensorMap)
@@ -131,6 +142,33 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_cache_occupancy_bytes",
            &ExpertDispatcher::GetCacheOccupancyBytes)
       .def("get_cache_hit_rate", &ExpertDispatcher::GetCacheHitRate)
+      .def("register_expert_variant", &ExpertDispatcher::RegisterExpertVariant)
+      .def("set_precision_targets", &ExpertDispatcher::SetPrecisionTargets,
+           py::arg("targets"), py::arg("epoch"))
+      .def("set_adaptive_hbm_budget_bytes",
+           &ExpertDispatcher::SetAdaptiveHbmBudgetBytes)
+      .def("get_precision_metrics",
+           [](const ExpertDispatcher& dispatcher) {
+             py::dict result;
+             const auto metrics = dispatcher.GetPrecisionMetrics();
+             for (const auto& metric : metrics)
+               result[py::str(metric.first)] = metric.second;
+             result["active_format"] = dispatcher.GetActiveFormat();
+             py::dict fallback_counts;
+             auto failed = metrics.find("transition_failed");
+             fallback_counts["transition_failed"] =
+                 failed == metrics.end() ? 0 : failed->second;
+             result["fallback_counts"] = fallback_counts;
+             return result;
+           })
+      .def("get_policy_stats", &ExpertDispatcher::GetPrecisionMetrics)
+      .def("get_residency_manager_id", &ExpertDispatcher::GetResidencyManagerId)
+      .def("configure_residency_manager",
+           &ExpertDispatcher::ConfigureResidencyManager)
+#ifdef MOE_INFINITY_TESTING
+      .def("inject_transition_failure_once_for_test",
+           &ExpertDispatcher::InjectTransitionFailureOnceForTest)
+#endif
       .def("set_scales", &ExpertDispatcher::SetScales,
            "Store fp8 block scales for dequant-on-copy (fp8-in-store path)");
 }
