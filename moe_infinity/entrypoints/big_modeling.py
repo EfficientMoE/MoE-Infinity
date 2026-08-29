@@ -330,6 +330,7 @@ class MoE:
         from moe_infinity.memory.memory_coordinator import MemoryCoordinator
         from moe_infinity.runtime.attention_backend import PagedAttentionBackend
         from moe_infinity.runtime.attention_types import KVCacheSpec
+        from moe_infinity.serving.engine import build_kv_transfer_resources
 
         model_num_layers = self._resolve_model_int_attr(
             model_config,
@@ -432,18 +433,27 @@ class MoE:
                 KVCacheOffloadCoordinator,
             )
 
-            # kv_tensors=None: The actual KV tensor storage (PagedAttentionBackend
-            # k_cache/v_cache) is not yet available at coordinator construction time.
-            # Call coordinator.set_kv_tensors(tensors) after model initialisation
-            # to enable real tensor copies. Until then, handlers are registered but
-            # copy operations are no-ops (guarded by `if self._kv_tensors is None`).
-            # This is intentional engine-path scaffolding per the plan scope.
+            if attention_backend is None:
+                raise RuntimeError(
+                    "KV offload requires initialized paged KV tensors"
+                )
+            native_kv_transfer_backend, native_kv_transfer_pool, _ = (
+                build_kv_transfer_resources(
+                    engine_config,
+                    attention_backend.k_cache.device,
+                )
+            )
             kv_offload_coordinator = KVCacheOffloadCoordinator(
-                kv_tensors=None,
-                block_pool=None,
+                kv_tensors=(
+                    attention_backend.k_cache,
+                    attention_backend.v_cache,
+                ),
+                block_pool=kv_cache_manager,
                 config=engine_config,
+                transfer_backend=native_kv_transfer_backend,
             )
             kv_offload_coordinator.register_with_scheduler(transfer_scheduler)
+            self._native_kv_transfer_pool = native_kv_transfer_pool
 
         expert_offload_coordinator = None
         if getattr(engine_config, "enable_expert_offload", False):
