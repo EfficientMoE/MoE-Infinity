@@ -29,3 +29,19 @@ def test_cmake_links_one_residency_authority() -> None:
     text = (ROOT / "core/CMakeLists.txt").read_text()
     assert text.count("prefetch/expert_residency.cpp") == 1
     assert text.count("residency.cpp") == 1
+
+
+def test_testing_definition_is_consistent_across_build_systems() -> None:
+    setup = (ROOT / "setup.py").read_text()
+    root_cmake = (ROOT / "CMakeLists.txt").read_text()
+    core_cmake = (ROOT / "core/CMakeLists.txt").read_text()
+    extensions_cmake = (ROOT / "extensions/CMakeLists.txt").read_text()
+
+    assert 'os.environ.get("MOE_INFINITY_TESTING") == "1"' in setup
+    assert setup.count('"-DMOE_INFINITY_TESTING=1"') == 2
+    assert (
+        'option(MOE_INFINITY_TESTING "Expose native test-only bindings" OFF)'
+        in root_cmake
+    )
+    assert "target_compile_definitions(archer_core" in core_cmake
+    assert "target_compile_definitions(prefetch_op" in extensions_cmake

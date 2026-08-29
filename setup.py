@@ -172,6 +172,10 @@ if os.environ.get("NVTX_DISABLE", "0") == "1":
     COMMON_CXX_ARGS.append("-DNVTX_DISABLE")
     COMMON_NVCC_ARGS.append("-DNVTX_DISABLE")
 
+if os.environ.get("MOE_INFINITY_TESTING") == "1":
+    COMMON_CXX_ARGS.append("-DMOE_INFINITY_TESTING=1")
+    COMMON_NVCC_ARGS.append("-DMOE_INFINITY_TESTING=1")
+
 # _store extension: IO/checkpoint and prefetch functionality
 # Includes AIO, prefetch handle, tensor index, memory pools, model topology
 _STORE_SOURCES = [

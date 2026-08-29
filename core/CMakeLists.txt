@@ -56,6 +56,10 @@ add_library(archer_core STATIC
   ${ARCHER_CORE_CUDA_SOURCES}
 )
 
+if(MOE_INFINITY_TESTING)
+  target_compile_definitions(archer_core PUBLIC MOE_INFINITY_TESTING=1)
+endif()
+
 target_include_directories(archer_core PUBLIC
   ${CMAKE_SOURCE_DIR}/core
   ${CMAKE_SOURCE_DIR}/extensions
