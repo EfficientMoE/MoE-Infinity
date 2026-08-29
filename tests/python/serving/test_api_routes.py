@@ -41,6 +41,30 @@ def _make_mock_stats() -> dict[str, Any]:
             "expert_cache_bytes": 0,
             "kv_cache_bytes": 0,
         },
+        "kv_swap": {
+            "mode": "async",
+            "fallback_reason": None,
+            "host_capacity_bytes": 4096,
+            "host_in_use_bytes": 1024,
+            "host_peak_in_use_bytes": 2048,
+            "inflight": 2,
+            "inflight_bytes": 512,
+            "retiring_records": 1,
+            "host_resident": 3,
+            "backpressure_total": 4,
+            "swap_out_started_total": 5,
+            "swap_out_completed_total": 6,
+            "swap_out_failed_total": 7,
+            "swap_in_started_total": 8,
+            "swap_in_completed_total": 9,
+            "swap_in_failed_total": 10,
+            "cancelled_total": 11,
+            "checksum_failures_total": 12,
+            "d2h_bytes_total": 13,
+            "h2d_bytes_total": 14,
+            "d2h_duration_ms_sum": 1500.0,
+            "h2d_duration_ms_sum": 2500.0,
+        },
     }
 
 
@@ -430,6 +454,25 @@ def test_metrics_endpoint(client: TestClient) -> None:
     assert "moe_queue_depth" in body
     assert "moe_kv_cache_free_blocks" in body
     assert "moe_tokens_generated_total" in body
+    required = [
+        "moe_kv_swap_inflight 2",
+        "moe_kv_swap_inflight_bytes 512",
+        "moe_kv_swap_retiring_records 1",
+        "moe_kv_swap_host_resident 3",
+        "moe_kv_swap_host_bytes 1024",
+        "moe_kv_swap_host_capacity_bytes 4096",
+        "moe_kv_swap_backpressure_total 4",
+        "moe_kv_swap_out_completed_total 6",
+        "moe_kv_swap_in_completed_total 9",
+        'moe_kv_swap_failures_total{direction="out"} 7',
+        'moe_kv_swap_failures_total{direction="in"} 10',
+        'moe_kv_swap_bytes_total{direction="d2h"} 13',
+        'moe_kv_swap_bytes_total{direction="h2d"} 14',
+        'moe_kv_swap_duration_seconds_sum{direction="d2h"} 1.5',
+        'moe_kv_swap_duration_seconds_sum{direction="h2d"} 2.5',
+    ]
+    for metric in required:
+        assert metric in body
 
 
 def test_metrics_engine_not_ready(client: TestClient) -> None:

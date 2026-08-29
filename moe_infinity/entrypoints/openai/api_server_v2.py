@@ -754,6 +754,47 @@ def _format_prometheus_metrics(stats: dict[str, object]) -> str:
     lines.append("# HELP moe_engine_steps_total Total engine steps")
     lines.append("# TYPE moe_engine_steps_total counter")
     lines.append(f"moe_engine_steps_total {stats.get('num_steps', 0)}")
+    kv_swap_obj = stats.get("kv_swap", {})
+    kv_swap = kv_swap_obj if isinstance(kv_swap_obj, dict) else {}
+    gauges = {
+        "moe_kv_swap_inflight": "inflight",
+        "moe_kv_swap_inflight_bytes": "inflight_bytes",
+        "moe_kv_swap_retiring_records": "retiring_records",
+        "moe_kv_swap_host_resident": "host_resident",
+        "moe_kv_swap_host_bytes": "host_in_use_bytes",
+        "moe_kv_swap_host_capacity_bytes": "host_capacity_bytes",
+    }
+    for metric, key in gauges.items():
+        lines.append(f"# TYPE {metric} gauge")
+        lines.append(f"{metric} {kv_swap.get(key, 0)}")
+    counters = {
+        "moe_kv_swap_backpressure_total": "backpressure_total",
+        "moe_kv_swap_out_completed_total": "swap_out_completed_total",
+        "moe_kv_swap_in_completed_total": "swap_in_completed_total",
+    }
+    for metric, key in counters.items():
+        lines.append(f"# TYPE {metric} counter")
+        lines.append(f"{metric} {kv_swap.get(key, 0)}")
+    lines.append(
+        'moe_kv_swap_failures_total{direction="out"} '
+        f"{kv_swap.get('swap_out_failed_total', 0)}"
+    )
+    lines.append(
+        'moe_kv_swap_failures_total{direction="in"} '
+        f"{kv_swap.get('swap_in_failed_total', 0)}"
+    )
+    for direction in ("d2h", "h2d"):
+        lines.append(
+            f'moe_kv_swap_bytes_total{{direction="{direction}"}} '
+            f"{kv_swap.get(f'{direction}_bytes_total', 0)}"
+        )
+        duration_seconds = (
+            float(kv_swap.get(f"{direction}_duration_ms_sum", 0.0)) / 1000.0
+        )
+        lines.append(
+            f'moe_kv_swap_duration_seconds_sum{{direction="{direction}"}} '
+            f"{duration_seconds:g}"
+        )
     return "\n".join(lines) + "\n"
 
 
