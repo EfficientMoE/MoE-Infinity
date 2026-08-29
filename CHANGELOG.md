@@ -6,6 +6,7 @@ All notable changes to MoE-Infinity will be documented in this file.
 
 ### Added
 
+- Opt-in phase-specific expert admission, prefetch, eviction, and telemetry over one shared residency manager, with the legacy policy retained by default and one-flag rollback requiring no offload-store migration.
 - Documentation hub at `docs/README.md` for users, operators, contributors, and project-history readers.
 - DFlash documentation that distinguishes direct batch-1 greedy and sampled draft/verify from the greedy-gated `MoE.generate` and serving integrations, explains the current batch>1 greedy-only constraint, and limits continuous-batching and route-ahead claims to validated paths.
 
