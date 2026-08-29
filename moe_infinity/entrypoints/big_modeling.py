@@ -922,6 +922,12 @@ class MoE:
         enable_prefix_caching: bool = False,
         offload_dir: Optional[str] = None,
         speculative_draft: Optional[object] = None,
+        kv_swap_mode: Optional[str] = None,
+        kv_swap_host_memory_bytes: Optional[int] = None,
+        kv_swap_max_inflight_bytes: Optional[int] = None,
+        kv_swap_checksum: Optional[bool] = None,
+        kv_swap_max_retries: Optional[int] = None,
+        kv_swap_allow_sync_fallback: Optional[bool] = None,
     ) -> None:
         """
         Start the OpenAI-compatible continuous batching server.
@@ -948,6 +954,36 @@ class MoE:
 
         from moe_infinity.entrypoints.openai import api_server_v2
 
+        def _resolve_swap(
+            override: object, attr: str, default: object
+        ) -> object:
+            if override is not None:
+                return override
+            return getattr(self.engine_config, attr, default)
+
+        resolved_kv_swap_mode = _resolve_swap(
+            kv_swap_mode, "kv_swap_mode", "sync"
+        )
+        resolved_kv_swap_host_memory_bytes = _resolve_swap(
+            kv_swap_host_memory_bytes,
+            "kv_swap_host_memory_bytes",
+            512 * 1024 * 1024,
+        )
+        resolved_kv_swap_max_inflight_bytes = _resolve_swap(
+            kv_swap_max_inflight_bytes,
+            "kv_swap_max_inflight_bytes",
+            256 * 1024 * 1024,
+        )
+        resolved_kv_swap_checksum = _resolve_swap(
+            kv_swap_checksum, "kv_swap_checksum", False
+        )
+        resolved_kv_swap_max_retries = _resolve_swap(
+            kv_swap_max_retries, "kv_swap_max_retries", 2
+        )
+        resolved_kv_swap_allow_sync_fallback = _resolve_swap(
+            kv_swap_allow_sync_fallback, "kv_swap_allow_sync_fallback", True
+        )
+
         serving_speculator = None
         if speculative_draft:
             self._resolve_spec_strategy(speculative_draft)
@@ -965,6 +1001,12 @@ class MoE:
             kv_cache_ratio=kv_cache_ratio,
             max_batch_size=max_batch_size,
             enable_prefix_caching=enable_prefix_caching,
+            kv_swap_mode=resolved_kv_swap_mode,
+            kv_swap_host_memory_bytes=resolved_kv_swap_host_memory_bytes,
+            kv_swap_max_inflight_bytes=resolved_kv_swap_max_inflight_bytes,
+            kv_swap_checksum=resolved_kv_swap_checksum,
+            kv_swap_max_retries=resolved_kv_swap_max_retries,
+            kv_swap_allow_sync_fallback=resolved_kv_swap_allow_sync_fallback,
             speculative_draft=serving_speculator,
         )
 

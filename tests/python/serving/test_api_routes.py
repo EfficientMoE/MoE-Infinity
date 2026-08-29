@@ -193,6 +193,208 @@ def test_initialize_with_model_forwards_speculative_draft(
     assert captured["speculative_draft"] is speculator
 
 
+def _swap_model_stub() -> SimpleNamespace:
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            hidden_size=32,
+            head_dim=8,
+            max_position_embeddings=128,
+            eos_token_id=2,
+            dtype="float32",
+        ),
+        dtype="float32",
+    )
+
+
+def test_parse_args_defines_kv_swap_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argv = [
+        "prog",
+        "--model",
+        "test-model",
+        "--offload-dir",
+        "/tmp/off",
+        "--kv-swap-mode",
+        "async",
+        "--kv-swap-host-memory-bytes",
+        "8192",
+        "--kv-swap-max-inflight-bytes",
+        "4096",
+        "--kv-swap-checksum",
+        "--kv-swap-max-retries",
+        "5",
+        "--no-kv-swap-sync-fallback",
+    ]
+    monkeypatch.setattr("sys.argv", argv)
+
+    args = srv.parse_args()
+
+    assert args.kv_swap_mode == "async"
+    assert args.kv_swap_host_memory_bytes == 8192
+    assert args.kv_swap_max_inflight_bytes == 4096
+    assert args.kv_swap_checksum is True
+    assert args.kv_swap_max_retries == 5
+    assert args.kv_swap_allow_sync_fallback is False
+
+
+def test_parse_args_kv_swap_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argv = ["prog", "--model", "test-model", "--offload-dir", "/tmp/off"]
+    monkeypatch.setattr("sys.argv", argv)
+
+    args = srv.parse_args()
+
+    assert args.kv_swap_mode == "sync"
+    assert args.kv_swap_host_memory_bytes == 512 * 1024 * 1024
+    assert args.kv_swap_max_inflight_bytes == 256 * 1024 * 1024
+    assert args.kv_swap_checksum is False
+    assert args.kv_swap_max_retries == 2
+    assert args.kv_swap_allow_sync_fallback is True
+
+
+def test_build_engine_config_includes_kv_swap_fields() -> None:
+    args = SimpleNamespace(
+        device_memory_ratio=0.75,
+        kv_cache_ratio=0.25,
+        max_batch_size=32,
+        enable_prefix_caching=False,
+        kv_swap_mode="async",
+        kv_swap_host_memory_bytes=8192,
+        kv_swap_max_inflight_bytes=4096,
+        kv_swap_checksum=True,
+        kv_swap_max_retries=5,
+        kv_swap_allow_sync_fallback=False,
+    )
+
+    config = srv._build_engine_config(args=args, model=_swap_model_stub())
+
+    assert config["kv_swap_mode"] == "async"
+    assert config["kv_swap_host_memory_bytes"] == 8192
+    assert config["kv_swap_max_inflight_bytes"] == 4096
+    assert config["kv_swap_checksum"] is True
+    assert config["kv_swap_max_retries"] == 5
+    assert config["kv_swap_allow_sync_fallback"] is False
+
+
+def test_initialize_with_model_forwards_kv_swap_kwargs_to_engine_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _capture_engine(**kwargs: Any) -> MagicMock:
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(srv, "ContinuousBatchingEngine", _capture_engine)
+
+    moe_model = SimpleNamespace(
+        model=_swap_model_stub(),
+        engine=object(),
+    )
+
+    srv.initialize_with_model(
+        moe_model=moe_model,
+        model_name="test-model",
+        tok=None,
+        max_seq_length=128,
+        kv_swap_mode="async",
+        kv_swap_host_memory_bytes=8192,
+        kv_swap_max_inflight_bytes=4096,
+        kv_swap_checksum=True,
+        kv_swap_max_retries=5,
+        kv_swap_allow_sync_fallback=False,
+    )
+
+    engine_config = captured["config"]
+    assert engine_config["kv_swap_mode"] == "async"
+    assert engine_config["kv_swap_host_memory_bytes"] == 8192
+    assert engine_config["kv_swap_max_inflight_bytes"] == 4096
+    assert engine_config["kv_swap_checksum"] is True
+    assert engine_config["kv_swap_max_retries"] == 5
+    assert engine_config["kv_swap_allow_sync_fallback"] is False
+
+
+_SENTINEL_KV_SWAP = {
+    "kv_swap_mode": "async",
+    "kv_swap_host_memory_bytes": 12345678,
+    "kv_swap_max_inflight_bytes": 1234567,
+    "kv_swap_checksum": True,
+    "kv_swap_max_retries": 7,
+    "kv_swap_allow_sync_fallback": False,
+}
+
+
+def _serve_stub_model() -> SimpleNamespace:
+    engine_config = SimpleNamespace(**_SENTINEL_KV_SWAP)
+    return SimpleNamespace(
+        engine_config=engine_config,
+        model=SimpleNamespace(config=SimpleNamespace(_name_or_path="m")),
+        max_seq_length=128,
+        tokenizer=None,
+    )
+
+
+def _install_serve_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Any]:
+    import sys
+
+    from moe_infinity.entrypoints.big_modeling import MoE
+
+    captured: dict[str, Any] = {}
+
+    def _capture_initialize(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        srv, "initialize_with_model", _capture_initialize, raising=True
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        SimpleNamespace(run=lambda *a, **k: None),
+    )
+    return {"MoE": MoE, "captured": captured}
+
+
+def test_serve_propagates_kv_swap_from_engine_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = _install_serve_capture(monkeypatch)
+    stub = _serve_stub_model()
+
+    setup["MoE"].serve(stub, offload_dir="/tmp/off")
+
+    captured = setup["captured"]
+    for key, value in _SENTINEL_KV_SWAP.items():
+        assert captured[key] == value
+
+
+def test_serve_explicit_override_beats_engine_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = _install_serve_capture(monkeypatch)
+    stub = _serve_stub_model()
+
+    setup["MoE"].serve(
+        stub,
+        offload_dir="/tmp/off",
+        kv_swap_mode="sync",
+        kv_swap_max_retries=1,
+    )
+
+    captured = setup["captured"]
+    assert captured["kv_swap_mode"] == "sync"
+    assert captured["kv_swap_max_retries"] == 1
+    assert captured["kv_swap_host_memory_bytes"] == 12345678
+    assert captured["kv_swap_allow_sync_fallback"] is False
+
+
 def test_list_models_engine_not_ready(client: TestClient) -> None:
     srv.engine = None
 

@@ -482,6 +482,12 @@ def initialize_with_model(
     kv_cache_ratio: float = 0.25,
     max_batch_size: int = 32,
     enable_prefix_caching: bool = False,
+    kv_swap_mode: str = "sync",
+    kv_swap_host_memory_bytes: int = 512 * 1024 * 1024,
+    kv_swap_max_inflight_bytes: int = 256 * 1024 * 1024,
+    kv_swap_checksum: bool = False,
+    kv_swap_max_retries: int = 2,
+    kv_swap_allow_sync_fallback: bool = True,
     speculative_draft: Optional[Any] = None,
 ) -> None:
     """Initialize the v2 server with a pre-loaded MoE model.
@@ -502,6 +508,12 @@ def initialize_with_model(
         kv_cache_ratio=kv_cache_ratio,
         max_batch_size=max_batch_size,
         enable_prefix_caching=enable_prefix_caching,
+        kv_swap_mode=kv_swap_mode,
+        kv_swap_host_memory_bytes=kv_swap_host_memory_bytes,
+        kv_swap_max_inflight_bytes=kv_swap_max_inflight_bytes,
+        kv_swap_checksum=kv_swap_checksum,
+        kv_swap_max_retries=kv_swap_max_retries,
+        kv_swap_allow_sync_fallback=kv_swap_allow_sync_fallback,
     )
     engine_config = _build_engine_config(args=args, model=hf_model)
 
@@ -1063,6 +1075,12 @@ async def _initialize_model() -> None:
         moe_config = {
             "offload_path": os.path.join(args.offload_dir, args.model),
             "device_memory_ratio": args.device_memory_ratio,
+            "kv_swap_mode": args.kv_swap_mode,
+            "kv_swap_host_memory_bytes": args.kv_swap_host_memory_bytes,
+            "kv_swap_max_inflight_bytes": args.kv_swap_max_inflight_bytes,
+            "kv_swap_checksum": args.kv_swap_checksum,
+            "kv_swap_max_retries": args.kv_swap_max_retries,
+            "kv_swap_allow_sync_fallback": args.kv_swap_allow_sync_fallback,
         }
         if args.enable_prefix_caching:
             moe_config["enable_prefix_caching"] = True
@@ -1862,6 +1880,19 @@ def _build_engine_config(
         config["eos_token_id"] = eos_token_id
     if args.enable_prefix_caching:
         config["enable_prefix_caching"] = True
+
+    config["kv_swap_mode"] = getattr(args, "kv_swap_mode", "sync")
+    config["kv_swap_host_memory_bytes"] = getattr(
+        args, "kv_swap_host_memory_bytes", 512 * 1024 * 1024
+    )
+    config["kv_swap_max_inflight_bytes"] = getattr(
+        args, "kv_swap_max_inflight_bytes", 256 * 1024 * 1024
+    )
+    config["kv_swap_checksum"] = getattr(args, "kv_swap_checksum", False)
+    config["kv_swap_max_retries"] = getattr(args, "kv_swap_max_retries", 2)
+    config["kv_swap_allow_sync_fallback"] = getattr(
+        args, "kv_swap_allow_sync_fallback", True
+    )
     return config
 
 
@@ -1887,6 +1918,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-waiting-requests", type=int, default=0)
     parser.add_argument("--max-n", type=int, default=16)
     parser.add_argument("--enable-prefix-caching", action="store_true")
+    parser.add_argument(
+        "--kv-swap-mode",
+        type=str,
+        default="sync",
+        choices=["sync", "async"],
+        help="Serving KV swap backend: 'sync' (default) or 'async'",
+    )
+    parser.add_argument(
+        "--kv-swap-host-memory-bytes",
+        type=int,
+        default=512 * 1024 * 1024,
+        help="Hard cap on pinned host memory for async KV swap",
+    )
+    parser.add_argument(
+        "--kv-swap-max-inflight-bytes",
+        type=int,
+        default=256 * 1024 * 1024,
+        help="Hard cap on in-flight async KV transfer bytes",
+    )
+    parser.add_argument(
+        "--kv-swap-checksum",
+        action="store_true",
+        help="Enable opt-in CRC32 validation of swapped KV payloads",
+    )
+    parser.add_argument(
+        "--kv-swap-max-retries",
+        type=int,
+        default=2,
+        help="Maximum async swap-in retries before terminal reprefill",
+    )
+    parser.add_argument(
+        "--no-kv-swap-sync-fallback",
+        action="store_false",
+        dest="kv_swap_allow_sync_fallback",
+        default=True,
+        help="Disable async->sync fallback when pinned/CUDA is unavailable",
+    )
     parser.add_argument(
         "--startup-timeout",
         type=float,
