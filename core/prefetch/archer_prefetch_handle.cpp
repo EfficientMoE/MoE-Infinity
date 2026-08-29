@@ -100,6 +100,7 @@ void ArcherPrefetchHandle::CleanUpResources() {
   kTopologyHandle.reset();
   kDeviceMemoryPool.reset();
   kHostMemoryPool.reset();
+  ResetExpertResidency();
   has_cleaned_up_resources_ = true;
 }
 

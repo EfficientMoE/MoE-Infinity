@@ -285,4 +285,5 @@ extern std::unique_ptr<ExpertResidencyClient> kDemandResidencyClient;
 extern std::unique_ptr<ExpertResidencyClient> kPrefetchResidencyClient;
 
 void InitExpertResidency();
+void ResetExpertResidency();
 void ConfigureExpertResidencyCapacityFromTopology();

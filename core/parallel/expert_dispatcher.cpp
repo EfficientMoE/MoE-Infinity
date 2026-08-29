@@ -246,14 +246,38 @@ ExpertPolicyStats ExpertDispatcher::GetPrecisionMetrics() const {
   metrics["manager_enabled"] = manager_enabled_ ? 1 : 0;
   metrics["phase_policy_enabled"] = phase_policy_enabled_ ? 1 : 0;
   metrics["transition_failed"] = transition_failed_count_;
+  metrics["h2d_payload_bytes"] = h2d_payload_bytes_;
+  metrics["h2d_transfers"] = h2d_transfers_;
+  metrics["promotions"] = promotions_;
+  metrics["demotions"] = demotions_;
+  metrics["representation_hits"] = representation_hits_;
+  metrics["representation_misses"] = representation_misses_;
+  metrics["policy_epochs"] = static_cast<std::int64_t>(precision_epoch_);
   for (const char* name :
-       {"h2d_payload_bytes", "h2d_transfers", "conversion_input_bytes",
-        "conversion_output_bytes", "conversion_seconds", "promotions",
-        "demotions", "representation_hits", "representation_misses",
-        "policy_epochs", "external_shared_resident_bytes"}) {
+       {"conversion_input_bytes", "conversion_output_bytes",
+        "conversion_seconds", "external_shared_resident_bytes"}) {
     metrics.emplace(name, 0);
   }
   return metrics;
+}
+
+std::vector<std::tuple<std::uint64_t, std::uint8_t, std::uint64_t, std::int64_t,
+                       std::int64_t, std::uint8_t>>
+ExpertDispatcher::GetResidentGenerationEntries() const {
+  std::vector<std::tuple<std::uint64_t, std::uint8_t, std::uint64_t,
+                         std::int64_t, std::int64_t, std::uint8_t>>
+      rows;
+  if (kExpertResidencyManager == nullptr) return rows;
+  for (int gpu_id = 0; gpu_id < std::max(kNumDevices(), 1); ++gpu_id) {
+    for (const auto& entry :
+         kExpertResidencyManager->ResidentGenerations(gpu_id)) {
+      rows.emplace_back(entry.key.logical_expert_key,
+                        static_cast<std::uint8_t>(entry.key.format),
+                        entry.key.generation, entry.payload_bytes, entry.bytes,
+                        static_cast<std::uint8_t>(entry.state));
+    }
+  }
+  return rows;
 }
 
 std::uintptr_t ExpertDispatcher::GetResidencyManagerId() const {
@@ -483,14 +507,25 @@ bool ExpertDispatcher::ApplyPrecisionTarget(const ExpertNodePtr& expert_node,
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto target = precision_targets_.find(logical_key);
-    if (target == precision_targets_.end()) return true;
-    const auto variant = registered_variants_.find(target->second);
-    if (variant == registered_variants_.end()) return false;
-    destination = variant->second;
+    if (target == precision_targets_.end()) {
+      destination = ResidencyVariant{
+          ResidencyVariantKey{logical_key, ExpertFormat::BF16, 0},
+          expert_node->node, expert_node->node->byte_size,
+          expert_node->node->byte_size, 0};
+    } else {
+      const auto variant = registered_variants_.find(target->second);
+      if (variant == registered_variants_.end()) return false;
+      destination = variant->second;
+    }
   }
+  kExpertResidencyManager->RegisterVariant(destination);
   const auto active =
       kExpertResidencyManager->ActiveGeneration(gpu_id, logical_key);
-  if (active.has_value() && *active == destination.key) return true;
+  if (active.has_value() && *active == destination.key) {
+    ++representation_hits_;
+    return true;
+  }
+  ++representation_misses_;
 
   ResidencyTicket transaction =
       active.has_value()
@@ -519,6 +554,17 @@ bool ExpertDispatcher::ApplyPrecisionTarget(const ExpertNodePtr& expert_node,
     return false;
   }
   if (!kExpertResidencyManager->CommitTransaction(transaction)) return false;
+  h2d_payload_bytes_ += destination.payload_bytes;
+  ++h2d_transfers_;
+  if (active.has_value()) {
+    if (static_cast<int>(destination.key.format) <
+        static_cast<int>(active->format)) {
+      ++promotions_;
+    } else if (static_cast<int>(destination.key.format) >
+               static_cast<int>(active->format)) {
+      ++demotions_;
+    }
+  }
   expert_node->node = destination.node;
   {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -131,6 +131,9 @@ class ExpertDispatcher : public base::noncopyable {
       std::uint64_t epoch);
   bool SetAdaptiveHbmBudgetBytes(std::int64_t bytes);
   ExpertPolicyStats GetPrecisionMetrics() const;
+  std::vector<std::tuple<std::uint64_t, std::uint8_t, std::uint64_t,
+                         std::int64_t, std::int64_t, std::uint8_t>>
+  GetResidentGenerationEntries() const;
   std::uintptr_t GetResidencyManagerId() const;
   void ConfigureResidencyManager(bool manager_enabled,
                                  bool phase_policy_enabled);
@@ -223,6 +226,12 @@ class ExpertDispatcher : public base::noncopyable {
   std::uint64_t published_generation_ = 0;
   std::int64_t adaptive_hbm_budget_bytes_ = 0;
   std::int64_t transition_failed_count_ = 0;
+  std::int64_t h2d_payload_bytes_ = 0;
+  std::int64_t h2d_transfers_ = 0;
+  std::int64_t promotions_ = 0;
+  std::int64_t demotions_ = 0;
+  std::int64_t representation_hits_ = 0;
+  std::int64_t representation_misses_ = 0;
   bool manager_enabled_ = false;
   bool phase_policy_enabled_ = false;
   std::string active_format_ = "bf16";

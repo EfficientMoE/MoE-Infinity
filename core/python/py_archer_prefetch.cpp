@@ -160,12 +160,49 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  failed == metrics.end() ? 0 : failed->second;
              result["fallback_counts"] = fallback_counts;
              py::dict leases_by_kind;
-             for (const char* kind :
-                  {"demand", "prefetch", "transfer", "execution", "transition"})
-               leases_by_kind[kind] = 0;
+             for (const char* kind : {"demand", "prefetch", "transfer",
+                                      "execution", "transition"}) {
+               const auto found = metrics.find(std::string("leases_") + kind);
+               leases_by_kind[kind] =
+                   found == metrics.end() ? 0 : found->second;
+             }
              result["leases_by_kind"] = leases_by_kind;
-             result["resident_generation_entries"] = py::list();
-             result["by_format"] = py::dict();
+             static const char* formats[] = {"bf16",
+                                             "fp8_e4m3_block128",
+                                             "marlin_int4_group128",
+                                             "gpt_oss_mxfp4",
+                                             "glm_fp8_block128",
+                                             "deepseek_v4_fp4",
+                                             "gptq",
+                                             "awq"};
+             py::list entries;
+             py::dict by_format;
+             for (const char* format : formats) {
+               py::dict aggregate;
+               aggregate["resident_generations"] = 0;
+               aggregate["resident_bytes"] = 0;
+               by_format[format] = aggregate;
+             }
+             for (const auto& row : dispatcher.GetResidentGenerationEntries()) {
+               const auto format_index = std::get<1>(row);
+               py::dict item;
+               item["logical_expert_key"] = std::get<0>(row);
+               item["format"] = formats[format_index];
+               item["generation"] = std::get<2>(row);
+               item["payload_bytes"] = std::get<3>(row);
+               item["aligned_bytes"] = std::get<4>(row);
+               item["state"] = std::get<5>(row) == 1 ? "active" : "retiring";
+               entries.append(item);
+               auto aggregate =
+                   by_format[formats[format_index]].cast<py::dict>();
+               aggregate["resident_generations"] =
+                   aggregate["resident_generations"].cast<std::int64_t>() + 1;
+               aggregate["resident_bytes"] =
+                   aggregate["resident_bytes"].cast<std::int64_t>() +
+                   std::get<4>(row);
+             }
+             result["resident_generation_entries"] = entries;
+             result["by_format"] = by_format;
              return result;
            })
       .def("get_policy_stats", &ExpertDispatcher::GetPrecisionMetrics)

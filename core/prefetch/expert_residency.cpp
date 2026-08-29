@@ -53,6 +53,12 @@ void InitExpertResidency() {
       kExpertResidencyManager, AdmissionSource::PREFETCH);
 }
 
+void ResetExpertResidency() {
+  kDemandResidencyClient.reset();
+  kPrefetchResidencyClient.reset();
+  kExpertResidencyManager.reset();
+}
+
 void ConfigureExpertResidencyCapacityFromTopology() {
   if (kExpertResidencyManager == nullptr || kTopologyHandle == nullptr) return;
   int device_count = 0;
@@ -646,6 +652,30 @@ ExpertPolicyStats ExpertResidencyManager::Snapshot() const {
   stats["registered_variants"] =
       static_cast<std::int64_t>(registered_variants_.size());
   stats["active_leases"] = static_cast<std::int64_t>(leases_.size());
+  for (const auto& name :
+       {"demand", "prefetch", "transfer", "execution", "transition"}) {
+    stats[std::string("leases_") + name] = 0;
+  }
+  for (const auto& lease : leases_) {
+    const char* name = "demand";
+    switch (lease.second.kind) {
+      case LeaseKind::PREFETCH:
+        name = "prefetch";
+        break;
+      case LeaseKind::TRANSFER:
+        name = "transfer";
+        break;
+      case LeaseKind::EXECUTION:
+        name = "execution";
+        break;
+      case LeaseKind::TRANSITION:
+        name = "transition";
+        break;
+      case LeaseKind::DEMAND:
+        break;
+    }
+    ++stats[std::string("leases_") + name];
+  }
   stats["pending_tickets"] = static_cast<std::int64_t>(pending_tickets_.size());
   stats["pending_transactions"] =
       static_cast<std::int64_t>(pending_tickets_.size());
