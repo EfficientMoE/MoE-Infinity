@@ -421,3 +421,21 @@ def test_phase_policy_cli_defaults_off_and_can_enable(monkeypatch) -> None:
         [*base, "--no-phase-specific-expert-policy"],
     )
     assert server_module.parse_args().phase_specific_expert_policy is False
+
+
+def test_prometheus_formats_phase_policy_metrics() -> None:
+    body = server_module._format_prometheus_metrics(
+        {
+            "expert_policy": {
+                "enabled": 1,
+                "resident_bytes": 4096,
+                "prefill_hits": 3,
+                "decode_hits": 7,
+                "transition_hits": 2,
+            }
+        }
+    )
+    assert 'moe_expert_cache_hits_total{phase="prefill"} 3' in body
+    assert 'moe_expert_cache_hits_total{phase="decode"} 7' in body
+    assert "moe_expert_cache_resident_bytes 4096" in body
+    assert "moe_expert_cache_transition_hits_total 2" in body

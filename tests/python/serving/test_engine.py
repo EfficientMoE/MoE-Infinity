@@ -545,3 +545,17 @@ def test_disabled_policy_keeps_paged_prefill_then_decode() -> None:
     batch = make_mixed_batch(prefill_tokens=[11, 12], decode_tokens=[21])
     _ = engine._execute_batch(batch)
     assert calls == [[True], [False]]
+
+
+def test_get_stats_reports_disabled_expert_policy_without_prefetcher() -> None:
+    engine = _make_engine()
+    stats = engine.get_stats()
+    assert "expert_policy" in stats
+    policy = stats["expert_policy"]
+    assert policy["enabled"] == 0
+    assert policy["resident_bytes"] == 0
+    assert policy["resident_experts"] == 0
+    assert policy["prefill_hits"] == 0
+    assert policy["decode_hits"] == 0
+    assert policy["transition_hits"] == 0
+    assert policy["starvation_promotions"] == 0

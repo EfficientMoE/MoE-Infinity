@@ -20,6 +20,42 @@ def _inert_phase_policy() -> PhasePolicySettings:
     )
 
 
+# Canonical keys published by ``ExpertResidencyManager::Snapshot()``. Kept in
+# sync with core/prefetch/expert_residency and the plan's Step 11 contract so
+# the Python surface exposes a stable, fully-populated telemetry dict even when
+# the native authority is absent (disabled policy or resident-only models).
+POLICY_STAT_KEYS: Tuple[str, ...] = (
+    "enabled",
+    "resident_bytes",
+    "resident_experts",
+    "prefill_accesses",
+    "prefill_hits",
+    "prefill_misses",
+    "prefill_admissions",
+    "prefill_transient",
+    "prefill_evictions",
+    "prefill_prefetch_issued",
+    "prefill_prefetch_completed",
+    "prefill_prefetch_rejected",
+    "decode_accesses",
+    "decode_hits",
+    "decode_misses",
+    "decode_admissions",
+    "decode_transient",
+    "decode_evictions",
+    "decode_prefetch_issued",
+    "decode_prefetch_completed",
+    "decode_prefetch_rejected",
+    "mixed_accesses",
+    "transition_hits",
+    "starvation_promotions",
+)
+
+
+def disabled_policy_stats() -> Dict[str, int]:
+    return {key: 0 for key in POLICY_STAT_KEYS}
+
+
 # Native prefetch priority bands; must mirror core/prefetch/task_scheduler.h.
 ON_DEMAND_PRIORITY = 0
 ROUTE_AHEAD_PRIORITY = 1
@@ -163,6 +199,30 @@ class ExpertPrefetcher(object):
             except Exception:
                 return 0.0
         return 0.0
+
+    def get_policy_stats(self) -> Dict[str, int]:
+        # Reads exactly one ExpertResidencyManager::Snapshot() via the handle.
+        # Must NOT merge dispatcher and scheduler totals: both are clients of
+        # the same authority, so summing would double-count shared residency.
+        stats = disabled_policy_stats()
+        engine = self.archer_engine
+        getter = (
+            getattr(engine, "get_expert_policy_stats", None)
+            if engine is not None
+            else None
+        )
+        if callable(getter):
+            try:
+                snapshot = getter()
+            except Exception:
+                snapshot = None
+            if isinstance(snapshot, dict):
+                for key, value in snapshot.items():
+                    try:
+                        stats[str(key)] = int(value)
+                    except (TypeError, ValueError):
+                        continue
+        return stats
 
     def prefetch_experts_list(
         self,

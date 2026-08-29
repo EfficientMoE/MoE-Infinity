@@ -665,7 +665,23 @@ class ContinuousBatchingEngine:
             "kv_cache_free_blocks": self.kv_cache.block_allocator.num_free_blocks,
             "sequence_status_counts": status_counts,
             "memory": self.memory_manager.report(),
+            "expert_policy": self._expert_policy_stats(),
         }
+
+    def _expert_policy_stats(self) -> dict[str, int]:
+        from moe_infinity.memory.expert_prefetcher import disabled_policy_stats
+
+        engine = getattr(self.model_runner, "engine", None)
+        prefetcher = getattr(engine, "expert_prefetcher", None)
+        getter = getattr(prefetcher, "get_policy_stats", None)
+        if callable(getter):
+            try:
+                snapshot = getter()
+            except Exception:
+                snapshot = None
+            if isinstance(snapshot, dict):
+                return snapshot
+        return disabled_policy_stats()
 
     def get_config(self) -> dict[str, object]:
         config: dict[str, object] = {}
