@@ -200,15 +200,16 @@ class ContinuousBatchingEngine:
             self.memory_controller = AdaptiveMemoryController(
                 self._adaptive_config_from_values()
             )
-            for device_id in range(self._adaptive_device_count):
-                kv_supported = device_id == int(self.device.index or 0)
-                kv_blocks = self.kv_cache.num_blocks if kv_supported else 0
-                expert_bytes = int(self._memory_budget.expert_cache_bytes)
-                self._adaptive_targets[device_id] = (
-                    expert_bytes,
-                    kv_blocks,
-                    kv_supported,
-                )
+        for device_id in range(self._adaptive_device_count):
+            kv_supported = device_id == int(self.device.index or 0)
+            kv_blocks = self.kv_cache.num_blocks if kv_supported else 0
+            expert_bytes = int(self._memory_budget.expert_cache_bytes)
+            self._adaptive_targets[device_id] = (
+                expert_bytes,
+                kv_blocks,
+                kv_supported,
+            )
+            if self.memory_controller is not None:
                 self.memory_controller.observe(
                     MemorySignals(
                         device_id=device_id,
@@ -739,6 +740,22 @@ class ContinuousBatchingEngine:
             device.setdefault("resize_attempts", 0)
             device.setdefault("resize_failures", 0)
             device.setdefault("last_reason", "init")
+            device.setdefault("hard_budget_violations", 0)
+            device.setdefault("minimum_capacity_violations", 0)
+            device.setdefault(
+                "min_free_gpu_bytes", self._free_gpu_bytes(device_id)
+            )
+            adaptive_config = self._adaptive_config_from_values()
+            device.setdefault(
+                "configured_reserve_bytes",
+                adaptive_config.free_memory_reserve_bytes,
+            )
+            device.setdefault("resize_count", int(device["resize_attempts"]))
+            device.setdefault(
+                "max_resize_count",
+                self._adaptive_tick_counter // adaptive_config.cooldown_steps
+                + 1,
+            )
             if int(device.get("expert_target_bytes", 0)) == 0:
                 device["expert_target_bytes"] = expert_bytes
             if int(device.get("kv_target_blocks", 0)) == 0:
@@ -746,6 +763,8 @@ class ContinuousBatchingEngine:
         memory["adaptive"] = {
             "enabled": self.memory_controller is not None,
             "devices": adaptive_devices,
+            "completed": not self.has_pending_requests(),
+            "failure_limit": self._adaptive_config_from_values().failure_limit,
         }
         return {
             "pending_requests": len(self._pending_request_ids()),
