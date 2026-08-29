@@ -55,6 +55,13 @@ class _ResizeReceiptLike(Protocol):
     def cancel(self) -> None: ...
 
 
+def _flashinfer_usable_on(module: object, device: torch.device | None) -> bool:
+    if device is not None and device.type == "cuda":
+        return True
+    module_name = getattr(module, "__name__", "")
+    return not module_name.startswith("flashinfer")
+
+
 @dataclass
 class BlockAllocator:
     num_blocks: int
@@ -211,7 +218,9 @@ class PagedKVCache:
         self._fi_decode = None
         if flashinfer_utils.HAS_FLASHINFER:
             flashinfer_module = flashinfer_utils.get_flashinfer_module()
-            if flashinfer_module is not None:
+            if flashinfer_module is not None and _flashinfer_usable_on(
+                flashinfer_module, self.device
+            ):
                 try:
                     fi_module = cast(_FlashinferModuleLike, flashinfer_module)
                     workspace = flashinfer_utils.get_workspace(self.device)

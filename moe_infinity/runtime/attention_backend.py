@@ -26,6 +26,13 @@ from moe_infinity.runtime.attention_types import (
 )
 
 
+def _flashinfer_usable_on(module: object, device: torch.device | None) -> bool:
+    if device is not None and device.type == "cuda":
+        return True
+    module_name = getattr(module, "__name__", "")
+    return not module_name.startswith("flashinfer")
+
+
 @dataclass
 class AttentionMetadata:
     is_prefill: bool
@@ -139,7 +146,9 @@ class PagedAttentionBackend:
                 Any,
                 flashinfer_utils.get_flashinfer_module(),
             )
-            if flashinfer_module is not None:
+            if flashinfer_module is not None and _flashinfer_usable_on(
+                flashinfer_module, device
+            ):
                 try:
                     workspace = flashinfer_utils.get_workspace(device)
                     self._fi_workspace = workspace
