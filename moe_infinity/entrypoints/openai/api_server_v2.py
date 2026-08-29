@@ -87,6 +87,7 @@ except Exception:
     uvicorn = SimpleNamespace(run=lambda *args, **kwargs: None)
 
 import moe_infinity.serving.watchdog as watchdog_module
+from moe_infinity.serving.cuda_graph import FALLBACK_REASONS
 from moe_infinity.serving.engine import ContinuousBatchingEngine, RequestOutput
 from moe_infinity.serving.health import ServerHealthState
 from moe_infinity.serving.sequence import SamplingParams
@@ -743,6 +744,44 @@ def _format_prometheus_metrics(stats: dict[str, object]) -> str:
     lines.append("# HELP moe_engine_steps_total Total engine steps")
     lines.append("# TYPE moe_engine_steps_total counter")
     lines.append(f"moe_engine_steps_total {stats.get('num_steps', 0)}")
+    cuda_graph = stats.get("cuda_graph", {})
+    graph_stats = (
+        cast(dict[str, object], cuda_graph)
+        if isinstance(cuda_graph, dict)
+        else {}
+    )
+    graph_metrics = (
+        ("moe_cuda_graph_captures_total", "captures", "counter"),
+        ("moe_cuda_graph_replays_total", "replays", "counter"),
+        (
+            "moe_cuda_graph_capture_failures_total",
+            "capture_failures",
+            "counter",
+        ),
+        ("moe_cuda_graph_instances", "graphs", "gauge"),
+        ("moe_cuda_graph_pool_bytes", "graph_pool_bytes", "gauge"),
+        (
+            "moe_cuda_graph_scratch_kv_bytes",
+            "scratch_kv_bytes",
+            "gauge",
+        ),
+    )
+    for metric_name, stats_key, metric_type in graph_metrics:
+        lines.append(f"# TYPE {metric_name} {metric_type}")
+        lines.append(f"{metric_name} {graph_stats.get(stats_key, 0)}")
+
+    fallback_value = graph_stats.get("fallback_reasons", {})
+    fallback_reasons = (
+        cast(dict[str, object], fallback_value)
+        if isinstance(fallback_value, dict)
+        else {}
+    )
+    lines.append("# TYPE moe_cuda_graph_fallback_total counter")
+    for reason in FALLBACK_REASONS:
+        count = fallback_reasons.get(reason, 0)
+        lines.append(
+            f'moe_cuda_graph_fallback_total{{reason="{reason}"}} {count}'
+        )
     return "\n".join(lines) + "\n"
 
 

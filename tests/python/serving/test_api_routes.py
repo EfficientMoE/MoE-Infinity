@@ -230,6 +230,42 @@ def test_metrics_endpoint(client: TestClient) -> None:
     assert "moe_tokens_generated_total" in body
 
 
+def test_metrics_endpoint_exports_graph_counters_and_bounded_reasons(
+    client: TestClient,
+) -> None:
+    srv.engine.get_stats.return_value = {
+        **_make_mock_stats(),
+        "cuda_graph": {
+            "captures": 2,
+            "replays": 9,
+            "capture_failures": 1,
+            "graphs": 2,
+            "graph_pool_bytes": 4096,
+            "scratch_kv_bytes": 2048,
+            "fallback_reasons": {
+                "expert_dispatcher": 7,
+                "not_decode": 3,
+                "unbounded-exception-text": 99,
+            },
+            "capability_reason": "expert_dispatcher",
+        },
+    }
+
+    response = client.get("/metrics")
+
+    assert "moe_cuda_graph_captures_total 2" in response.text
+    assert "moe_cuda_graph_replays_total 9" in response.text
+    assert "moe_cuda_graph_capture_failures_total 1" in response.text
+    assert "moe_cuda_graph_instances 2" in response.text
+    assert "moe_cuda_graph_pool_bytes 4096" in response.text
+    assert "moe_cuda_graph_scratch_kv_bytes 2048" in response.text
+    assert (
+        'moe_cuda_graph_fallback_total{reason="expert_dispatcher"} 7'
+        in response.text
+    )
+    assert 'reason="unbounded-exception-text"' not in response.text
+
+
 def test_metrics_engine_not_ready(client: TestClient) -> None:
     srv.engine = None
 
