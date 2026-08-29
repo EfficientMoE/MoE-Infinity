@@ -659,8 +659,6 @@ class ModelRunner:
                 return torch.device("cuda")
             return torch.device("cpu")
 
-        if device.type == "cuda" and not torch.cuda.is_available():
-            return torch.device("cpu")
         return device
 
 

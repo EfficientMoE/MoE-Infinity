@@ -12,8 +12,8 @@ def canonical_device(device: torch.device | str | None) -> torch.device:
     """Resolve a device to an explicit indexed ``torch.device``.
 
     ``cuda`` (without an index) resolves to the current indexed CUDA device.
-    A CUDA device requested while CUDA is unavailable falls back to CPU. CPU is
-    returned unchanged.
+    CUDA identity is preserved even when CUDA is unavailable so CPU-only gate
+    tests can still distinguish ``cuda:0`` from CPU or another CUDA index.
     """
     if device is None:
         if torch.cuda.is_available():
@@ -24,11 +24,11 @@ def canonical_device(device: torch.device | str | None) -> torch.device:
         device = torch.device(device)
 
     if device.type == "cuda":
-        if not torch.cuda.is_available():
-            return torch.device("cpu")
         index = device.index
         if index is None:
-            index = torch.cuda.current_device()
+            index = (
+                torch.cuda.current_device() if torch.cuda.is_available() else 0
+            )
         return torch.device("cuda", index)
 
     return device
