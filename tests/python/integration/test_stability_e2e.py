@@ -395,3 +395,29 @@ def test_server_without_watchdog_flags_keeps_watchdogs_none(
     decode_mock.assert_not_called()
     assert server_module._startup_watchdog is None
     assert server_module._decode_watchdog is None
+
+
+def test_phase_policy_cli_defaults_off_and_can_enable(monkeypatch) -> None:
+    base = [
+        "api_server_v2",
+        "--model",
+        "fixture/model",
+        "--offload-dir",
+        "/tmp/moe-policy-test",
+    ]
+    monkeypatch.setattr(sys, "argv", base)
+    assert server_module.parse_args().phase_specific_expert_policy is False
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [*base, "--phase-specific-expert-policy"],
+    )
+    assert server_module.parse_args().phase_specific_expert_policy is True
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [*base, "--no-phase-specific-expert-policy"],
+    )
+    assert server_module.parse_args().phase_specific_expert_policy is False

@@ -1063,6 +1063,9 @@ async def _initialize_model() -> None:
         moe_config = {
             "offload_path": os.path.join(args.offload_dir, args.model),
             "device_memory_ratio": args.device_memory_ratio,
+            "phase_specific_expert_policy": bool(
+                args.phase_specific_expert_policy
+            ),
         }
         if args.enable_prefix_caching:
             moe_config["enable_prefix_caching"] = True
@@ -1887,6 +1890,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-waiting-requests", type=int, default=0)
     parser.add_argument("--max-n", type=int, default=16)
     parser.add_argument("--enable-prefix-caching", action="store_true")
+    parser.add_argument(
+        "--phase-specific-expert-policy",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable phase-specific expert admission, prefetch, and eviction policy.",
+    )
     parser.add_argument(
         "--startup-timeout",
         type=float,
