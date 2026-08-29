@@ -15,6 +15,8 @@ import re
 import tempfile
 import time
 import warnings
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Dict, Optional, Type, Union
 
 import torch
@@ -56,6 +58,14 @@ from moe_infinity.models import (
     SyncOlmoeMoEBlock,
     SyncQwen3_5MoeSparseMoeBlock,
 )
+from moe_infinity.runtime.adaptive_precision_allowlist import (
+    ReleasedAdaptiveEntry,
+)
+from moe_infinity.runtime.expert_precision import (
+    ModelPrecisionCapabilities,
+    resolve_model_precision_capabilities,
+)
+from moe_infinity.runtime.expert_variant_manifest import ExpertVariantManifest
 from moe_infinity.runtime.hooks import *
 from moe_infinity.utils import (
     ArcherConfig,
@@ -81,6 +91,92 @@ from moe_infinity.utils.quantization import (
     should_cast_tensor,
     validate_quantization_support,
 )
+
+
+@dataclass(frozen=True)
+class AdaptivePrecisionResolution:
+    enabled: bool
+    fallback_reason: Optional[str]
+    capabilities: ModelPrecisionCapabilities
+    manifest: object | None = None
+
+
+def _resolve_adaptive_precision(
+    model_config,
+    archer_config,
+    offload_path: str,
+    *,
+    extension_names: set[str],
+    purpose: str = "serve",
+    checkpoint_fingerprint: Optional[str] = None,
+    released_entries=frozenset(),
+    native_handle=None,
+) -> AdaptivePrecisionResolution:
+    capabilities = resolve_model_precision_capabilities(
+        model_config, extension_names
+    )
+    if not bool(getattr(archer_config, "adaptive_expert_precision", False)):
+        return AdaptivePrecisionResolution(False, "disabled", capabilities)
+    if capabilities.protected_reason is not None:
+        return AdaptivePrecisionResolution(
+            False, capabilities.protected_reason, capabilities
+        )
+    if int(getattr(archer_config, "adaptive_hbm_budget_bytes", 0)) <= 0:
+        return AdaptivePrecisionResolution(
+            False, "invalid_hbm_budget", capabilities
+        )
+    if purpose not in {"build", "serve"}:
+        raise ValueError("purpose must be 'build' or 'serve'")
+    derivative_root = getattr(
+        archer_config, "adaptive_derivative_root", None
+    ) or str(Path(offload_path) / "adaptive_derivatives")
+    if purpose == "build":
+        if not bool(getattr(archer_config, "adaptive_variant_build", False)):
+            return AdaptivePrecisionResolution(
+                False, "variant_build_disabled", capabilities
+            )
+        return AdaptivePrecisionResolution(
+            False, "build_required", capabilities
+        )
+    try:
+        manifest = ExpertVariantManifest.load_current(
+            derivative_root, native_handle=native_handle
+        )
+    except FileNotFoundError:
+        return AdaptivePrecisionResolution(
+            False, "manifest_missing", capabilities
+        )
+    except (KeyError, TypeError, ValueError, OSError):
+        return AdaptivePrecisionResolution(
+            False, "manifest_invalid", capabilities
+        )
+
+    entries = getattr(manifest, "release_entries", None)
+    if entries is None:
+        entries = frozenset(
+            ReleasedAdaptiveEntry(
+                checkpoint_fingerprint=manifest.checkpoint_fingerprint,
+                format=variant.format,
+                converter_version=variant.converter_version,
+                quality_attestation_sha256=variant.quality_attestation_sha256,
+            )
+            for variant in manifest.variants
+        )
+    if checkpoint_fingerprint is not None and any(
+        entry.checkpoint_fingerprint != checkpoint_fingerprint
+        for entry in entries
+    ):
+        return AdaptivePrecisionResolution(
+            False, "checkpoint_fingerprint_mismatch", capabilities
+        )
+    if not entries or not frozenset(entries).issubset(
+        frozenset(released_entries)
+    ):
+        return AdaptivePrecisionResolution(
+            False, "manifest_unapproved", capabilities, manifest
+        )
+    return AdaptivePrecisionResolution(True, None, capabilities, manifest)
+
 
 _prefetch_lib = None
 # Alias for compatibility
