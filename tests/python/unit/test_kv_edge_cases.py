@@ -104,12 +104,23 @@ def test_gpu_oom_on_swap_in_handled_gracefully(monkeypatch) -> None:
     request_map[group.request_id] = group
     sequence_map[sequence.seq_id] = sequence
 
-    def _raise_oom(_seq_id: int) -> None:
-        raise RuntimeError("CUDA out of memory")
+    from moe_infinity.serving.scheduler import (
+        SwapGroupPhase,
+        _SwappedGroupRecord,
+    )
 
-    monkeypatch.setattr(scheduler.kv_cache, "swap_in", _raise_oom)
+    scheduler._swapped_groups[group.request_id] = _SwappedGroupRecord(
+        group=group,
+        prior_status_by_seq={sequence.seq_id: SequenceStatus.DECODE},
+        phase=SwapGroupPhase.HOST_RESIDENT,
+    )
 
-    scheduler._recover_swapped_groups([group])
+    def _oom(_seq_ids: list[int]) -> None:
+        return None
+
+    monkeypatch.setattr(scheduler.kv_cache, "reserve_swap_in_group", _oom)
+
+    scheduler._recover_host_resident_groups()
 
     assert sequence.status is SequenceStatus.SWAPPED
     assert group in swapped_queue
