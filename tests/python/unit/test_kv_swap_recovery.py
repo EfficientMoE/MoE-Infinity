@@ -2,7 +2,11 @@ from typing import cast
 
 import torch
 
-from moe_infinity.engine.kv_transfer import CopyTicket, KVTransferState
+from moe_infinity.engine.kv_transfer import (
+    CopyTicket,
+    KVTransferState,
+    PinnedBufferPool,
+)
 from moe_infinity.serving.kv_cache import PagedKVCache
 from moe_infinity.serving.scheduler import Scheduler
 from moe_infinity.serving.sequence import (
@@ -126,6 +130,10 @@ class _FakeAsyncBackend:
 def _make_async_cache(
     num_blocks: int, backend: _FakeAsyncBackend
 ) -> PagedKVCache:
+    pool = PinnedBufferPool(
+        capacity_bytes=1 << 20,
+        allocator=lambda shape, dtype: torch.empty(shape, dtype=dtype),
+    )
     return PagedKVCache(
         num_blocks=num_blocks,
         block_size=4,
@@ -135,7 +143,7 @@ def _make_async_cache(
         dtype=torch.float16,
         device=torch.device("cpu"),
         transfer_backend=backend,
-        host_pool_bytes=1 << 20,
+        pinned_pool=pool,
     )
 
 

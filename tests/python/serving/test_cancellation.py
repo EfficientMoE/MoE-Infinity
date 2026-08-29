@@ -68,6 +68,7 @@ _ = _load_module(
 from moe_infinity.engine.kv_transfer import (
     CopyTicket,
     KVTransferState,
+    PinnedBufferPool,
 )
 from moe_infinity.serving.engine import ContinuousBatchingEngine
 from moe_infinity.serving.kv_cache import PagedKVCache
@@ -343,6 +344,10 @@ class _FakeAsyncBackend:
 
 
 def _make_async_cache(backend: _FakeAsyncBackend) -> PagedKVCache:
+    pool = PinnedBufferPool(
+        capacity_bytes=1 << 20,
+        allocator=lambda shape, dtype: torch.empty(shape, dtype=dtype),
+    )
     return PagedKVCache(
         num_blocks=2,
         block_size=4,
@@ -352,7 +357,7 @@ def _make_async_cache(backend: _FakeAsyncBackend) -> PagedKVCache:
         dtype=torch.float16,
         device=torch.device("cpu"),
         transfer_backend=backend,
-        host_pool_bytes=1 << 20,
+        pinned_pool=pool,
     )
 
 
