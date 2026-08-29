@@ -908,7 +908,61 @@ class ContinuousBatchingEngine:
             self.config[key] = value
             setattr(self.scheduler, key, value)
             applied[key] = value
+        if "adaptive_memory_enabled" in updates:
+            value = updates["adaptive_memory_enabled"]
+            if not isinstance(value, bool):
+                raise ValueError(
+                    "adaptive_memory_enabled must be a boolean value"
+                )
+            current = self.memory_controller is not None
+            if current and not value:
+                self.restore_static_memory_targets(transactional=True)
+            elif value and not current:
+                self.config["adaptive_memory_enabled"] = True
+                self.memory_controller = AdaptiveMemoryController(
+                    self._adaptive_config_from_values()
+                )
+                for device_id, (
+                    _,
+                    kv_blocks,
+                    kv_supported,
+                ) in self._adaptive_targets.items():
+                    self.memory_controller.observe(
+                        MemorySignals(
+                            device_id=device_id,
+                            step=self._adaptive_tick_counter,
+                            expert_misses=0,
+                            expert_accesses=0,
+                            expert_fetch_stall_ms=0.0,
+                            kv_used_blocks=0,
+                            kv_total_blocks=kv_blocks,
+                            kv_swap_bytes=0,
+                            kv_swap_stall_ms=0.0,
+                            kv_preemptions=0,
+                            free_gpu_bytes=self._free_gpu_bytes(device_id),
+                            kv_supported=kv_supported,
+                        )
+                    )
+            self.config["adaptive_memory_enabled"] = value
+            applied["adaptive_memory_enabled"] = value
         return applied
+
+    def restore_static_memory_targets(
+        self, *, transactional: bool = True
+    ) -> None:
+        if not transactional:
+            raise ValueError("static memory restoration must be transactional")
+        for device_id in sorted(self._adaptive_targets):
+            resizer = self._memory_resizers.get(device_id)
+            restore = getattr(resizer, "restore_static_targets", None)
+            if callable(restore):
+                restore()
+            elif self.memory_controller is not None:
+                self.memory_controller.disable_to_static(
+                    device_id, "static_restore_deferred"
+                )
+        self.memory_controller = None
+        self.config["adaptive_memory_enabled"] = False
 
     def _resolve_num_blocks(
         self,
