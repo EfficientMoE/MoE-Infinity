@@ -5,9 +5,13 @@
 
 #pragma once
 
+#include <string>
+#include <unordered_map>
+
 #include "aio/archer_tensor_handle.h"
 #include "model/model_topology.h"
 #include "parallel/expert_dispatcher.h"
+#include "prefetch/expert_residency.h"
 #include "prefetch/task_scheduler.h"
 
 class ArcherPrefetchHandle {
@@ -56,6 +60,7 @@ class ArcherPrefetchHandle {
           std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
                      std::vector<std::uint64_t>>>& topology);
   std::vector<std::tuple<std::uint64_t, bool, int>> GetTopologySnapshot();
+  std::unordered_map<std::string, std::int64_t> GetExpertPolicyStats() const;
   void UpdateTensorMap(std::uint64_t old_ptr, std::uint64_t new_ptr);
   bool IsTensorIndexInitialized() const;
   bool IsTensorOnDevice(const torch::Tensor& tensor) const;

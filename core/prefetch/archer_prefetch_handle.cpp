@@ -13,6 +13,7 @@
 #include "common/pytorch.h"
 #include "common/time.h"
 #include "memory/memory_pool.h"
+#include "prefetch/expert_residency.h"
 #include "task_scheduler.h"
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
@@ -31,6 +32,7 @@ ArcherPrefetchHandle::ArcherPrefetchHandle(const std::string& prefix,
       std::make_unique<ArcherTensorHandle>(prefix, num_io_threads);
   kTopologyHandle = std::make_unique<ArcherTopologyHandle>();
   kTaskPool = std::make_unique<ArcherTaskPool>();
+  InitExpertResidency();
   kDeviceMemoryPool = std::make_unique<DeviceMemoryPool>();
   kHostMemoryPool = std::make_unique<HostMemoryPool>();
   kDeviceMemoryPool->SetMemoryRatio(device_memory_ratio);
@@ -398,6 +400,7 @@ void ArcherPrefetchHandle::SetTopology(
         std::tuple<std::string, std::vector<std::vector<TensorID>>>>&
         topology) {
   kTopologyHandle->InitializeTopology(topology);
+  ConfigureExpertResidencyCapacityFromTopology();
 }
 
 void ArcherPrefetchHandle::SetTopologyV2(
@@ -405,11 +408,20 @@ void ArcherPrefetchHandle::SetTopologyV2(
         std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
                    std::vector<std::uint64_t>>>& topology) {
   kTopologyHandle->InitializeTopologyV2(topology);
+  ConfigureExpertResidencyCapacityFromTopology();
 }
 
 std::vector<std::tuple<std::uint64_t, bool, int>>
 ArcherPrefetchHandle::GetTopologySnapshot() {
   return kTopologyHandle->GetTopologySnapshot();
+}
+
+std::unordered_map<std::string, std::int64_t>
+ArcherPrefetchHandle::GetExpertPolicyStats() const {
+  if (kExpertResidencyManager == nullptr) {
+    return {};
+  }
+  return kExpertResidencyManager->Snapshot();
 }
 
 bool ArcherPrefetchHandle::IsTensorOffloaded(const std::uint32_t tensor_id) {

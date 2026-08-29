@@ -75,6 +75,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                             std::vector<std::uint64_t>>>&)) &
                ArcherPrefetchHandle::SetTopologyV2)
       .def("get_topology_snapshot", &ArcherPrefetchHandle::GetTopologySnapshot)
+      .def("get_expert_policy_stats",
+           &ArcherPrefetchHandle::GetExpertPolicyStats)
       .def("update_tensor_map",
            (void(ArcherPrefetchHandle::*)(std::uint64_t, std::uint64_t)) &
                ArcherPrefetchHandle::UpdateTensorMap)

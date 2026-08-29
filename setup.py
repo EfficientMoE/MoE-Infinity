@@ -183,6 +183,7 @@ _STORE_SOURCES = [
     "core/model/moe.cpp",
     # prefetch
     "core/prefetch/archer_prefetch_handle.cpp",
+    "core/prefetch/expert_residency.cpp",
     "core/prefetch/task_scheduler.cpp",
     "core/prefetch/task_thread.cpp",
     # memory

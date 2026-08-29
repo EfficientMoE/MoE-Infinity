@@ -40,3 +40,8 @@ find_package(OpenMP REQUIRED)
 
 add_subdirectory(core)
 add_subdirectory(extensions)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_subdirectory(tests/cpp/unit/prefetch)
+endif()
