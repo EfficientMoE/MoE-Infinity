@@ -28,6 +28,7 @@ from moe_infinity.serving.kv_cache import PagedKVCache
 from moe_infinity.serving.memory_resize import (
     ResizeReceipt,
     ServingMemoryResizer,
+    TransactionalServingMemoryResizer,
 )
 from moe_infinity.serving.scheduler import Scheduler
 from moe_infinity.serving.sequence import (
@@ -317,3 +318,34 @@ def test_serving_first_replan_failure_restores_complete_old_bundle(
     assert cache._fi_prefill.plan_calls[-1].max_page_index < 8
     assert cache._fi_decode.plan_calls[-1].max_page_index < 8
     assert receipt.admissions_paused is False
+
+
+def test_transactional_resizer_quiesces_and_publishes_effective_targets() -> (
+    None
+):
+    receipt = completed_receipt(device_id=0)
+    scheduler = Mock(
+        quiesce_for_kv_resize=Mock(return_value=receipt),
+        restore_after_kv_resize=Mock(),
+    )
+    expert = Mock(resize_cache=Mock(return_value={"resident_bytes": 512}))
+    kv = Mock(num_blocks=4, resize_num_blocks=Mock())
+    resizer = TransactionalServingMemoryResizer(
+        device_id=0,
+        scheduler=scheduler,
+        expert_cache=expert,
+        kv_cache=kv,
+        reserve_probe=lambda _: 2**40,
+        free_reserve_bytes=128,
+    )
+    result = resizer.apply(
+        0,
+        MemoryTargets(0, 512, 8, ResizeDirection.EXPERT_TO_KV, "kv_pressure"),
+        current_expert_bytes=1024,
+        current_kv_blocks=4,
+        kv_block_bytes=64,
+    )
+    assert result.outcome is ResizeOutcome.COMMITTED
+    expert.resize_cache.assert_called_once_with(0, 512)
+    kv.resize_num_blocks.assert_called_once_with(8, receipt)
+    scheduler.restore_after_kv_resize.assert_called_once_with(receipt)

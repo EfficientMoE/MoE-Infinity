@@ -277,4 +277,207 @@ class _ShrinkToDonor:
     """Sentinel marking a committed ``shrink_to`` fallback reservation."""
 
 
-__all__ = ["ResizeReceipt", "ServingMemoryResizer"]
+class TransactionalServingMemoryResizer:
+    """Quiesce-aware serving adapter used by the live controller."""
+
+    def __init__(
+        self,
+        *,
+        device_id: int,
+        scheduler: Any,
+        expert_cache: Any,
+        kv_cache: Any,
+        reserve_probe: Callable[[int], int],
+        free_reserve_bytes: int,
+        static_expert_bytes: int | None = None,
+        static_kv_blocks: int | None = None,
+    ) -> None:
+        self.device_id = device_id
+        self.scheduler = scheduler
+        self.expert_cache = expert_cache
+        self.kv_cache = kv_cache
+        self.reserve_probe = reserve_probe
+        self.free_reserve_bytes = free_reserve_bytes
+        self.static_expert_bytes = static_expert_bytes
+        self.static_kv_blocks = static_kv_blocks
+        self._last_expert_bytes = static_expert_bytes or 0
+        self._last_kv_blocks = static_kv_blocks or int(
+            getattr(kv_cache, "num_blocks", 0)
+        )
+
+    def apply(
+        self,
+        device_id: int,
+        targets: MemoryTargets,
+        *,
+        current_expert_bytes: int,
+        current_kv_blocks: int,
+        kv_block_bytes: int,
+    ) -> ResizeResult:
+        if device_id != self.device_id or targets.device_id != device_id:
+            raise ValueError("resize device_id does not match adapter")
+        receipt = self.scheduler.quiesce_for_kv_resize()
+        try:
+            if targets.direction is ResizeDirection.EXPERT_TO_KV:
+                result = self._expert_to_kv_transaction(
+                    targets,
+                    receipt,
+                    current_expert_bytes=current_expert_bytes,
+                    current_kv_blocks=current_kv_blocks,
+                    kv_block_bytes=kv_block_bytes,
+                )
+            elif targets.direction is ResizeDirection.KV_TO_EXPERT:
+                result = self._kv_to_expert_transaction(
+                    targets,
+                    receipt,
+                    current_expert_bytes=current_expert_bytes,
+                    current_kv_blocks=current_kv_blocks,
+                )
+            else:
+                result = ResizeResult(
+                    device_id,
+                    ResizeOutcome.REJECTED,
+                    current_expert_bytes,
+                    current_kv_blocks,
+                    targets.reason,
+                    targets.kv_supported,
+                )
+            if result.committed:
+                self._last_expert_bytes = result.expert_bytes
+                self._last_kv_blocks = result.kv_blocks
+            return result
+        finally:
+            self.scheduler.restore_after_kv_resize(receipt)
+
+    def restore_static_targets(self) -> ResizeResult:
+        if self.static_expert_bytes is None or self.static_kv_blocks is None:
+            raise RuntimeError("static memory targets are unavailable")
+        direction = (
+            ResizeDirection.EXPERT_TO_KV
+            if self.static_kv_blocks > self._last_kv_blocks
+            else ResizeDirection.KV_TO_EXPERT
+        )
+        return self.apply(
+            self.device_id,
+            MemoryTargets(
+                self.device_id,
+                self.static_expert_bytes,
+                self.static_kv_blocks,
+                direction,
+                "static_restore",
+            ),
+            current_expert_bytes=self._last_expert_bytes,
+            current_kv_blocks=self._last_kv_blocks,
+            kv_block_bytes=1,
+        )
+
+    def _resize_experts(self, target_bytes: int) -> int:
+        result = self.expert_cache.resize_cache(self.device_id, target_bytes)
+        if isinstance(result, dict):
+            return int(result.get("resident_bytes", target_bytes))
+        return target_bytes
+
+    def _expert_to_kv_transaction(
+        self,
+        targets: MemoryTargets,
+        receipt: ResizeReceipt,
+        *,
+        current_expert_bytes: int,
+        current_kv_blocks: int,
+        kv_block_bytes: int,
+    ) -> ResizeResult:
+        try:
+            expert_bytes = self._resize_experts(targets.expert_bytes)
+        except Exception as error:
+            return ResizeResult(
+                self.device_id,
+                ResizeOutcome.REJECTED,
+                current_expert_bytes,
+                current_kv_blocks,
+                str(error),
+                targets.kv_supported,
+            )
+        growth = max(0, targets.kv_blocks - current_kv_blocks) * kv_block_bytes
+        if (
+            self.reserve_probe(self.device_id)
+            < self.free_reserve_bytes + growth
+        ):
+            return ResizeResult(
+                self.device_id,
+                ResizeOutcome.PARTIAL_DONOR_COMMITTED,
+                expert_bytes,
+                current_kv_blocks,
+                "insufficient free memory after expert shrink",
+                targets.kv_supported,
+            )
+        try:
+            self.kv_cache.resize_num_blocks(targets.kv_blocks, receipt)
+        except Exception as error:
+            return ResizeResult(
+                self.device_id,
+                ResizeOutcome.PARTIAL_DONOR_COMMITTED,
+                expert_bytes,
+                current_kv_blocks,
+                str(error),
+                targets.kv_supported,
+            )
+        return ResizeResult(
+            self.device_id,
+            ResizeOutcome.COMMITTED,
+            expert_bytes,
+            targets.kv_blocks,
+            targets.reason,
+            targets.kv_supported,
+        )
+
+    def _kv_to_expert_transaction(
+        self,
+        targets: MemoryTargets,
+        receipt: ResizeReceipt,
+        *,
+        current_expert_bytes: int,
+        current_kv_blocks: int,
+    ) -> ResizeResult:
+        try:
+            self.kv_cache.resize_num_blocks(targets.kv_blocks, receipt)
+        except Exception as error:
+            return ResizeResult(
+                self.device_id,
+                ResizeOutcome.ROLLED_BACK,
+                current_expert_bytes,
+                current_kv_blocks,
+                str(error),
+                targets.kv_supported,
+            )
+        try:
+            expert_bytes = self._resize_experts(targets.expert_bytes)
+        except Exception as error:
+            rollback = ResizeReceipt(
+                device_id=receipt.device_id,
+                completion_events=receipt.completion_events,
+                admissions_paused=True,
+            )
+            self.kv_cache.resize_num_blocks(current_kv_blocks, rollback)
+            return ResizeResult(
+                self.device_id,
+                ResizeOutcome.ROLLED_BACK,
+                current_expert_bytes,
+                current_kv_blocks,
+                str(error),
+                targets.kv_supported,
+            )
+        return ResizeResult(
+            self.device_id,
+            ResizeOutcome.COMMITTED,
+            expert_bytes,
+            targets.kv_blocks,
+            targets.reason,
+            targets.kv_supported,
+        )
+
+
+__all__ = [
+    "ResizeReceipt",
+    "ServingMemoryResizer",
+    "TransactionalServingMemoryResizer",
+]
