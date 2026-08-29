@@ -61,6 +61,13 @@ struct ResidencyVariant {
   std::int64_t workspace_bytes = 0;
 };
 
+struct ExpertExecutionDescriptor {
+  ResidencyVariantKey key;
+  std::uint8_t execution_kind = 0;
+  std::vector<TensorID> tensor_ids;
+  std::vector<std::string> tensor_roles;
+};
+
 enum class ResidencyState : std::uint8_t {
   HOST_READY = 0,
   ACTIVE = 1,
@@ -148,6 +155,8 @@ class ExpertResidencyManager {
   bool AbortAdmission(const ResidencyTicket& ticket);
 
   void RegisterVariant(const ResidencyVariant& variant);
+  std::optional<ResidencyVariant> RegisteredVariant(
+      const ResidencyVariantKey& key) const;
   ResidencyTicket BeginAdmission(const ResidencyVariant& incoming, int gpu_id,
                                  ExpertPhase phase, AdmissionMode mode,
                                  AdmissionSource source);

@@ -198,6 +198,17 @@ void ExpertResidencyManager::RegisterVariant(const ResidencyVariant& variant) {
   }
 }
 
+std::optional<ResidencyVariant> ExpertResidencyManager::RegisteredVariant(
+    const ResidencyVariantKey& key) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto found = std::find_if(
+      registered_variants_.begin(), registered_variants_.end(),
+      [&key](const ResidencyVariant& variant) { return variant.key == key; });
+  return found == registered_variants_.end()
+             ? std::nullopt
+             : std::optional<ResidencyVariant>(*found);
+}
+
 ResidencyTicket ExpertResidencyManager::BeginAdmission(const NodePtr& incoming,
                                                        int gpu_id,
                                                        ExpertPhase phase,
