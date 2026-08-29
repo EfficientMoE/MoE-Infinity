@@ -188,6 +188,7 @@ def _make_cpu_gate_runner(
     runner_device: torch.device | None = None,
     device: torch.device | None = None,
     capability_reason: str = "eligible",
+    max_graph_memory_bytes: int = 0,
 ) -> CudaGraphRunner:
     base = device or torch.device("cpu")
     storage_device = storage_device or base
@@ -208,6 +209,7 @@ def _make_cpu_gate_runner(
         enabled=enabled,
         batch_buckets=batch_buckets,
         context_buckets=context_buckets,
+        max_graph_memory_bytes=max_graph_memory_bytes,
     )
     runner._cuda_ops = _FakeCudaOps(available=True)
     return runner
@@ -306,6 +308,11 @@ def test_disabled_by_default_and_environment_kill_switch(monkeypatch) -> None:
     assert (
         runner.check_eligibility(_make_decode_batch()).reason == "kill_switch"
     )
+
+
+def test_negative_graph_memory_limit_is_rejected() -> None:
+    with pytest.raises(ValueError, match="max_graph_memory_bytes"):
+        _make_cpu_gate_runner(max_graph_memory_bytes=-1)
 
 
 @pytest.mark.parametrize(

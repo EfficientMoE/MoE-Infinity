@@ -139,6 +139,8 @@ class CudaGraphRunner:
             )
         if warmup_iters < 1:
             raise ValueError("warmup_iters must be at least 1")
+        if max_graph_memory_bytes < 0:
+            raise ValueError("max_graph_memory_bytes must be non-negative")
         self.warmup_iters = warmup_iters
         self.max_graph_memory_bytes = max_graph_memory_bytes
 
