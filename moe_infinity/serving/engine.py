@@ -204,6 +204,7 @@ class ContinuousBatchingEngine:
             transfer_backend=backend,
             pinned_pool=cast(Optional[PinnedBufferPool], pool),
             host_pool_bytes=swap_settings.kv_swap_host_memory_bytes,
+            max_inflight_bytes=swap_settings.kv_swap_max_inflight_bytes,
             checksum=swap_settings.kv_swap_checksum,
         )
         self.scheduler = Scheduler(
@@ -774,6 +775,9 @@ class ContinuousBatchingEngine:
         for sequence in self._sequences.values():
             status_counts[sequence.status.value] += 1
 
+        kv_swap = dict(self.kv_cache.get_swap_stats())
+        kv_swap["mode"] = self._kv_swap_mode
+        kv_swap["fallback_reason"] = self._kv_swap_fallback_reason
         return {
             "pending_requests": len(self._pending_request_ids()),
             "completed_requests": len(self._completed_request_ids),
@@ -784,6 +788,7 @@ class ContinuousBatchingEngine:
             "kv_cache_free_blocks": self.kv_cache.block_allocator.num_free_blocks,
             "sequence_status_counts": status_counts,
             "memory": self.memory_manager.report(),
+            "kv_swap": kv_swap,
         }
 
     def get_config(self) -> dict[str, object]:

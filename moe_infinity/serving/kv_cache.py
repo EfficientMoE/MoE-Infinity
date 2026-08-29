@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import heapq
+import logging
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol, cast
@@ -27,6 +29,24 @@ from moe_infinity.engine.kv_transfer import (
 from moe_infinity.runtime import flashinfer_utils
 
 _BLOCK_DIM = 1
+_logger = logging.getLogger(__name__)
+
+
+def _new_swap_counters() -> dict[str, int | float]:
+    return {
+        "swap_out_started_total": 0,
+        "swap_out_completed_total": 0,
+        "swap_out_failed_total": 0,
+        "swap_in_started_total": 0,
+        "swap_in_completed_total": 0,
+        "swap_in_failed_total": 0,
+        "cancelled_total": 0,
+        "checksum_failures_total": 0,
+        "d2h_bytes_total": 0,
+        "h2d_bytes_total": 0,
+        "d2h_duration_ms_sum": 0.0,
+        "h2d_duration_ms_sum": 0.0,
+    }
 
 
 def _contiguous_ascending(values: list[int]) -> bool:
@@ -241,6 +261,7 @@ class PagedKVCache:
     transfer_backend: KVTransferBackend | None = None
     pinned_pool: PinnedBufferPool | None = None
     host_pool_bytes: int = 0
+    max_inflight_bytes: int = 0
     host_pool_factory: Callable[[int], PinnedBufferPool] | None = None
     checksum: bool = False
     block_allocator: BlockAllocator = field(init=False)
@@ -266,6 +287,10 @@ class PagedKVCache:
         init=False, default=None
     )
     _cp_kv_manager: CPAwareKVManager | None = field(init=False, default=None)
+    _swap_counters: dict[str, int | float] = field(
+        init=False, default_factory=_new_swap_counters
+    )
+    _inflight_backpressure_total: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         if self.num_layers <= 0:
@@ -692,6 +717,7 @@ class PagedKVCache:
         record = self._kv_records[seq_id]
         block_table = self._sequence_tables[seq_id]
         block_ids = reservation.block_ids[key]
+        self._swap_counters["swap_out_started_total"] += 1
 
         if not self._backend.asynchronous:
             # Sync D2H: blocking pageable clone, immediate completion.
@@ -712,6 +738,10 @@ class PagedKVCache:
             record.state = KVTransferState.HOST_RESIDENT
             record.active_block_ids = list(block_ids)
             record.num_tokens = block_table.num_computed_tokens()
+            self._swap_counters["swap_out_completed_total"] += 1
+            self._swap_counters["d2h_bytes_total"] += (
+                record.metadata.nbytes if record.metadata is not None else 0
+            )
             return
 
         # Async D2H: mark EVICTING, submit against pinned lease.
@@ -732,6 +762,7 @@ class PagedKVCache:
             record.host_lease = None
             record.state = KVTransferState.GPU_RESIDENT
             record.last_error = f"{type(exc).__name__}: {exc}"
+            self._record_failure("out", record)
             return
         record.host_lease = lease
         record.pageable_buffer = None
@@ -819,6 +850,7 @@ class PagedKVCache:
         record = self._kv_records[seq_id]
         block_table = self._sequence_tables[seq_id]
         restored = reservation.block_ids[key]
+        self._swap_counters["swap_in_started_total"] += 1
 
         if not self._backend.asynchronous:
             assert record.pageable_buffer is not None
@@ -847,6 +879,10 @@ class PagedKVCache:
             record.pageable_buffer.release()
             record.pageable_buffer = None
             record.state = KVTransferState.GPU_RESIDENT
+            self._swap_counters["swap_in_completed_total"] += 1
+            self._swap_counters["h2d_bytes_total"] += (
+                record.metadata.nbytes if record.metadata is not None else 0
+            )
             return
 
         # Async H2D: validate metadata, submit, publish only after retirement.
@@ -869,6 +905,9 @@ class PagedKVCache:
             record.restoring_block_ids = []
             record.state = KVTransferState.FAILED
             record.last_error = f"{type(exc).__name__}: {exc}"
+            if "checksum" in str(exc).lower():
+                self._swap_counters["checksum_failures_total"] += 1
+            self._record_failure("in", record)
             return
         try:
             ticket = self._backend.submit_h2d(
@@ -882,6 +921,7 @@ class PagedKVCache:
             record.restoring_block_ids = []
             record.state = KVTransferState.HOST_RESIDENT
             record.last_error = f"{type(exc).__name__}: {exc}"
+            self._record_failure("in", record)
             return
         record.ticket = ticket
         record.restoring_block_ids = list(restored)
@@ -963,6 +1003,7 @@ class PagedKVCache:
     ) -> KVTransferCompletion:
         # D2H complete: release GPU blocks, publish HOST_RESIDENT.
         block_table = self._sequence_tables.get(seq_id)
+        ticket = record.ticket
         block_ids = record.active_block_ids
         if block_ids:
             self.block_allocator.free(block_ids)
@@ -972,6 +1013,7 @@ class PagedKVCache:
         record.active_block_ids = []
         record.state = KVTransferState.HOST_RESIDENT
         nbytes = record.host_lease.nbytes if record.host_lease else 0
+        self._record_completion("out", ticket, nbytes)
         return KVTransferCompletion(
             seq_id=seq_id,
             generation=record.key.generation,
@@ -987,6 +1029,7 @@ class PagedKVCache:
     ) -> KVTransferCompletion:
         # H2D complete: publish block table, release host lease.
         block_table = self._sequence_tables.get(seq_id)
+        ticket = record.ticket
         restored = record.restoring_block_ids
         self.block_allocator.set_ownership(restored, BlockOwnership.ALLOCATED)
         if block_table is not None:
@@ -997,6 +1040,7 @@ class PagedKVCache:
         nbytes = record.host_lease.nbytes if record.host_lease else 0
         self._release_host_storage(record)
         record.state = KVTransferState.GPU_RESIDENT
+        self._record_completion("in", ticket, nbytes)
         return KVTransferCompletion(
             seq_id=seq_id,
             generation=record.key.generation,
@@ -1021,6 +1065,7 @@ class PagedKVCache:
         record.ticket = None
         self._release_host_storage(record)
         record.state = KVTransferState.CANCELLED
+        self._swap_counters["cancelled_total"] += 1
         _ = self._retiring_records.pop(tomb_key, None)
 
     # ------------------------------------------------------------------ #
@@ -1074,13 +1119,44 @@ class PagedKVCache:
         else:
             host_capacity = self._pinned_pool.capacity_bytes
             host_in_use = self._pinned_pool.in_use_bytes
-        return {
+        records = list(self._kv_records.values()) + [
+            entry.record for entry in self._retiring_records.values()
+        ]
+        inflight_records = [
+            record for record in records if record.ticket is not None
+        ]
+        pool_backpressure = (
+            self._pinned_pool.backpressure_total
+            if self._pinned_pool is not None
+            else 0
+        )
+        stats: dict[str, object] = {
+            "mode": "async" if self._backend.asynchronous else "sync",
+            "fallback_reason": None,
             "host_capacity_bytes": host_capacity,
             "host_in_use_bytes": host_in_use,
-            "num_records": len(self._kv_records),
-            "num_retiring": len(self._retiring_records),
-            "asynchronous": self._backend.asynchronous,
+            "host_peak_in_use_bytes": (
+                self._pinned_pool.peak_in_use_bytes
+                if self._pinned_pool is not None
+                else 0
+            ),
+            "inflight": len(inflight_records),
+            "inflight_bytes": sum(
+                record.ticket.nbytes
+                for record in inflight_records
+                if record.ticket is not None
+            ),
+            "retiring_records": len(self._retiring_records),
+            "host_resident": sum(
+                record.state is KVTransferState.HOST_RESIDENT
+                for record in self._kv_records.values()
+            ),
+            "backpressure_total": (
+                pool_backpressure + self._inflight_backpressure_total
+            ),
         }
+        stats.update(self._swap_counters)
+        return stats
 
     def shutdown(self, timeout_ms: float = 5000.0) -> None:
         # Synchronize and retire every unretired ticket.
@@ -1142,8 +1218,40 @@ class PagedKVCache:
         return math.ceil(record.num_tokens / self.block_size)
 
     def _within_inflight_cap(self, additional_nbytes: int) -> bool:
-        # In-flight byte cap is inactive unless a positive cap is configured.
-        return True
+        if not self._backend.asynchronous or self.max_inflight_bytes <= 0:
+            return True
+        current = int(self.get_swap_stats()["inflight_bytes"])
+        allowed = current + additional_nbytes <= self.max_inflight_bytes
+        if not allowed:
+            self._inflight_backpressure_total += 1
+        return allowed
+
+    def _record_failure(
+        self, direction: str, record: _SequenceKVRecord
+    ) -> None:
+        self._swap_counters[f"swap_{direction}_failed_total"] += 1
+        _logger.warning(
+            "KV swap %s failed state=%s generation=%d error=%s",
+            direction,
+            record.state.value,
+            record.key.generation,
+            record.last_error,
+        )
+
+    def _record_completion(
+        self,
+        direction: str,
+        ticket: CopyTicket | None,
+        nbytes: int,
+    ) -> None:
+        self._swap_counters[f"swap_{direction}_completed_total"] += 1
+        copy_direction = "d2h" if direction == "out" else "h2d"
+        self._swap_counters[f"{copy_direction}_bytes_total"] += nbytes
+        if ticket is not None:
+            elapsed_ms = (time.monotonic_ns() - ticket.submitted_ns) / 1_000_000
+            self._swap_counters[f"{copy_direction}_duration_ms_sum"] += (
+                elapsed_ms
+            )
 
     def _compute_attention(
         self,
