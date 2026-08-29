@@ -47,9 +47,11 @@ def _delay(stream: torch.cuda.Stream) -> None:
         sleep(5_000_000_000)
 
 
-def _prime_host_pool(cache: PagedKVCache, block_count: int) -> None:
+def _warm_transfer_path(cache: PagedKVCache, block_count: int) -> None:
     pool = cache._pinned_pool
+    backend = cache._backend
     assert pool is not None
+    assert isinstance(backend, CudaKVTransferBackend)
     lease = pool.acquire(
         (
             cache.num_layers,
@@ -62,6 +64,13 @@ def _prime_host_pool(cache: PagedKVCache, block_count: int) -> None:
         cache.dtype,
     )
     assert lease is not None
+    ticket = backend.submit_d2h(
+        cache.get_kv_cache_tensors(),
+        lease.tensor,
+        block_ids=list(range(block_count)),
+        block_dim=1,
+    )
+    assert ticket.retire(synchronize=True)
     pool.release(lease)
 
 
@@ -125,7 +134,7 @@ def test_async_submission_returns_before_transfer_event_completion(
 ) -> None:
     cache, backend = _cache()
     cache.allocate_sequence(1, num_tokens=8)
-    _prime_host_pool(cache, block_count=2)
+    _warm_transfer_path(cache, block_count=2)
     _delay_recorded_events(monkeypatch)
 
     assert cache.request_swap_out(1)
@@ -139,7 +148,7 @@ def test_async_submission_returns_before_transfer_event_completion(
 def test_cancel_during_d2h_does_not_reuse_source_blocks_early() -> None:
     cache, backend = _cache(num_blocks=2)
     cache.allocate_sequence(1, num_tokens=8)
-    _prime_host_pool(cache, block_count=2)
+    _warm_transfer_path(cache, block_count=2)
     _delay(backend._transfer_stream)
     assert cache.request_swap_out(1)
     ticket = cache._kv_records[1].ticket
@@ -209,7 +218,7 @@ def test_ticket_retire_keeps_staging_alive_until_event_completion(
 ) -> None:
     cache, backend = _cache(num_blocks=2)
     cache.allocate_sequence(1, num_tokens=8)
-    _prime_host_pool(cache, block_count=2)
+    _warm_transfer_path(cache, block_count=2)
     _delay_recorded_events(monkeypatch)
     assert cache.request_swap_out(1)
     ticket = cache._kv_records[1].ticket
