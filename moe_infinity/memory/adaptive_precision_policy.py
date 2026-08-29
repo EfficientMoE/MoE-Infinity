@@ -50,6 +50,12 @@ class PrecisionPlan:
     evictions: Tuple[ExpertKey, ...]
     accounted_bytes: int
 
+    def as_native_targets(self) -> list[tuple[int, int, str, int]]:
+        return [
+            (key.layer_id, key.expert_id, fmt.value, 0)
+            for key, fmt in sorted(self.targets.items())
+        ]
+
 
 @dataclass(frozen=True)
 class SimulationResult:
@@ -101,6 +107,10 @@ class AdaptivePrecisionPolicy:
         self.hotness: Dict[ExpertKey, Fraction] = {}
         self.epoch = 0
         self.cooldown_until = 0
+
+    @property
+    def epoch_due(self) -> bool:
+        return True
 
     def observe(self, counts: Mapping[ExpertKey, int], tokens: int) -> None:
         divisor = max(int(tokens), 1)
