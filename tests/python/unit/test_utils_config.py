@@ -89,3 +89,31 @@ def test_native_engine_autocorrects_kv_cache_ratio(monkeypatch):
             kv_cache_memory_ratio=0.0,
         )
     assert config.kv_cache_memory_ratio == pytest.approx(0.15)
+
+
+def test_adaptive_defaults_disabled_and_bounded(monkeypatch) -> None:
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    config = ArcherConfig(offload_path="/tmp", use_native_engine=False)
+    assert config.adaptive_memory_enabled is False
+    assert config.adaptive_memory_min_expert_cache_bytes > 0
+    assert config.adaptive_memory_min_kv_cache_blocks > 0
+    assert config.adaptive_memory_free_reserve_bytes > 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("adaptive_memory_interval_steps", 0),
+        ("adaptive_memory_ewma_alpha", 0.0),
+        ("adaptive_memory_hysteresis_ratio", 1.1),
+        ("adaptive_memory_failure_limit", 0),
+    ],
+)
+def test_adaptive_bounds_are_validated(monkeypatch, field, value) -> None:
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.raises(ValueError, match="adaptive_memory"):
+        ArcherConfig(
+            offload_path="/tmp",
+            use_native_engine=False,
+            **{field: value},
+        )
