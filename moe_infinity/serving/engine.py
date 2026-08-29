@@ -17,6 +17,7 @@ from moe_infinity.memory.adaptive_memory import (
 from .batch import BatchBuilder, BatchMetadata, split_prefill_decode_batch
 from .kv_cache import PagedKVCache
 from .memory_manager import MemoryManager
+from .memory_resize import TransactionalServingMemoryResizer
 from .model_runner import ModelRunner
 from .sampler import Sampler
 from .scheduler import Scheduler
@@ -226,6 +227,24 @@ class ContinuousBatchingEngine:
                         kv_supported=kv_supported,
                     )
                 )
+        expert_cache = getattr(self.engine, "expert_prefetcher", None)
+        if self.memory_controller is not None and callable(
+            getattr(expert_cache, "resize_cache", None)
+        ):
+            device_id = int(self.device.index or 0)
+            expert_bytes, kv_blocks, _ = self._adaptive_targets[device_id]
+            self._memory_resizers[device_id] = (
+                TransactionalServingMemoryResizer(
+                    device_id=device_id,
+                    scheduler=self.scheduler,
+                    expert_cache=expert_cache,
+                    kv_cache=self.kv_cache,
+                    reserve_probe=self._free_gpu_bytes,
+                    free_reserve_bytes=self._adaptive_config_from_values().free_memory_reserve_bytes,
+                    static_expert_bytes=expert_bytes,
+                    static_kv_blocks=kv_blocks,
+                )
+            )
 
     def add_request(
         self,
