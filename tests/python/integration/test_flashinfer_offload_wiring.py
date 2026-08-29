@@ -179,7 +179,10 @@ def _native_moe() -> Any:
     return moe
 
 
-def test_native_kv_offload_stores_paged_backend_tensors() -> None:
+def test_native_kv_offload_stores_paged_backend_tensors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     moe = _native_moe()
     engine_config = _native_engine_config(enable_kv_cache_offload=True)
 

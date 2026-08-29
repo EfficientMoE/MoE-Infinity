@@ -171,13 +171,5 @@ class KVCacheOffloadCoordinator:
                 raise RuntimeError("KV copy ticket did not retire")
         return sum(ticket.nbytes for ticket in tickets)
 
-    def _select_block_tensors(self, block_ids: list[int]) -> KVTensors:
-        if self._kv_tensors is None:
-            raise RuntimeError("KV tensors are not initialized")
-        if isinstance(self._kv_tensors, tuple):
-            k_cache, v_cache = self._kv_tensors
-            return k_cache[block_ids, ...], v_cache[block_ids, ...]
-        return self._kv_tensors[:, block_ids, ...]
-
 
 __all__ = ["KVCacheOffloadCoordinator"]
