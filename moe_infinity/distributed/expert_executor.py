@@ -11,6 +11,10 @@ import torch
 import torch.distributed as dist
 import torch.distributed.rpc as rpc
 
+from moe_infinity.memory.expert_policy import (
+    ExpertPhase,
+    current_expert_phase,
+)
 from moe_infinity.utils import ArcherConfig
 
 try:
@@ -116,9 +120,13 @@ class DistributedExpertExecutor:
     def set_prefetcher(self, prefetcher):
         self.prefetcher = prefetcher
 
-    def trigger_speculative_prefetch(self, layer_id, router_logits):
+    def trigger_speculative_prefetch(
+        self, layer_id, router_logits, phase=ExpertPhase.MIXED
+    ):
         if self.prefetcher is not None:
-            self.prefetcher.speculative_prefetch(layer_id, router_logits)
+            self.prefetcher.speculative_prefetch(
+                layer_id, router_logits, phase=phase
+            )
 
     def _maybe_route_ahead_prefetch(
         self, layer_id, router_mask, num_expert, prefetcher=None
@@ -168,6 +176,7 @@ class DistributedExpertExecutor:
                 layer_id,
                 expert_ids=union_expert_ids,
                 prefetch_layer_id=layer_id,
+                phase=ExpertPhase.DECODE,
             )
             fired = True
         if stats is not None:
@@ -215,6 +224,8 @@ class DistributedExpertExecutor:
                 )
                 expected_wait_cnt = len(expert_list)
 
+        phase = current_expert_phase()
+
         self.expert_dispatcher.set_inputs(
             hidden_states, router_mask.bool(), router_weights
         )
@@ -238,7 +249,7 @@ class DistributedExpertExecutor:
                 for expert_id in expert_list:
                     gpu_id = expert_id % total_gpus
                     self.expert_dispatcher.enqueue_expert(
-                        layer_id, expert_id, gpu_id, False
+                        layer_id, expert_id, gpu_id, False, int(phase)
                     )
         self.expert_dispatcher.notify_fetch_start()
 
@@ -255,7 +266,7 @@ class DistributedExpertExecutor:
             and prefetcher is not None
             and router_logits is not None
         ):
-            self.trigger_speculative_prefetch(layer_id, router_logits)
+            self.trigger_speculative_prefetch(layer_id, router_logits, phase)
             pending_router_logits = None
         else:
             pending_router_logits = router_logits
@@ -265,6 +276,7 @@ class DistributedExpertExecutor:
             layer_id,
             expert_list,
             pending_router_logits,
+            phase,
         )
 
     def wait_dispatch_local(self):
@@ -281,12 +293,16 @@ class DistributedExpertExecutor:
 
         pending = getattr(self, "_pending_prefetch", None)
         if pending is not None:
-            prefetcher, layer_id, expert_list, router_logits = pending
+            prefetcher, layer_id, expert_list, router_logits, phase = pending
             self._pending_prefetch = None
             if prefetcher is not None:
-                prefetcher.correct_prefetch(layer_id + 1, expert_list)
+                prefetcher.correct_prefetch(
+                    layer_id + 1, expert_list, phase=phase
+                )
             if router_logits is not None:
-                self.trigger_speculative_prefetch(layer_id, router_logits)
+                self.trigger_speculative_prefetch(
+                    layer_id, router_logits, phase
+                )
 
         return result
 
@@ -302,6 +318,8 @@ class DistributedExpertExecutor:
         expert_list = (
             np.arange(num_expert).astype(int)[expert_count > 0].tolist()
         )
+
+        phase = current_expert_phase()
 
         device_list = self.device_map_manager.get_target_device(expert_list)
         visited_ranks = set()
@@ -339,13 +357,20 @@ class DistributedExpertExecutor:
             rank, gpu_id, expert_id = device_meta
             if rank == dist.get_rank():
                 self.expert_dispatcher.enqueue_expert(
-                    layer_id, expert_id, gpu_id, False
+                    layer_id, expert_id, gpu_id, False, int(phase)
                 )
             else:
                 future = rpc.rpc_async(
                     f"worker_{rank}",
                     _call_expert_dispatcher,
-                    args=("enqueue_expert", layer_id, expert_id, gpu_id, True),
+                    args=(
+                        "enqueue_expert",
+                        layer_id,
+                        expert_id,
+                        gpu_id,
+                        True,
+                        int(phase),
+                    ),
                 )
                 futures.append(future)
 
