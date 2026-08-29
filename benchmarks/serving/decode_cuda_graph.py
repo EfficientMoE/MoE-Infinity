@@ -280,14 +280,53 @@ def _run_model(args: argparse.Namespace) -> dict[str, object]:
     capability_fn = getattr(runtime, "decode_graph_capability", None)
     capability = capability_fn() if callable(capability_fn) else None
     reason = getattr(capability, "reason", "missing_capability")
+    points: list[dict[str, object]] = []
+    for batch_size in sorted(set(args.batch_sizes)):
+        for context_size in sorted(set(args.context_sizes)):
+            input_ids = torch.ones(
+                (batch_size, context_size),
+                dtype=torch.long,
+                device="cuda",
+            )
+
+            def eager_once() -> torch.Tensor:
+                return runtime.generate(
+                    input_ids,
+                    max_new_tokens=1,
+                    do_sample=False,
+                )
+
+            for _ in range(args.warmup_iters):
+                _ = eager_once()
+            torch.cuda.synchronize()
+            eager_us = [
+                _time_cuda(eager_once)[0] for _ in range(args.measure_iters)
+            ]
+            points.append(
+                build_result(
+                    config={
+                        "mode": "model",
+                        "model": args.model,
+                        "batch_size": batch_size,
+                        "context_size": context_size,
+                    },
+                    eager_us=eager_us,
+                    replay_us=[],
+                    graph_stats={
+                        "captures": 0,
+                        "replays": 0,
+                        "capability_reason": reason,
+                    },
+                    environment=_environment(),
+                    correctness={"comparison": "eager_only"},
+                )
+            )
     return {
         "schema_version": 1,
         "mode": "model",
         "model": args.model,
         "capability_reason": reason,
-        "measurements": {"eager_us": [], "replay_us": []},
-        "graph_stats": {"captures": 0, "replays": 0},
-        "environment": _environment(),
+        "results": points,
     }
 
 
