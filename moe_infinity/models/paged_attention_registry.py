@@ -108,6 +108,7 @@ class PagedLayerBinding:
     backend: LayerBoundPagedBackend
     class_fqn: str
     storage_owner_id: str
+    has_write_proof: bool = False
 
 
 @dataclass
@@ -185,6 +186,7 @@ class PagedAttentionLayerRegistry:
                     backend=proxy,
                     class_fqn=class_fqn,
                     storage_owner_id=storage.owner_id,
+                    has_write_proof=True,
                 )
             )
 

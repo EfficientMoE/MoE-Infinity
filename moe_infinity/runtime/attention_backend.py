@@ -695,6 +695,17 @@ class PagedAttentionBackend:
     def supports_dtype(self, dtype: torch.dtype) -> bool:
         return dtype in (torch.float16, torch.bfloat16, torch.float32)
 
+    def decode_graph_capability(self) -> "DecodeGraphCapability":
+        from moe_infinity.runtime.attention_types import DecodeGraphCapability
+
+        if self._use_flashinfer:
+            return DecodeGraphCapability(False, "flashinfer_plan_path")
+        if self.storage is None:
+            return DecodeGraphCapability(False, "kv_storage_mismatch")
+        return DecodeGraphCapability(
+            True, "eligible", storage_owner_id=self.storage.owner_id
+        )
+
     @staticmethod
     def _is_prefill(
         metadata: AttentionMetadata | RuntimeAttentionMetadata,

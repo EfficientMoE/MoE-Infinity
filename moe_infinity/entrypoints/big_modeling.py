@@ -314,6 +314,7 @@ class MoE:
             self._native_memory_coordinator = None
             self._native_kv_cache_manager = None
             self._native_attention_backend = None
+            self._native_paged_kv_storage = None
             self._native_transfer_scheduler = None
             self._native_scheduler = None
             self._native_generation_engine = None
@@ -544,6 +545,31 @@ class MoE:
             return PagedKVStorage(spec)
         except Exception:
             return None
+
+    def decode_graph_capability(self):
+        from moe_infinity.runtime.attention_types import DecodeGraphCapability
+
+        engine = getattr(self, "engine", None)
+        engine_capability_fn = getattr(engine, "decode_graph_capability", None)
+        if callable(engine_capability_fn):
+            engine_capability = engine_capability_fn()
+            if not engine_capability.safe:
+                return engine_capability
+
+        transfer_scheduler = getattr(self, "_native_transfer_scheduler", None)
+        if transfer_scheduler is not None:
+            return DecodeGraphCapability(False, "transfer_scheduler")
+
+        if getattr(self, "_native_kv_offload_coordinator", None) is not None:
+            return DecodeGraphCapability(False, "kv_offload")
+
+        storage = getattr(self, "_native_paged_kv_storage", None)
+        if storage is None:
+            return DecodeGraphCapability(False, "native_paged_required")
+
+        return DecodeGraphCapability(
+            True, "eligible", storage_owner_id=storage.owner_id
+        )
 
     def _resolve_native_input_device(self) -> torch.device:
         """Input device for the native forward (mirrors engine._resolve_device).

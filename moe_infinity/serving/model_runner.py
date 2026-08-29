@@ -35,11 +35,112 @@ class ModelRunner:
         model: object,
         engine: object,
         device: Optional[torch.device] = None,
+        *,
+        paged_kv_storage: object = None,
+        paged_attention_registry: object = None,
+        decode_graph_capability_provider: object = None,
     ) -> None:
         self.model = model
         self.engine = engine
         self.device = self._resolve_device(device)
         self.seq_id_list = []
+        self.paged_kv_storage = paged_kv_storage
+        self.paged_attention_registry = paged_attention_registry
+        self.decode_graph_capability_provider = decode_graph_capability_provider
+
+    def get_paged_kv_storage(self) -> object:
+        return self.paged_kv_storage
+
+    def decode_graph_capability(self) -> "DecodeGraphCapability":
+        from moe_infinity.runtime.attention_types import (
+            DecodeGraphCapability,
+            PagedLayerWriteProof,
+        )
+        from moe_infinity.runtime.paged_kv_storage import canonical_device
+
+        provider = self.decode_graph_capability_provider
+        if provider is None:
+            engine_capability_fn = getattr(
+                self.engine, "decode_graph_capability", None
+            )
+            if callable(engine_capability_fn):
+                provider = self.engine
+        if provider is None:
+            return DecodeGraphCapability(False, "missing_capability")
+
+        provider_capability = provider.decode_graph_capability()
+        if not provider_capability.safe:
+            return provider_capability
+
+        backend = self._get_attention_backend()
+        if backend is None:
+            return DecodeGraphCapability(False, "native_paged_required")
+
+        backend_capability_fn = getattr(
+            backend, "decode_graph_capability", None
+        )
+        if callable(backend_capability_fn):
+            backend_capability = backend_capability_fn()
+            if not backend_capability.safe:
+                return backend_capability
+
+        storage = self.paged_kv_storage
+        backend_storage = getattr(backend, "storage", None)
+        if storage is None or backend_storage is None:
+            return DecodeGraphCapability(False, "kv_storage_mismatch")
+        if storage is not backend_storage:
+            return DecodeGraphCapability(False, "kv_storage_mismatch")
+
+        kv_cache = getattr(self.engine, "kv_cache", None)
+        cache_storage = getattr(kv_cache, "storage", None)
+        if kv_cache is not None and cache_storage is not storage:
+            return DecodeGraphCapability(False, "kv_storage_mismatch")
+
+        storage_device = canonical_device(storage.spec.device)
+        if storage_device != canonical_device(self.device):
+            return DecodeGraphCapability(False, "kv_storage_mismatch")
+        backend_device = getattr(backend, "device", None)
+        if (
+            backend_device is not None
+            and canonical_device(backend_device) != storage_device
+        ):
+            return DecodeGraphCapability(False, "kv_storage_mismatch")
+
+        registry = self.paged_attention_registry
+        if registry is None:
+            return DecodeGraphCapability(False, "paged_class_unregistered")
+        registry_reason = getattr(registry, "reason", "eligible")
+        if registry_reason != "eligible":
+            return DecodeGraphCapability(False, registry_reason)
+        bindings = list(getattr(registry, "bindings", []))
+        if not bindings:
+            return DecodeGraphCapability(False, "paged_class_unregistered")
+
+        if any(
+            not getattr(binding, "has_write_proof", False)
+            for binding in bindings
+        ):
+            return DecodeGraphCapability(False, "layer_write_unproven")
+
+        proofs: list[PagedLayerWriteProof] = []
+        for binding in bindings:
+            proofs.append(
+                PagedLayerWriteProof(
+                    class_fqn=binding.class_fqn,
+                    layer_idx=binding.layer_idx,
+                    storage_owner_id=binding.storage_owner_id,
+                    writer="moe_infinity.kernel.paged_kv_write.paged_kv_write_",
+                    writes_before_attention=True,
+                    allocation_free=True,
+                )
+            )
+
+        return DecodeGraphCapability(
+            True,
+            "eligible",
+            storage_owner_id=storage.owner_id,
+            layer_write_proofs=tuple(proofs),
+        )
 
     def prepare_inputs(self, batch: BatchMetadata) -> dict[str, torch.Tensor]:
         num_seqs = len(batch.seq_ids)
