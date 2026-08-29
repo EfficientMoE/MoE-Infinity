@@ -7,7 +7,12 @@ from typing import Callable, Optional, Protocol, cast
 
 import torch
 
+from moe_infinity.models.paged_attention_registry import (
+    PagedAttentionLayerRegistry,
+)
+
 from .batch import BatchBuilder, BatchMetadata, split_prefill_decode_batch
+from .cuda_graph import CudaGraphRunner
 from .kv_cache import PagedKVCache
 from .memory_manager import MemoryManager
 from .model_runner import ModelRunner
@@ -119,6 +124,7 @@ class ContinuousBatchingEngine:
             head_dim=head_dim,
         )
 
+        backend_storage = self._resolve_backend_storage(engine)
         self.kv_cache = PagedKVCache(
             num_blocks=num_blocks,
             block_size=block_size,
@@ -127,6 +133,7 @@ class ContinuousBatchingEngine:
             head_dim=head_dim,
             dtype=self.dtype,
             device=self.device,
+            storage=backend_storage,
         )
         self.scheduler = Scheduler(
             self.kv_cache,
@@ -147,7 +154,46 @@ class ContinuousBatchingEngine:
                 "verify_expert_byte_deficit_cap"
             ),
         )
-        self.model_runner = ModelRunner(model, engine, device=self.device)
+        storage = self.kv_cache.storage
+        backend = backend_storage and self._resolve_attention_backend(engine)
+        if storage is None:
+            self.paged_attention_registry = PagedAttentionLayerRegistry.empty(
+                reason="native_paged_required"
+            )
+        else:
+            self.paged_attention_registry = (
+                PagedAttentionLayerRegistry.register(
+                    model=model, backend=backend, storage=storage
+                )
+            )
+        self.model_runner = ModelRunner(
+            model,
+            engine,
+            device=self.device,
+            paged_kv_storage=storage,
+            paged_attention_registry=self.paged_attention_registry,
+            decode_graph_capability_provider=getattr(
+                engine, "decode_graph_capability_provider", None
+            ),
+        )
+        self.cuda_graph_runner = CudaGraphRunner(
+            self.model_runner,
+            storage,
+            enabled=self._get_bool_config("enable_decode_cuda_graphs", False),
+            batch_buckets=self._get_int_tuple_config(
+                "decode_cuda_graph_batch_sizes", (1, 2, 4, 8, 16, 32)
+            ),
+            context_buckets=self._get_int_tuple_config(
+                "decode_cuda_graph_context_sizes",
+                (128, 256, 512, 1024, 2048, 4096),
+            ),
+            warmup_iters=self._get_int_config(
+                "decode_cuda_graph_warmup_iters", 2
+            ),
+            max_graph_memory_bytes=self._get_int_config(
+                "decode_cuda_graph_max_memory_bytes", 0
+            ),
+        )
         self.sampler = Sampler()
         self.batch_builder = BatchBuilder()
         self.speculative_draft = speculative_draft
@@ -738,7 +784,12 @@ class ContinuousBatchingEngine:
                 paged_classes = cast(list[object], maybe_paged_classes)
         uses_paged = bool(paged_classes)
 
-        if not uses_paged or not (has_prefill and has_decode):
+        if not (has_prefill and has_decode):
+            if has_decode and not has_prefill:
+                return self._execute_decode_batch(batch)
+            return self.model_runner.execute(batch)
+
+        if not uses_paged:
             return self.model_runner.execute(batch)
 
         split = split_prefill_decode_batch(batch)
@@ -747,8 +798,14 @@ class ContinuousBatchingEngine:
         if split.prefill_batch is not None:
             prefill_logits = self.model_runner.execute(split.prefill_batch)
         if split.decode_batch is not None:
-            decode_logits = self.model_runner.execute(split.decode_batch)
+            decode_logits = self._execute_decode_batch(split.decode_batch)
         return split.recombine_outputs(prefill_logits, decode_logits)
+
+    def _execute_decode_batch(self, batch: BatchMetadata) -> torch.Tensor:
+        graph_logits = self.cuda_graph_runner.try_execute(batch)
+        if graph_logits is not None:
+            return graph_logits
+        return self.model_runner.execute(batch)
 
     @staticmethod
     def _extract_last_token_logits(
@@ -940,6 +997,28 @@ class ContinuousBatchingEngine:
         return torch.device("cpu")
 
     @staticmethod
+    def _resolve_attention_backend(engine: object) -> object | None:
+        getter = getattr(engine, "get_attention_backend", None)
+        if callable(getter):
+            backend = getter()
+            if backend is not None:
+                return backend
+        for attr_name in (
+            "attention_backend",
+            "_attention_backend",
+            "_native_attention_backend",
+        ):
+            backend = getattr(engine, attr_name, None)
+            if backend is not None:
+                return backend
+        return None
+
+    @classmethod
+    def _resolve_backend_storage(cls, engine: object) -> object | None:
+        backend = cls._resolve_attention_backend(engine)
+        return getattr(backend, "storage", None)
+
+    @staticmethod
     def _resolve_model_memory_bytes(model: object) -> int:
         get_memory_footprint = getattr(model, "get_memory_footprint", None)
         if callable(get_memory_footprint):
@@ -1004,6 +1083,29 @@ class ContinuousBatchingEngine:
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{key} must be an integer value")
         return value
+
+    def _get_bool_config(self, key: str, default: bool) -> bool:
+        value = self.config.get(key, default)
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be a boolean value")
+        return value
+
+    def _get_int_tuple_config(
+        self, key: str, default: tuple[int, ...]
+    ) -> tuple[int, ...]:
+        if key not in self.config:
+            return default
+        value = self.config[key]
+        if isinstance(value, (str, bytes)) or not isinstance(
+            value, (list, tuple)
+        ):
+            raise ValueError(f"{key} must be a sequence of integers")
+        result: list[int] = []
+        for item in value:
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise ValueError(f"{key} must contain only integers")
+            result.append(item)
+        return tuple(result)
 
 
 __all__ = [
