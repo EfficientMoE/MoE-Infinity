@@ -4,6 +4,7 @@ import pickle
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any, Dict
 
 import pytest
@@ -133,11 +134,20 @@ def _run_worker(script: str, args: list, label: str) -> Dict[str, torch.Tensor]:
         f.write(script)
         script_path = f.name
     out_path = args[-1]
+    worker_env = os.environ.copy()
+    repository_root = str(Path(__file__).resolve().parents[3])
+    inherited_pythonpath = worker_env.get("PYTHONPATH")
+    worker_env["PYTHONPATH"] = (
+        repository_root
+        if not inherited_pythonpath
+        else os.pathsep.join((repository_root, inherited_pythonpath))
+    )
     try:
         proc = subprocess.Popen(
             [sys.executable, script_path] + args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=worker_env,
         )
         deadline = time.monotonic() + 3600
         while time.monotonic() < deadline:
