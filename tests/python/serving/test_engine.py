@@ -253,6 +253,19 @@ def test_stats_include_bounded_cuda_graph_and_memory_usage() -> None:
     assert memory["cuda_graph_total_bytes"] == 0
 
 
+def test_engine_forwards_explicit_decode_graph_capability_provider() -> None:
+    provider = object()
+
+    engine = ContinuousBatchingEngine(
+        model=MockModel(),
+        engine=MockOffloadEngine(),
+        config=_make_config(),
+        decode_graph_capability_provider=provider,
+    )
+
+    assert engine.model_runner.decode_graph_capability_provider is provider
+
+
 def test_engine_single_request_run_until_done() -> None:
     engine = _make_engine(tokenizer=MockTokenizer())
     callback_outputs: list[RequestOutput] = []
