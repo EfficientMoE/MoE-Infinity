@@ -39,4 +39,10 @@ endif()
 find_package(OpenMP REQUIRED)
 
 add_subdirectory(core)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_subdirectory(tests/cpp/unit/prefetch)
+endif()
+
 add_subdirectory(extensions)
