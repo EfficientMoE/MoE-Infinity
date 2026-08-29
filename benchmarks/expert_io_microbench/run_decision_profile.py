@@ -61,6 +61,20 @@ def build_model_config(args) -> dict:
     }
 
 
+def collect_routing_stats(model):
+    engine = getattr(model, "engine", None)
+    executor = getattr(engine, "expert_executor", None)
+    getter = getattr(executor, "get_gpu_routing_stats", None)
+    if getter is None:
+        return {
+            "route_batches": 0,
+            "route_failures": 0,
+            "fallback_count": 0,
+            "completion_events_retired": 0,
+        }
+    return {key: int(value) for key, value in getter().items()}
+
+
 def build_profile_payload(*, args, decode_step_times_ns, routing, pcie) -> dict:
     return {
         "schema_version": "gpu-routing-decision-profile-v1",
@@ -194,28 +208,23 @@ def main() -> int:
     use_width = max(link_width, link_width_after)
     use_gen = max(link_gen, link_gen_after)
 
-    out = {
-        "model": args.model,
-        "mode": args.mode,
-        "hardware_tag": args.hardware_tag,
-        "offload_dir": args.offload_dir,
-        "max_new_tokens": args.max_new_tokens,
-        "warmup_tokens": args.warmup_tokens,
-        "iters": args.iters,
-        "device_memory_ratio": args.device_memory_ratio,
-        "speculative_prefetch": args.speculative_prefetch,
-        "speculative_prefetch_overlap": args.speculative_prefetch_overlap,
-        "num_threads": args.num_threads,
-        "decode_step_times_ns": decode_step_times_ns,
-        "decode_step_total_ns": sum(decode_step_times_ns),
-        "decode_step_count": args.iters * args.max_new_tokens,
-        "pcie_link_width_observed": use_width,
-        "pcie_link_gen_observed": use_gen,
-        "pcie_link_width_pre": link_width,
-        "pcie_link_gen_pre": link_gen,
-        "pcie_link_width_post": link_width_after,
-        "pcie_link_gen_post": link_gen_after,
-    }
+    out = build_profile_payload(
+        args=args,
+        decode_step_times_ns=decode_step_times_ns,
+        routing=collect_routing_stats(m),
+        pcie={
+            "link_width_pre": link_width,
+            "link_gen_pre": link_gen,
+            "link_width_post": link_width_after,
+            "link_gen_post": link_gen_after,
+        },
+    )
+    out["model"] = args.model
+    out["mode"] = args.mode
+    out["hardware_tag"] = args.hardware_tag
+    out["offload_dir"] = args.offload_dir
+    out["pcie_link_width_observed"] = use_width
+    out["pcie_link_gen_observed"] = use_gen
     with out_path.open("w") as f:
         json.dump(out, f, indent=2)
         f.write("\n")
