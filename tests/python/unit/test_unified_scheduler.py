@@ -2,6 +2,8 @@ import threading
 import time
 from typing import Optional
 
+import pytest
+
 from moe_infinity.engine.transfer_types import (
     TransferPriority,
     TransferRequest,
@@ -24,6 +26,7 @@ def _request(
         priority=priority,
         source_device="cpu",
         target_device="cuda:0",
+        device_id=0,
         block_ids=[] if block_ids is None else block_ids,
     )
 
@@ -174,5 +177,82 @@ def test_metrics_tracked() -> None:
         assert metrics["EXPERT_FETCH"]["count"] == 1
         assert metrics["KV_SWAP_OUT"]["count"] == 1
         assert metrics["KV_SWAP_OUT"]["bytes"] == 3
+    finally:
+        scheduler.shutdown()
+
+
+def test_wait_for_device_ignores_unrelated_gpu() -> None:
+    gate0, gate1 = threading.Event(), threading.Event()
+    scheduler = UnifiedTransferScheduler(max_workers=2)
+    scheduler.register_handler(
+        TransferType.KV_SWAP_OUT,
+        lambda request: {0: gate0, 1: gate1}[request.device_id].wait(),
+    )
+
+    def swap(device_id: int) -> TransferRequest:
+        return TransferRequest(
+            transfer_id=f"d{device_id}",
+            transfer_type=TransferType.KV_SWAP_OUT,
+            priority=TransferPriority.HIGH,
+            source_device=f"cuda:{device_id}",
+            target_device="cpu",
+            device_id=device_id,
+        )
+
+    id0 = scheduler.enqueue(swap(0))
+    id1 = scheduler.enqueue(swap(1))
+    try:
+        gate0.set()
+        assert scheduler.wait(id0, timeout_ms=1000)
+        assert scheduler.wait_for_device(0, timeout_ms=10)
+        assert not scheduler.wait_for_device(1, timeout_ms=1)
+        gate1.set()
+        assert scheduler.wait(id1, timeout_ms=1000)
+        assert scheduler.wait_for_device(1, timeout_ms=10)
+    finally:
+        gate0.set()
+        gate1.set()
+        scheduler.shutdown()
+
+
+@pytest.mark.parametrize("bad", [-1, 2])
+def test_transfer_scheduler_rejects_endpoint_for_other_device(bad: int) -> None:
+    scheduler = UnifiedTransferScheduler()
+    try:
+        with pytest.raises(ValueError, match="device_id"):
+            scheduler.enqueue(
+                TransferRequest(
+                    transfer_id="wrong",
+                    transfer_type=TransferType.KV_SWAP_OUT,
+                    priority=TransferPriority.HIGH,
+                    source_device=f"cuda:{bad}",
+                    target_device="cpu",
+                    device_id=1,
+                )
+            )
+    finally:
+        scheduler.shutdown()
+
+
+def test_enqueue_normalization_preserves_device_owner() -> None:
+    scheduler = UnifiedTransferScheduler()
+    seen: list[int] = []
+    scheduler.register_handler(
+        TransferType.EXPERT_FETCH,
+        lambda request: seen.append(request.device_id),
+    )
+    transfer_id = scheduler.enqueue(
+        TransferRequest(
+            transfer_id="owned",
+            transfer_type=TransferType.EXPERT_FETCH,
+            priority=TransferPriority.NORMAL,
+            source_device="cpu",
+            target_device="cuda:3",
+            device_id=3,
+        )
+    )
+    try:
+        assert scheduler.wait(transfer_id, timeout_ms=1000)
+        assert seen == [3]
     finally:
         scheduler.shutdown()
