@@ -98,6 +98,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            &ArcherPrefetchHandle::ReplaceCacheCandidates)
       .def("enqueue_prefetch", &ArcherPrefetchHandle::EnqueuePrefetch)
       .def("fetch_tensors", &ArcherPrefetchHandle::FetchTensors)
+      .def("get_canonical_tensor_index_snapshot",
+           &ArcherPrefetchHandle::GetCanonicalTensorIndexSnapshot)
+      .def("begin_derivative_overlay",
+           &ArcherPrefetchHandle::BeginDerivativeOverlay)
+      .def("register_derivative_tensor",
+           &ArcherPrefetchHandle::RegisterDerivativeTensor)
+      .def("commit_derivative_overlay",
+           &ArcherPrefetchHandle::CommitDerivativeOverlay)
+      .def("abort_derivative_overlay",
+           &ArcherPrefetchHandle::AbortDerivativeOverlay)
       .def("clean_up_resources", &ArcherPrefetchHandle::CleanUpResources)
       .def("reset_cache", &ArcherPrefetchHandle::ResetCache);
   //    .def("set_node_cache_priority",

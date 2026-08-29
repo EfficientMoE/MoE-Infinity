@@ -1004,7 +1004,7 @@ git commit -m "feat: add explicit expert variant converters"
 - Modify: `core/prefetch/archer_prefetch_handle.cpp:23-84,446-458`
 - Modify: `core/python/py_archer_prefetch.cpp:18-100`
 
-- [ ] **Step 1: Write failing manifest approval and build-recovery tests**
+- [x] **Step 1: Write failing manifest approval and build-recovery tests**
 
 ```python
 import hashlib
@@ -1269,29 +1269,29 @@ def test_durable_replace_fsyncs_temp_before_replace(tmp_path, monkeypatch):
 
 `RecordingOverlayHandle` deliberately implements only the four mutating pybind-shaped methods used by the Python loader, so these tests fail if loading silently falls back to a C++ path parser.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `pytest -q tests/python/unit/test_expert_variant_manifest.py tests/python/unit/test_expert_variant_build.py`
 
 Expected: collection fails because manifest approval and derivative build modules do not exist.
 
-- [ ] **Step 3: Implement exact JSON schemas, digest chain, and released-entry validation**
+- [x] **Step 3: Implement exact JSON schemas, digest chain, and released-entry validation**
 
 Implement `canonical_json_bytes`, `compute_checkpoint_fingerprint(native_handle, model_signature, offload_path)`, `create`, `to_dict`, `from_dict`, `write_atomic`, `write_derivative_index`, `load_derivative_overlay`, `load_for_serving`, and `load_current`. Enforce the strict fingerprint, `CURRENT`, derivative-index, quality-attestation, and manifest schemas in the data-contract section; reject unknown keys as well as missing keys. Hash raw canonical file bytes before JSON parsing, validate the `CURRENT` manifest/index/attestation digest chain, then validate duplicate `(layer_id, expert_id, format)`, role/ID mismatch, derivative IDs at or below `canonical_max_tensor_id`, duplicate IDs, file-interval overlap, payload checksum/size/alignment errors, unknown enums/dtypes, wrong recomputed checkpoint fingerprint, converter mismatch, incomplete state, failed attestation, and any variant whose exact four-field `ReleasedAdaptiveEntry` is absent. A manifest containing three formats requires three released entries pointing to the same validated generation-attestation digest; partial approval rejects the entire generation rather than silently dropping variants. Do not invoke a native overlay method until all Python validation and payload hashing succeeds.
 
-- [ ] **Step 4: Implement durable generation reservation and explicit native overlay registration**
+- [x] **Step 4: Implement durable generation reservation and explicit native overlay registration**
 
 `DerivativeBuildJournal` writes canonical JSON with `flush`, `os.fsync`, atomic replace, and parent-directory `fsync` at every state transition. Implement `_durable_replace_bytes(path, data)` as open sibling `path.name + ".tmp"` in binary truncate mode → write all bytes → `flush` → `os.fsync(file.fileno())` → close → `os.replace(tmp, path)`, and `_fsync_directory(path)` as `os.open(path, os.O_RDONLY | os.O_DIRECTORY)` → `os.fsync(fd)` → close. `publish_attested_generation` uses only these helpers and the exact event order asserted above. Before reservation, call `get_canonical_tensor_index_snapshot()`, validate its exact row schema/order, hash canonical partitions in Python, and write `canonical-checkpoint-fingerprint.v1.json`. Reserve derivative tensor/file ranges strictly above persisted canonical and prior-generation high-water marks. Write derivative payloads and all four metadata files with the exact filenames and durability order in the data contract. No file named `derivative-index.v1` is created.
 
 Extend `ArcherTensorHandle` with `GetCanonicalTensorIndexSnapshot`, `BeginDerivativeOverlay`, `RegisterDerivativeTensor`, `CommitDerivativeOverlay`, and `AbortDerivativeOverlay`; expose thin delegates with the exact snake-case names from the data contract on `ArcherPrefetchHandle` in `py_archer_prefetch.cpp`. `GetCanonicalTensorIndexSnapshot` returns sorted dictionaries with stable string dtypes. `RegisterDerivativeTensor` receives already-parsed scalar fields and never receives a path or JSON string. The transaction stages metadata and merges it only on commit after native range/alignment/size/disjointness checks. The root canonical `archer_index`, canonical partition files, `name_id_map.json`, and model signature remain unchanged. If any `CURRENT`, index, attestation, manifest, payload, release, or native registration validation fails, call `abort_derivative_overlay` and load canonical metadata only.
 
-- [ ] **Step 5: Run the tests and verify GREEN**
+- [x] **Step 5: Run the tests and verify GREEN**
 
 Run: `pytest -q tests/python/unit/test_expert_variant_manifest.py tests/python/unit/test_expert_variant_build.py`
 
 Expected: all tests pass, including simulated crashes at every journal state.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add moe_infinity/runtime/expert_variant_manifest.py moe_infinity/runtime/expert_variant_build.py moe_infinity/runtime/model_offload.py core/aio/archer_tensor_handle.h core/aio/archer_tensor_handle.cpp core/prefetch/archer_prefetch_handle.h core/prefetch/archer_prefetch_handle.cpp core/python/py_archer_prefetch.cpp tests/python/unit/test_expert_variant_manifest.py tests/python/unit/test_expert_variant_build.py

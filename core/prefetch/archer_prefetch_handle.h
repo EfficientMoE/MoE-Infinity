@@ -66,6 +66,19 @@ class ArcherPrefetchHandle {
   bool IsTensorOnDevice(const torch::Tensor& tensor) const;
   bool IsTensorOnDevice(const TensorID tensor_id) const;
 
+  std::vector<std::unordered_map<std::string, py::object>>
+  GetCanonicalTensorIndexSnapshot() const;
+  void BeginDerivativeOverlay(const std::string& generation,
+                              std::int64_t canonical_max_tensor_id,
+                              std::int64_t canonical_max_file_id);
+  void RegisterDerivativeTensor(const std::string& generation,
+                                std::int64_t tensor_id, std::int64_t file_id,
+                                std::int64_t offset, std::int64_t size,
+                                const std::vector<std::int64_t>& shape,
+                                const std::string& dtype);
+  void CommitDerivativeOverlay(const std::string& generation);
+  void AbortDerivativeOverlay(const std::string& generation);
+
   void CleanUpResources();
   void ResetCache();
 

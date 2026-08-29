@@ -101,6 +101,36 @@ void ArcherPrefetchHandle::ResetCache() {
   }
 }
 
+std::vector<std::unordered_map<std::string, py::object>>
+ArcherPrefetchHandle::GetCanonicalTensorIndexSnapshot() const {
+  return kArcherTensorHandle->GetCanonicalTensorIndexSnapshot();
+}
+
+void ArcherPrefetchHandle::BeginDerivativeOverlay(
+    const std::string& generation, std::int64_t canonical_max_tensor_id,
+    std::int64_t canonical_max_file_id) {
+  kArcherTensorHandle->BeginDerivativeOverlay(
+      generation, canonical_max_tensor_id, canonical_max_file_id);
+}
+
+void ArcherPrefetchHandle::RegisterDerivativeTensor(
+    const std::string& generation, std::int64_t tensor_id, std::int64_t file_id,
+    std::int64_t offset, std::int64_t size,
+    const std::vector<std::int64_t>& shape, const std::string& dtype) {
+  kArcherTensorHandle->RegisterDerivativeTensor(generation, tensor_id, file_id,
+                                                offset, size, shape, dtype);
+}
+
+void ArcherPrefetchHandle::CommitDerivativeOverlay(
+    const std::string& generation) {
+  kArcherTensorHandle->CommitDerivativeOverlay(generation);
+}
+
+void ArcherPrefetchHandle::AbortDerivativeOverlay(
+    const std::string& generation) {
+  kArcherTensorHandle->AbortDerivativeOverlay(generation);
+}
+
 void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
                                          torch::Tensor& buffer,
                                          std::uint32_t explicit_id) {
