@@ -60,6 +60,8 @@ class ArcherPrefetchHandle {
           std::tuple<std::string, bool, std::vector<std::vector<TensorID>>,
                      std::vector<std::uint64_t>>>& topology);
   std::vector<std::tuple<std::uint64_t, bool, int>> GetTopologySnapshot();
+  NodePtr CreateDetachedNode(const std::vector<TensorID>& tensor_ids,
+                             int gpu_id);
   std::unordered_map<std::string, std::int64_t> GetExpertPolicyStats() const;
   void UpdateTensorMap(std::uint64_t old_ptr, std::uint64_t new_ptr);
   bool IsTensorIndexInitialized() const;

@@ -446,6 +446,11 @@ ArcherPrefetchHandle::GetTopologySnapshot() {
   return kTopologyHandle->GetTopologySnapshot();
 }
 
+NodePtr ArcherPrefetchHandle::CreateDetachedNode(
+    const std::vector<TensorID>& tensor_ids, int gpu_id) {
+  return kTopologyHandle->CreateDetachedNode(tensor_ids, gpu_id);
+}
+
 std::unordered_map<std::string, std::int64_t>
 ArcherPrefetchHandle::GetExpertPolicyStats() const {
   if (kExpertResidencyManager == nullptr) {
