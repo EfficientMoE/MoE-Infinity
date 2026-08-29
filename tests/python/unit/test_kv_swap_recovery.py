@@ -93,25 +93,25 @@ def test_no_recovery_when_gpu_full() -> None:
 
 
 def test_free_gpu_blocks_preserves_cpu_buffer() -> None:
+    from moe_infinity.engine.kv_transfer import KVTransferState
+
     kv_cache = _make_kv_cache(num_blocks=2)
     kv_cache.allocate_sequence(seq_id=33, num_tokens=8)
     kv_cache.swap_out(seq_id=33)
-    swapped_cpu_buffers = cast(
-        dict[int, torch.Tensor],
-        getattr(kv_cache, "_swapped_cpu_buffers"),
-    )
+    kv_records = cast(dict[int, object], getattr(kv_cache, "_kv_records"))
     sequence_tables = cast(
         dict[int, object],
         getattr(kv_cache, "_sequence_tables"),
     )
 
-    assert 33 in swapped_cpu_buffers
+    assert kv_cache.transfer_state(33) is KVTransferState.HOST_RESIDENT
+    assert kv_records[33].pageable_buffer is not None
     blocks_before = kv_cache.get_block_table(33)
     assert len(blocks_before) == 2
 
     kv_cache.free_gpu_blocks(seq_id=33)
 
-    assert 33 in swapped_cpu_buffers
+    assert kv_records[33].pageable_buffer is not None
     assert 33 in sequence_tables
     assert kv_cache.get_block_table(33) == []
     assert kv_cache.block_allocator.num_free_blocks == 2
