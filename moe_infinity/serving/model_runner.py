@@ -461,7 +461,7 @@ class ModelRunner:
         logits = self._extract_logits(outputs)
         if logits.dim() == 3:
             logits = logits[:, -1, :]
-        return logits[: buffers.real_batch_size]
+        return logits
 
     def _configure_expert_tracing(self, num_sequences: int) -> None:
         tracer = getattr(self.engine, "expert_tracer", None)

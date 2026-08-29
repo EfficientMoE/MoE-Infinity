@@ -66,6 +66,7 @@ DecodeGraphCapability = _ATTENTION_TYPES_MODULE.DecodeGraphCapability
 PagedLayerWriteProof = _ATTENTION_TYPES_MODULE.PagedLayerWriteProof
 CudaGraphRunner = _CUDA_GRAPH_MODULE.CudaGraphRunner
 GraphKey = _CUDA_GRAPH_MODULE.GraphKey
+ModelRunner = _MODEL_RUNNER_MODULE.ModelRunner
 
 
 @dataclass(frozen=True)
@@ -348,5 +349,202 @@ def test_invalidate_waits_for_replay_lock_and_advances_generation() -> None:
 
 
 @requires_cuda
-def test_capture_and_replay_cuda_equivalence() -> None:
-    pytest.skip("CUDA equivalence covered by Task 9 real-device tests")
+@pytest.mark.parametrize("real_batch_size", [1, 2, 3, 4])
+def test_capture_and_replay_matches_eager_with_padding(
+    real_batch_size: int,
+) -> None:
+    from moe_infinity.kernel.paged_kv_write import paged_kv_write_
+    from moe_infinity.runtime.paged_kv_storage import (
+        PagedKVStorage,
+        PagedKVStorageSpec,
+    )
+
+    device = torch.device("cuda", 0)
+    storage = PagedKVStorage(
+        PagedKVStorageSpec(
+            num_layers=2,
+            num_blocks=32,
+            block_size=4,
+            num_kv_heads=2,
+            head_dim=8,
+            dtype=torch.float32,
+            device=device,
+        )
+    )
+    class_fqn = "moe_infinity.models.qwen3_paged_attention.Qwen3PagedAttention"
+    bindings = [
+        types.SimpleNamespace(
+            class_fqn=class_fqn,
+            layer_idx=layer_idx,
+            storage_owner_id=storage.owner_id,
+            has_write_proof=True,
+        )
+        for layer_idx in range(2)
+    ]
+
+    class FixtureModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = types.SimpleNamespace(vocab_size=4)
+            self.metadata = None
+
+        def forward(
+            self,
+            input_ids: torch.Tensor,
+            position_ids: torch.Tensor,
+            **_: object,
+        ) -> object:
+            assert self.metadata is not None
+            token_values = input_ids[:, 0].to(torch.float32)
+            key = token_values[:, None, None].expand(-1, 2, 8).contiguous()
+            value = key + 100
+            for layer_idx in range(2):
+                paged_kv_write_(
+                    storage,
+                    layer_idx=layer_idx,
+                    key=key + layer_idx,
+                    value=value + layer_idx,
+                    slot_mapping=self.metadata.slot_mapping,
+                )
+            logits = torch.stack(
+                (
+                    token_values,
+                    position_ids[:, 0].to(torch.float32),
+                    self.metadata.seq_lens.to(torch.float32),
+                    self.metadata.block_tables[:, 0].to(torch.float32),
+                ),
+                dim=1,
+            )
+            return types.SimpleNamespace(logits=logits[:, None, :])
+
+    model = FixtureModel().to(device)
+
+    class Registry:
+        reason = "eligible"
+
+        def __init__(self) -> None:
+            self.bindings = bindings
+
+        def install_metadata(self, metadata: object) -> None:
+            model.metadata = metadata
+
+        def clear_metadata(self) -> None:
+            model.metadata = None
+
+    capability = DecodeGraphCapability(True, "eligible")
+    backend = types.SimpleNamespace(
+        storage=storage,
+        device=device,
+        decode_graph_capability=lambda: capability,
+    )
+    engine = types.SimpleNamespace(
+        kv_cache=types.SimpleNamespace(storage=storage),
+        get_attention_backend=lambda: backend,
+    )
+    provider = types.SimpleNamespace(
+        decode_graph_capability=lambda: capability,
+    )
+    model_runner = ModelRunner(
+        model,
+        engine,
+        device=device,
+        paged_kv_storage=storage,
+        paged_attention_registry=Registry(),
+        decode_graph_capability_provider=provider,
+    )
+    graph_runner = CudaGraphRunner(
+        model_runner,
+        storage,
+        enabled=True,
+        batch_buckets=(1, 2, 4),
+        context_buckets=(16, 32),
+        warmup_iters=1,
+    )
+    context_lengths = [2 + index * 3 for index in range(real_batch_size)]
+    input_token_ids = [20 + index for index in range(real_batch_size)]
+    block_tables = [
+        list(range(4 + index * 4, 8 + index * 4))
+        for index in range(real_batch_size)
+    ]
+    batch = BatchMetadata(
+        seq_ids=list(range(real_batch_size)),
+        input_token_ids=input_token_ids,
+        seq_lengths=[1] * real_batch_size,
+        context_lengths=context_lengths,
+        is_prefill=[False] * real_batch_size,
+        block_tables=block_tables,
+        token_offsets=list(range(real_batch_size + 1)),
+        sampling_params=[SamplingParams() for _ in range(real_batch_size)],
+    )
+
+    actual = graph_runner.try_execute(batch)
+
+    assert actual is not None, (
+        graph_runner.stats(),
+        graph_runner._quarantined,
+    )
+    expected = torch.tensor(
+        [
+            [token, context, context + 1, blocks[0]]
+            for token, context, blocks in zip(
+                input_token_ids, context_lengths, block_tables
+            )
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    torch.testing.assert_close(actual, expected)
+    assert actual.shape[0] == real_batch_size
+    for state in graph_runner._graphs.values():
+        assert state.output_logits.device == storage.spec.device
+        assert all(
+            tensor.device == storage.spec.device
+            for tensor in state.buffers.tensor_values()
+        )
+    for row, context_length in enumerate(context_lengths):
+        block_idx = context_length // storage.block_size
+        slot = (
+            block_tables[row][block_idx] * storage.block_size
+            + context_length % storage.block_size
+        )
+        block_id, offset = divmod(slot, storage.block_size)
+        for layer_idx in range(2):
+            assert torch.all(
+                storage.value_cache[layer_idx, block_id, :, :, offset]
+                == input_token_ids[row] + 100 + layer_idx
+            )
+
+    first_output = actual.clone()
+    next_context_lengths = [value + 1 for value in context_lengths]
+    next_input_token_ids = [value + 10 for value in input_token_ids]
+    next_block_tables = [list(reversed(blocks)) for blocks in block_tables]
+    next_batch = BatchMetadata(
+        seq_ids=list(range(real_batch_size)),
+        input_token_ids=next_input_token_ids,
+        seq_lengths=[1] * real_batch_size,
+        context_lengths=next_context_lengths,
+        is_prefill=[False] * real_batch_size,
+        block_tables=next_block_tables,
+        token_offsets=list(range(real_batch_size + 1)),
+        sampling_params=[SamplingParams() for _ in range(real_batch_size)],
+    )
+
+    next_actual = graph_runner.try_execute(next_batch)
+
+    assert next_actual is not None
+    next_expected = torch.tensor(
+        [
+            [token, context, context + 1, blocks[0]]
+            for token, context, blocks in zip(
+                next_input_token_ids,
+                next_context_lengths,
+                next_block_tables,
+            )
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    torch.testing.assert_close(next_actual, next_expected)
+    torch.testing.assert_close(actual, first_output)
+    assert graph_runner.stats()["replays"] == 2
+    graph_runner.close()
