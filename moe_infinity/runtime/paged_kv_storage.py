@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
-from moe_infinity.serving.kv_cache import BlockAllocator
+if TYPE_CHECKING:
+    from moe_infinity.serving.kv_cache import BlockAllocator
 
 
 def canonical_device(device: torch.device | str | None) -> torch.device:
@@ -76,6 +78,8 @@ class PagedKVStorage:
     _X: int = 8
 
     def __init__(self, spec: PagedKVStorageSpec) -> None:
+        from moe_infinity.serving.kv_cache import BlockAllocator
+
         self.spec = spec
         self.owner_id = uuid.uuid4().hex
         self.block_allocator = BlockAllocator(
