@@ -92,7 +92,7 @@ The implementation is not releasable until all of these are true:
 - Test: `tests/python/serving/test_kv_cache.py`
 - Test: `tests/python/integration/test_paged_attention_backend.py`
 
-- [ ] **Step 1: Write failing identity, per-layer, and scratch ownership tests**
+- [x] **Step 1: Write failing identity, per-layer, and scratch ownership tests**
 
 ```python
 def test_scheduler_backend_and_scratch_share_one_storage_owner() -> None:
@@ -199,7 +199,7 @@ def test_deepseek_mla_is_recognized_but_never_registered(family: str) -> None:
     assert result.reason == "mla_layout_unsupported"
 ```
 
-- [ ] **Step 2: Run ownership tests and verify RED**
+- [x] **Step 2: Run ownership tests and verify RED**
 
 ```bash
 pytest -q tests/python/serving/test_paged_kv_storage.py \
@@ -213,7 +213,7 @@ pytest -q tests/python/serving/test_paged_kv_storage.py \
 
 Expected: FAIL because `PagedKVStorage`, exact class specs, per-instance layer bindings, shared ownership, layer-indexed tensors, and metadata owner IDs do not exist.
 
-- [ ] **Step 3: Implement the single authoritative storage object**
+- [x] **Step 3: Implement the single authoritative storage object**
 
 Create these interfaces in `paged_kv_storage.py`:
 
@@ -287,7 +287,7 @@ Canonicalize devices to explicit indexed `torch.device` values before comparison
 
 In `big_modeling.py`, construct one `PagedKVStorage` after sizing blocks and pass it to the native paged backend. In Task 5, `ContinuousBatchingEngine` adopts that exact backend storage for its scheduler-facing `PagedKVCache`; it never allocates a second serving cache. Existing native-engine `KVCacheManager`/transfer-scheduler paths remain explicitly ineligible until they also consume this allocator, so they cannot accidentally qualify based on numeric block-ID overlap.
 
-- [ ] **Step 4: Run ownership suites and verify GREEN**
+- [x] **Step 4: Run ownership suites and verify GREEN**
 
 ```bash
 pytest -q tests/python/serving/test_paged_kv_storage.py \
@@ -301,7 +301,7 @@ pytest -q tests/python/serving/test_paged_kv_storage.py \
 
 Expected: PASS; tests assert legacy constructor compatibility, bound allocator identity, owner ID, exact device, block count, tensor pointers, Qwen3-only registration, MLA rejection, and per-layer writes.
 
-- [ ] **Step 5: Commit authoritative KV ownership**
+- [x] **Step 5: Commit authoritative KV ownership**
 
 ```bash
 git add moe_infinity/runtime/paged_kv_storage.py \
@@ -333,7 +333,7 @@ git commit -m "refactor(serving): unify paged KV allocation and storage"
 - Test: `tests/python/serving/test_model_runner.py`
 - Test: `tests/python/serving/test_paged_attention_registry.py`
 
-- [ ] **Step 1: Write one failing test for every rejection reason**
+- [x] **Step 1: Write one failing test for every rejection reason**
 
 ```python
 @pytest.mark.parametrize(
@@ -412,7 +412,7 @@ def test_capability_rejects_missing_per_layer_write_proof(registry, reason: str)
     assert runner.decode_graph_capability().reason == reason
 ```
 
-- [ ] **Step 2: Run capability tests and verify RED**
+- [x] **Step 2: Run capability tests and verify RED**
 
 ```bash
 pytest -q tests/python/serving/test_model_offload_capability.py \
@@ -424,7 +424,7 @@ pytest -q tests/python/serving/test_model_offload_capability.py \
 
 Expected: FAIL because typed capability evidence and fixed rejection reasons do not exist.
 
-- [ ] **Step 3: Implement typed capability composition**
+- [x] **Step 3: Implement typed capability composition**
 
 Add:
 
@@ -465,7 +465,7 @@ class DecodeGraphCapabilityProvider(Protocol):
 
 `PagedAttentionBackend.decode_graph_capability()` returns `flashinfer_plan_path` when FlashInfer is active. Before ordinary paged checks, exact DeepSeek V2/V3 paged types return `mla_layout_unsupported`; capability composition must preserve that reason instead of attempting to derive one common `head_dim`, registering a layer, or falling through to `paged_class_unregistered`. Otherwise, the registry must produce exactly one `PagedLayerWriteProof` for every Qwen3 paged module and every expected layer index; each proof must name only `moe_infinity.models.qwen3_paged_attention.Qwen3PagedAttention`, match `storage.owner_id`, identify `moe_infinity.kernel.paged_kv_write.paged_kv_write_`, and set both booleans true. Missing/unregistered classes, duplicate/out-of-range/missing layer indices, absent proofs, or a backend that reads before writing are denied. `ModelRunner` requires proof coverage equal to the registered binding set, a bound (non-`None`) `PagedKVCache.storage`, object identity with backend storage, and exact equality of canonical `PagedKVStorage.spec.device`, `ModelRunner.device`, backend device, and cache tensor devices.
 
-- [ ] **Step 4: Run capability tests and verify GREEN**
+- [x] **Step 4: Run capability tests and verify GREEN**
 
 ```bash
 pytest -q tests/python/serving/test_model_offload_capability.py \
@@ -476,7 +476,7 @@ pytest -q tests/python/serving/test_model_offload_capability.py \
 
 Expected: PASS; each unsafe mechanism has a distinct deterministic reason and no non-paged model is eligible.
 
-- [ ] **Step 5: Commit explicit capability evidence**
+- [x] **Step 5: Commit explicit capability evidence**
 
 ```bash
 git add moe_infinity/runtime/attention_types.py \
@@ -503,7 +503,7 @@ git commit -m "feat(serving): require explicit decode graph capability"
 - Test: `tests/python/serving/test_paged_attention_registry.py`
 - Test: `tests/python/ops/test_paged_kv_write.py`
 
-- [ ] **Step 1: Write failing fixed-pointer and semantic parity tests**
+- [x] **Step 1: Write failing fixed-pointer and semantic parity tests**
 
 ```python
 def test_prepared_native_paged_decode_preserves_side_effects_and_pointers() -> None:
@@ -591,7 +591,7 @@ def test_second_decode_token_eager_and_replay_observe_first_token_kv() -> None:
     torch.testing.assert_close(replay_second, eager_second, rtol=1e-4, atol=1e-4)
 ```
 
-- [ ] **Step 2: Run prepared-forward tests and verify RED**
+- [x] **Step 2: Run prepared-forward tests and verify RED**
 
 ```bash
 pytest -q tests/python/serving/test_model_runner.py \
@@ -603,7 +603,7 @@ pytest -q tests/python/serving/test_model_runner.py \
 
 Expected: FAIL because prepared buffers do not carry authoritative storage identity, layer-bound backends do not exist, and decode does not write current-token K/V before attention.
 
-- [ ] **Step 3: Implement prepared buffers and allocation-free graph mode**
+- [x] **Step 3: Implement prepared buffers and allocation-free graph mode**
 
 Define this exact buffer boundary:
 
@@ -717,7 +717,7 @@ def forward_layer(
 
 `LayerBoundPagedBackend.forward()` supplies its immutable registered `layer_idx`; each eligible Qwen3 generated bound subclass receives a different proxy. DeepSeek V2/V3 is rejected before binding as `mla_layout_unsupported`. Extract eager/paged model execution into `_forward_with_optional_paged_context(...)`; `forward_prepared_decode()` installs fixed metadata through all Qwen3 registry bindings. In graph mode, no `.to()`, `.item()`, `torch.tensor`, concatenation, Python data-dependent loop, FlashInfer `plan()`, or output allocation occurs. Sampling remains outside.
 
-- [ ] **Step 4: Run prepared/native suites and verify GREEN**
+- [x] **Step 4: Run prepared/native suites and verify GREEN**
 
 ```bash
 pytest -q tests/python/serving/test_model_runner.py \
@@ -729,7 +729,7 @@ pytest -q tests/python/serving/test_model_runner.py \
 
 Expected: PASS with eager semantics unchanged and graph mode native-paged only.
 
-- [ ] **Step 5: Commit the prepared boundary**
+- [x] **Step 5: Commit the prepared boundary**
 
 ```bash
 git add moe_infinity/serving/model_runner.py \
@@ -750,7 +750,7 @@ git commit -m "refactor(serving): prepare native paged decode for replay"
 - Rewrite: `moe_infinity/serving/cuda_graph.py`
 - Rewrite: `tests/python/serving/test_cuda_graph.py`
 
-- [ ] **Step 1: Write deterministic CPU tests for config, gates, buckets, fallback reasons, and lifecycle**
+- [x] **Step 1: Write deterministic CPU tests for config, gates, buckets, fallback reasons, and lifecycle**
 
 Use injected CUDA operations and an explicit `_eligible_capability_for_registry(registry)` provider containing complete per-layer write proofs so gate logic runs without a GPU and never relies on heuristic model inspection:
 
@@ -842,7 +842,7 @@ def test_invalidate_waits_for_replay_lock_and_advances_generation() -> None:
     assert runner.stats()["graphs"] == 0
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -853,7 +853,7 @@ pytest -q tests/python/serving/test_cuda_graph.py \
 
 Expected: FAIL because the new decision, key, injected-ops, stats, and lazy execution APIs do not exist.
 
-- [ ] **Step 3: Implement exact public types and bounded reasons**
+- [x] **Step 3: Implement exact public types and bounded reasons**
 
 Use these public interfaces:
 
@@ -942,7 +942,7 @@ def __init__(
 
 Normalize sorted positive unique buckets; reject empty enabled bucket sets and `warmup_iters < 1`. `storage=None` is accepted only to preserve the eager engine path around a legacy `PagedKVCache`; it always returns the model capability reason (normally `native_paged_required`) or `kv_storage_mismatch`, never reserves scratch, and never captures. At every eligibility check with bound storage, obtain `model_runner.decode_graph_capability()` and return its exact typed reason unless it is safe, its `storage_owner_id == storage.owner_id`, its proof set exactly covers the registry's Qwen3 `(class_fqn, layer_idx)` bindings, and canonical `storage.spec.device == model_runner.device`. Immediately after buffer creation and immediately before every capture/replay, walk all `PreparedDecodeBuffers` tensors plus `_CapturedGraphState.output_logits` and require `tensor.device == storage.spec.device`; any mismatch returns `kv_storage_mismatch` before capture/replay and before scratch allocation where possible. Recheck proof coverage and device equality immediately before first capture after invalidation/reload. Read `MOE_DISABLE_CUDA_GRAPHS` on every check so rollback does not require restart.
 
-- [ ] **Step 4: Implement stable scratch layout and lazy capture**
+- [x] **Step 4: Implement stable scratch layout and lazy capture**
 
 Reserve once, on first eligible capture, one unique scratch block for each row of the largest configured batch bucket. Convert allocator exhaustion to `_GraphMemoryUnavailable`; `try_execute()` catches that exception, records `insufficient_memory`, and returns `None` without quarantining a graph key:
 
@@ -964,7 +964,7 @@ Map row `r` to one unique scratch ID. Synthetic capture and padded replay rows u
 
 Use one `threading.RLock` around scratch reservation, capture, replay, invalidation, and close. Assert that every scratch ID remains in `storage.graph_scratch_blocks` immediately before metadata copy and replay. Never hold the graph lock while calling application lifecycle code; application lock ordering is defined in Task 6.
 
-- [ ] **Step 5: Implement replay with eager signal, real-row slicing, and exception quarantine**
+- [x] **Step 5: Implement replay with eager signal, real-row slicing, and exception quarantine**
 
 ```python
 def try_execute(self, batch: BatchMetadata) -> torch.Tensor | None:
@@ -1007,7 +1007,7 @@ Input validation/copy failures that occur before `graph.replay()` may quarantine
 
 Implement `invalidate(reason)` to synchronize the device only when graphs exist, clear graphs/quarantine, increment generation, and retain scratch pages for recapture. Implement `close()` to invalidate, release scratch pages, and make future checks return `disabled`.
 
-- [ ] **Step 6: Run CPU lifecycle tests and verify GREEN**
+- [x] **Step 6: Run CPU lifecycle tests and verify GREEN**
 
 Run:
 
@@ -1018,7 +1018,7 @@ pytest -q tests/python/serving/test_cuda_graph.py \
 
 Expected: CPU-safe tests PASS without requiring CUDA.
 
-- [ ] **Step 7: Commit the runner lifecycle**
+- [x] **Step 7: Commit the runner lifecycle**
 
 ```bash
 git add moe_infinity/serving/cuda_graph.py tests/python/serving/test_cuda_graph.py
@@ -1031,7 +1031,7 @@ git commit -m "feat(serving): add safe lazy decode CUDA graph runner"
 - Modify: `moe_infinity/serving/engine.py:65-168,726-751`
 - Modify: `tests/python/serving/test_engine.py`
 
-- [ ] **Step 1: Write failing active-path tests**
+- [x] **Step 1: Write failing active-path tests**
 
 ```python
 def test_pure_decode_uses_graph_logits_before_existing_sampler() -> None:
@@ -1096,7 +1096,7 @@ def test_non_paged_decode_is_always_eager() -> None:
     assert engine.cuda_graph_runner.stats()["fallback_reasons"]["native_paged_required"] == 1
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -1106,7 +1106,7 @@ pytest -q tests/python/serving/test_engine.py -k 'graph or padded_graph'
 
 Expected: FAIL because the engine has no `cuda_graph_runner` and never calls it.
 
-- [ ] **Step 3: Instantiate opt-in runner and preserve mixed-batch order**
+- [x] **Step 3: Instantiate opt-in runner and preserve mixed-batch order**
 
 In `ContinuousBatchingEngine.__init__`, resolve storage before creating the scheduler-facing cache and model runner:
 
@@ -1180,7 +1180,7 @@ Update `_execute_batch()` rules:
 
 Do not move `_extract_last_token_logits()` or `Sampler.sample()` into `CudaGraphRunner`.
 
-- [ ] **Step 4: Verify active-path GREEN**
+- [x] **Step 4: Verify active-path GREEN**
 
 Run:
 
@@ -1192,7 +1192,7 @@ pytest -q tests/python/serving/test_engine.py \
 
 Expected: all tests PASS, including pre-existing speculative decode tests.
 
-- [ ] **Step 5: Commit active serving integration**
+- [x] **Step 5: Commit active serving integration**
 
 ```bash
 git add moe_infinity/serving/engine.py \
@@ -1208,7 +1208,7 @@ git commit -m "feat(serving): replay eligible decode batches"
 - Modify: `tests/python/serving/test_hot_reload.py`
 - Modify: `tests/python/serving/test_api_routes.py`
 
-- [ ] **Step 1: Write failing reload ordering tests**
+- [x] **Step 1: Write failing reload ordering tests**
 
 ```python
 def test_reload_invalidates_graphs_before_importlib_reload(monkeypatch) -> None:
@@ -1280,7 +1280,7 @@ def test_hot_replacement_waits_for_active_step_and_obeys_lock_order(monkeypatch)
     assert events == ["step:exit", "graph:close", "old:close"]
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -1292,7 +1292,7 @@ pytest -q tests/python/serving/test_hot_reload.py \
 
 Expected: FAIL because reload does not invalidate graphs, shutdown calls only optional `engine.shutdown`, direct engine assignment does not close the old runner, and no lifecycle lock serializes an active step with replacement.
 
-- [ ] **Step 3: Implement lifecycle hooks and lock ordering**
+- [x] **Step 3: Implement lifecycle hooks and lock ordering**
 
 Add to the engine:
 
@@ -1321,7 +1321,7 @@ The engine loop acquires `_engine_lifecycle_lock` around reading the global engi
 
 Document and test the sole lock order: **application `_engine_lifecycle_lock` → engine step ownership → `CudaGraphRunner._lock`**. `CudaGraphRunner` never acquires the lifecycle lock or calls scheduler/request/application methods while holding its lock. Shutdown does not await a task while holding either lock. This makes replacement wait for an active replay/step, then closes the old runner before returning.
 
-- [ ] **Step 4: Run reload tests and verify GREEN**
+- [x] **Step 4: Run reload tests and verify GREEN**
 
 Run:
 
@@ -1334,7 +1334,7 @@ pytest -q tests/python/serving/test_hot_reload.py \
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit lifecycle invalidation**
+- [x] **Step 5: Commit lifecycle invalidation**
 
 ```bash
 git add moe_infinity/serving/engine.py \
@@ -1352,7 +1352,7 @@ git commit -m "fix(serving): close CUDA graphs across engine lifecycle"
 - Modify: `tests/python/serving/test_memory_manager.py`
 - Modify: `tests/python/serving/test_api_routes.py`
 
-- [ ] **Step 1: Write failing memory and metric tests**
+- [x] **Step 1: Write failing memory and metric tests**
 
 ```python
 def test_report_includes_graph_pool_and_reserved_scratch_bytes() -> None:
@@ -1384,7 +1384,7 @@ def test_metrics_endpoint_exports_graph_counters_and_bounded_reasons(client) -> 
     assert 'moe_cuda_graph_fallback_total{reason="expert_dispatcher"} 7' in response.text
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -1396,7 +1396,7 @@ pytest -q tests/python/serving/test_memory_manager.py \
 
 Expected: FAIL because graph memory fields and metrics are absent.
 
-- [ ] **Step 3: Implement memory accounting and stats wiring**
+- [x] **Step 3: Implement memory accounting and stats wiring**
 
 Add initialized counters and a validated setter:
 
@@ -1426,7 +1426,7 @@ scratch_kv_bytes = (
 
 Update `MemoryManager` before returning stats. Keep scratch bytes distinct from graph-pool bytes because authoritative native K/V storage was preallocated but reservation reduces request capacity. Include `kv_storage_owner_id`, `capability_safe`, bounded `capability_reason`, `registered_paged_layers`, and `proved_write_layers` in JSON stats; eligibility requires the latter counts to be equal and nonzero. Do not expose owner ID or class names as Prometheus labels.
 
-- [ ] **Step 4: Export fixed-name Prometheus metrics**
+- [x] **Step 4: Export fixed-name Prometheus metrics**
 
 Add counters/gauges:
 
@@ -1440,7 +1440,7 @@ Add counters/gauges:
 
 Never use exception text, model IDs, graph keys, request IDs, or arbitrary strings as labels.
 
-- [ ] **Step 5: Run memory/API tests and verify GREEN**
+- [x] **Step 5: Run memory/API tests and verify GREEN**
 
 Run:
 
@@ -1451,7 +1451,7 @@ pytest -q tests/python/serving/test_memory_manager.py \
 
 Expected: all tests PASS and JSON stats remain serializable.
 
-- [ ] **Step 6: Commit accounting and observability**
+- [x] **Step 6: Commit accounting and observability**
 
 ```bash
 git add moe_infinity/serving/memory_manager.py \
@@ -1468,7 +1468,7 @@ git commit -m "feat(serving): report decode CUDA graph usage"
 - Modify: `moe_infinity/entrypoints/openai/api_server_v2.py:475-506,1778-1919`
 - Modify: `tests/python/serving/test_api_routes.py`
 
-- [ ] **Step 1: Write failing CLI/config tests**
+- [x] **Step 1: Write failing CLI/config tests**
 
 ```python
 def test_decode_cuda_graphs_are_disabled_by_default(monkeypatch) -> None:
@@ -1503,7 +1503,7 @@ def test_enable_flag_does_not_override_unsafe_runtime_capability() -> None:
     }
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -1513,7 +1513,7 @@ pytest -q tests/python/serving/test_api_routes.py -k decode_cuda_graph
 
 Expected: FAIL because parser/config fields are absent.
 
-- [ ] **Step 3: Add explicit opt-in fields**
+- [x] **Step 3: Add explicit opt-in fields**
 
 Add CLI arguments:
 
@@ -1539,7 +1539,7 @@ Rollback hierarchy:
 2. For an already-configured process, set `MOE_DISABLE_CUDA_GRAPHS=1`; the gate reads it per batch and immediately routes eager.
 3. Call `engine.invalidate_cuda_graphs("operator_rollback")` to release captured graph states; call `shutdown()` only during engine replacement/application shutdown to close the runner and release authoritative-storage scratch reservations.
 
-- [ ] **Step 4: Run config tests and verify GREEN**
+- [x] **Step 4: Run config tests and verify GREEN**
 
 Run:
 
@@ -1549,7 +1549,7 @@ pytest -q tests/python/serving/test_api_routes.py -k 'decode_cuda_graph or initi
 
 Expected: all selected tests PASS.
 
-- [ ] **Step 5: Commit opt-in controls**
+- [x] **Step 5: Commit opt-in controls**
 
 ```bash
 git add moe_infinity/entrypoints/openai/api_server_v2.py \
@@ -1567,7 +1567,7 @@ git commit -m "feat(serving): add opt-in decode CUDA graph controls"
 - Modify: `tests/python/serving/test_paged_attention_registry.py`
 - Modify: `tests/python/ops/test_paged_kv_write.py`
 
-- [ ] **Step 1: Write CUDA equivalence tests before completing device behavior**
+- [x] **Step 1: Write CUDA equivalence tests before completing device behavior**
 
 ```python
 @requires_cuda
@@ -1686,7 +1686,7 @@ def test_resident_non_paged_model_remains_eager() -> None:
     assert engine.cuda_graph_runner.stats()["fallback_reasons"]["native_paged_required"] == 1
 ```
 
-- [ ] **Step 2: Run CUDA tests and verify RED against incomplete device behavior**
+- [x] **Step 2: Run CUDA tests and verify RED against incomplete device behavior**
 
 Run:
 
@@ -1697,7 +1697,7 @@ pytest -q tests/python/serving/test_cuda_graph.py \
 
 Expected on a CUDA host: at least one FAIL until stable output, metadata copies, and padding are complete. Expected on a CPU-only host: SKIP with the existing `requires_cuda` marker.
 
-- [ ] **Step 3: Finish only the minimal device fixes exposed by RED**
+- [x] **Step 3: Finish only the minimal device fixes exposed by RED**
 
 Fix production behavior rather than weakening tolerances or expected values. In particular:
 
@@ -1712,7 +1712,7 @@ Fix production behavior rather than weakening tolerances or expected values. In 
 - never capture DeepSeek V2/V3 MLA, non-paged, offload/dispatcher/Archer/transfer-scheduler/KV-offload, dynamic-allocation, or FlashInfer-plan paths;
 - keep Qwen3's per-layer current-token write-before-attention and following-token persistence unchanged.
 
-- [ ] **Step 4: Run CUDA equivalence suite and verify GREEN**
+- [x] **Step 4: Run CUDA equivalence suite and verify GREEN**
 
 Run:
 
@@ -1727,7 +1727,7 @@ pytest -q tests/python/serving/test_cuda_graph.py \
 
 Expected on CUDA: all tests PASS. Expected without CUDA: deterministic CPU tests PASS and CUDA tests SKIP.
 
-- [ ] **Step 5: Commit device equivalence coverage**
+- [x] **Step 5: Commit device equivalence coverage**
 
 ```bash
 git add moe_infinity/serving/cuda_graph.py \
@@ -1748,7 +1748,7 @@ git commit -m "test(serving): prove decode CUDA graph replay parity"
 - Create: `benchmarks/serving/decode_cuda_graph_fixture.py`
 - Test: `tests/python/serving/test_cuda_graph.py`
 
-- [ ] **Step 1: Write a failing CPU schema/CLI test**
+- [x] **Step 1: Write a failing CPU schema/CLI test**
 
 ```python
 def test_benchmark_result_schema_does_not_claim_speedup() -> None:
@@ -1781,7 +1781,7 @@ def test_benchmark_model_mode_requires_model_and_offload_dir() -> None:
         module.validate_args(args)
 ```
 
-- [ ] **Step 2: Run the schema test and verify RED**
+- [x] **Step 2: Run the schema test and verify RED**
 
 Run:
 
@@ -1791,7 +1791,7 @@ pytest -q tests/python/serving/test_cuda_graph.py -k benchmark_result_schema
 
 Expected: FAIL because the benchmark module does not exist.
 
-- [ ] **Step 3: Implement the benchmark with paired controls**
+- [x] **Step 3: Implement the benchmark with paired controls**
 
 The CLI must accept:
 
@@ -1820,7 +1820,7 @@ For each exact `(batch_size, context_size)` point:
 
 Use `build_result(...)` as a pure function so schema tests run on CPU.
 
-- [ ] **Step 4: Verify schema and run a smoke benchmark**
+- [x] **Step 4: Verify schema and run a smoke benchmark**
 
 Run CPU schema test:
 
@@ -1860,7 +1860,7 @@ python benchmarks/serving/decode_cuda_graph.py \
 
 Expected: valid CLI; for an offloaded MoE runtime the JSON reports the explicit unsafe capability and eager-only samples with zero captures/replays.
 
-- [ ] **Step 5: Commit benchmark harness**
+- [x] **Step 5: Commit benchmark harness**
 
 ```bash
 git add benchmarks/serving/decode_cuda_graph.py \
@@ -1875,7 +1875,7 @@ git commit -m "bench(serving): compare eager and graph decode launches"
 - Modify: `docs/serving.md`
 - Modify: `docs/benchmarking.md`
 
-- [ ] **Step 1: Add operator documentation**
+- [x] **Step 1: Add operator documentation**
 
 Add a `Decode CUDA graphs (experimental, opt-in)` section containing:
 
@@ -1895,7 +1895,7 @@ Emergency rollback: export MOE_DISABLE_CUDA_GRAPHS=1.
 
 Document all CLI flags, the sole supported Qwen3 class FQN, exact DeepSeek V2/V3 MLA rejection reason, generated per-layer Qwen3 bindings, write-before-attention semantics, one-owner KV persistence, exact device equality, padding, scratch reservation, lazy capture latency, reload/hot-replacement/application-shutdown cleanup, lock order, and Prometheus metrics. State that utility is limited to resident/native-paged ordinary-GQA Qwen3 models with complete write proofs, does not graph sampling, does not support DeepSeek MLA or offloaded MoE, and does not guarantee a speedup. Link future offloaded-MoE work to a separate piecewise design with explicit eager attention/routing/transfer boundaries.
 
-- [ ] **Step 2: Add staged rollout and acceptance checklist**
+- [x] **Step 2: Add staged rollout and acceptance checklist**
 
 Document these stages exactly:
 
@@ -1905,11 +1905,11 @@ Document these stages exactly:
 4. **General opt-in:** retain kill switch and per-model allowlist; DeepSeek V2/V3 MLA, non-paged, FlashInfer, and offloaded MoE stay unsupported regardless of benchmark results.
 5. **Rollback:** set `MOE_DISABLE_CUDA_GRAPHS=1`, verify replay counter stops increasing and eager fallback counter increases, then restart without the enable flag if memory must be reclaimed immediately.
 
-- [ ] **Step 3: Add benchmark documentation and citation**
+- [x] **Step 3: Add benchmark documentation and citation**
 
 Document the exact valid `fixture` command and the `model` command with both `--model` and `--offload-dir`, required metadata, capability outcome, raw-result retention, no performance pass threshold, and the TensorRT-LLM motivation link. Explain that offloaded MoE model mode currently measures/records eager fallback rather than graph utility. Explain the capture-point tradeoff: denser buckets reduce padding but consume more graph memory and authoritative scratch KV capacity.
 
-- [ ] **Step 4: Validate documentation references**
+- [x] **Step 4: Validate documentation references**
 
 Run:
 
@@ -1921,7 +1921,7 @@ pytest -q tests/python/serving
 
 Expected: compile command exits 0; serving suite PASS with CUDA-only tests either PASS on CUDA or SKIP without CUDA.
 
-- [ ] **Step 5: Commit operator documentation**
+- [x] **Step 5: Commit operator documentation**
 
 ```bash
 git add docs/serving.md docs/benchmarking.md
@@ -1933,7 +1933,7 @@ git commit -m "docs(serving): add decode CUDA graph rollout guide"
 **Files:**
 - Verify only; no new files.
 
-- [ ] **Step 1: Run static diagnostics on every changed Python file**
+- [x] **Step 1: Run static diagnostics on every changed Python file**
 
 Use the repository's configured language server on:
 
@@ -1958,7 +1958,7 @@ benchmarks/serving/decode_cuda_graph_fixture.py
 
 Expected: zero errors.
 
-- [ ] **Step 2: Run the complete serving test suite once**
+- [x] **Step 2: Run the complete serving test suite once**
 
 ```bash
 pytest -q tests/python/serving \
@@ -1970,7 +1970,7 @@ pytest -q tests/python/serving \
 
 Expected: PASS; every capability reason, owner-identity assertion, shutdown/hot-replacement lock test, and benchmark CLI validation passes. CUDA-specific tests SKIP only when CUDA requirements are unavailable; FlashInfer tests prove eager fallback rather than graph eligibility.
 
-- [ ] **Step 3: Run one CUDA equivalence/benchmark qualification when a supported GPU is available**
+- [x] **Step 3: Run one CUDA equivalence/benchmark qualification when a supported GPU is available**
 
 ```bash
 pytest -q tests/python/serving/test_cuda_graph.py \
@@ -1988,7 +1988,7 @@ python benchmarks/serving/decode_cuda_graph.py \
 
 Expected: every registered layer's current-token write and following-token persistence test PASS; benchmark exits 0 with two proved Qwen3 layers, per-layer KV checksums, and raw paired measurements. Record observations; do not convert them into a universal speedup claim.
 
-- [ ] **Step 4: Verify rollback behavior**
+- [x] **Step 4: Verify rollback behavior**
 
 ```bash
 MOE_DISABLE_CUDA_GRAPHS=1 pytest -q tests/python/serving/test_cuda_graph.py \
@@ -1997,7 +1997,7 @@ MOE_DISABLE_CUDA_GRAPHS=1 pytest -q tests/python/serving/test_cuda_graph.py \
 
 Expected: PASS, with no capture/replay attempted.
 
-- [ ] **Step 5: Commit any verification-only fixture corrections, if tests required them**
+- [x] **Step 5: Commit any verification-only fixture corrections, if tests required them**
 
 If no correction was needed, do not create an empty commit. If a fixture correction was required:
 
