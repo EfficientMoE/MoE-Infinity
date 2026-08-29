@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import random
 from dataclasses import dataclass
 
@@ -33,3 +35,10 @@ def deterministic_workload(
         )
         for _ in range(cases)
     )
+
+
+def workload_sha256(cases) -> str:
+    payload = json.dumps(
+        [list(case.input_ids) for case in cases], separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()

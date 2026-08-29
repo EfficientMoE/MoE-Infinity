@@ -50,9 +50,18 @@ class PrecisionPlan:
     evictions: Tuple[ExpertKey, ...]
     accounted_bytes: int
 
-    def as_native_targets(self) -> list[tuple[int, int, str, int]]:
+    def as_native_targets(
+        self,
+        generations: Mapping[tuple[ExpertKey, ExpertFormat], int] | None = None,
+    ) -> list[tuple[int, int, str, int]]:
+        generations = generations or {}
         return [
-            (key.layer_id, key.expert_id, fmt.value, 0)
+            (
+                key.layer_id,
+                key.expert_id,
+                fmt.value,
+                generations.get((key, fmt), 0),
+            )
             for key, fmt in sorted(self.targets.items())
         ]
 
@@ -94,6 +103,8 @@ class AdaptivePrecisionPolicy:
         promote_cooldown: int,
         demote_cooldown: int,
         catalog: Mapping[ExpertKey, Mapping[ExpertFormat, int]],
+        generations: Mapping[tuple[ExpertKey, ExpertFormat], int] | None = None,
+        epoch_tokens: int = 1,
     ) -> None:
         self.budget_bytes = int(budget_bytes)
         self.decay = Fraction(str(decay))
@@ -107,13 +118,22 @@ class AdaptivePrecisionPolicy:
         self.hotness: Dict[ExpertKey, Fraction] = {}
         self.epoch = 0
         self.cooldown_until = 0
+        self.generations = dict(generations or {})
+        self.epoch_tokens = max(int(epoch_tokens), 1)
+        self.observed_tokens = 0
 
     @property
     def epoch_due(self) -> bool:
-        return True
+        return self.observed_tokens >= self.epoch_tokens
+
+    def as_native_targets(
+        self, plan: PrecisionPlan
+    ) -> list[tuple[int, int, str, int]]:
+        return plan.as_native_targets(self.generations)
 
     def observe(self, counts: Mapping[ExpertKey, int], tokens: int) -> None:
         divisor = max(int(tokens), 1)
+        self.observed_tokens += divisor
         decayed: Dict[ExpertKey, Fraction] = {
             key: value * (1 - self.decay) for key, value in self.hotness.items()
         }
@@ -338,6 +358,7 @@ class AdaptivePrecisionPolicy:
             self.cooldown_until = self.epoch + max(
                 self.promote_cooldown, self.demote_cooldown
             )
+        self.observed_tokens = 0
 
     @classmethod
     def simulate(

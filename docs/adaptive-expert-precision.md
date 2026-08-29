@@ -23,4 +23,4 @@ python benchmarks/adaptive_precision/bench_policy.py
 python benchmarks/adaptive_precision/report.py results.jsonl --output report.json
 ```
 
-Rollback with `{"adaptive_expert_precision": false}`, restart, and verify `disabled`. Preserve `adaptive_derivatives`, `CURRENT`, manifests, and canonical files; disabled serving does not load or mutate them.
+Rollback with `{"adaptive_expert_precision": false}`, restart, and verify `disabled`; preserve `adaptive_derivatives`, `CURRENT`, manifests, and canonical files. Disabled serving does not load or mutate them.

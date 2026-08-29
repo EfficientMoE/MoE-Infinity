@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from moe_infinity.runtime.adaptive_precision_allowlist import (
     ReleasedAdaptiveEntry,
 )
@@ -88,3 +90,40 @@ def test_serving_rejects_valid_but_unreleased_manifest(tmp_path, monkeypatch):
     )
     assert result.enabled is False
     assert result.fallback_reason == "manifest_unapproved"
+
+
+@pytest.mark.parametrize(
+    ("model_type", "quantization", "reason"),
+    [
+        ("gpt_oss", {"quant_method": "mxfp4"}, "protected:gpt_oss_mxfp4"),
+        ("glm_moe_dsa", {"quant_method": "fp8"}, "protected:glm_fp8"),
+        ("deepseek_v4", None, "protected:deepseek_v4_fp4"),
+        ("deepseek_v3", {"quant_method": "fp8"}, "protected:existing_fp8"),
+        ("mixtral", {"quant_method": "gptq"}, "protected:gptq"),
+        ("mixtral", {"quant_method": "awq"}, "protected:awq"),
+    ],
+)
+def test_protected_paths_short_circuit_general_resolution(
+    tmp_path, monkeypatch, model_type, quantization, reason
+):
+    monkeypatch.setattr(
+        "moe_infinity.runtime.model_offload.resolve_model_precision_capabilities",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("protected path entered general adaptive resolution")
+        ),
+    )
+    result = _resolve_adaptive_precision(
+        SimpleNamespace(
+            model_type=model_type, quantization_config=quantization
+        ),
+        _archer(
+            adaptive_expert_precision=True,
+            adaptive_variant_build=True,
+            adaptive_hbm_budget_bytes=1024,
+        ),
+        str(tmp_path),
+        extension_names={"_v4_fp4"},
+    )
+    assert result.enabled is False
+    assert result.fallback_reason == reason
+    assert not (tmp_path / "adaptive_derivatives").exists()

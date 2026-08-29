@@ -252,6 +252,11 @@ class ExpertVariantManifest:
     canonical_max_file_id: int
     derivative_index_sha256: str
     variants: tuple[ExpertVariantSpec, ...]
+    converter_version: str = "adaptive-expert-v1"
+    store_signature_version: int = 1
+    quality_attestation_sha256: str = ""
+    variant_payload_sha256: str = ""
+    complete: bool = True
 
     @classmethod
     def create(
@@ -280,10 +285,15 @@ class ExpertVariantManifest:
             "schema_version": 1,
             "model_name": self.model_name,
             "checkpoint_fingerprint": self.checkpoint_fingerprint,
+            "store_signature_version": self.store_signature_version,
+            "converter_version": self.converter_version,
             "generation": self.generation,
             "canonical_max_tensor_id": self.canonical_max_tensor_id,
             "canonical_max_file_id": self.canonical_max_file_id,
             "derivative_index_sha256": self.derivative_index_sha256,
+            "quality_attestation_sha256": self.quality_attestation_sha256,
+            "variant_payload_sha256": self.variant_payload_sha256,
+            "complete": self.complete,
             "variants": [
                 _variant_to_dict(variant) for variant in self.variants
             ],
@@ -330,7 +340,9 @@ class ExpertVariantManifest:
         return manifest
 
     @classmethod
-    def load_current(cls, root, *, native_handle) -> "ExpertVariantManifest":
+    def load_current(
+        cls, root, *, native_handle, register_overlay: bool = True
+    ) -> "ExpertVariantManifest":
         root = Path(root)
         current = json.loads((root / "CURRENT").read_text())
         if set(current) != _CURRENT_KEYS:
@@ -356,8 +368,40 @@ class ExpertVariantManifest:
         if _sha256_hex(manifest_bytes) != current["manifest_sha256"]:
             raise ValueError("manifest_digest_mismatch")
 
-        manifest = cls.from_dict(json.loads(manifest_bytes))
-        load_derivative_overlay(
-            generation_dir / "derivative-index.v1.json", native_handle
+        index_document = _validate_derivative_document(json.loads(index_bytes))
+        if index_document["generation"] != generation:
+            raise ValueError("derivative generation mismatch")
+        for record in index_document["records"]:
+            partition = root.parent / f"archer_param_{record['file_id']}"
+            with partition.open("rb") as handle:
+                handle.seek(record["offset"])
+                payload = handle.read(record["size"])
+            if (
+                len(payload) != record["size"]
+                or _sha256_hex(payload) != record["sha256"]
+            ):
+                raise ValueError("derivative payload checksum mismatch")
+
+        from moe_infinity.runtime.expert_variant_build import (
+            validate_quality_attestation,
         )
+
+        attestation = json.loads(attestation_bytes)
+        validate_quality_attestation(attestation)
+        manifest_document = json.loads(manifest_bytes)
+        if (
+            manifest_document.get("derivative_index_sha256")
+            != current["derivative_index_sha256"]
+            or manifest_document.get("quality_attestation_sha256")
+            != current["quality_attestation_sha256"]
+            or attestation["derivative_index_sha256"]
+            != current["derivative_index_sha256"]
+            or attestation["generation"] != generation
+        ):
+            raise ValueError("manifest_digest_mismatch")
+        manifest = cls.from_dict(manifest_document)
+        if register_overlay:
+            load_derivative_overlay(
+                generation_dir / "derivative-index.v1.json", native_handle
+            )
         return manifest

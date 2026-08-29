@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,24 @@ DERIVATIVES_DIRNAME = "adaptive_derivatives"
 JOURNAL_FILENAME = "build-journal.v1.json"
 GENERATIONS_DIRNAME = "generations"
 CURRENT_FILENAME = "CURRENT"
+QUALITY_ATTESTATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "checkpoint_fingerprint",
+        "generation",
+        "converter_version",
+        "converter_source_commit",
+        "variant_payload_sha256",
+        "derivative_index_sha256",
+        "thresholds",
+        "formats",
+        "raw_result_sha256",
+        "workload_sha256",
+        "hardware",
+        "software",
+        "passed",
+    }
+)
 
 _JOURNAL_KEYS = frozenset(
     {
@@ -79,6 +98,40 @@ def _generation_name(index: int) -> str:
 
 def _generation_index(name: str) -> int:
     return int(name[1:])
+
+
+def validate_quality_attestation(document: dict) -> None:
+    if (
+        set(document) != QUALITY_ATTESTATION_KEYS
+        or document["schema_version"] != 1
+    ):
+        raise ValueError("quality attestation schema mismatch")
+    if document["passed"] is not True:
+        raise ValueError("quality_model")
+    if [row["format"] for row in document["formats"]] != sorted(
+        row["format"] for row in document["formats"]
+    ):
+        raise ValueError("quality attestation formats are not sorted")
+    numeric = []
+    for row in document["formats"]:
+        numeric.extend(
+            value for value in row.values() if isinstance(value, (int, float))
+        )
+    numeric.extend(document["thresholds"].values())
+    if any(not math.isfinite(float(value)) for value in numeric):
+        raise ValueError("quality_nonfinite")
+    thresholds = document["thresholds"]
+    for row in document["formats"]:
+        baseline = float(row["perplexity_baseline"])
+        adaptive = float(row["perplexity_adaptive"])
+        if baseline <= 0 or adaptive / baseline - 1 > float(
+            thresholds["perplexity_relative_increase_max"]
+        ):
+            raise ValueError("quality_model")
+        if float(row["greedy_agreement"]) < float(
+            thresholds["greedy_agreement_min"]
+        ):
+            raise ValueError("quality_model")
 
 
 @dataclass

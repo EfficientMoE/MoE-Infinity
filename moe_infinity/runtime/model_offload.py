@@ -44,6 +44,10 @@ from transformers.modeling_utils import PreTrainedModel
 from moe_infinity.common import parse_expert_type
 from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
+from moe_infinity.memory.adaptive_precision_policy import (
+    AdaptivePrecisionPolicy,
+    ExpertKey,
+)
 from moe_infinity.models import (
     Qwen3MoEBlock,
     Qwen3PagedAttention,
@@ -59,13 +63,19 @@ from moe_infinity.models import (
     SyncQwen3_5MoeSparseMoeBlock,
 )
 from moe_infinity.runtime.adaptive_precision_allowlist import (
+    RELEASED_ADAPTIVE_ENTRIES,
     ReleasedAdaptiveEntry,
 )
 from moe_infinity.runtime.expert_precision import (
+    PROTECTED_MODEL_PATHS,
     ModelPrecisionCapabilities,
+    protected_capabilities,
     resolve_model_precision_capabilities,
 )
-from moe_infinity.runtime.expert_variant_manifest import ExpertVariantManifest
+from moe_infinity.runtime.expert_variant_manifest import (
+    ExpertVariantManifest,
+    load_derivative_overlay,
+)
 from moe_infinity.runtime.hooks import *
 from moe_infinity.utils import (
     ArcherConfig,
@@ -112,15 +122,31 @@ def _resolve_adaptive_precision(
     released_entries=frozenset(),
     native_handle=None,
 ) -> AdaptivePrecisionResolution:
+    model_type = str(getattr(model_config, "model_type", ""))
+    if not bool(getattr(archer_config, "adaptive_expert_precision", False)):
+        return AdaptivePrecisionResolution(
+            False,
+            "disabled",
+            ModelPrecisionCapabilities(model_type, {}, None),
+        )
+    quantization = getattr(model_config, "quantization_config", None) or {}
+    quant_method = str(quantization.get("quant_method", "")).lower()
+    protected_reason = PROTECTED_MODEL_PATHS.get(model_type)
+    if protected_reason is None and quant_method in {
+        "gptq",
+        "awq",
+        "mxfp4",
+        "fp8",
+    }:
+        protected_reason = f"protected:{quant_method}"
+    if protected_reason is not None:
+        capabilities = protected_capabilities(model_type, protected_reason)
+        return AdaptivePrecisionResolution(
+            False, protected_reason, capabilities
+        )
     capabilities = resolve_model_precision_capabilities(
         model_config, extension_names
     )
-    if not bool(getattr(archer_config, "adaptive_expert_precision", False)):
-        return AdaptivePrecisionResolution(False, "disabled", capabilities)
-    if capabilities.protected_reason is not None:
-        return AdaptivePrecisionResolution(
-            False, capabilities.protected_reason, capabilities
-        )
     if int(getattr(archer_config, "adaptive_hbm_budget_bytes", 0)) <= 0:
         return AdaptivePrecisionResolution(
             False, "invalid_hbm_budget", capabilities
@@ -140,7 +166,9 @@ def _resolve_adaptive_precision(
         )
     try:
         manifest = ExpertVariantManifest.load_current(
-            derivative_root, native_handle=native_handle
+            derivative_root,
+            native_handle=native_handle,
+            register_overlay=False,
         )
     except FileNotFoundError:
         return AdaptivePrecisionResolution(
@@ -174,6 +202,14 @@ def _resolve_adaptive_precision(
     ):
         return AdaptivePrecisionResolution(
             False, "manifest_unapproved", capabilities, manifest
+        )
+    if native_handle is not None:
+        load_derivative_overlay(
+            Path(derivative_root)
+            / "generations"
+            / manifest.generation
+            / "derivative-index.v1.json",
+            native_handle,
         )
     return AdaptivePrecisionResolution(True, None, capabilities, manifest)
 
@@ -1326,6 +1362,96 @@ class OffloadEngine(object):
 
                 self.setup_archer_hooks(model)
                 self.deliver_fp8_scales_to_dispatcher()
+                extension_names = {
+                    name
+                    for name in ("_marlin", "_v4_fp4")
+                    if importlib.util.find_spec(f"moe_infinity.{name}")
+                    is not None
+                }
+                manager_match = (
+                    self.expert_dispatcher.get_residency_manager_id()
+                    == self.expert_prefetcher.get_residency_manager_id()
+                )
+                if (
+                    not manager_match
+                    and self.archer_config.adaptive_expert_precision
+                ):
+                    capabilities = resolve_model_precision_capabilities(
+                        self.config, extension_names
+                    )
+                    resolution = AdaptivePrecisionResolution(
+                        False, "residency_manager_mismatch", capabilities
+                    )
+                else:
+                    resolution = _resolve_adaptive_precision(
+                        self.config,
+                        self.archer_config,
+                        self.checkpoint,
+                        extension_names=extension_names,
+                        purpose="serve",
+                        released_entries=RELEASED_ADAPTIVE_ENTRIES,
+                        native_handle=self.archer_engine,
+                    )
+                manager_enabled = bool(
+                    getattr(
+                        self.archer_config,
+                        "phase_specific_expert_policy",
+                        False,
+                    )
+                    or resolution.enabled
+                )
+                phase_enabled = bool(
+                    getattr(
+                        self.archer_config,
+                        "phase_specific_expert_policy",
+                        False,
+                    )
+                )
+                self.expert_dispatcher.configure_residency_manager(
+                    manager_enabled, phase_enabled
+                )
+                self.archer_engine.configure_residency_manager(
+                    manager_enabled, phase_enabled
+                )
+                if resolution.enabled:
+                    self.expert_dispatcher.set_adaptive_hbm_budget_bytes(
+                        self.archer_config.adaptive_hbm_budget_bytes
+                    )
+                    for variant in resolution.manifest.variants:
+                        self.expert_dispatcher.register_expert_variant(
+                            variant.layer_id,
+                            variant.expert_id,
+                            variant.format.value,
+                            int(resolution.manifest.generation[1:]),
+                            variant.execution.value,
+                            list(variant.tensor_ids),
+                            list(variant.tensor_roles),
+                            variant.payload_bytes,
+                            variant.aligned_bytes,
+                            variant.workspace_bytes,
+                        )
+                    catalog = {}
+                    generations = {}
+                    native_generation = int(resolution.manifest.generation[1:])
+                    for variant in resolution.manifest.variants:
+                        key = ExpertKey(variant.layer_id, variant.expert_id)
+                        catalog.setdefault(key, {})[variant.format] = (
+                            variant.aligned_bytes
+                        )
+                        generations[(key, variant.format)] = native_generation
+                    policy = AdaptivePrecisionPolicy(
+                        self.archer_config.adaptive_hbm_budget_bytes,
+                        self.archer_config.adaptive_hotness_decay,
+                        self.archer_config.adaptive_promotion_threshold,
+                        self.archer_config.adaptive_demotion_threshold,
+                        self.archer_config.adaptive_min_residency_epochs,
+                        self.archer_config.adaptive_transition_cooldown_epochs,
+                        catalog,
+                        generations=generations,
+                        epoch_tokens=self.archer_config.adaptive_policy_epoch_tokens,
+                    )
+                    self.expert_executor.set_precision_policy(policy)
+                self.expert_precision_resolution = resolution
                 return model
 
             return archer_from_pretrained

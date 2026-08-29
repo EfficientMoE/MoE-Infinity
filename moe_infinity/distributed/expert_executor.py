@@ -230,9 +230,27 @@ class DistributedExpertExecutor:
                 observations, tokens=int(router_mask.shape[0])
             )
             if self.precision_policy.epoch_due:
+                from moe_infinity.runtime.expert_precision import (
+                    ExpertFormat,
+                    ResidentGeneration,
+                )
+
                 metrics = self.expert_dispatcher.get_precision_metrics()
+                resident = {}
+                for row in metrics.get("resident_generation_entries", []):
+                    if row["state"] != "active":
+                        continue
+                    logical_key = int(row["logical_expert_key"])
+                    resident[
+                        ExpertKey(logical_key >> 32, logical_key & 0xFFFFFFFF)
+                    ] = ResidentGeneration(
+                        ExpertFormat(row["format"]),
+                        int(row["aligned_bytes"]),
+                        int(row["generation"]),
+                        row["state"],
+                    )
                 plan = self.precision_policy.plan(
-                    resident={},
+                    resident=resident,
                     admission_candidates=set(observations),
                     transition_reserved_bytes=int(
                         metrics.get("transition_reserved_bytes", 0)
@@ -240,7 +258,7 @@ class DistributedExpertExecutor:
                     workspace_bytes=int(metrics.get("workspace_bytes", 0)),
                 )
                 if self.expert_dispatcher.set_precision_targets(
-                    plan.as_native_targets(), plan.epoch
+                    self.precision_policy.as_native_targets(plan), plan.epoch
                 ):
                     self.precision_policy.commit(plan)
 

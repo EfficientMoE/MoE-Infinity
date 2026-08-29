@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 from pathlib import Path
 
 REQUIRED = {
@@ -40,6 +41,48 @@ def validate_run(row: dict) -> None:
             raise ValueError("nonfinite TPOT")
 
 
+def evaluate_release_gate(rows: list[dict]) -> dict:
+    for row in rows:
+        validate_run(row)
+    reasons = []
+    by_mode = {
+        mode: [row for row in rows if row["mode"] == mode]
+        for mode in ("canonical", "static_low", "adaptive")
+    }
+    if any(len(group) != 5 for group in by_mode.values()):
+        reasons.append("five_repetitions_required")
+    adaptive = by_mode["adaptive"]
+    if any(row["policy"].get("fallback_counts") for row in adaptive):
+        reasons.append("adaptive_fallback")
+    if adaptive and by_mode["canonical"] and by_mode["static_low"]:
+        median_h2d = statistics.median(
+            row["transfer"]["h2d_payload_bytes"] for row in adaptive
+        )
+        canonical_h2d = statistics.median(
+            row["transfer"]["h2d_payload_bytes"] for row in by_mode["canonical"]
+        )
+        if median_h2d > canonical_h2d:
+            reasons.append("h2d_regression")
+        adaptive_tpot = statistics.median(
+            row["latency"]["tpot_ms_p50"] for row in adaptive
+        )
+        reference_tpot = min(
+            statistics.median(
+                row["latency"]["tpot_ms_p50"] for row in by_mode[mode]
+            )
+            for mode in ("canonical", "static_low")
+        )
+        if adaptive_tpot > reference_tpot * 1.05:
+            reasons.append("tpot_regression")
+    return {
+        "release_gate": "pass" if not reasons else "fail",
+        "reasons": reasons,
+        "quality_attestation_sha256": adaptive[0]["quality_attestation_sha256"]
+        if adaptive
+        else None,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("input")
@@ -52,13 +95,9 @@ def main() -> None:
     ]
     for row in rows:
         validate_run(row)
-    Path(args.output).write_text(
-        json.dumps(
-            {"runs": len(rows), "release_gate": "candidate-only"},
-            sort_keys=True,
-        )
-        + "\n"
-    )
+    report = evaluate_release_gate(rows)
+    report["runs"] = len(rows)
+    Path(args.output).write_text(json.dumps(report, sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":
