@@ -35,6 +35,13 @@ def _load_module(module_name: str, file_path: Path) -> types.ModuleType:
     return module
 
 
+def _load_benchmark_module() -> types.ModuleType:
+    return _load_module(
+        "decode_cuda_graph_benchmark_test",
+        ROOT / "benchmarks" / "serving" / "decode_cuda_graph.py",
+    )
+
+
 _ensure_package("moe_infinity", ROOT / "moe_infinity")
 _ensure_package("moe_infinity.serving", ROOT / "moe_infinity" / "serving")
 _ensure_package("moe_infinity.runtime", ROOT / "moe_infinity" / "runtime")
@@ -346,6 +353,41 @@ def test_invalidate_waits_for_replay_lock_and_advances_generation() -> None:
     runner.invalidate("module_reload")
     assert runner.generation == generation + 1
     assert runner.stats()["graphs"] == 0
+
+
+def test_benchmark_result_schema_does_not_claim_speedup() -> None:
+    module = _load_benchmark_module()
+    result = module.build_result(
+        config={"batch_size": 4},
+        eager_us=[100.0, 101.0],
+        replay_us=[90.0, 91.0],
+        graph_stats={"replays": 2},
+        environment={"gpu": "test"},
+    )
+
+    assert result["schema_version"] == 1
+    assert result["measurements"]["eager_us"] == [100.0, 101.0]
+    assert result["measurements"]["replay_us"] == [90.0, 91.0]
+    assert "claimed_speedup" not in result
+
+
+def test_benchmark_fixture_mode_needs_no_model_or_offload_args() -> None:
+    module = _load_benchmark_module()
+    args = module.parse_args(
+        ["--mode", "fixture", "--output-json", "/tmp/out.json"]
+    )
+    module.validate_args(args)
+    assert args.model is None
+    assert args.offload_dir is None
+
+
+def test_benchmark_model_mode_requires_model_and_offload_dir() -> None:
+    module = _load_benchmark_module()
+    args = module.parse_args(
+        ["--mode", "model", "--output-json", "/tmp/out.json"]
+    )
+    with pytest.raises(ValueError, match="--model and --offload-dir"):
+        module.validate_args(args)
 
 
 @requires_cuda
