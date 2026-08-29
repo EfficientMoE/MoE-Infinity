@@ -202,6 +202,7 @@ class ContinuousBatchingEngine:
         )
 
         self._next_seq_id = 0
+        self._shutdown = False
         self._sequences: dict[int, SequenceData] = {}
         self._sequence_to_request_id: dict[int, str] = {}
         self._request_to_seq_ids: dict[str, list[int]] = {}
@@ -695,6 +696,15 @@ class ContinuousBatchingEngine:
 
     def has_pending_requests(self) -> bool:
         return bool(self._pending_request_ids())
+
+    def invalidate_cuda_graphs(self, reason: str) -> None:
+        self.cuda_graph_runner.invalidate(reason)
+
+    def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self.cuda_graph_runner.close()
+        self._shutdown = True
 
     def get_stats(self) -> dict[str, object]:
         status_counts = {status.value: 0 for status in SequenceStatus}

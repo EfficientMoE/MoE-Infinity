@@ -226,6 +226,17 @@ def _make_engine(
     )
 
 
+def test_shutdown_closes_cuda_graph_runner_once() -> None:
+    engine = _make_engine()
+    graph_runner = Mock()
+    engine.cuda_graph_runner = graph_runner
+
+    engine.shutdown()
+    engine.shutdown()
+
+    graph_runner.close.assert_called_once_with()
+
+
 def test_engine_single_request_run_until_done() -> None:
     engine = _make_engine(tokenizer=MockTokenizer())
     callback_outputs: list[RequestOutput] = []
