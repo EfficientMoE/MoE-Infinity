@@ -7,6 +7,10 @@ from typing import Any, Optional, Protocol, runtime_checkable
 
 import torch
 
+from moe_infinity.memory.expert_policy import (
+    ExpertPhase,
+    expert_phase_scope,
+)
 from moe_infinity.runtime.attention_types import (
     AttentionMetadata as RuntimeAttentionMetadata,
 )
@@ -89,6 +93,13 @@ class ModelRunner:
             "attention_mask": attention_mask,
         }
 
+    def _expert_phase(self, batch: BatchMetadata) -> ExpertPhase:
+        if batch.is_prefill and all(batch.is_prefill):
+            return ExpertPhase.PREFILL
+        if batch.is_prefill and not any(batch.is_prefill):
+            return ExpertPhase.DECODE
+        return ExpertPhase.MIXED
+
     def execute(
         self,
         batch: BatchMetadata,
@@ -123,7 +134,7 @@ class ModelRunner:
             paged_attention_classes and backend is not None
         )
 
-        with torch.no_grad():
+        with torch.no_grad(), expert_phase_scope(self._expert_phase(batch)):
             if not use_paged_context:
                 outputs = forward_fn(**forward_kwargs)
             else:

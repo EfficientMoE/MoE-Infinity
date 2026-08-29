@@ -738,16 +738,39 @@ class ContinuousBatchingEngine:
                 paged_classes = cast(list[object], maybe_paged_classes)
         uses_paged = bool(paged_classes)
 
-        if not uses_paged or not (has_prefill and has_decode):
-            return self.model_runner.execute(batch)
+        phase_policy_enabled = bool(
+            self.config.get("phase_specific_expert_policy", False)
+        )
 
+        if not phase_policy_enabled:
+            if not uses_paged or not (has_prefill and has_decode):
+                return self.model_runner.execute(batch)
+            split = split_prefill_decode_batch(batch)
+            prefill_logits = (
+                self.model_runner.execute(split.prefill_batch)
+                if split.prefill_batch is not None
+                else None
+            )
+            decode_logits = (
+                self.model_runner.execute(split.decode_batch)
+                if split.decode_batch is not None
+                else None
+            )
+            return split.recombine_outputs(prefill_logits, decode_logits)
+
+        if not (has_prefill and has_decode):
+            return self.model_runner.execute(batch)
         split = split_prefill_decode_batch(batch)
-        prefill_logits = None
-        decode_logits = None
-        if split.prefill_batch is not None:
-            prefill_logits = self.model_runner.execute(split.prefill_batch)
-        if split.decode_batch is not None:
-            decode_logits = self.model_runner.execute(split.decode_batch)
+        decode_logits = (
+            self.model_runner.execute(split.decode_batch)
+            if split.decode_batch is not None
+            else None
+        )
+        prefill_logits = (
+            self.model_runner.execute(split.prefill_batch)
+            if split.prefill_batch is not None
+            else None
+        )
         return split.recombine_outputs(prefill_logits, decode_logits)
 
     @staticmethod
