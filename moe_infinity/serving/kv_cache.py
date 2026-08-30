@@ -422,6 +422,23 @@ class PagedKVCache:
             record.num_tokens = block_table.num_computed_tokens()
             record.active_block_ids = block_table.get_block_ids()
 
+    def num_tokens(self, seq_id: int) -> int:
+        try:
+            return self._require_sequence(seq_id).num_computed_tokens()
+        except KeyError:
+            return 0
+
+    def can_append(self, seq_id: int, num_new_tokens: int) -> bool:
+        try:
+            block_table = self._require_sequence(seq_id)
+        except KeyError:
+            return True
+        current = block_table.num_computed_tokens()
+        block_size = self.block_size
+        have = (current + block_size - 1) // block_size
+        need = (current + num_new_tokens + block_size - 1) // block_size
+        return (need - have) <= self.block_allocator.num_free_blocks
+
     def truncate_tokens(self, seq_id: int, new_len: int) -> None:
         """Roll a sequence back to ``new_len`` tokens, freeing tail blocks.
 

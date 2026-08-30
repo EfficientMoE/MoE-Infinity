@@ -331,6 +331,8 @@ class Scheduler:
 
         self._recover_host_resident_groups()
 
+        self._ensure_decode_headroom()
+
         capacity_reached = False
         for group in self._running:
             if capacity_reached:
@@ -344,6 +346,9 @@ class Scheduler:
                 ):
                     capacity_reached = True
                     break
+
+                if not self.kv_cache.can_append(sequence.seq_id, 1):
+                    continue
 
                 output.decode_seq_ids.append(sequence.seq_id)
                 output.num_decode_tokens += 1
@@ -426,6 +431,8 @@ class Scheduler:
                     if committed_counts is None
                     else committed_counts.get(seq_id, 1)
                 )
+                if not self.kv_cache.can_append(seq_id, num_new):
+                    continue
                 try:
                     self.kv_cache.append_tokens(seq_id, num_new_tokens=num_new)
                 except KeyError:
@@ -525,6 +532,25 @@ class Scheduler:
             SequenceStatus.VERIFY,
         }
     )
+
+    def _decode_block_demand(self) -> int:
+        block_size = self.kv_cache.block_size
+        demand = 0
+        for group in self._running:
+            for sequence in group.sequences:
+                if sequence.status is not SequenceStatus.DECODE:
+                    continue
+                if self.kv_cache.num_tokens(sequence.seq_id) % block_size == 0:
+                    demand += 1
+        return demand
+
+    def _ensure_decode_headroom(self) -> None:
+        for _ in range(len(self._running)):
+            demand = self._decode_block_demand()
+            if self.kv_cache.block_allocator.num_free_blocks >= demand:
+                return
+            if not self._preempt_oldest_running_group():
+                return
 
     def _preempt_oldest_running_group(self) -> list[int]:
         while self._running:

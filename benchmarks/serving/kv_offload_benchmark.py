@@ -45,6 +45,8 @@ def parse_args() -> argparse.Namespace:
         dest="kv_swap_allow_sync_fallback",
     )
     parser.set_defaults(kv_swap_allow_sync_fallback=True)
+    parser.add_argument("--max-batch-size", type=int, default=64)
+    parser.add_argument("--max-tokens-per-step", type=int, default=4096)
     return parser.parse_args()
 
 
@@ -176,6 +178,8 @@ def _build_engine_config(
     model: object,
     kv_cache_ratio: float,
     swap_config: dict[str, object] | None = None,
+    max_batch_size: int = 64,
+    max_tokens_per_step: int = 4096,
 ) -> dict[str, object]:
     model_config = getattr(model, "config", None)
     if model_config is None:
@@ -214,8 +218,8 @@ def _build_engine_config(
     config: dict[str, object] = {
         "device_memory_ratio": 0.75,
         "kv_cache_ratio": kv_cache_ratio,
-        "max_batch_size": 64,
-        "max_tokens_per_step": 4096,
+        "max_batch_size": max_batch_size,
+        "max_tokens_per_step": max_tokens_per_step,
         "block_size": 16,
         "num_layers": num_layers,
         "num_kv_heads": num_kv_heads,
@@ -491,6 +495,8 @@ def main() -> int:
             model.model,
             kv_cache_ratio=kv_cache_ratio,
             swap_config=swap_config,
+            max_batch_size=args.max_batch_size,
+            max_tokens_per_step=args.max_tokens_per_step,
         ),
         tokenizer=tokenizer,
     )
