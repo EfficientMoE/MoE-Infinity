@@ -927,17 +927,25 @@ async def _completion_event_generator(
     raw_request: Request,
 ) -> Any:
     runtime_engine, _ = _ensure_runtime_ready()
+    pending: Optional["asyncio.Future[Optional[str]]"] = None
     while True:
         if await raw_request.is_disconnected():
             runtime_engine.abort_request(request_id)
+            if pending is not None:
+                _ = pending.cancel()
             return
+        if pending is None:
+            pending = asyncio.ensure_future(
+                asyncio.to_thread(_next_stream_event, stream)
+            )
         try:
             event = await asyncio.wait_for(
-                asyncio.to_thread(_next_stream_event, stream),
+                asyncio.shield(pending),
                 timeout=0.1,
             )
         except asyncio.TimeoutError:
             continue
+        pending = None
 
         if event is None:
             return
@@ -971,17 +979,25 @@ async def _chat_event_generator(
     *, request_id: str, stream: Any, raw_request: Request
 ) -> Any:
     runtime_engine, _ = _ensure_runtime_ready()
+    pending: Optional["asyncio.Future[Optional[str]]"] = None
     while True:
         if await raw_request.is_disconnected():
             runtime_engine.abort_request(request_id)
+            if pending is not None:
+                _ = pending.cancel()
             return
+        if pending is None:
+            pending = asyncio.ensure_future(
+                asyncio.to_thread(_next_stream_event, stream)
+            )
         try:
             event = await asyncio.wait_for(
-                asyncio.to_thread(_next_stream_event, stream),
+                asyncio.shield(pending),
                 timeout=0.1,
             )
         except asyncio.TimeoutError:
             continue
+        pending = None
 
         if event is None:
             return
@@ -991,6 +1007,7 @@ async def _chat_event_generator(
 
 
 async def _engine_loop() -> None:
+    _logger.info("engine loop started")
     while (
         _engine_shutdown_event is not None
         and not _engine_shutdown_event.is_set()
@@ -999,18 +1016,23 @@ async def _engine_loop() -> None:
             await asyncio.sleep(0.01)
             continue
 
-        if engine.has_pending_requests():
-            if _decode_watchdog is not None:
-                _decode_watchdog.activate()
-            _ = engine.step()
-            if _decode_watchdog is not None:
-                _decode_watchdog.feed()
-            await asyncio.sleep(0)
-            continue
+        try:
+            if engine.has_pending_requests():
+                if _decode_watchdog is not None:
+                    _decode_watchdog.activate()
+                _ = engine.step()
+                if _decode_watchdog is not None:
+                    _decode_watchdog.feed()
+                await asyncio.sleep(0)
+                continue
 
-        if _decode_watchdog is not None:
-            _decode_watchdog.deactivate()
-        await asyncio.sleep(0.005)
+            if _decode_watchdog is not None:
+                _decode_watchdog.deactivate()
+            await asyncio.sleep(0.005)
+        except Exception as exc:
+            _logger.exception("engine loop step failed")
+            _health_state.set_unhealthy(f"engine loop failed: {exc}")
+            return
 
 
 def _ensure_engine_loop_running() -> None:

@@ -427,7 +427,17 @@ class PagedKVCache:
             raise ValueError("paged KV head-count mismatch")
         if store.head_dim != self.head_dim:
             raise ValueError("paged KV head-dimension mismatch")
-        if store.dtype != self.dtype or store.device != self.device:
+
+        def _dev_key(device: torch.device) -> tuple[str, int]:
+            if device.index is not None:
+                return (device.type, device.index)
+            if device.type == "cuda":
+                return (device.type, torch.cuda.current_device())
+            return (device.type, -1)
+
+        if store.dtype != self.dtype or _dev_key(store.device) != _dev_key(
+            self.device
+        ):
             raise ValueError("paged KV dtype/device mismatch")
         self._block_store = store
 
