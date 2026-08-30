@@ -320,13 +320,21 @@ class PagedKVCache:
             raise ValueError("layered KV store owner mismatch")
         if self.num_blocks > store.num_blocks:
             raise ValueError("logical cache exceeds layered store capacity")
+
+        def _dev_key(device: torch.device) -> tuple[str, int]:
+            if device.index is not None:
+                return (device.type, device.index)
+            if device.type == "cuda":
+                return (device.type, torch.cuda.current_device())
+            return (device.type, -1)
+
         expected = (
             self.num_layers,
             self.block_size,
             self.num_heads,
             self.head_dim,
             self.dtype,
-            self.device,
+            _dev_key(self.device),
         )
         actual = (
             store.num_layers,
@@ -334,7 +342,7 @@ class PagedKVCache:
             store.num_kv_heads,
             store.head_dim,
             store.dtype,
-            store.device,
+            _dev_key(store.device),
         )
         if actual != expected:
             raise ValueError(

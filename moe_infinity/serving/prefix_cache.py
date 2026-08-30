@@ -98,6 +98,7 @@ class PrefixCache:
 
         self._hits = 0
         self._misses = 0
+        self._matched_tokens_total = 0
         self._open_leases = 0
 
     @property
@@ -114,6 +115,14 @@ class PrefixCache:
         if total == 0:
             return 0.0
         return self._hits / total
+
+    @property
+    def hits_total(self) -> int:
+        return self._hits
+
+    @property
+    def matched_tokens_total(self) -> int:
+        return self._matched_tokens_total
 
     def _root_entry_id(self, namespace: CacheNamespace) -> EntryId:
         root = self._roots.get(namespace)
@@ -230,6 +239,9 @@ class PrefixCache:
                 return PrefixLease.empty()
 
             self._hits += 1
+            self._matched_tokens_total += (
+                len(matched_block_ids) * self.block_size
+            )
             self._on_retain(list(matched_block_ids))
             self._open_leases += 1
             for entry_id in matched_entry_ids:

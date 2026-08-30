@@ -202,8 +202,10 @@ def run_mode(
             context_lengths=sample.plan.lengths.context_lengths.tolist(),
             kv_seq_lengths=sample.plan.lengths.kv_seq_lengths.tolist(),
         ),
-        hits_total=int(stats["prefix_cache_hits_total"]),
-        matched_tokens_total=int(stats["prefix_cache_matched_tokens_total"]),
+        hits_total=int(stats.get("prefix_cache_hits_total", 0)),
+        matched_tokens_total=int(
+            stats.get("prefix_cache_matched_tokens_total", 0)
+        ),
         open_leases=int(stats["prefix_cache_open_leases"]),
         refcount_high_water=engine.refcount_high_water,
         token_digest=token_digest,
@@ -251,6 +253,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--dry-run-force-mismatch", action="store_true", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--_mode",
+        choices=("disabled", "enabled_cold", "enabled_warm"),
+        default=None,
+        help=argparse.SUPPRESS,
     )
     return parser.parse_args()
 
@@ -321,29 +329,117 @@ def build_prompt_pair(
     return shared + prime_suffix, shared + measured_suffix
 
 
+def run_suite_subprocess(args: argparse.Namespace) -> dict[str, object]:
+    import os
+    import subprocess
+
+    runner = [sys.executable]
+    wt_root = os.environ.get("MOE_WT_ROOT")
+    if wt_root:
+        runner.append(
+            os.path.join(os.path.dirname(wt_root.rstrip("/")), "_runwt.py")
+        )
+    modes: dict[str, dict[str, object]] = {}
+    for name in ("disabled", "enabled_cold", "enabled_warm"):
+        mode_out = f"{args.output_json}.{name}.json"
+        cmd = runner + [
+            os.path.abspath(__file__),
+            "--model",
+            args.model,
+            "--offload-dir",
+            os.path.join(args.offload_dir, name),
+            "--shared-prefix-tokens",
+            str(args.shared_prefix_tokens),
+            "--suffix-tokens",
+            str(args.suffix_tokens),
+            "--output-json",
+            mode_out,
+            "--_mode",
+            name,
+        ]
+        proc = subprocess.run(cmd)
+        if proc.returncode == 2:
+            raise BenchmarkMismatch(
+                f"mode {name} reported a capability or mismatch error"
+            )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"mode {name} subprocess exited with {proc.returncode}"
+            )
+        with open(mode_out, "r", encoding="utf-8") as handle:
+            modes[name] = json.load(handle)
+    if len({str(m["engine_instance_id"]) for m in modes.values()}) != 3:
+        raise RuntimeError("expected three distinct engine instances")
+    token_equal = len({str(m["token_digest"]) for m in modes.values()}) == 1
+    logit_equal = len({str(m["logit_digest"]) for m in modes.values()}) == 1
+    if not (token_equal and logit_equal):
+        raise BenchmarkMismatch("disabled/cold/warm digest mismatch")
+    if any(int(m["open_leases"]) for m in modes.values()):
+        raise RuntimeError("benchmark completed with open prefix leases")
+    return {
+        "modes": modes,
+        "correctness": {
+            "token_digests_equal": token_equal,
+            "logit_digests_equal": logit_equal,
+        },
+    }
+
+
 def main() -> int:
     args = parse_args()
-    tokenizer = (
-        None
-        if args.dry_run
-        else AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    )
-    factory = (
-        make_dry_factory()
-        if args.dry_run
-        else make_real_factory(args, tokenizer)
-    )
-    prime_prompt, measured_prompt = build_prompt_pair(args, tokenizer)
-    try:
-        payload = run_suite(
-            factory,
-            prime_prompt,
-            measured_prompt,
-            force_mismatch=args.dry_run_force_mismatch,
+
+    if args._mode is not None:
+        tokenizer = (
+            None
+            if args.dry_run
+            else AutoTokenizer.from_pretrained(
+                args.model, trust_remote_code=True
+            )
         )
-    except (BenchmarkMismatch, PrefixCapabilityError) as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
+        factory = (
+            make_dry_factory()
+            if args.dry_run
+            else make_real_factory(args, tokenizer)
+        )
+        prime_prompt, measured_prompt = build_prompt_pair(args, tokenizer)
+        try:
+            result = run_mode(
+                args._mode,
+                factory,
+                prime_prompt,
+                measured_prompt,
+                args.dry_run_force_mismatch,
+            )
+        except (BenchmarkMismatch, PrefixCapabilityError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output_json).write_text(
+            json.dumps(dataclasses.asdict(result), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return 0
+
+    if args.dry_run:
+        factory = make_dry_factory()
+        prime_prompt, measured_prompt = build_prompt_pair(args, None)
+        try:
+            payload = run_suite(
+                factory,
+                prime_prompt,
+                measured_prompt,
+                force_mismatch=args.dry_run_force_mismatch,
+            )
+        except (BenchmarkMismatch, PrefixCapabilityError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    else:
+        try:
+            payload = run_suite_subprocess(args)
+        except (BenchmarkMismatch, PrefixCapabilityError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+
     output = Path(args.output_json)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
