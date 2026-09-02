@@ -1116,12 +1116,18 @@ async def _initialize_model() -> None:
         moe_config = {
             "offload_path": os.path.join(args.offload_dir, args.model),
             "device_memory_ratio": args.device_memory_ratio,
-            "kv_swap_mode": args.kv_swap_mode,
-            "kv_swap_host_memory_bytes": args.kv_swap_host_memory_bytes,
-            "kv_swap_max_inflight_bytes": args.kv_swap_max_inflight_bytes,
-            "kv_swap_checksum": args.kv_swap_checksum,
-            "kv_swap_max_retries": args.kv_swap_max_retries,
-            "kv_swap_allow_sync_fallback": args.kv_swap_allow_sync_fallback,
+            "kv_swap_mode": getattr(args, "kv_swap_mode", "sync"),
+            "kv_swap_host_memory_bytes": getattr(
+                args, "kv_swap_host_memory_bytes", 512 * 1024 * 1024
+            ),
+            "kv_swap_max_inflight_bytes": getattr(
+                args, "kv_swap_max_inflight_bytes", 256 * 1024 * 1024
+            ),
+            "kv_swap_checksum": getattr(args, "kv_swap_checksum", False),
+            "kv_swap_max_retries": getattr(args, "kv_swap_max_retries", 2),
+            "kv_swap_allow_sync_fallback": getattr(
+                args, "kv_swap_allow_sync_fallback", True
+            ),
         }
         if args.enable_prefix_caching:
             moe_config["enable_prefix_caching"] = True
