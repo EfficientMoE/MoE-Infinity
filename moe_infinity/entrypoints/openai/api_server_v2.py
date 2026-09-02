@@ -1145,7 +1145,7 @@ async def _initialize_model() -> None:
             "offload_path": os.path.join(args.offload_dir, args.model),
             "device_memory_ratio": args.device_memory_ratio,
             "phase_specific_expert_policy": bool(
-                args.phase_specific_expert_policy
+                getattr(args, "phase_specific_expert_policy", False)
             ),
         }
         if args.enable_prefix_caching:
