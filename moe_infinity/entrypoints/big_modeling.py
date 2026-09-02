@@ -411,12 +411,14 @@ class MoE:
         )
         num_cpu_blocks = max(32, num_gpu_blocks * 2)
 
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device_id = int(device.index or 0)
         kv_cache_manager = KVCacheManager(
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
             block_size=kv_spec.block_size,
+            device_id=device_id,
         )
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         try:
             attention_backend = PagedAttentionBackend(
                 spec=kv_spec,
@@ -467,6 +469,7 @@ class MoE:
         scheduler = Scheduler(
             kv_cache_manager=kv_cache_manager,
             transfer_scheduler=transfer_scheduler,
+            device_id=device_id,
         )
 
         generation_engine = GenerationEngine(

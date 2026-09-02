@@ -4,13 +4,12 @@ import sys
 from pathlib import Path
 from typing import Optional, Protocol, Union, cast
 
+import pytest
 import torch
 
 ROOT = str(Path(__file__).resolve().parents[3])
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-_ = sys.modules.pop("moe_infinity", None)
-_ = sys.modules.pop("moe_infinity.serving", None)
 MEMORY_MANAGER_PATH = (
     Path(ROOT) / "moe_infinity" / "serving" / "memory_manager.py"
 )
@@ -170,3 +169,30 @@ def test_handles_no_gpu() -> None:
     assert budget.available_bytes == 0
     assert budget.expert_cache_bytes == 0
     assert budget.kv_cache_bytes == 0
+
+
+def test_absolute_targets_cannot_consume_free_reserve() -> None:
+    _, MemoryManager = _load_classes()
+    manager = MemoryManager(
+        device=torch.device("cpu"),
+        device_memory_ratio=1.0,
+        kv_cache_ratio=0.5,
+        activation_reserve_ratio=0.1,
+    )
+    manager.total_gpu_memory_bytes = 2048 * 1024**2
+    budget = manager.compute_budget(
+        model_memory_bytes=512 * 1024**2,
+        free_memory_reserve_bytes=256 * 1024**2,
+    )
+    assert budget.expert_cache_bytes + budget.kv_cache_bytes <= 1076 * 1024**2
+
+
+def test_static_call_keeps_existing_ratio_result() -> None:
+    _, MemoryManager = _load_classes()
+    manager = MemoryManager(
+        device=torch.device("cpu"),
+        device_memory_ratio=0.8,
+        kv_cache_ratio=0.25,
+    )
+    manager.total_gpu_memory_bytes = 8 * 1024**3
+    assert manager.compute_budget(0).expert_cache_ratio == pytest.approx(0.6)
