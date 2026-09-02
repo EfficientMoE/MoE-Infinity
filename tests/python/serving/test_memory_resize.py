@@ -12,12 +12,6 @@ import torch
 ROOT = str(Path(__file__).resolve().parents[3])
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-for _stale in [
-    name
-    for name in list(sys.modules)
-    if name == "moe_infinity" or name.startswith("moe_infinity.")
-]:
-    _ = sys.modules.pop(_stale, None)
 
 from moe_infinity.memory.adaptive_memory import (
     MemoryTargets,
