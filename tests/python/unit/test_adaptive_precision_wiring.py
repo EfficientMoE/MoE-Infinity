@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from moe_infinity.runtime import expert_variant_manifest, model_offload
 from moe_infinity.runtime.adaptive_precision_allowlist import (
     ReleasedAdaptiveEntry,
 )
@@ -72,7 +73,8 @@ def test_serving_rejects_valid_but_unreleased_manifest(tmp_path, monkeypatch):
     )
     manifest = SimpleNamespace(release_entries=frozenset({entry}))
     monkeypatch.setattr(
-        "moe_infinity.runtime.expert_variant_manifest.ExpertVariantManifest.load_current",
+        expert_variant_manifest.ExpertVariantManifest,
+        "load_current",
         lambda *args, **kwargs: manifest,
     )
     result = _resolve_adaptive_precision(
@@ -107,7 +109,8 @@ def test_protected_paths_short_circuit_general_resolution(
     tmp_path, monkeypatch, model_type, quantization, reason
 ):
     monkeypatch.setattr(
-        "moe_infinity.runtime.model_offload.resolve_model_precision_capabilities",
+        model_offload,
+        "resolve_model_precision_capabilities",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("protected path entered general adaptive resolution")
         ),
