@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import Iterable, Mapping
 from typing import Any, Optional, Protocol, runtime_checkable
 
@@ -12,6 +14,8 @@ from moe_infinity.runtime.attention_types import (
 )
 
 from .batch import BatchMetadata
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -40,6 +44,7 @@ class ModelRunner:
         self.engine = engine
         self.device = self._resolve_device(device)
         self.seq_id_list = []
+        self._warned_no_paged_shim = False
 
     def prepare_inputs(self, batch: BatchMetadata) -> dict[str, torch.Tensor]:
         num_seqs = len(batch.seq_ids)
@@ -122,6 +127,22 @@ class ModelRunner:
         use_paged_context = bool(
             paged_attention_classes and backend is not None
         )
+
+        # Backend present but no shim matched => paged cache is never wired into
+        # attention and decode silently degenerates; surface it (see issue #191).
+        if backend is not None and not paged_attention_classes:
+            _msg = (
+                "MoE-Infinity serving: no paged-attention shim matched the "
+                f"served model ({type(self.model).__name__}); the paged KV "
+                "cache is NOT wired into its attention, so multi-token decode "
+                "output will be INCORRECT. Implement a *PagedAttention shim for "
+                "this model (reference: moe_infinity/models/qwen3_paged_attention.py)."
+            )
+            if os.environ.get("MOE_STRICT_PAGED_ATTENTION", "0") == "1":
+                raise RuntimeError(_msg)
+            if not self._warned_no_paged_shim:
+                logger.warning(_msg)
+                self._warned_no_paged_shim = True
 
         with torch.no_grad():
             if not use_paged_context:
