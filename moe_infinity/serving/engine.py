@@ -665,7 +665,23 @@ class ContinuousBatchingEngine:
             "kv_cache_free_blocks": self.kv_cache.block_allocator.num_free_blocks,
             "sequence_status_counts": status_counts,
             "memory": self.memory_manager.report(),
+            "expert_policy": self._expert_policy_stats(),
         }
+
+    def _expert_policy_stats(self) -> dict[str, int]:
+        from moe_infinity.memory.expert_prefetcher import disabled_policy_stats
+
+        engine = getattr(self.model_runner, "engine", None)
+        prefetcher = getattr(engine, "expert_prefetcher", None)
+        getter = getattr(prefetcher, "get_policy_stats", None)
+        if callable(getter):
+            try:
+                snapshot = getter()
+            except Exception:
+                snapshot = None
+            if isinstance(snapshot, dict):
+                return snapshot
+        return disabled_policy_stats()
 
     def get_config(self) -> dict[str, object]:
         config: dict[str, object] = {}
@@ -738,16 +754,39 @@ class ContinuousBatchingEngine:
                 paged_classes = cast(list[object], maybe_paged_classes)
         uses_paged = bool(paged_classes)
 
-        if not uses_paged or not (has_prefill and has_decode):
-            return self.model_runner.execute(batch)
+        phase_policy_enabled = bool(
+            self.config.get("phase_specific_expert_policy", False)
+        )
 
+        if not phase_policy_enabled:
+            if not uses_paged or not (has_prefill and has_decode):
+                return self.model_runner.execute(batch)
+            split = split_prefill_decode_batch(batch)
+            prefill_logits = (
+                self.model_runner.execute(split.prefill_batch)
+                if split.prefill_batch is not None
+                else None
+            )
+            decode_logits = (
+                self.model_runner.execute(split.decode_batch)
+                if split.decode_batch is not None
+                else None
+            )
+            return split.recombine_outputs(prefill_logits, decode_logits)
+
+        if not (has_prefill and has_decode):
+            return self.model_runner.execute(batch)
         split = split_prefill_decode_batch(batch)
-        prefill_logits = None
-        decode_logits = None
-        if split.prefill_batch is not None:
-            prefill_logits = self.model_runner.execute(split.prefill_batch)
-        if split.decode_batch is not None:
-            decode_logits = self.model_runner.execute(split.decode_batch)
+        decode_logits = (
+            self.model_runner.execute(split.decode_batch)
+            if split.decode_batch is not None
+            else None
+        )
+        prefill_logits = (
+            self.model_runner.execute(split.prefill_batch)
+            if split.prefill_batch is not None
+            else None
+        )
         return split.recombine_outputs(prefill_logits, decode_logits)
 
     @staticmethod

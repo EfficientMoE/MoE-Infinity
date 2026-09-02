@@ -36,6 +36,7 @@ import pytest
 import torch
 
 from moe_infinity.distributed.expert_executor import DistributedExpertExecutor
+from moe_infinity.memory.expert_policy import ExpertPhase
 from moe_infinity.memory.expert_prefetcher import ExpertPrefetcher
 from moe_infinity.spec_decode._route_ahead_ctx import (
     current_prefetcher,
@@ -152,7 +153,11 @@ def test_active_context_prefetches_exact_union_for_current_layer():
         lambda layer, **kw: events.append(("prefetch", layer, kw))
     )
     executor.expert_dispatcher.enqueue_expert.side_effect = (
-        lambda layer, expert, gpu, remote: events.append(("enqueue", expert))
+        lambda layer,
+        expert,
+        gpu,
+        remote,
+        phase=int(ExpertPhase.MIXED): events.append(("enqueue", expert))
     )
 
     with route_ahead_context(prefetcher=prefetcher):
@@ -161,7 +166,10 @@ def test_active_context_prefetches_exact_union_for_current_layer():
 
     prefetcher.fetch_experts_lock_cache.assert_called_once_with(LAYER_ID, UNION)
     prefetcher.speculative_prefetch.assert_called_once_with(
-        LAYER_ID, expert_ids=UNION, prefetch_layer_id=LAYER_ID
+        LAYER_ID,
+        expert_ids=UNION,
+        prefetch_layer_id=LAYER_ID,
+        phase=ExpertPhase.DECODE,
     )
     first_read = next(i for i, e in enumerate(events) if e[0] == "enqueue")
     assert events.index(("lock", LAYER_ID, UNION)) < first_read
@@ -171,7 +179,13 @@ def test_active_context_prefetches_exact_union_for_current_layer():
     # Routing untouched: exactly the union experts are dispatched to compute.
     assert [e[1] for e in events if e[0] == "enqueue"] == UNION
     # A0 section 3: legacy pooled prediction suppressed for this dispatch.
-    assert executor._pending_prefetch == (None, LAYER_ID, UNION, None)
+    assert executor._pending_prefetch == (
+        None,
+        LAYER_ID,
+        UNION,
+        None,
+        ExpertPhase.MIXED,
+    )
 
 
 def test_active_context_falls_back_to_executor_prefetcher():
@@ -189,7 +203,13 @@ def test_active_context_falls_back_to_executor_prefetcher():
     assert _issued_tensor_ids(engine) == [300, 301, 302, 305, 307]
     assert prefetcher._last_speculative_prediction == set(UNION)
     trigger_spy.assert_not_called()
-    assert executor._pending_prefetch == (prefetcher, LAYER_ID, UNION, None)
+    assert executor._pending_prefetch == (
+        prefetcher,
+        LAYER_ID,
+        UNION,
+        None,
+        ExpertPhase.MIXED,
+    )
 
     # The pending correct_prefetch(layer+1, expert_list) no-ops because the
     # recorded prediction IS the actual union; nothing further is enqueued.
@@ -212,7 +232,10 @@ def test_active_context_prefetcher_arg_wins_over_context_handle():
         LAYER_ID, UNION
     )
     arg_prefetcher.speculative_prefetch.assert_called_once_with(
-        LAYER_ID, expert_ids=UNION, prefetch_layer_id=LAYER_ID
+        LAYER_ID,
+        expert_ids=UNION,
+        prefetch_layer_id=LAYER_ID,
+        phase=ExpertPhase.DECODE,
     )
     ctx_prefetcher.fetch_experts_lock_cache.assert_not_called()
     self_prefetcher.fetch_experts_lock_cache.assert_not_called()
@@ -262,9 +285,16 @@ def test_inactive_context_overlap_path_byte_identical():
     prefetcher.fetch_experts_lock_cache.assert_not_called()
     assert prefetcher.speculative_prefetch.call_count == 1
     args, kwargs = prefetcher.speculative_prefetch.call_args
-    assert args[0] == LAYER_ID and args[1] is LOGITS and not kwargs
+    assert args[0] == LAYER_ID and kwargs.get("phase") == ExpertPhase.MIXED
+    assert args[1] is LOGITS
     trigger_spy.assert_called_once()
-    assert executor._pending_prefetch == (prefetcher, LAYER_ID, UNION, None)
+    assert executor._pending_prefetch == (
+        prefetcher,
+        LAYER_ID,
+        UNION,
+        None,
+        ExpertPhase.MIXED,
+    )
 
 
 def test_inactive_context_deferred_legacy_path_byte_identical():
@@ -279,10 +309,13 @@ def test_inactive_context_deferred_legacy_path_byte_identical():
     assert pending is not None and pending[3] is LOGITS
 
     executor.wait_dispatch_local()
-    prefetcher.correct_prefetch.assert_called_once_with(LAYER_ID + 1, UNION)
+    prefetcher.correct_prefetch.assert_called_once_with(
+        LAYER_ID + 1, UNION, phase=ExpertPhase.MIXED
+    )
     assert prefetcher.speculative_prefetch.call_count == 1
     args, kwargs = prefetcher.speculative_prefetch.call_args
-    assert args[0] == LAYER_ID and args[1] is LOGITS and not kwargs
+    assert args[0] == LAYER_ID and kwargs.get("phase") == ExpertPhase.MIXED
+    assert args[1] is LOGITS
 
 
 def test_inactive_context_without_router_logits_makes_no_prefetch_calls():
@@ -295,7 +328,9 @@ def test_inactive_context_without_router_logits_makes_no_prefetch_calls():
     prefetcher.fetch_experts_lock_cache.assert_not_called()
     prefetcher.speculative_prefetch.assert_not_called()
     # Pre-A3 behavior: correction still fires from the pending tuple.
-    prefetcher.correct_prefetch.assert_called_once_with(LAYER_ID + 1, UNION)
+    prefetcher.correct_prefetch.assert_called_once_with(
+        LAYER_ID + 1, UNION, phase=ExpertPhase.MIXED
+    )
 
 
 # ---------------------------------------------------------------------------
