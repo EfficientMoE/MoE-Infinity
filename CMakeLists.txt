@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(MoEInfinity LANGUAGES CXX CUDA)
 
+option(MOE_INFINITY_TESTING "Expose native test-only bindings" OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
@@ -40,3 +42,8 @@ find_package(OpenMP REQUIRED)
 
 add_subdirectory(core)
 add_subdirectory(extensions)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_subdirectory(tests/cpp/unit/prefetch)
+endif()
