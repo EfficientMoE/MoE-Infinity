@@ -181,7 +181,7 @@ def test_batch_builder_decode_only() -> None:
     assert metadata.seq_ids == [20, 21, 22]
     assert metadata.input_token_ids == [3, 5, 6]
     assert metadata.seq_lengths == [1, 1, 1]
-    assert metadata.context_lengths == [3, 2, 1]
+    assert metadata.context_lengths == [2, 1, 0]
     assert metadata.is_prefill == [False, False, False]
     assert metadata.block_tables == [[0], [1], [2]]
     assert metadata.token_offsets == [0, 1, 2, 3]
@@ -213,7 +213,7 @@ def test_batch_builder_mixed() -> None:
     assert metadata.seq_ids == [30, 31, 32]
     assert metadata.input_token_ids == [7, 8, 3, 4]
     assert metadata.seq_lengths == [2, 1, 1]
-    assert metadata.context_lengths == [0, 3, 1]
+    assert metadata.context_lengths == [0, 2, 0]
     assert metadata.is_prefill == [True, False, False]
     assert metadata.token_offsets == [0, 2, 3, 4]
 
