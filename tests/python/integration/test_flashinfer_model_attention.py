@@ -230,12 +230,14 @@ def test_mla_kv_cache_spec_is_symmetric_padded() -> None:
         hidden_size=2048,
         head_dim=None,
     )
-    assert DeepseekV2PagedAttention.get_kv_cache_spec_for_config(
-        lite_like
-    ) == {"num_kv_heads": 16, "head_dim": 256}
-    assert DeepseekV3PagedAttention.get_kv_cache_spec_for_config(
-        lite_like
-    ) == {"num_kv_heads": 16, "head_dim": 256}
+    assert DeepseekV2PagedAttention.get_kv_cache_spec_for_config(lite_like) == {
+        "num_kv_heads": 16,
+        "head_dim": 256,
+    }
+    assert DeepseekV3PagedAttention.get_kv_cache_spec_for_config(lite_like) == {
+        "num_kv_heads": 16,
+        "head_dim": 256,
+    }
 
     tiny = _v2_config()
     assert DeepseekV2PagedAttention.get_kv_cache_spec_for_config(tiny) == {

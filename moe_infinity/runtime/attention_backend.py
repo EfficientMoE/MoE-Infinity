@@ -619,10 +619,12 @@ class PagedAttentionBackend:
         cls,
         spec: KVCacheSpec,
         num_gpu_blocks: int,
+        num_layers: int = 1,
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         _ = cls
         x = 8
         k_shape = (
+            max(1, int(num_layers)),
             int(num_gpu_blocks),
             spec.num_kv_heads,
             spec.head_dim // x,
@@ -630,6 +632,7 @@ class PagedAttentionBackend:
             x,
         )
         v_shape = (
+            max(1, int(num_layers)),
             int(num_gpu_blocks),
             spec.num_kv_heads,
             spec.head_dim,
