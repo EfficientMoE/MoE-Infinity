@@ -40,6 +40,11 @@ if not HAS_PAGED_ATTN:
         "PagedAttention CUDA kernel not available, falling back to torch SDPA"
     )
 
+# The compiled paged_attention_v1 kernel produces correct results only for
+# these head sizes; MLA's padded head_dim (256) reads back wrong from this
+# kernel, so route it through the (correct) SDPA reconstruction fallback.
+_CUDA_PAGED_ATTN_HEAD_SIZES = frozenset({64, 80, 96, 112, 128})
+
 
 def paged_attention_fwd(
     query: torch.Tensor,
@@ -69,6 +74,7 @@ def paged_attention_fwd(
     if (
         HAS_PAGED_ATTN
         and _paged_attn_ops is not None
+        and query.shape[-1] in _CUDA_PAGED_ATTN_HEAD_SIZES
         and query.is_cuda
         and key_cache.is_cuda
         and value_cache.is_cuda
@@ -139,9 +145,12 @@ def _paged_attention_sdpa_fallback(
     if num_heads % num_kv_heads != 0:
         raise ValueError("num_heads must be divisible by num_kv_heads")
 
+    seq_lens_list = seq_lens.tolist()
+    block_tables_list = block_tables.tolist()
+
     outputs: list[torch.Tensor] = []
     for seq_idx in range(batch_size):
-        seq_len = int(seq_lens[seq_idx].item())
+        seq_len = int(seq_lens_list[seq_idx])
         q = query[seq_idx : seq_idx + 1]
 
         if seq_len <= 0:
@@ -153,7 +162,7 @@ def _paged_attention_sdpa_fallback(
         v_list: list[torch.Tensor] = []
 
         for b in range(num_blocks):
-            phys_block = int(block_tables[seq_idx, b].item())
+            phys_block = int(block_tables_list[seq_idx][b])
             tokens_in_block = min(block_size, seq_len - b * block_size)
 
             k_block = key_cache[phys_block]
