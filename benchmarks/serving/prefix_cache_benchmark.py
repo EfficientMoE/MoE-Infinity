@@ -183,12 +183,21 @@ def run_mode(
     prime_prompt: list[int],
     measured_prompt: list[int],
     force_mismatch: bool,
+    dump_path: str | None = None,
 ) -> ModeResult:
     enabled = name != "disabled"
     engine = factory(enabled)
     if name == "enabled_warm":
         engine.run(prime_prompt, measured=False)
     sample = engine.run(measured_prompt, measured=True)
+    if dump_path is not None:
+        torch.save(
+            {
+                "token_ids": sample.token_ids,
+                "last_token_logits": sample.last_token_logits,
+            },
+            dump_path,
+        )
     token_digest = digest_tensor(sample.token_ids)
     if force_mismatch and name == "enabled_warm":
         token_digest = "forced-mismatch"
@@ -247,9 +256,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="Qwen/Qwen3-30B-A3B")
     parser.add_argument("--offload-dir", default="/tmp/moe-prefix-benchmark")
+    parser.add_argument("--device-memory-ratio", type=float, default=0.5)
+    parser.add_argument("--kv-cache-ratio", type=float, default=0.25)
     parser.add_argument("--shared-prefix-tokens", type=int, default=64)
     parser.add_argument("--suffix-tokens", type=int, default=1)
     parser.add_argument("--output-json", required=True)
+    parser.add_argument(
+        "--parity-report",
+        action="store_true",
+        help=(
+            "dump per-mode token/logit tensors and emit a numerical parity "
+            "analysis instead of failing on digest mismatch"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--dry-run-force-mismatch", action="store_true", help=argparse.SUPPRESS
@@ -273,13 +292,13 @@ def make_real_factory(args: argparse.Namespace, tokenizer):
             args.model,
             {
                 "offload_path": str(Path(args.offload_dir) / str(uuid.uuid4())),
-                "device_memory_ratio": 0.5,
+                "device_memory_ratio": args.device_memory_ratio,
             },
         )
         config = _build_engine_config(
             SimpleNamespace(
-                device_memory_ratio=0.5,
-                kv_cache_ratio=0.25,
+                device_memory_ratio=args.device_memory_ratio,
+                kv_cache_ratio=args.kv_cache_ratio,
                 max_batch_size=1,
                 enable_prefix_caching=enabled,
                 prefix_cache_max_entries=1000,
@@ -329,6 +348,44 @@ def build_prompt_pair(
     return shared + prime_suffix, shared + measured_suffix
 
 
+def analyze_parity(dump_paths: dict[str, str]) -> dict[str, object]:
+    tensors = {name: torch.load(path) for name, path in dump_paths.items()}
+    report: dict[str, object] = {
+        "tokens": {
+            name: data["token_ids"].tolist() for name, data in tensors.items()
+        }
+    }
+    disabled = tensors["disabled"]["last_token_logits"].float()
+    cold = tensors["enabled_cold"]["last_token_logits"].float()
+    warm = tensors["enabled_warm"]["last_token_logits"].float()
+    steps = min(x.shape[0] for x in (disabled, cold, warm))
+    report["logits_max_abs"] = {
+        "disabled_vs_cold": (disabled[:steps] - cold[:steps])
+        .abs()
+        .max()
+        .item(),
+        "cold_vs_warm": (cold[:steps] - warm[:steps]).abs().max().item(),
+    }
+    cold_tokens = tensors["enabled_cold"]["token_ids"].tolist()
+    warm_tokens = tensors["enabled_warm"]["token_ids"].tolist()
+    flips = [
+        index
+        for index, pair in enumerate(zip(cold_tokens, warm_tokens))
+        if pair[0] != pair[1]
+    ]
+    report["first_flip_step"] = flips[0] if flips else None
+    if flips and flips[0] < steps:
+        step = flips[0]
+        for label, logits in (("cold", cold), ("warm", warm)):
+            top2 = torch.topk(logits[step], 2)
+            report[f"{label}_flip_top2"] = {
+                "token_ids": top2.indices.tolist(),
+                "logits": top2.values.tolist(),
+                "margin": (top2.values[0] - top2.values[1]).item(),
+            }
+    return report
+
+
 def run_suite_subprocess(args: argparse.Namespace) -> dict[str, object]:
     import os
     import subprocess
@@ -354,9 +411,15 @@ def run_suite_subprocess(args: argparse.Namespace) -> dict[str, object]:
             str(args.suffix_tokens),
             "--output-json",
             mode_out,
+            "--device-memory-ratio",
+            str(args.device_memory_ratio),
+            "--kv-cache-ratio",
+            str(args.kv_cache_ratio),
             "--_mode",
             name,
         ]
+        if args.parity_report:
+            cmd.append("--parity-report")
         proc = subprocess.run(cmd)
         if proc.returncode == 2:
             raise BenchmarkMismatch(
@@ -372,17 +435,25 @@ def run_suite_subprocess(args: argparse.Namespace) -> dict[str, object]:
         raise RuntimeError("expected three distinct engine instances")
     token_equal = len({str(m["token_digest"]) for m in modes.values()}) == 1
     logit_equal = len({str(m["logit_digest"]) for m in modes.values()}) == 1
-    if not (token_equal and logit_equal):
-        raise BenchmarkMismatch("disabled/cold/warm digest mismatch")
-    if any(int(m["open_leases"]) for m in modes.values()):
-        raise RuntimeError("benchmark completed with open prefix leases")
-    return {
+    payload: dict[str, object] = {
         "modes": modes,
         "correctness": {
             "token_digests_equal": token_equal,
             "logit_digests_equal": logit_equal,
         },
     }
+    if args.parity_report:
+        payload["parity"] = analyze_parity(
+            {
+                name: f"{args.output_json}.{name}.json.tensors.pt"
+                for name in ("disabled", "enabled_cold", "enabled_warm")
+            }
+        )
+    elif not (token_equal and logit_equal):
+        raise BenchmarkMismatch("disabled/cold/warm digest mismatch")
+    if any(int(m["open_leases"]) for m in modes.values()):
+        raise RuntimeError("benchmark completed with open prefix leases")
+    return payload
 
 
 def main() -> int:
@@ -409,6 +480,11 @@ def main() -> int:
                 prime_prompt,
                 measured_prompt,
                 args.dry_run_force_mismatch,
+                dump_path=(
+                    f"{args.output_json}.tensors.pt"
+                    if args.parity_report
+                    else None
+                ),
             )
         except (BenchmarkMismatch, PrefixCapabilityError) as exc:
             print(str(exc), file=sys.stderr)
