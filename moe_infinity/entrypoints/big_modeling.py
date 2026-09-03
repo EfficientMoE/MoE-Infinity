@@ -365,6 +365,23 @@ class MoE:
                 hidden_size = max(1, num_attention_heads * 128)
             head_dim = max(1, hidden_size // max(1, num_attention_heads))
 
+        qk_rope_head_dim = self._resolve_model_int_attr(
+            model_config, "qk_rope_head_dim"
+        )
+        qk_nope_head_dim = self._resolve_model_int_attr(
+            model_config, "qk_nope_head_dim"
+        )
+        if qk_rope_head_dim is not None and qk_nope_head_dim is not None:
+            from moe_infinity.models.deepseek_v2_paged_attention import (
+                DeepseekV2PagedAttention,
+            )
+
+            mla_spec = DeepseekV2PagedAttention.get_kv_cache_spec_for_config(
+                model_config
+            )
+            head_dim = mla_spec["head_dim"]
+            num_kv_heads = mla_spec["num_kv_heads"]
+
         vocab_size = self._resolve_model_int_attr(model_config, "vocab_size")
         if vocab_size is None:
             vocab_size = 32000
@@ -422,6 +439,7 @@ class MoE:
                 spec=kv_spec,
                 num_gpu_blocks=num_gpu_blocks,
                 device=device,
+                num_layers=int(num_layers),
             )
         except Exception:
             attention_backend = None
