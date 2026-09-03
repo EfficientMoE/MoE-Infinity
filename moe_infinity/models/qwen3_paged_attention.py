@@ -35,6 +35,7 @@ class _SupportsPagedAttention(Protocol):
         attention_metadata: Optional[
             Union[AttentionMetadata, RuntimeAttentionMetadata]
         ] = None,
+        layer_idx: int = 0,
     ) -> Optional[torch.Tensor]: ...
 
 
@@ -152,6 +153,7 @@ class Qwen3PagedAttention(Qwen3MoeAttention):
             value_tokens,
             attention_metadata=attention_metadata,
             scale=cast(float, self.scaling),
+            layer_idx=int(self.layer_idx or 0),
         )
 
         if attn_output_tokens is None or attn_output_tokens.ndim != 3:
