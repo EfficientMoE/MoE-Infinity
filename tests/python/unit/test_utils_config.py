@@ -130,6 +130,8 @@ def test_gpu_routing_rejects_future_overlap_modes(mode):
         match="gpu_only_expert_routing cannot be combined with overlap prefetch",
     ):
         ArcherConfig._validate_gpu_routing_overlap(True, False, mode)
+
+
 def test_paged_mla_admission_guard_defaults_are_safe(monkeypatch):
     monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
     config = ArcherConfig(use_native_engine=False)
