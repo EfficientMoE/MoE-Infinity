@@ -131,6 +131,9 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
     cudaStream_t exec_stream;
     cudaStreamCreateWithFlags(&exec_stream, cudaStreamNonBlocking);
     exec_streams_.emplace_back(exec_stream);
+    cudaEvent_t exec_done_event;
+    cudaEventCreateWithFlags(&exec_done_event, cudaEventDisableTiming);
+    exec_done_events_.emplace_back(exec_done_event);
 
     modules_[i] = new MoEMLP(dtype, expert_type);
 
@@ -616,6 +619,17 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       auto device = CUDA_DEVICE(gpu_id);
       auto expert_idx = args.expert_node->expert_idx;
 
+      // Enter the exec stream before any tensor op and order it after the
+      // producer stream that wrote hidden_states_/router_mask_ (recorded in
+      // SetInputs). exec streams are non-blocking, so without this the
+      // gather/copy below could run against not-yet-written input memory.
+      c10::cuda::CUDAStream torch_stream =
+          c10::cuda::getStreamFromExternal(stream, gpu_id);
+      c10::cuda::CUDAStreamGuard guard(torch_stream);
+      if (input_ready_event_ != nullptr) {
+        cudaStreamWaitEvent(stream, input_ready_event_, 0);
+      }
+
       auto token_mask = router_mask_.index({"...", expert_idx});
       torch::Tensor input = (batch_size == 1)
                                 ? hidden_states_.to(device)
@@ -634,10 +648,6 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
           modules_[thread_idx]->DequantFp8Params(stream);
         }
       }
-
-      c10::cuda::CUDAStream torch_stream =
-          c10::cuda::getStreamFromExternal(stream, gpu_id);
-      c10::cuda::CUDAStreamGuard guard(torch_stream);
 
       if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
         modules_[thread_idx]->DequantMxfp4Params(stream);
@@ -721,6 +731,7 @@ std::vector<ExpertDispatcher::CallResult> ExpertDispatcher::Wait() {
 
   std::unique_lock<std::mutex> lock(pending_mutex_);
   pending_cv_.wait(lock, [&] { return pending_.load() == 0; });
+  SyncExecStreamsWithCurrent();
 
   num_enqueued_.store(0);
   std::vector<CallResult> output_queue;
@@ -738,6 +749,10 @@ torch::Tensor ExpertDispatcher::WaitHiddenStates() {
 #endif
   std::unique_lock<std::mutex> lock(pending_mutex_);
   pending_cv_.wait(lock, [&] { return pending_.load() == 0; });
+  // pending_ hits zero when the accumulation is enqueued, not complete;
+  // order the caller's stream after every exec stream before the result
+  // tensor is consumed.
+  SyncExecStreamsWithCurrent();
   num_enqueued_.store(0);
   return final_hidden_states_;
 }
@@ -752,4 +767,17 @@ void ExpertDispatcher::SetInputs(const torch::Tensor& hidden_states,
   router_mask_ = router_mask;
   router_weight_ = router_weight;  // this can be float32
   final_hidden_states_ = torch::zeros_like(hidden_states, options);
+
+  if (input_ready_event_ == nullptr) {
+    cudaEventCreateWithFlags(&input_ready_event_, cudaEventDisableTiming);
+  }
+  cudaEventRecord(input_ready_event_, c10::cuda::getCurrentCUDAStream());
+}
+
+void ExpertDispatcher::SyncExecStreamsWithCurrent() {
+  auto current = c10::cuda::getCurrentCUDAStream();
+  for (size_t i = 0; i < exec_streams_.size(); ++i) {
+    cudaEventRecord(exec_done_events_[i], exec_streams_[i]);
+    cudaStreamWaitEvent(current.stream(), exec_done_events_[i], 0);
+  }
 }

@@ -1,6 +1,7 @@
 # pyright: reportAny=false, reportCallIssue=false, reportExplicitAny=false, reportMissingParameterType=false, reportMissingTypeArgument=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownVariableType=false
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, cast
@@ -186,11 +187,80 @@ def test_initialize_with_model_forwards_speculative_draft(
         tok=None,
         max_seq_length=128,
         speculative_draft=speculator,
+        enable_deepseek_mla_paging=True,
+        max_resident_paged_speculative_sessions=3,
+        min_free_mla_blocks_after_admission=2,
     )
 
     assert captured["model"] is model
     assert captured["engine"] is offload_engine
     assert captured["speculative_draft"] is speculator
+    assert captured["config"]["enable_deepseek_mla_paging"] is True
+    assert captured["config"]["max_resident_paged_speculative_sessions"] == 3
+    assert captured["config"]["min_free_mla_blocks_after_admission"] == 2
+
+
+def test_dflash_paged_cli_defaults_remain_off_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "api_server_v2.py",
+            "--model",
+            "demo/model",
+            "--offload-dir",
+            "/tmp/offload",
+        ],
+    )
+
+    args = srv.parse_args()
+
+    assert args.enable_deepseek_mla_paging is False
+    assert args.max_resident_paged_speculative_sessions == 1
+    assert args.min_free_mla_blocks_after_admission == 1
+
+
+def test_dflash_paged_cli_values_forward_to_engine_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "api_server_v2.py",
+            "--model",
+            "demo/model",
+            "--offload-dir",
+            "/tmp/offload",
+            "--enable-deepseek-mla-paging",
+            "--max-resident-paged-speculative-sessions",
+            "4",
+            "--min-free-mla-blocks-after-admission",
+            "3",
+        ],
+    )
+    args = srv.parse_args()
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            hidden_size=32,
+            head_dim=8,
+            max_position_embeddings=128,
+            eos_token_id=2,
+            dtype="float32",
+        ),
+        dtype="float32",
+    )
+
+    config = srv._build_engine_config(args=args, model=model)
+
+    assert config["enable_deepseek_mla_paging"] is True
+    assert config["max_resident_paged_speculative_sessions"] == 4
+    assert config["min_free_mla_blocks_after_admission"] == 3
 
 
 def test_list_models_engine_not_ready(client: TestClient) -> None:

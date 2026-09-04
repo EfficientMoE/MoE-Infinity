@@ -74,6 +74,24 @@ class ArcherConfig:
             "help": "Enable attention backend offloading. Default False (uses HuggingFace attention)."
         },
     )
+    enable_deepseek_mla_paging: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable experimental batch-one DeepSeek V2/V3 MLA paging. Default False."
+        },
+    )
+    max_resident_paged_speculative_sessions: int = field(
+        default=1,
+        metadata={
+            "help": "Maximum concurrent resident paged-MLA speculative sessions. Default 1; set 0 to force Stage 4a fallback."
+        },
+    )
+    min_free_mla_blocks_after_admission: int = field(
+        default=1,
+        metadata={
+            "help": "Minimum MLA blocks that remain free after reserving all active and newly admitted requests' full declared budgets plus maximum transient DFlash verify peaks. Default 1."
+        },
+    )
     enable_kv_cache_offload: bool = field(
         default=False,
         metadata={
@@ -159,4 +177,18 @@ class ArcherConfig:
         if self.device_memory_ratio + self.kv_cache_memory_ratio > 1.0:
             raise ValueError(
                 f"device_memory_ratio ({self.device_memory_ratio}) + kv_cache_memory_ratio ({self.kv_cache_memory_ratio}) > 1.0"
+            )
+        if (
+            type(self.max_resident_paged_speculative_sessions) is not int
+            or self.max_resident_paged_speculative_sessions < 0
+        ):
+            raise ValueError(
+                "max_resident_paged_speculative_sessions must be an integer >= 0"
+            )
+        if (
+            type(self.min_free_mla_blocks_after_admission) is not int
+            or self.min_free_mla_blocks_after_admission < 1
+        ):
+            raise ValueError(
+                "min_free_mla_blocks_after_admission must be an integer >= 1"
             )
