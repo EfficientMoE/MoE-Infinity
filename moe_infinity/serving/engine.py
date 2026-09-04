@@ -738,8 +738,10 @@ class ContinuousBatchingEngine:
             return None
         try:
             self.kv_cache.set_block_store(store, owner=backend)
-        except (RuntimeError, ValueError):
-            self._prefix_cache_disabled_reason = "kv-store-binding-mismatch"
+        except (RuntimeError, ValueError) as exc:
+            self._prefix_cache_disabled_reason = (
+                f"kv-store-binding-mismatch: {exc}"
+            )
             return None
         self.cache_namespace = self._build_cache_namespace()
         self.prefix_cache = PrefixCache(
@@ -763,6 +765,10 @@ class ContinuousBatchingEngine:
         active = self.prefix_cache is not None
         entries = self.prefix_cache.num_entries if active else 0
         open_leases = self.prefix_cache.open_leases if active else 0
+        hits_total = self.prefix_cache.hits_total if active else 0
+        matched_tokens_total = (
+            self.prefix_cache.matched_tokens_total if active else 0
+        )
         return {
             "prefix_cache_enabled": self._prefix_cache_enabled,
             "prefix_cache_active": active,
@@ -771,6 +777,8 @@ class ContinuousBatchingEngine:
             ),
             "prefix_cache_entries": entries,
             "prefix_cache_open_leases": open_leases,
+            "prefix_cache_hits_total": hits_total,
+            "prefix_cache_matched_tokens_total": matched_tokens_total,
             "prefix_cache_invalidations_total": (
                 self._prefix_cache_invalidations
             ),

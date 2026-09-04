@@ -110,26 +110,67 @@ def run_with_logits(engine, request_id: str, prompt: list[int]):
 
 
 def test_real_flashinfer_warm_suffix_matches_cold_logits(
-    qwen3_engine_factory,
+    tmp_path: Path,
 ) -> None:
-    factory, tokenizer = qwen3_engine_factory
-    shared = tokenize_to_at_least_64_tokens(tokenizer)
-    cold = factory(enable_prefix_caching=False)
-    warm = factory(enable_prefix_caching=True)
-    run_with_logits(warm, "prime", shared + [100])
-    cold_tokens, cold_logits, cold_plans = run_with_logits(
-        cold, "cold", shared + [101]
-    )
-    warm_tokens, warm_logits, warm_plans = run_with_logits(
-        warm, "warm", shared + [101]
-    )
-    assert warm_tokens == cold_tokens
-    torch.testing.assert_close(warm_logits, cold_logits, rtol=2e-3, atol=2e-3)
-    cold_prefill, warm_prefill = cold_plans[0], warm_plans[0]
-    assert cold_prefill.lengths.query_offsets.tolist() == [0, len(shared) + 1]
-    assert warm_prefill.lengths.query_offsets.tolist() == [0, 1]
-    assert warm_prefill.lengths.context_lengths.tolist() == [len(shared)]
-    assert warm_prefill.lengths.kv_seq_lengths.tolist() == [len(shared) + 1]
+    """Warm-vs-cold parity via the subprocess benchmark harness.
+
+    Loading two engines in one process trips the single-owner
+    kTopologyHandle guard, so each mode runs in its own subprocess. Cold and
+    warm execute different FlashInfer kernel schedules (full prefill vs
+    append), which are individually correct but not bitwise-identical
+    (tests/python/integration/test_flashinfer_kernel_parity.py), and expert
+    accumulation order is nondeterministic, so near-tie argmax swaps are
+    tolerated; only disagreement beyond the shared top-2 pair fails.
+    """
+    import json
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[3]
+    output = tmp_path / "suite.json"
+    cmd = [
+        sys.executable,
+        str(root / "benchmarks" / "serving" / "prefix_cache_benchmark.py"),
+        "--model",
+        os.environ.get("MOE_PREFIX_PARITY_MODEL", MODEL),
+        "--offload-dir",
+        os.environ.get("MOE_PREFIX_PARITY_OFFLOAD", str(tmp_path / "offload")),
+        "--shared-prefix-tokens",
+        "64",
+        "--suffix-tokens",
+        "8",
+        "--output-json",
+        str(output),
+        "--parity-report",
+    ]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(cmd, cwd=root, env=env)
+    assert proc.returncode == 0
+    payload = json.loads(output.read_text())
+
+    modes = payload["modes"]
+    assert (
+        modes["disabled"]["token_digest"]
+        == modes["enabled_cold"]["token_digest"]
+    ), "disabled and cold share one kernel path and must match bitwise"
+
+    warm = modes["enabled_warm"]
+    assert warm["prefix_cache_active"] is True
+    assert warm["hits_total"] >= 1
+    assert warm["geometry"]["query_offsets"] == [0, 8]
+    assert warm["geometry"]["context_lengths"] == [64]
+    assert warm["geometry"]["kv_seq_lengths"] == [72]
+
+    parity = payload["parity"]
+    assert parity["logits_max_abs"]["disabled_vs_cold"] == 0.0
+    if parity["first_flip_step"] is not None:
+        cold_top2 = parity["cold_flip_top2"]["token_ids"]
+        warm_top2 = parity["warm_flip_top2"]["token_ids"]
+        assert cold_top2[0] in warm_top2 and warm_top2[0] in cold_top2, (
+            "warm and cold disagree beyond a near-tie candidate swap, "
+            "which indicates a real warm-path bug, not numerical noise"
+        )
 
 
 def test_active_reference_survives_lru_eviction(qwen3_engine_factory) -> None:

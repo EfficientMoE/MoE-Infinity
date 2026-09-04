@@ -632,6 +632,7 @@ class PagedAttentionBackend:
                 kv_indices,
                 kv_last_page_len,
                 num_qo_heads,
+                query_src.dtype,
             )
             return cast(
                 torch.Tensor,
@@ -885,6 +886,7 @@ class PagedAttentionBackend:
         kv_indices: torch.Tensor,
         kv_last_page_len: torch.Tensor,
         num_qo_heads: int,
+        query_dtype: torch.dtype,
     ) -> None:
         if self._fi_prefill is None:
             raise RuntimeError("FlashInfer prefill wrapper is unavailable")
@@ -899,6 +901,9 @@ class PagedAttentionBackend:
                 self.spec.num_kv_heads,
                 self.spec.head_dim,
                 self.spec.block_size,
+                causal=True,
+                q_data_type=query_dtype,
+                kv_data_type=query_dtype,
             )
         except TypeError:
             self._fi_prefill.plan(
@@ -933,6 +938,9 @@ class PagedAttentionBackend:
                 self.spec.num_kv_heads,
                 self.spec.head_dim,
                 self.spec.block_size,
+                pos_encoding_mode="NONE",
+                q_data_type=query_dtype,
+                kv_data_type=query_dtype,
             )
         except TypeError:
             self._fi_decode.plan(
