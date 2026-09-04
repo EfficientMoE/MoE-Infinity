@@ -29,6 +29,12 @@ Exact string comparisons matter. Several toggles only react to `"1"` or
 | `MOE_INFINITY_PROFILE_IO_OUT` | unset | `moe_infinity/profiling/io_profiler.py` | Append JSONL events to this path on flush. | No output if unset. |
 | `MOE_INFINITY_PROFILE_IO_SAMPLE` | `"1.0"` | `moe_infinity/profiling/io_profiler.py` | Sampling probability, clamped to `[0.0, 1.0]`. | `0` disables, `1` records all. |
 
+With `gpu_only_expert_routing=true`, full sampling emits `gpu_route_submit`,
+`gpu_route_fallback`, and the existing `sync_wait` stages. Native NVTX adds
+`gpu_route_handoff` and `expert_completion_handoff`. A nonzero
+`route_failures` count or any unexpected `gpu_route_fallback` event is a
+rollback signal; set `gpu_only_expert_routing=false` and retain the eager path.
+
 ## Deterministic mode
 
 | Variable | Default | Where read | Effect | Notes |
