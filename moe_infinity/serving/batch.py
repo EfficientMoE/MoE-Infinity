@@ -252,7 +252,7 @@ class BatchBuilder:
             )
             input_token_ids.extend(token)
             seq_lengths.append(len(token))
-            context_lengths.append(sequence.num_computed_tokens)
+            context_lengths.append(sequence.num_computed_tokens - len(token))
             is_prefill.append(False)
             block_tables.append(kv_cache.get_block_table(seq_id))
             sampling_params.append(sequence.sampling_params)

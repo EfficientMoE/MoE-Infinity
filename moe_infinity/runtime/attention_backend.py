@@ -16,6 +16,8 @@ from moe_infinity.runtime.attention_types import (
     KVCacheSpec,
 )
 
+_FLASHINFER_SUPPORTED_HEAD_DIMS = frozenset({64, 128})
+
 
 @dataclass
 class AttentionMetadata:
@@ -92,16 +94,22 @@ class PagedAttentionBackend:
         spec: KVCacheSpec,
         num_gpu_blocks: int,
         device: torch.device,
+        num_layers: int = 1,
     ) -> None:
         if spec.head_dim % 8 != 0:
             raise ValueError("spec.head_dim must be divisible by 8")
 
         self.spec = spec
         self.num_gpu_blocks = int(num_gpu_blocks)
+        self.num_layers = max(1, int(num_layers))
         self.device = device
 
         x = 8
+        # A single backend instance is shared by every decoder layer, so the KV
+        # cache carries a leading layer dimension; without it all layers would
+        # write the same slots and read back only the last layer's KV.
         self.k_cache = torch.zeros(
+            self.num_layers,
             self.num_gpu_blocks,
             spec.num_kv_heads,
             spec.head_dim // x,
@@ -111,6 +119,7 @@ class PagedAttentionBackend:
             device=device,
         )
         self.v_cache = torch.zeros(
+            self.num_layers,
             self.num_gpu_blocks,
             spec.num_kv_heads,
             spec.head_dim,
@@ -124,7 +133,14 @@ class PagedAttentionBackend:
         self._fi_kv_cache = None
         self._fi_prefill = None
         self._fi_decode = None
-        if flashinfer_utils.HAS_FLASHINFER:
+        # MLA runs with a padded head_dim (256); FlashInfer's paged wrappers
+        # JIT-compile per head_dim on first use and stall the request there, so
+        # only small standard dims use FlashInfer. MLA falls back to SDPA
+        # prefill + the precompiled paged_attention_v1 kernel (both handle 256).
+        if (
+            flashinfer_utils.HAS_FLASHINFER
+            and spec.head_dim in _FLASHINFER_SUPPORTED_HEAD_DIMS
+        ):
             flashinfer_module = cast(
                 Any,
                 flashinfer_utils.get_flashinfer_module(),
@@ -134,6 +150,7 @@ class PagedAttentionBackend:
                     workspace = flashinfer_utils.get_workspace(device)
                     self._fi_workspace = workspace
                     self._fi_kv_cache = torch.zeros(
+                        self.num_layers,
                         self.num_gpu_blocks,
                         2,
                         spec.block_size,
@@ -167,6 +184,7 @@ class PagedAttentionBackend:
         key: torch.Tensor,
         value: torch.Tensor,
         slot_mapping: torch.Tensor,
+        layer_idx: int = 0,
     ) -> None:
         if key.shape != value.shape:
             raise ValueError("key and value must have the same shape")
@@ -202,18 +220,21 @@ class PagedAttentionBackend:
                     "slot_mapping points past allocated GPU blocks"
                 )
 
-            self.k_cache[block_id, :, :, token_offset, :] = k_src[i].reshape(
+            self.k_cache[layer_idx, block_id, :, :, token_offset, :] = k_src[
+                i
+            ].reshape(
                 self.spec.num_kv_heads,
                 self.spec.head_dim // x,
                 x,
             )
-            self.v_cache[block_id, :, :, token_offset] = v_src[i]
+            self.v_cache[layer_idx, block_id, :, :, token_offset] = v_src[i]
 
     def write_kv_flashinfer(
         self,
         key: torch.Tensor,
         value: torch.Tensor,
         slot_mapping: torch.Tensor,
+        layer_idx: int = 0,
     ) -> None:
         if self._fi_kv_cache is None:
             raise RuntimeError("FlashInfer KV cache is not initialized")
@@ -249,8 +270,8 @@ class PagedAttentionBackend:
                     "slot_mapping points past allocated GPU blocks"
                 )
 
-            self._fi_kv_cache[block_id, 0, token_offset] = k_src[i]
-            self._fi_kv_cache[block_id, 1, token_offset] = v_src[i]
+            self._fi_kv_cache[layer_idx, block_id, 0, token_offset] = k_src[i]
+            self._fi_kv_cache[layer_idx, block_id, 1, token_offset] = v_src[i]
 
     def forward(
         self,
@@ -265,6 +286,7 @@ class PagedAttentionBackend:
         attention_metadata: Optional[
             AttentionMetadata | RuntimeAttentionMetadata
         ] = None,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         _ = kv_cache
         metadata = (
@@ -275,22 +297,26 @@ class PagedAttentionBackend:
         if metadata is None:
             raise ValueError("attention metadata is required")
 
-        if self._is_prefill(metadata):
-            slot_mapping = self._get_slot_mapping(metadata)
-            if slot_mapping is None:
-                raise ValueError("prefill requires slot_mapping")
-            self.write_kv(key, value, slot_mapping)
+        slot_mapping = self._get_slot_mapping(metadata)
+        is_prefill = self._is_prefill(metadata)
+        if is_prefill and slot_mapping is None:
+            raise ValueError("prefill requires slot_mapping")
+        if slot_mapping is not None:
+            self.write_kv(key, value, slot_mapping, layer_idx)
             if self._flashinfer_enabled():
-                self.write_kv_flashinfer(key, value, slot_mapping)
+                self.write_kv_flashinfer(key, value, slot_mapping, layer_idx)
+        if is_prefill:
             return self._prefill_forward(
                 query,
                 key,
                 value,
                 metadata=metadata,
                 scale=scale,
+                layer_idx=layer_idx,
             )
-
-        return self._decode_forward(query, metadata, scale=scale)
+        return self._decode_forward(
+            query, metadata, scale=scale, layer_idx=layer_idx
+        )
 
     def _prefill_forward(
         self,
@@ -299,6 +325,7 @@ class PagedAttentionBackend:
         value: torch.Tensor,
         metadata: Optional[AttentionMetadata | RuntimeAttentionMetadata] = None,
         scale: Optional[float] = None,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         if query.ndim != 3 or key.ndim != 3 or value.ndim != 3:
             raise ValueError(
@@ -328,7 +355,7 @@ class PagedAttentionBackend:
             )
             return cast(
                 torch.Tensor,
-                self._fi_prefill.run(query_src, self._fi_kv_cache),
+                self._fi_prefill.run(query_src, self._fi_kv_cache[layer_idx]),
             )
 
         q = (
@@ -387,6 +414,7 @@ class PagedAttentionBackend:
         query: torch.Tensor,
         metadata: AttentionMetadata | RuntimeAttentionMetadata,
         scale: Optional[float] = None,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         if query.ndim == 2:
             query = query.unsqueeze(0)
@@ -413,7 +441,7 @@ class PagedAttentionBackend:
             )
             return cast(
                 torch.Tensor,
-                self._fi_decode.run(query_src, self._fi_kv_cache),
+                self._fi_decode.run(query_src, self._fi_kv_cache[layer_idx]),
             )
 
         block_tables = self._get_block_tables(metadata)
@@ -430,8 +458,8 @@ class PagedAttentionBackend:
 
         return paged_attention_fwd(
             query=query.to(self.device, dtype=self.spec.dtype),
-            key_cache=self.k_cache,
-            value_cache=self.v_cache,
+            key_cache=self.k_cache[layer_idx],
+            value_cache=self.v_cache[layer_idx],
             block_tables=block_tables.to(self.device),
             seq_lens=seq_lens.to(self.device),
             scale=attn_scale,
@@ -591,10 +619,12 @@ class PagedAttentionBackend:
         cls,
         spec: KVCacheSpec,
         num_gpu_blocks: int,
+        num_layers: int = 1,
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         _ = cls
         x = 8
         k_shape = (
+            max(1, int(num_layers)),
             int(num_gpu_blocks),
             spec.num_kv_heads,
             spec.head_dim // x,
@@ -602,6 +632,7 @@ class PagedAttentionBackend:
             x,
         )
         v_shape = (
+            max(1, int(num_layers)),
             int(num_gpu_blocks),
             spec.num_kv_heads,
             spec.head_dim,
