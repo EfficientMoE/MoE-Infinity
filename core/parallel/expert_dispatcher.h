@@ -215,6 +215,12 @@ class ExpertDispatcher : public base::noncopyable {
     for (auto& stream : fetch_streams_) {
       cudaStreamDestroy(stream);
     }
+    for (auto& event : exec_done_events_) {
+      cudaEventDestroy(event);
+    }
+    if (input_ready_event_ != nullptr) {
+      cudaEventDestroy(input_ready_event_);
+    }
     for (auto* m : modules_) {
       delete m;
     }
@@ -342,7 +348,11 @@ class ExpertDispatcher : public base::noncopyable {
   std::mutex output_mutex_;
   std::mutex accum_mutex_;
 
+  void SyncExecStreamsWithCurrent();
+
   std::vector<cudaStream_t> exec_streams_;
+  std::vector<cudaEvent_t> exec_done_events_;
+  cudaEvent_t input_ready_event_ = nullptr;
   std::vector<cudaStream_t> fetch_streams_;
 
   std::unique_ptr<std::atomic<bool>[]> gpu_overload_;
