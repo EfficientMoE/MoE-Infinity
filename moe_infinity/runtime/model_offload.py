@@ -1256,6 +1256,22 @@ class OffloadEngine(object):
                         if self._is_shared_expert_param(_name):
                             del self.name_id_map[_name]
 
+                # glm5_next keeps the whole non-expert backbone resident, so
+                # no archer forward hook ever moves those modules; place them
+                # on the GPU once here (offload-managed tensors stay behind as
+                # placeholders and are excluded via name_id_map membership).
+                if (
+                    getattr(self.config, "model_type", "") == "glm5_next"
+                    and torch.cuda.is_available()
+                ):
+                    _resident_device = torch.device("cuda", 0)
+                    for _pname, _param in model.named_parameters(recurse=True):
+                        if _pname not in self.name_id_map:
+                            _param.data = _param.data.to(_resident_device)
+                    for _bname, _buf in model.named_buffers(recurse=True):
+                        if _bname not in self.name_id_map:
+                            _buf.data = _buf.data.to(_resident_device)
+
                 if (
                     getattr(self.config, "model_type", "") == "gpt_oss"
                     and not self.gpt_oss_offload_enabled
