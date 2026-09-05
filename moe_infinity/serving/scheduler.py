@@ -256,6 +256,7 @@ class Scheduler:
 
         scheduled_seqs = 0
         scheduled_tokens = 0
+        self._restored_this_pass: set[str] = set()
 
         completions = self.kv_cache.poll_transfers()
         self._advance_swapped_groups(completions)
@@ -569,7 +570,9 @@ class Scheduler:
                 if not seqs:
                     preserved.append(self._running.popleft())
                     continue
-                if any(
+                if group.request_id in getattr(
+                    self, "_restored_this_pass", set()
+                ) or any(
                     sequence.status
                     in (SequenceStatus.DRAFT, SequenceStatus.VERIFY)
                     for sequence in seqs
@@ -784,6 +787,7 @@ class Scheduler:
             _ = self._swapped.remove(group)
         self._running.appendleft(group)
         _ = self._swapped_groups.pop(group.request_id, None)
+        getattr(self, "_restored_this_pass", set()).add(group.request_id)
 
     def _begin_retry_or_evict(self, record: _SwappedGroupRecord) -> None:
         from moe_infinity.engine.kv_transfer import KVTransferState
