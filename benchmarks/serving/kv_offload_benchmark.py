@@ -313,10 +313,17 @@ def run_benchmark(
 
     swap_count = [0]
     original_swap_out = engine.kv_cache.swap_out
+    original_reserve_swap_out_group = engine.kv_cache.reserve_swap_out_group
 
     def counting_swap_out(seq_id: int) -> None:
         swap_count[0] += 1
         original_swap_out(seq_id)
+
+    def counting_reserve_swap_out_group(seq_ids: list[int]) -> object:
+        reservation = original_reserve_swap_out_group(seq_ids)
+        if reservation is not None:
+            swap_count[0] += len(seq_ids)
+        return reservation
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -325,10 +332,17 @@ def run_benchmark(
     engine.eos_token_id = None
     before_swap = engine.kv_cache.get_swap_stats()
     start = time.perf_counter()
-    with patch.object(
-        engine.kv_cache,
-        "swap_out",
-        side_effect=counting_swap_out,
+    with (
+        patch.object(
+            engine.kv_cache,
+            "swap_out",
+            side_effect=counting_swap_out,
+        ),
+        patch.object(
+            engine.kv_cache,
+            "reserve_swap_out_group",
+            side_effect=counting_reserve_swap_out_group,
+        ),
     ):
         for req_idx, prompt_ids in enumerate(prompt_batches):
             engine.add_request(
