@@ -234,13 +234,12 @@ class ContinuousBatchingEngine:
                     model=model, backend=backend, storage=storage
                 )
             )
-        self.model_runner = ModelRunner(
-            model,
-            engine,
-            device=self.device,
-            paged_kv_storage=storage,
-            paged_attention_registry=self.paged_attention_registry,
-            decode_graph_capability_provider=decode_graph_capability_provider,
+        self.model_runner.paged_kv_storage = storage
+        self.model_runner.paged_attention_registry = (
+            self.paged_attention_registry
+        )
+        self.model_runner.decode_graph_capability_provider = (
+            decode_graph_capability_provider
         )
         self.cuda_graph_runner = CudaGraphRunner(
             self.model_runner,
