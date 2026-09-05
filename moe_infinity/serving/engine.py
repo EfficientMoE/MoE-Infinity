@@ -8,9 +8,6 @@ from typing import Callable, Optional, Protocol, cast
 
 import torch
 
-from moe_infinity.models.paged_attention_registry import (
-    PagedAttentionLayerRegistry,
-)
 from moe_infinity.runtime.attention_backend import PagedAttentionBackend
 from moe_infinity.runtime.attention_types import DECODE_GRAPH_REASONS
 
@@ -192,6 +189,10 @@ class ContinuousBatchingEngine:
                 "verify_expert_byte_deficit_cap"
             ),
         )
+        from moe_infinity.models.paged_attention_registry import (
+            PagedAttentionLayerRegistry,
+        )
+
         storage = self.kv_cache.storage
         backend = backend_storage and self._resolve_attention_backend(engine)
         if storage is None:
