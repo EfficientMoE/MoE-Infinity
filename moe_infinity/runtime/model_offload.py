@@ -48,6 +48,7 @@ from moe_infinity.models import (
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
+    SyncGlm5NextMoEBlock,
     SyncGlmMoeDsaMoEBlock,
     SyncGptOssMLP,
     SyncJambaMoEBlock,
@@ -852,6 +853,14 @@ class OffloadEngine(object):
         except (ImportError, AttributeError):
             pass
 
+        try:
+            import transformers.models.glm5_next.modeling_glm5_next as _glm5n_mod
+
+            _glm5n_mod._old_glm5_next_moe = _glm5n_mod.Glm5NextTextMoE
+            _glm5n_mod.Glm5NextTextMoE = SyncGlm5NextMoEBlock
+        except (ImportError, AttributeError):
+            pass
+
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
         ) -> Callable:
@@ -944,8 +953,8 @@ class OffloadEngine(object):
                         )[0]
                         is_glm_fp8_ckpt = (
                             "GlmMoeDsa" in _arch0_cast
-                            and _has_fp8_blockwise(self.config)
-                        )
+                            or "Glm5Next" in _arch0_cast
+                        ) and _has_fp8_blockwise(self.config)
                         self._cast_state_dict_tensors(
                             state_dict,
                             is_gptq_ckpt=is_gptq_ckpt,
@@ -1005,9 +1014,8 @@ class OffloadEngine(object):
                             getattr(self.config, "architectures", None) or [""]
                         )[0]
                         is_glm_fp8 = (
-                            "GlmMoeDsa" in arch0
-                            and _has_fp8_blockwise(self.config)
-                        )
+                            "GlmMoeDsa" in arch0 or "Glm5Next" in arch0
+                        ) and _has_fp8_blockwise(self.config)
                         if is_glm_fp8:
                             from moe_infinity.utils.fp8 import (
                                 dequant_fp8_blockwise,
@@ -1077,16 +1085,17 @@ class OffloadEngine(object):
                     _arch0_reload = (
                         getattr(self.config, "architectures", None) or [""]
                     )[0]
-                    if "GlmMoeDsa" in _arch0_reload and _has_fp8_blockwise(
-                        self.config
-                    ):
+                    if (
+                        "GlmMoeDsa" in _arch0_reload
+                        or "Glm5Next" in _arch0_reload
+                    ) and _has_fp8_blockwise(self.config):
                         self._rebuild_glm_fp8_scales_from_ckpt()
 
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
                 )
                 _model_type = getattr(self.config, "model_type", "")
-                _force_eager = _model_type == "glm_moe_dsa"
+                _force_eager = _model_type in ("glm_moe_dsa", "glm5_next")
                 model = cls._from_config(
                     self.config,
                     torch_dtype=self.dtype_cls
@@ -1206,6 +1215,7 @@ class OffloadEngine(object):
                         or isinstance(module, SyncOlmoeMoEBlock)
                         or isinstance(module, SyncJambaMoEBlock)
                         or isinstance(module, SyncGlmMoeDsaMoEBlock)
+                        or isinstance(module, SyncGlm5NextMoEBlock)
                     ):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
@@ -1236,6 +1246,7 @@ class OffloadEngine(object):
                 if getattr(self.config, "model_type", "") in (
                     "glm_moe_dsa",
                     "qwen3_5_moe",
+                    "glm5_next",
                 ):
                     self._load_resident_shared_experts(model)
                     for _name in list(self.name_id_map.keys()):
@@ -1295,6 +1306,14 @@ class OffloadEngine(object):
         except (ImportError, AttributeError):
             pass
 
+        try:
+            import transformers.models.glm5_next.modeling_glm5_next as _glm5n_mod
+
+            if hasattr(_glm5n_mod, "_old_glm5_next_moe"):
+                _glm5n_mod.Glm5NextTextMoE = _glm5n_mod._old_glm5_next_moe
+        except (ImportError, AttributeError):
+            pass
+
     def _is_shared_expert_param(self, name: str) -> bool:
         # DeepSeek names shared experts ".shared_experts." (plural); Qwen3.5-MoE
         # uses singular ".shared_expert." plus ".shared_expert_gate.". The
@@ -1312,6 +1331,13 @@ class OffloadEngine(object):
                 return expert_id is None
             if name.endswith("lm_head.weight"):
                 return True
+        # glm5_next (GLM-5.3-Flash): same policy as Qwen3.5-MoE, extended to
+        # the whole checkpoint namespace - only routed experts are offloaded;
+        # KDA linear attention, DSA indexer, mHC hyper-connections, vision
+        # tower (model.visual.*), and lm_head all stay resident.
+        if getattr(self.config, "model_type", "") == "glm5_next":
+            _, expert_id = parse_expert_id(name, self.config)
+            return expert_id is None
         return False
 
     @torch.no_grad()
