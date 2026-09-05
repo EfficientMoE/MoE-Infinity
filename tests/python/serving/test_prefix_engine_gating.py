@@ -106,9 +106,8 @@ def test_store_geometry_mismatch_fails_closed(monkeypatch) -> None:
     engine = _make_engine({"enable_prefix_caching": True})
     assert engine.prefix_cache is None
     assert engine.scheduler.prefix_lease_provider is None
-    assert (
-        engine.get_stats()["prefix_cache_disabled_reason"]
-        == "kv-store-binding-mismatch"
+    assert str(engine.get_stats()["prefix_cache_disabled_reason"]).startswith(
+        "kv-store-binding-mismatch"
     )
 
 

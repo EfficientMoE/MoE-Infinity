@@ -1,8 +1,50 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 import torch
+
+DECODE_GRAPH_REASONS = (
+    "eligible",
+    "missing_capability",
+    "active_model_hooks",
+    "archer_callbacks",
+    "transfer_scheduler",
+    "expert_dispatcher",
+    "kv_offload",
+    "flashinfer_plan_path",
+    "dynamic_allocations",
+    "native_paged_required",
+    "mla_layout_unsupported",
+    "kv_storage_mismatch",
+    "paged_class_unregistered",
+    "layer_idx_invalid",
+    "layer_write_unproven",
+)
+
+
+@dataclass(frozen=True)
+class PagedLayerWriteProof:
+    class_fqn: str
+    layer_idx: int
+    storage_owner_id: str
+    writer: str
+    writes_before_attention: bool
+    allocation_free: bool
+
+
+@dataclass(frozen=True)
+class DecodeGraphCapability:
+    safe: bool
+    reason: str
+    storage_owner_id: str | None = None
+    layer_write_proofs: tuple[PagedLayerWriteProof, ...] = ()
+
+
+@runtime_checkable
+class DecodeGraphCapabilityProvider(Protocol):
+    def decode_graph_capability(self) -> DecodeGraphCapability: ...
 
 
 @dataclass
@@ -59,12 +101,21 @@ class PagedBatchLengths:
 @dataclass
 class AttentionMetadata:
     block_tables: torch.Tensor
-    lengths: PagedBatchLengths
-    max_seq_len: int
-    num_prefill_tokens: int
-    num_decode_tokens: int
-    slot_mapping: torch.Tensor
-    is_prefill: bool
+    lengths: PagedBatchLengths | None = None
+    max_seq_len: int = 0
+    num_prefill_tokens: int = 0
+    num_decode_tokens: int = 0
+    slot_mapping: torch.Tensor | None = None
+    is_prefill: bool = False
+    seq_lens: torch.Tensor | None = None
+    kv_storage_owner_id: str | None = None
+    seq_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.lengths is None and self.seq_lens is None:
+            raise ValueError(
+                "AttentionMetadata requires either lengths or seq_lens"
+            )
 
 
 @dataclass(frozen=True)

@@ -41,6 +41,53 @@ class BatchMetadata:
     block_tables: list[list[int]]
     sampling_params: list[SamplingParams]
 
+    def __init__(
+        self,
+        seq_ids: list[int],
+        input_token_ids: list[int],
+        lengths: PagedBatchLengths | None = None,
+        is_prefill: list[bool] | None = None,
+        block_tables: list[list[int]] | None = None,
+        sampling_params: list[SamplingParams] | None = None,
+        seq_lengths: list[int] | None = None,
+        context_lengths: list[int] | None = None,
+        token_offsets: list[int] | None = None,
+    ) -> None:
+        self.seq_ids = seq_ids
+        self.input_token_ids = input_token_ids
+        self.is_prefill = list(is_prefill or [])
+        self.block_tables = list(block_tables or [])
+        self.sampling_params = list(sampling_params or [])
+        if lengths is None:
+            if seq_lengths is None:
+                raise ValueError(
+                    "BatchMetadata requires lengths or seq_lengths"
+                )
+            contexts = list(
+                context_lengths
+                if context_lengths is not None
+                else [0] * len(seq_lengths)
+            )
+            offsets = list(
+                token_offsets
+                if token_offsets is not None
+                else [
+                    sum(seq_lengths[:index])
+                    for index in range(len(seq_lengths) + 1)
+                ]
+            )
+            lengths = PagedBatchLengths(
+                query_lengths=list(seq_lengths),
+                query_offsets=offsets,
+                context_lengths=contexts,
+                kv_seq_lengths=[
+                    int(context) + int(query)
+                    for context, query in zip(contexts, seq_lengths)
+                ],
+            )
+        self.lengths = lengths
+        self.__post_init__()
+
     def __post_init__(self) -> None:
         self.lengths.validate()
         expected = len(self.seq_ids)
@@ -80,6 +127,14 @@ class BatchMetadata:
     @property
     def kv_seq_lengths(self) -> list[int]:
         return [int(value) for value in self.lengths.kv_seq_lengths]
+
+    @property
+    def seq_lengths(self) -> list[int]:
+        return self.query_lengths
+
+    @property
+    def token_offsets(self) -> list[int]:
+        return self.query_offsets
 
     @property
     def total_tokens(self) -> int:
