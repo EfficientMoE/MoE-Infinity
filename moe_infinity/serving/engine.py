@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from math import ceil
@@ -24,6 +25,8 @@ from .sequence import (
     SequenceGroup,
     SequenceStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class EvictionSyncAdapter(Protocol):
@@ -862,16 +865,35 @@ class ContinuousBatchingEngine:
                     for module in modules
                 ]
             )
-            if (
-                backend.num_gpu_blocks >= self.kv_cache.num_blocks
-                and backend.block_store.physical_capacity
-                >= self.kv_cache.num_blocks
-            ):
-                self.kv_cache.set_block_store(
-                    backend.block_store,
-                    logical_capacity=self.kv_cache.num_blocks,
+            physical_capacity = min(
+                int(backend.num_gpu_blocks),
+                int(backend.block_store.physical_capacity),
+            )
+            if physical_capacity <= 0:
+                logger.warning(
+                    "layered paged KV store not bound: physical capacity "
+                    "is %d (num_gpu_blocks=%d, store_capacity=%d)",
+                    physical_capacity,
+                    backend.num_gpu_blocks,
+                    backend.block_store.physical_capacity,
                 )
-        except (ValueError, RuntimeError):
+                return
+            if self.kv_cache.num_blocks > physical_capacity:
+                logger.warning(
+                    "capping logical KV blocks %d -> %d to fit physical "
+                    "paged store (num_gpu_blocks=%d, store_capacity=%d)",
+                    self.kv_cache.num_blocks,
+                    physical_capacity,
+                    backend.num_gpu_blocks,
+                    backend.block_store.physical_capacity,
+                )
+                self.kv_cache.resize_num_blocks(physical_capacity)
+            self.kv_cache.set_block_store(
+                backend.block_store,
+                logical_capacity=self.kv_cache.num_blocks,
+            )
+        except (ValueError, RuntimeError) as exc:
+            logger.warning("failed to bind layered paged KV store: %r", exc)
             return
 
     def _execute_batch(self, batch: BatchMetadata) -> torch.Tensor:

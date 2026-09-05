@@ -256,6 +256,48 @@ class PagedKVCache:
                     self._fi_prefill = None
                     self._fi_decode = None
 
+    def resize_num_blocks(self, new_num_blocks: int) -> None:
+        """Shrink the logical block budget to fit the physical paged store.
+
+        Only shrinks, and only before any sequence is allocated: it rebuilds
+        the allocator and logical KV tensor, which would invalidate live block
+        ids. See :meth:`set_block_store`, which requires logical <= physical.
+        """
+        if new_num_blocks <= 0:
+            raise ValueError(
+                f"new_num_blocks must be > 0, got {new_num_blocks}"
+            )
+        if self._sequence_tables:
+            raise RuntimeError(
+                "cannot resize KV blocks while sequences are allocated"
+            )
+        if new_num_blocks == self.num_blocks:
+            return
+        if new_num_blocks > self.num_blocks:
+            raise ValueError(
+                "resize_num_blocks only shrinks the logical budget "
+                f"({new_num_blocks} > {self.num_blocks})"
+            )
+
+        self.num_blocks = int(new_num_blocks)
+        self.block_allocator = BlockAllocator(
+            num_blocks=self.num_blocks,
+            block_size=self.block_size,
+            device=self.device,
+        )
+        self._kv_cache = torch.zeros(
+            (
+                self.num_layers,
+                self.num_blocks,
+                2,
+                self.block_size,
+                self.num_heads,
+                self.head_dim,
+            ),
+            dtype=self.dtype,
+            device=self.device,
+        )
+
     def allocate_sequence(self, seq_id: int, num_tokens: int) -> None:
         if seq_id in self._sequence_tables:
             raise ValueError(f"sequence {seq_id} already exists")
