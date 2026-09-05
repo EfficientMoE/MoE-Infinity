@@ -752,6 +752,9 @@ class PagedAttentionBackend:
                 self.spec.num_kv_heads,
                 self.spec.head_dim,
                 self.spec.block_size,
+                causal=True,
+                q_data_type=self.spec.dtype,
+                kv_data_type=self.spec.dtype,
             )
         except TypeError:
             self._fi_prefill.plan(
@@ -786,6 +789,9 @@ class PagedAttentionBackend:
                 self.spec.num_kv_heads,
                 self.spec.head_dim,
                 self.spec.block_size,
+                pos_encoding_mode="NONE",
+                q_data_type=query_dtype,
+                kv_data_type=query_dtype,
             )
         except TypeError:
             self._fi_decode.plan(
