@@ -60,6 +60,7 @@ from moe_infinity.models import (
 from moe_infinity.runtime.hooks import *
 from moe_infinity.utils import (
     ArcherConfig,
+    moe_text_config,
     parse_expert_dtype,
     parse_expert_id,
     parse_moe_param,
@@ -1180,10 +1181,12 @@ class OffloadEngine(object):
                 # for deepseek and glm, we need to set the expert_tensor_map for the model
                 first_k_dense_replace = 0
                 if "deepseek" in model_name or "glm" in model_name.lower():
+                    first_k_dense_replace = moe_text_config(
+                        self.config
+                    ).first_k_dense_replace
                     self.expert_prefetcher.first_k_dense_replace = (
-                        self.config.first_k_dense_replace
+                        first_k_dense_replace
                     )
-                    first_k_dense_replace = self.config.first_k_dense_replace
 
                 self.expert_executor.set_expert_dispatcher(
                     self.expert_dispatcher
@@ -1340,6 +1343,96 @@ class OffloadEngine(object):
             return expert_id is None
         return False
 
+    def _resident_ckpt_key_renamer(self):
+        # Transformers v5 renames some checkpoint keys on load (e.g. glm5_next
+        # maps on-disk "hc_attn_base" to module "attn_hc.base" and
+        # "self_attn.A_log" to "self_attn.forget_gate.A_log" via
+        # conversion_mapping WeightRenaming entries). The resident loader reads
+        # safetensors directly, bypassing from_pretrained, so it must apply the
+        # same renames; families without rename entries get the identity.
+        try:
+            from transformers.conversion_mapping import (
+                get_checkpoint_conversion_mapping,
+            )
+        except ImportError:
+            return lambda key: key
+        try:
+            entries = (
+                get_checkpoint_conversion_mapping(
+                    getattr(self.config, "model_type", "")
+                )
+                or []
+            )
+        except Exception:
+            entries = []
+        # Apply plain WeightRenaming entries only. WeightConverter entries
+        # (e.g. packing per-expert weights into a batched module) must NOT be
+        # applied: the Sync MoE blocks keep the raw per-expert checkpoint
+        # layout, and a converter rename would collapse distinct expert keys.
+        renamings = [
+            entry
+            for entry in entries
+            if type(entry).__name__ == "WeightRenaming"
+        ]
+        if not renamings:
+            return lambda key: key
+
+        def _rename(key: str) -> str:
+            for entry in renamings:
+                renamed, matched = entry.rename_source_key(key)
+                if matched is not None:
+                    key = renamed
+            return key
+
+        return _rename
+
+    def _resident_ckpt_fusions(self):
+        # Concat-style WeightConverter entries (e.g. glm5_next fuses on-disk
+        # q/k/v_conv1d.weight into the module's single conv1d.weight along dim
+        # 0). Only literal multi-source -> single-target Concatenate entries
+        # are honored here; wildcard converters (batched experts) are handled
+        # by the per-expert Sync blocks instead.
+        try:
+            from transformers.conversion_mapping import (
+                get_checkpoint_conversion_mapping,
+            )
+        except ImportError:
+            return []
+        try:
+            entries = (
+                get_checkpoint_conversion_mapping(
+                    getattr(self.config, "model_type", "")
+                )
+                or []
+            )
+        except Exception:
+            entries = []
+        fusions = []
+        for entry in entries:
+            if type(entry).__name__ != "WeightConverter":
+                continue
+            sources = getattr(entry, "source_patterns", None)
+            targets = getattr(entry, "target_patterns", None)
+            ops = getattr(entry, "operations", None)
+            if (
+                isinstance(sources, list)
+                and len(sources) > 1
+                and isinstance(targets, list)
+                and len(targets) == 1
+                and ops
+                and len(ops) == 1
+                and type(ops[0]).__name__ == "Concatenate"
+                and all("*" not in str(s) for s in sources)
+            ):
+                fusions.append(
+                    (
+                        str(targets[0]),
+                        [str(s) for s in sources],
+                        getattr(ops[0], "dim", 0),
+                    )
+                )
+        return fusions
+
     @torch.no_grad()
     def _load_resident_shared_experts(self, model):
         # Shared experts run inside the Python MoE block (not the C++ expert
@@ -1355,6 +1448,8 @@ class OffloadEngine(object):
         if not wanted:
             return
 
+        rename = self._resident_ckpt_key_renamer()
+        fusions = self._resident_ckpt_fusions()
         remaining = set(wanted)
         from moe_infinity.utils.fp8 import dequant_fp8_blockwise
 
@@ -1375,25 +1470,44 @@ class OffloadEngine(object):
                 break
             if ckpt.endswith(".safetensors"):
                 with safe_open(ckpt, framework="pt", device="cpu") as f:
-                    keys = set(f.keys())
+                    raw_keys = set(f.keys())
+                    keys = {rename(k): k for k in raw_keys}
                     for name in list(remaining):
                         if name not in keys:
                             continue
                         param = wanted[name]
-                        scale_key = name + "_scale_inv"
+                        scale_key = keys.get(name + "_scale_inv")
                         scale = (
                             f.get_tensor(scale_key)
-                            if scale_key in keys
+                            if scale_key is not None
                             else None
                         )
                         param.data = _resolve(
-                            param, name, f.get_tensor(name), scale
+                            param, name, f.get_tensor(keys[name]), scale
                         )
                         param.requires_grad_(False)
                         param._moe_infinity_resident = True
                         remaining.remove(name)
+                    for name in list(remaining):
+                        for target_sfx, source_sfxs, dim in fusions:
+                            if not name.endswith(target_sfx):
+                                continue
+                            prefix = name[: -len(target_sfx)]
+                            src_names = [prefix + s for s in source_sfxs]
+                            if not all(k in raw_keys for k in src_names):
+                                continue
+                            param = wanted[name]
+                            fused = torch.cat(
+                                [f.get_tensor(k) for k in src_names], dim=dim
+                            )
+                            param.data = _resolve(param, name, fused, None)
+                            param.requires_grad_(False)
+                            param._moe_infinity_resident = True
+                            remaining.remove(name)
+                            break
             else:
                 state = torch.load(ckpt, map_location="cpu")
+                state = {rename(k): v for k, v in state.items()}
                 for name in list(remaining):
                     if name not in state:
                         continue
@@ -1779,7 +1893,7 @@ class OffloadEngine(object):
 
         expert_layer_id = 0
         if "deepseek" in self.model_name or "glm" in self.model_name.lower():
-            expert_layer_id = self.config.first_k_dense_replace
+            expert_layer_id = moe_text_config(self.config).first_k_dense_replace
 
         output_device_index = None
         for key, tensors in topo:
