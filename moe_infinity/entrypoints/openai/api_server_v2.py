@@ -484,6 +484,12 @@ def initialize_with_model(
     kv_cache_ratio: float = 0.25,
     max_batch_size: int = 32,
     enable_prefix_caching: bool = False,
+    kv_swap_mode: str = "sync",
+    kv_swap_host_memory_bytes: int = 512 * 1024 * 1024,
+    kv_swap_max_inflight_bytes: int = 256 * 1024 * 1024,
+    kv_swap_checksum: bool = False,
+    kv_swap_max_retries: int = 2,
+    kv_swap_allow_sync_fallback: bool = True,
     speculative_draft: Optional[Any] = None,
     enable_decode_cuda_graphs: bool = False,
     decode_cuda_graph_batch_sizes: tuple[int, ...] = (1, 2, 4, 8, 16, 32),
@@ -519,6 +525,12 @@ def initialize_with_model(
         kv_cache_ratio=kv_cache_ratio,
         max_batch_size=max_batch_size,
         enable_prefix_caching=enable_prefix_caching,
+        kv_swap_mode=kv_swap_mode,
+        kv_swap_host_memory_bytes=kv_swap_host_memory_bytes,
+        kv_swap_max_inflight_bytes=kv_swap_max_inflight_bytes,
+        kv_swap_checksum=kv_swap_checksum,
+        kv_swap_max_retries=kv_swap_max_retries,
+        kv_swap_allow_sync_fallback=kv_swap_allow_sync_fallback,
         enable_decode_cuda_graphs=enable_decode_cuda_graphs,
         decode_cuda_graph_batch_sizes=decode_cuda_graph_batch_sizes,
         decode_cuda_graph_context_sizes=decode_cuda_graph_context_sizes,
@@ -772,6 +784,47 @@ def _format_prometheus_metrics(stats: dict[str, object]) -> str:
     lines.append("# HELP moe_engine_steps_total Total engine steps")
     lines.append("# TYPE moe_engine_steps_total counter")
     lines.append(f"moe_engine_steps_total {stats.get('num_steps', 0)}")
+    kv_swap_obj = stats.get("kv_swap", {})
+    kv_swap = kv_swap_obj if isinstance(kv_swap_obj, dict) else {}
+    gauges = {
+        "moe_kv_swap_inflight": "inflight",
+        "moe_kv_swap_inflight_bytes": "inflight_bytes",
+        "moe_kv_swap_retiring_records": "retiring_records",
+        "moe_kv_swap_host_resident": "host_resident",
+        "moe_kv_swap_host_bytes": "host_in_use_bytes",
+        "moe_kv_swap_host_capacity_bytes": "host_capacity_bytes",
+    }
+    for metric, key in gauges.items():
+        lines.append(f"# TYPE {metric} gauge")
+        lines.append(f"{metric} {kv_swap.get(key, 0)}")
+    counters = {
+        "moe_kv_swap_backpressure_total": "backpressure_total",
+        "moe_kv_swap_out_completed_total": "swap_out_completed_total",
+        "moe_kv_swap_in_completed_total": "swap_in_completed_total",
+    }
+    for metric, key in counters.items():
+        lines.append(f"# TYPE {metric} counter")
+        lines.append(f"{metric} {kv_swap.get(key, 0)}")
+    lines.append(
+        'moe_kv_swap_failures_total{direction="out"} '
+        f"{kv_swap.get('swap_out_failed_total', 0)}"
+    )
+    lines.append(
+        'moe_kv_swap_failures_total{direction="in"} '
+        f"{kv_swap.get('swap_in_failed_total', 0)}"
+    )
+    for direction in ("d2h", "h2d"):
+        lines.append(
+            f'moe_kv_swap_bytes_total{{direction="{direction}"}} '
+            f"{kv_swap.get(f'{direction}_bytes_total', 0)}"
+        )
+        duration_seconds = (
+            float(kv_swap.get(f"{direction}_duration_ms_sum", 0.0)) / 1000.0
+        )
+        lines.append(
+            f'moe_kv_swap_duration_seconds_sum{{direction="{direction}"}} '
+            f"{duration_seconds:g}"
+        )
     cuda_graph = stats.get("cuda_graph", {})
     graph_stats = (
         cast(dict[str, object], cuda_graph)
@@ -1165,6 +1218,18 @@ async def _initialize_model() -> None:
         moe_config = {
             "offload_path": os.path.join(args.offload_dir, args.model),
             "device_memory_ratio": args.device_memory_ratio,
+            "kv_swap_mode": getattr(args, "kv_swap_mode", "sync"),
+            "kv_swap_host_memory_bytes": getattr(
+                args, "kv_swap_host_memory_bytes", 512 * 1024 * 1024
+            ),
+            "kv_swap_max_inflight_bytes": getattr(
+                args, "kv_swap_max_inflight_bytes", 256 * 1024 * 1024
+            ),
+            "kv_swap_checksum": getattr(args, "kv_swap_checksum", False),
+            "kv_swap_max_retries": getattr(args, "kv_swap_max_retries", 2),
+            "kv_swap_allow_sync_fallback": getattr(
+                args, "kv_swap_allow_sync_fallback", True
+            ),
             "enable_deepseek_mla_paging": enable_deepseek_mla_paging,
             "max_resident_paged_speculative_sessions": (
                 max_resident_paged_speculative_sessions
@@ -2008,6 +2073,19 @@ def _build_engine_config(
         config["eos_token_id"] = eos_token_id
     if args.enable_prefix_caching:
         config["enable_prefix_caching"] = True
+
+    config["kv_swap_mode"] = getattr(args, "kv_swap_mode", "sync")
+    config["kv_swap_host_memory_bytes"] = getattr(
+        args, "kv_swap_host_memory_bytes", 512 * 1024 * 1024
+    )
+    config["kv_swap_max_inflight_bytes"] = getattr(
+        args, "kv_swap_max_inflight_bytes", 256 * 1024 * 1024
+    )
+    config["kv_swap_checksum"] = getattr(args, "kv_swap_checksum", False)
+    config["kv_swap_max_retries"] = getattr(args, "kv_swap_max_retries", 2)
+    config["kv_swap_allow_sync_fallback"] = getattr(
+        args, "kv_swap_allow_sync_fallback", True
+    )
     return config
 
 
@@ -2055,6 +2133,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-waiting-requests", type=int, default=0)
     parser.add_argument("--max-n", type=int, default=16)
     parser.add_argument("--enable-prefix-caching", action="store_true")
+    parser.add_argument(
+        "--kv-swap-mode",
+        type=str,
+        default="sync",
+        choices=["sync", "async"],
+        help="Serving KV swap backend: 'sync' (default) or 'async'",
+    )
+    parser.add_argument(
+        "--kv-swap-host-memory-bytes",
+        type=int,
+        default=512 * 1024 * 1024,
+        help="Hard cap on pinned host memory for async KV swap",
+    )
+    parser.add_argument(
+        "--kv-swap-max-inflight-bytes",
+        type=int,
+        default=256 * 1024 * 1024,
+        help="Hard cap on in-flight async KV transfer bytes",
+    )
+    parser.add_argument(
+        "--kv-swap-checksum",
+        action="store_true",
+        help="Enable opt-in CRC32 validation of swapped KV payloads",
+    )
+    parser.add_argument(
+        "--kv-swap-max-retries",
+        type=int,
+        default=2,
+        help="Maximum async swap-in retries before terminal reprefill",
+    )
+    parser.add_argument(
+        "--no-kv-swap-sync-fallback",
+        action="store_false",
+        dest="kv_swap_allow_sync_fallback",
+        default=True,
+        help="Disable async->sync fallback when pinned/CUDA is unavailable",
+    )
     parser.add_argument(
         "--enable-decode-cuda-graphs",
         action="store_true",

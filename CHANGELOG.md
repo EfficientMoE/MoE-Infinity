@@ -7,6 +7,8 @@ All notable changes to MoE-Infinity will be documented in this file.
 ### Added
 
 - Documentation hub at `docs/README.md` for users, operators, contributors, and project-history readers.
+- DFlash documentation that distinguishes direct batch-1 greedy and sampled draft/verify from the greedy-gated `MoE.generate` and serving integrations, explains the current batch>1 greedy-only constraint, and limits continuous-batching and route-ahead claims to validated paths.
+- Opt-in asynchronous hierarchical KV swap between GPU and bounded pinned host memory, with event-driven scheduling, cancellation tombstones, telemetry, and a synchronous fallback. The external tier remains an interface only; no external or distributed store is implemented.
 - Unified DFlash `SessionDriver`/`SpecSession` protocol, capability-selected bare-HF and rich backends, shared trace evidence, and per-request sampling streams.
 - Direct bare-HF batch-1/batch>1 greedy, sampled, and mixed-row execution with dense reconstruction, right-padded output, and `last_generated_lengths`.
 - Stage 4a persistent serving sessions and default-off Stage 4b engine-owned DeepSeek V2/V3 MLA pages for eligible greedy batch-1 requests.
