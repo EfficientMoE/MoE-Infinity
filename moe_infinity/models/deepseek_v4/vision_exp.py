@@ -39,3 +39,14 @@ def classify_vision_exp_tensor(name: str, config) -> TensorClass:
     ):
         return TensorClass.ROUTED_EXPERT
     return TensorClass.RESIDENT_TEXT
+
+
+def should_skip_resident_load(
+    name: str, config, text_only: bool = True
+) -> bool:
+    if not is_vision_exp_config(config):
+        return ".ffn.experts." in name
+    cls = classify_vision_exp_tensor(name, config)
+    if cls is TensorClass.ROUTED_EXPERT:
+        return True
+    return text_only and cls is TensorClass.MTP_NEXTN

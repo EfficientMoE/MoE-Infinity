@@ -4,6 +4,7 @@ from moe_infinity.models.deepseek_v4.vision_exp import (
     TensorClass,
     classify_vision_exp_tensor,
     is_vision_exp_config,
+    should_skip_resident_load,
 )
 
 
@@ -55,3 +56,45 @@ def test_base_v4_flash_is_not_vision_exp():
         n_routed_experts = 256
 
     assert not is_vision_exp_config(_TextOnlyCfg())
+
+
+class _BaseV4Cfg:
+    num_hidden_layers = 43
+    num_nextn_predict_layers = 1
+    n_routed_experts = 256
+
+
+@pytest.mark.parametrize(
+    "name,text_only,expected_skip",
+    [
+        ("layers.5.ffn.experts.17.w1.weight", True, True),
+        ("layers.5.ffn.experts.17.w1.weight", False, True),
+        ("mtp.0.attn.wkv.weight", True, True),
+        ("mtp.0.attn.wkv.weight", False, False),
+        ("mtp.2.ffn.experts.0.w1.weight", True, True),
+        ("vision.blocks.0.attn.wqkv.weight", True, False),
+        ("aligner.w1.weight", True, False),
+        ("image_newline", True, False),
+        ("layers.5.ffn.shared_experts.w1.weight", True, False),
+        ("layers.5.attn.wkv.weight", True, False),
+        ("embed.weight", True, False),
+    ],
+)
+def test_should_skip_resident_load_vision_exp(name, text_only, expected_skip):
+    assert (
+        should_skip_resident_load(name, _VisionExpCfg(), text_only=text_only)
+        is expected_skip
+    )
+
+
+@pytest.mark.parametrize(
+    "name,expected_skip",
+    [
+        ("layers.5.ffn.experts.17.w1.weight", True),
+        ("layers.5.ffn.shared_experts.w1.weight", False),
+        ("layers.5.attn.wkv.weight", False),
+        ("embed.weight", False),
+    ],
+)
+def test_should_skip_resident_load_base_v4(name, expected_skip):
+    assert should_skip_resident_load(name, _BaseV4Cfg()) is expected_skip
