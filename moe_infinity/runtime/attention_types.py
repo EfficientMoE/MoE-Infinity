@@ -74,3 +74,4 @@ class AttentionMetadata:
     slot_mapping: torch.Tensor
     is_prefill: bool
     kv_storage_owner_id: str | None = None
+    seq_id: int | None = None

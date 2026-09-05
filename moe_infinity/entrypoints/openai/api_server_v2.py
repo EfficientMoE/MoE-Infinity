@@ -497,6 +497,9 @@ def initialize_with_model(
     ),
     decode_cuda_graph_warmup_iters: int = 2,
     decode_cuda_graph_max_memory_bytes: int = 0,
+    enable_deepseek_mla_paging: bool = False,
+    max_resident_paged_speculative_sessions: int = 1,
+    min_free_mla_blocks_after_admission: int = 1,
 ) -> None:
     """Initialize the v2 server with a pre-loaded MoE model.
 
@@ -521,6 +524,13 @@ def initialize_with_model(
         decode_cuda_graph_context_sizes=decode_cuda_graph_context_sizes,
         decode_cuda_graph_warmup_iters=decode_cuda_graph_warmup_iters,
         decode_cuda_graph_max_memory_bytes=decode_cuda_graph_max_memory_bytes,
+        enable_deepseek_mla_paging=enable_deepseek_mla_paging,
+        max_resident_paged_speculative_sessions=(
+            max_resident_paged_speculative_sessions
+        ),
+        min_free_mla_blocks_after_admission=(
+            min_free_mla_blocks_after_admission
+        ),
     )
     engine_config = _build_engine_config(args=args, model=hf_model)
 
@@ -1143,9 +1153,25 @@ async def _initialize_model() -> None:
             trust_remote_code=True,
         )
 
+        enable_deepseek_mla_paging = bool(
+            getattr(args, "enable_deepseek_mla_paging", False)
+        )
+        max_resident_paged_speculative_sessions = int(
+            getattr(args, "max_resident_paged_speculative_sessions", 1)
+        )
+        min_free_mla_blocks_after_admission = int(
+            getattr(args, "min_free_mla_blocks_after_admission", 1)
+        )
         moe_config = {
             "offload_path": os.path.join(args.offload_dir, args.model),
             "device_memory_ratio": args.device_memory_ratio,
+            "enable_deepseek_mla_paging": enable_deepseek_mla_paging,
+            "max_resident_paged_speculative_sessions": (
+                max_resident_paged_speculative_sessions
+            ),
+            "min_free_mla_blocks_after_admission": (
+                min_free_mla_blocks_after_admission
+            ),
         }
         if args.enable_prefix_caching:
             moe_config["enable_prefix_caching"] = True
@@ -1968,6 +1994,15 @@ def _build_engine_config(
         "decode_cuda_graph_max_memory_bytes": getattr(
             args, "decode_cuda_graph_max_memory_bytes", 0
         ),
+        "enable_deepseek_mla_paging": bool(
+            getattr(args, "enable_deepseek_mla_paging", False)
+        ),
+        "max_resident_paged_speculative_sessions": int(
+            getattr(args, "max_resident_paged_speculative_sessions", 1)
+        ),
+        "min_free_mla_blocks_after_admission": int(
+            getattr(args, "min_free_mla_blocks_after_admission", 1)
+        ),
     }
     if eos_token_id is not None:
         config["eos_token_id"] = eos_token_id
@@ -1993,6 +2028,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device-memory-ratio", type=float, default=0.75)
     parser.add_argument("--kv-cache-ratio", type=float, default=0.25)
     parser.add_argument("--max-batch-size", type=int, default=32)
+    parser.add_argument(
+        "--enable-deepseek-mla-paging",
+        action="store_true",
+        default=False,
+        help="Enable default-off DeepSeek V2/V3 paged MLA serving",
+    )
+    parser.add_argument(
+        "--max-resident-paged-speculative-sessions",
+        type=int,
+        default=1,
+        help="Maximum concurrent resident paged-MLA speculative sessions",
+    )
+    parser.add_argument(
+        "--min-free-mla-blocks-after-admission",
+        type=int,
+        default=1,
+        help=(
+            "Minimum MLA blocks that remain free after reserving all active "
+            "and newly admitted requests' full declared budgets plus maximum "
+            "transient DFlash verify peaks"
+        ),
+    )
     parser.add_argument("--api-key", type=str, default=None)
     parser.add_argument("--rate-limit", type=int, default=0)
     parser.add_argument("--max-waiting-requests", type=int, default=0)

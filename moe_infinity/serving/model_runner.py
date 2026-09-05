@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol, runtime_checkable
@@ -14,6 +16,8 @@ from moe_infinity.runtime.attention_types import (
 )
 
 from .batch import BatchMetadata
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -75,6 +79,7 @@ class ModelRunner:
         self.paged_kv_storage = paged_kv_storage
         self.paged_attention_registry = paged_attention_registry
         self.decode_graph_capability_provider = decode_graph_capability_provider
+        self._warned_no_paged_shim = False
 
     def get_paged_kv_storage(self) -> object:
         return self.paged_kv_storage
@@ -169,6 +174,7 @@ class ModelRunner:
             storage_owner_id=storage.owner_id,
             layer_write_proofs=tuple(proofs),
         )
+        self._warned_no_paged_shim = False
 
     def prepare_inputs(self, batch: BatchMetadata) -> dict[str, torch.Tensor]:
         num_seqs = len(batch.seq_ids)
@@ -228,9 +234,41 @@ class ModelRunner:
         past_key_values: object = None,
     ) -> torch.Tensor:
         self.prepare_batch_side_effects(batch)
+        return self._execute(batch, past_key_values=past_key_values, rich=False)
 
+    def execute_rich(
+        self,
+        batch: BatchMetadata,
+        *,
+        cache_handles: tuple[object, ...] = (),
+    ) -> object:
+        """Run the normal serving forward and retain speculative state."""
+        self.prepare_batch_side_effects(batch)
+        return self._execute(batch, rich=True, cache_handles=cache_handles)
+
+    def _execute(
+        self,
+        batch: BatchMetadata,
+        past_key_values: object = None,
+        *,
+        rich: bool,
+        cache_handles: tuple[object, ...] = (),
+    ) -> Any:
         if batch.total_tokens == 0:
-            return self._empty_logits()
+            logits = self._empty_logits()
+            if not rich:
+                return logits
+            from moe_infinity.spec_decode.protocols import RichForwardResult
+
+            shared = cache_handles[0] if cache_handles else None
+            return RichForwardResult(
+                logits=logits,
+                hidden_states=(),
+                cache_handle=shared,
+                cache_handles=cache_handles or (shared,) * len(batch.seq_ids),
+                row_offsets=tuple(batch.token_offsets),
+                row_lengths=tuple(batch.seq_lengths),
+            )
 
         model_inputs = self.prepare_inputs(batch)
 
@@ -238,6 +276,8 @@ class ModelRunner:
             **model_inputs,
             "use_cache": True,
         }
+        if rich:
+            forward_kwargs["output_hidden_states"] = True
         if past_key_values is not None:
             forward_kwargs["past_key_values"] = past_key_values
 
@@ -260,7 +300,31 @@ class ModelRunner:
             raise ValueError(
                 f"packed logits row count must match batch.total_tokens; got {logits.size(0)} vs {batch.total_tokens}"
             )
-        return logits
+        if not rich:
+            return logits
+
+        from moe_infinity.spec_decode.protocols import RichForwardResult
+
+        hidden_value = getattr(outputs, "hidden_states", None)
+        if hidden_value is None:
+            raise ValueError("rich model output must include hidden_states")
+        token_mask = model_inputs["attention_mask"].to(dtype=torch.bool)
+        hidden_states = tuple(
+            hidden[token_mask.to(device=hidden.device)]
+            if hidden.dim() == 3
+            else hidden
+            for hidden in hidden_value
+        )
+        cache_handle = getattr(outputs, "past_key_values", None)
+        row_handles = cache_handles or (cache_handle,) * len(batch.seq_ids)
+        return RichForwardResult(
+            logits=logits,
+            hidden_states=hidden_states,
+            cache_handle=cache_handle,
+            cache_handles=row_handles,
+            row_offsets=tuple(batch.token_offsets),
+            row_lengths=tuple(batch.seq_lengths),
+        )
 
     def _forward_with_optional_paged_context(
         self,
@@ -281,6 +345,22 @@ class ModelRunner:
         use_paged_context = bool(
             paged_attention_classes and backend is not None
         )
+
+        # Backend present but no shim matched => paged cache is never wired into
+        # attention and decode silently degenerates; surface it (see issue #191).
+        if backend is not None and not paged_attention_classes:
+            _msg = (
+                "MoE-Infinity serving: no paged-attention shim matched the "
+                f"served model ({type(self.model).__name__}); the paged KV "
+                "cache is NOT wired into its attention, so multi-token decode "
+                "output will be INCORRECT. Implement a *PagedAttention shim for "
+                "this model (reference: moe_infinity/models/qwen3_paged_attention.py)."
+            )
+            if os.environ.get("MOE_STRICT_PAGED_ATTENTION", "0") == "1":
+                raise RuntimeError(_msg)
+            if not self._warned_no_paged_shim:
+                logger.warning(_msg)
+                self._warned_no_paged_shim = True
 
         with torch.no_grad():
             if not use_paged_context:
