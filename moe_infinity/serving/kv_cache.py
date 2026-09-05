@@ -6,7 +6,7 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 
@@ -80,6 +80,10 @@ class _PagedCacheTensor(torch.Tensor):
             rewritten = (index[0], slice(start, stop), *index[2:])
             return torch.Tensor.__getitem__(self, rewritten)
         return torch.Tensor.__getitem__(self, index)
+
+
+if TYPE_CHECKING:
+    from moe_infinity.runtime.paged_kv_storage import PagedKVStorage
 
 
 class CPAwareKVManager(Protocol):
@@ -264,6 +268,7 @@ class PagedKVCache:
     max_inflight_bytes: int = 0
     host_pool_factory: Callable[[int], PinnedBufferPool] | None = None
     checksum: bool = False
+    storage: "PagedKVStorage | None" = None
     block_allocator: BlockAllocator = field(init=False)
     _sequence_tables: dict[int, BlockTable] = field(
         init=False, default_factory=dict
@@ -272,6 +277,16 @@ class PagedKVCache:
         init=False, default_factory=dict
     )
     _retiring_records: dict[tuple[int, int], _RetiringEntry] = field(
+        init=False, default_factory=dict
+    )
+    _swapped_storage_buffers: dict[int, tuple[torch.Tensor, torch.Tensor]] = (
+        field(init=False, default_factory=dict)
+    )
+    _swapped_cpu_buffers: dict[int, torch.Tensor] = field(
+        init=False, default_factory=dict
+    )
+    _swapped_out_sequences: set[int] = field(init=False, default_factory=set)
+    _swapped_num_tokens: dict[int, int] = field(
         init=False, default_factory=dict
     )
     _next_generation: int = field(init=False, default=1)
@@ -299,6 +314,10 @@ class PagedKVCache:
             raise ValueError(f"num_heads must be > 0, got {self.num_heads}")
         if self.head_dim <= 0:
             raise ValueError(f"head_dim must be > 0, got {self.head_dim}")
+
+        if self.storage is not None:
+            self._bind_storage(self.storage)
+            return
 
         self.device = self._resolve_device(self.device)
         self.block_allocator = BlockAllocator(
@@ -371,6 +390,38 @@ class PagedKVCache:
     # ------------------------------------------------------------------ #
     # Sequence allocation and token management                            #
     # ------------------------------------------------------------------ #
+    def _bind_storage(self, storage: "PagedKVStorage") -> None:
+        from moe_infinity.runtime.paged_kv_storage import canonical_device
+
+        spec = storage.spec
+        if self.num_blocks != spec.num_blocks:
+            raise ValueError("num_blocks mismatch with bound storage")
+        if self.block_size != spec.block_size:
+            raise ValueError("block_size mismatch with bound storage")
+        if self.num_layers != spec.num_layers:
+            raise ValueError("num_layers mismatch with bound storage")
+        if self.num_heads != spec.num_kv_heads:
+            raise ValueError("num_heads mismatch with bound storage")
+        if self.head_dim != spec.head_dim:
+            raise ValueError("head_dim mismatch with bound storage")
+        if self.dtype != spec.dtype:
+            raise ValueError("dtype mismatch with bound storage")
+        if self.device is not None and canonical_device(
+            self.device
+        ) != canonical_device(spec.device):
+            raise ValueError("device mismatch with bound storage")
+
+        self.device = spec.device
+        self.block_allocator = storage.block_allocator
+        self._kv_cache = storage.value_cache
+        self._use_flashinfer = False
+        self._fi_workspace = None
+        self._fi_prefill = None
+        self._fi_decode = None
+
+    @property
+    def has_bound_storage(self) -> bool:
+        return self.storage is not None
 
     def allocate_sequence(self, seq_id: int, num_tokens: int) -> None:
         if seq_id in self._sequence_tables:
@@ -485,6 +536,27 @@ class PagedKVCache:
                                 tensor=trimmed,
                                 nbytes=trimmed.numel() * trimmed.element_size(),
                             )
+        if seq_id in self._swapped_out_sequences:
+            self._swapped_num_tokens[seq_id] = new_len
+            storage_buffer = self._swapped_storage_buffers.get(seq_id)
+            if storage_buffer is not None:
+                if blocks_needed == 0:
+                    _ = self._swapped_storage_buffers.pop(seq_id, None)
+                else:
+                    key_buffer, value_buffer = storage_buffer
+                    if int(key_buffer.shape[1]) > blocks_needed:
+                        self._swapped_storage_buffers[seq_id] = (
+                            key_buffer[:, :blocks_needed, ...].clone(),
+                            value_buffer[:, :blocks_needed, ...].clone(),
+                        )
+            cpu_buffer = self._swapped_cpu_buffers.get(seq_id)
+            if cpu_buffer is not None:
+                if blocks_needed == 0:
+                    _ = self._swapped_cpu_buffers.pop(seq_id, None)
+                elif int(cpu_buffer.shape[1]) > blocks_needed:
+                    self._swapped_cpu_buffers[seq_id] = cpu_buffer[
+                        :, :blocks_needed, ...
+                    ].clone()
 
         if freed_block_ids and self._cp_kv_manager is not None:
             try:
@@ -545,6 +617,10 @@ class PagedKVCache:
         if block_table is not None:
             block_table.release()
 
+        _ = self._swapped_cpu_buffers.pop(seq_id, None)
+        _ = self._swapped_storage_buffers.pop(seq_id, None)
+        _ = self._swapped_num_tokens.pop(seq_id, None)
+        self._swapped_out_sequences.discard(seq_id)
         _ = self._kv_records.pop(seq_id, None)
         _ = self._sequence_tables.pop(seq_id, None)
 
@@ -1214,6 +1290,28 @@ class PagedKVCache:
                 f"KV swap-out backpressure for sequence {seq_id}"
             )
         # Sync submission has already completed and published HOST_RESIDENT.
+        block_table = self._sequence_tables.get(seq_id)
+        if block_table is None:
+            return
+        self._swapped_num_tokens[seq_id] = block_table.num_computed_tokens()
+        block_ids = block_table.get_block_ids()
+        if block_ids:
+            if self.storage is not None:
+                self._swapped_storage_buffers[seq_id] = (
+                    self.storage.key_cache[:, block_ids, ...]
+                    .detach()
+                    .to("cpu")
+                    .clone(),
+                    self.storage.value_cache[:, block_ids, ...]
+                    .detach()
+                    .to("cpu")
+                    .clone(),
+                )
+            else:
+                self._swapped_cpu_buffers[seq_id] = (
+                    self._kv_cache[:, block_ids, ...].detach().to("cpu").clone()
+                )
+        self._swapped_out_sequences.add(seq_id)
 
     def swap_in(self, seq_id: int) -> None:
         record = self._kv_records.get(seq_id)
@@ -1224,6 +1322,56 @@ class PagedKVCache:
         if not self.request_swap_in(seq_id):
             raise RuntimeError(f"KV swap-in unavailable for sequence {seq_id}")
         # Sync submission has already restored/published and released bytes.
+        block_table = self._sequence_tables.get(seq_id)
+        if block_table is None:
+            return
+        saved_num_tokens = self._swapped_num_tokens.pop(seq_id, 0)
+        if self.storage is not None:
+            storage_buffer = self._swapped_storage_buffers.pop(seq_id, None)
+            if storage_buffer is not None:
+                key_buffer, value_buffer = storage_buffer
+                if not block_table.has_blocks():
+                    num_blocks_needed = int(key_buffer.shape[1])
+                    restored_block_ids = self.block_allocator.allocate(
+                        num_blocks_needed,
+                    )
+                    block_table.restore_blocks(
+                        restored_block_ids,
+                        num_tokens=saved_num_tokens,
+                    )
+                block_ids = block_table.get_block_ids()
+                if block_ids:
+                    self.storage.key_cache[:, block_ids, ...] = key_buffer.to(
+                        device=self.storage.key_cache.device,
+                        dtype=self.storage.key_cache.dtype,
+                    )
+                    self.storage.value_cache[:, block_ids, ...] = (
+                        value_buffer.to(
+                            device=self.storage.value_cache.device,
+                            dtype=self.storage.value_cache.dtype,
+                        )
+                    )
+            self._swapped_out_sequences.discard(seq_id)
+            return
+
+        cpu_buffer = self._swapped_cpu_buffers.pop(seq_id, None)
+        if cpu_buffer is not None:
+            if not block_table.has_blocks():
+                num_blocks_needed = int(cpu_buffer.shape[1])
+                restored_block_ids = self.block_allocator.allocate(
+                    num_blocks_needed,
+                )
+                block_table.restore_blocks(
+                    restored_block_ids,
+                    num_tokens=saved_num_tokens,
+                )
+            block_ids = block_table.get_block_ids()
+            if block_ids and self._kv_cache is not None:
+                self._kv_cache[:, block_ids, ...] = cpu_buffer.to(
+                    device=self._kv_cache.device,
+                    dtype=self._kv_cache.dtype,
+                )
+        self._swapped_out_sequences.discard(seq_id)
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                    #

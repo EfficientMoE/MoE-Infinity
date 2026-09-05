@@ -447,6 +447,8 @@ class Scheduler:
                 SequenceStatus.WAITING,
                 SequenceStatus.PREFILL,
                 SequenceStatus.DECODE,
+                SequenceStatus.DRAFT,
+                SequenceStatus.VERIFY,
                 SequenceStatus.SWAPPED,
             ):
                 sequence.set_status(SequenceStatus.FINISHED)
@@ -520,6 +522,8 @@ class Scheduler:
                 if sequence.status in (
                     SequenceStatus.PREFILL,
                     SequenceStatus.DECODE,
+                    SequenceStatus.DRAFT,
+                    SequenceStatus.VERIFY,
                 ):
                     running_seq_ids.append(sequence.seq_id)
         return running_seq_ids
@@ -553,50 +557,61 @@ class Scheduler:
                 return
 
     def _preempt_oldest_running_group(self) -> list[int]:
-        while self._running:
-            group = self._running[0]
-            seqs = [
-                sequence
-                for sequence in group.sequences
-                if sequence.status in self._SWAPPABLE_STATUSES
-            ]
-            if not seqs:
-                _ = self._running.popleft()
-                continue
-
-            reservation = self.kv_cache.reserve_swap_out_group(
-                [sequence.seq_id for sequence in seqs]
-            )
-            if reservation is None:
-                return []
-
-            prior = {sequence.seq_id: sequence.status for sequence in seqs}
-            self.kv_cache.submit_swap_out_group(reservation)
-
-            submitted = self._submitted_swap_out(seqs)
-            if len(submitted) != len(seqs):
-                self._roll_back_failed_swap_out(group, seqs, prior)
-                return []
-
-            _ = self._running.popleft()
-            for sequence in seqs:
-                sequence.set_status(SequenceStatus.SWAPPED)
-                if self._is_host_resident(sequence.seq_id):
-                    self.kv_cache.free_gpu_blocks(sequence.seq_id)
-            self._swapped.append(group)
-            self._swapped_groups[group.request_id] = _SwappedGroupRecord(
-                group=group,
-                prior_status_by_seq=prior,
-                phase=SwapGroupPhase.OUT_IN_FLIGHT,
-                pending_seq_ids={
-                    sequence.seq_id
+        preserved: list[SequenceGroup] = []
+        try:
+            while self._running:
+                group = self._running[0]
+                seqs = [
+                    sequence
+                    for sequence in group.sequences
+                    if sequence.status in self._SWAPPABLE_STATUSES
+                ]
+                if not seqs:
+                    preserved.append(self._running.popleft())
+                    continue
+                if any(
+                    sequence.status
+                    in (SequenceStatus.DRAFT, SequenceStatus.VERIFY)
                     for sequence in seqs
-                    if not self._is_host_resident(sequence.seq_id)
-                },
-            )
-            return [sequence.seq_id for sequence in seqs]
+                ):
+                    preserved.append(self._running.popleft())
+                    continue
 
-        return []
+                reservation = self.kv_cache.reserve_swap_out_group(
+                    [sequence.seq_id for sequence in seqs]
+                )
+                if reservation is None:
+                    return []
+
+                prior = {sequence.seq_id: sequence.status for sequence in seqs}
+                self.kv_cache.submit_swap_out_group(reservation)
+
+                submitted = self._submitted_swap_out(seqs)
+                if len(submitted) != len(seqs):
+                    self._roll_back_failed_swap_out(group, seqs, prior)
+                    return []
+
+                _ = self._running.popleft()
+                for sequence in seqs:
+                    sequence.set_status(SequenceStatus.SWAPPED)
+                    if self._is_host_resident(sequence.seq_id):
+                        self.kv_cache.free_gpu_blocks(sequence.seq_id)
+                self._swapped.append(group)
+                self._swapped_groups[group.request_id] = _SwappedGroupRecord(
+                    group=group,
+                    prior_status_by_seq=prior,
+                    phase=SwapGroupPhase.OUT_IN_FLIGHT,
+                    pending_seq_ids={
+                        sequence.seq_id
+                        for sequence in seqs
+                        if not self._is_host_resident(sequence.seq_id)
+                    },
+                )
+                return [sequence.seq_id for sequence in seqs]
+
+            return []
+        finally:
+            self._running.extendleft(reversed(preserved))
 
     def _submitted_swap_out(
         self, seqs: list[SequenceData]
