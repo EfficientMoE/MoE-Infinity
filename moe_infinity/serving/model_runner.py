@@ -28,6 +28,11 @@ if TYPE_CHECKING:
     from moe_infinity.runtime.attention_backend import PrefixReuseCapability
 logger = logging.getLogger(__name__)
 
+# Shims whose layers the runner registers with the paged backend (prefix reuse,
+# chunked prefill, layered store binding). Matched by class name, like
+# ``_get_paged_attention_classes``.
+_LAYER_REGISTERED_SHIMS = frozenset({"Qwen3PagedAttention", "OlmoePagedAttention"})
+
 
 @runtime_checkable
 class _ExpertTracerLike(Protocol):
@@ -800,7 +805,7 @@ class ModelRunner:
         if not isinstance(modules, Iterable):
             return registrations
         for module in modules:
-            if module.__class__.__name__ != "Qwen3PagedAttention":
+            if module.__class__.__name__ not in _LAYER_REGISTERED_SHIMS:
                 continue
             layer_idx = getattr(module, "layer_idx", None)
             if not isinstance(layer_idx, int):
@@ -820,6 +825,7 @@ class ModelRunner:
             "DeepseekV2PagedAttention",
             "DeepseekV3PagedAttention",
             "Qwen3PagedAttention",
+            "OlmoePagedAttention",
         }
         classes: list[type[Any]] = []
         seen: set[type[Any]] = set()
@@ -856,7 +862,7 @@ class ModelRunner:
             return []
         found: list[Any] = []
         for module in modules:
-            if module.__class__.__name__ == "Qwen3PagedAttention" and hasattr(
+            if module.__class__.__name__ in _LAYER_REGISTERED_SHIMS and hasattr(
                 module, "layer_idx"
             ):
                 found.append(module)

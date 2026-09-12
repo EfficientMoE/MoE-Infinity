@@ -31,6 +31,7 @@ __all__ = [
     "DeepseekV2PagedAttention",
     "DeepseekV3PagedAttention",
     "Qwen3MoEBlock",
+    "OlmoePagedAttention",
     "Qwen3PagedAttention",
     "SyncDbrxFFNBlock",
     "SyncDeepseekV2MoEBlock",
@@ -64,4 +65,8 @@ def __getattr__(name: str):
             "DeepseekV2PagedAttention": DeepseekV2PagedAttention,
             "DeepseekV3PagedAttention": DeepseekV3PagedAttention,
         }[name]
+    if name == "OlmoePagedAttention":
+        from .olmoe_paged_attention import OlmoePagedAttention
+
+        return OlmoePagedAttention
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

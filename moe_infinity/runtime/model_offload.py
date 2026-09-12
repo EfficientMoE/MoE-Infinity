@@ -56,6 +56,7 @@ from moe_infinity.memory.adaptive_precision_policy import (
 from moe_infinity.models import (
     DeepseekV2PagedAttention,
     DeepseekV3PagedAttention,
+    OlmoePagedAttention,
     Qwen3MoEBlock,
     Qwen3PagedAttention,
     SyncDbrxFFNBlock,
@@ -991,6 +992,13 @@ class OffloadEngine(object):
         )
         transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock = (
             SyncOlmoeMoEBlock
+        )
+
+        transformers.models.olmoe.modeling_olmoe._old_olmoe_attention = (
+            transformers.models.olmoe.modeling_olmoe.OlmoeAttention
+        )
+        transformers.models.olmoe.modeling_olmoe.OlmoeAttention = (
+            OlmoePagedAttention
         )
 
         transformers.models.jamba.modeling_jamba._old_jamba_moe = (
@@ -2669,6 +2677,12 @@ class OffloadEngine(object):
         transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock = (
             transformers.models.olmoe.modeling_olmoe._old_olmoe_moe
         )
+        if hasattr(
+            transformers.models.olmoe.modeling_olmoe, "_old_olmoe_attention"
+        ):
+            transformers.models.olmoe.modeling_olmoe.OlmoeAttention = (
+                transformers.models.olmoe.modeling_olmoe._old_olmoe_attention
+            )
 
         transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock = (
             transformers.models.jamba.modeling_jamba._old_jamba_moe
