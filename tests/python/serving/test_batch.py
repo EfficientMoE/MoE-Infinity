@@ -218,9 +218,13 @@ def test_batch_builder_decode_only() -> None:
             22, [6], status=SequenceStatus.DECODE, num_computed_tokens=1
         ),
     }
-    cache.allocate_sequence(20, num_tokens=3)
-    cache.allocate_sequence(21, num_tokens=2)
-    cache.allocate_sequence(22, num_tokens=1)
+    # A sequence enters decode with the token sampled at the previous step
+    # appended; that token is the decode query and its KV is not written yet.
+    for seq_id, sampled in ((20, 9), (21, 8), (22, 7)):
+        sequences[seq_id].append_output_token(sampled)
+    cache.allocate_sequence(20, num_tokens=4)
+    cache.allocate_sequence(21, num_tokens=3)
+    cache.allocate_sequence(22, num_tokens=2)
 
     metadata = BatchBuilder.from_scheduler_output(
         SchedulerOutput(decode_seq_ids=[20, 21, 22]),
@@ -229,13 +233,45 @@ def test_batch_builder_decode_only() -> None:
     )
 
     assert metadata.seq_ids == [20, 21, 22]
-    assert metadata.input_token_ids == [3, 5, 6]
+    assert metadata.input_token_ids == [9, 8, 7]
     assert metadata.query_lengths == [1, 1, 1]
+    # context = tokens whose KV is already in the cache (the prompt), not the
+    # query token itself
     assert metadata.context_lengths == [3, 2, 1]
     assert metadata.kv_seq_lengths == [4, 3, 2]
     assert metadata.is_prefill == [False, False, False]
     assert metadata.block_tables == [[0], [1], [2]]
     assert metadata.query_offsets == [0, 1, 2, 3]
+
+
+def test_decode_context_excludes_the_token_being_computed() -> None:
+    """Regression: with a 5-token prompt the first decode step must see
+    context 5, slot 5, kv 6. Counting the freshly sampled token as computed
+    context gave 6/6/7 and left slot 5 unwritten but attended (measured on
+    OLMoE and Qwen3 through api_server_v2)."""
+    cache = _make_cache()
+    sequence = _make_sequence(
+        7, [1, 2, 3, 4, 5], status=SequenceStatus.DECODE, num_computed_tokens=5
+    )
+    sequence.append_output_token(42)
+    sequences = {7: sequence}
+    cache.allocate_sequence(7, num_tokens=6)
+
+    metadata = BatchBuilder.from_scheduler_output(
+        SchedulerOutput(decode_seq_ids=[7]), sequences, cache
+    )
+    assert metadata.input_token_ids == [42]
+    assert metadata.context_lengths == [5]
+    assert metadata.kv_seq_lengths == [6]
+
+    # and again after the next sampled token
+    sequence.append_output_token(43)
+    metadata = BatchBuilder.from_scheduler_output(
+        SchedulerOutput(decode_seq_ids=[7]), sequences, cache
+    )
+    assert metadata.input_token_ids == [43]
+    assert metadata.context_lengths == [6]
+    assert metadata.kv_seq_lengths == [7]
 
 
 def test_batch_builder_mixed() -> None:
@@ -251,9 +287,11 @@ def test_batch_builder_mixed() -> None:
             32, [4], status=SequenceStatus.DECODE, num_computed_tokens=1
         ),
     }
+    sequences[31].append_output_token(9)
+    sequences[32].append_output_token(8)
     cache.allocate_sequence(30, num_tokens=2)
-    cache.allocate_sequence(31, num_tokens=3)
-    cache.allocate_sequence(32, num_tokens=1)
+    cache.allocate_sequence(31, num_tokens=4)
+    cache.allocate_sequence(32, num_tokens=2)
 
     metadata = BatchBuilder.from_scheduler_output(
         SchedulerOutput(prefill_seq_ids=[30], decode_seq_ids=[31, 32]),
@@ -262,7 +300,7 @@ def test_batch_builder_mixed() -> None:
     )
 
     assert metadata.seq_ids == [30, 31, 32]
-    assert metadata.input_token_ids == [7, 8, 3, 4]
+    assert metadata.input_token_ids == [7, 8, 9, 8]
     assert metadata.query_lengths == [2, 1, 1]
     assert metadata.context_lengths == [0, 3, 1]
     assert metadata.kv_seq_lengths == [2, 4, 2]

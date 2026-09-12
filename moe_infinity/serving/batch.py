@@ -375,7 +375,15 @@ class BatchBuilder:
             )
             input_token_ids.extend(token)
             query_lengths.append(len(token))
-            context_lengths.append(sequence.num_computed_tokens)
+            # ``num_computed_tokens`` already counts the token sampled at the
+            # previous step (``SequenceData.append_output_token``), and that
+            # token is exactly this row's query: its KV is written by this
+            # forward, so the context is everything before it. Counting it in
+            # the context shifted slot_mapping, position_ids and kv_seq_lengths
+            # by one from the first decode step (measured on OLMoE and Qwen3).
+            context_lengths.append(
+                sequence.num_computed_tokens - len(token)
+            )
             is_prefill.append(False)
             prefill_is_terminal.append(False)
             block_tables.append(kv_cache.get_block_table(seq_id))

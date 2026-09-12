@@ -709,6 +709,27 @@ def test_disabled_policy_keeps_paged_prefill_then_decode() -> None:
     assert calls == [[True], [False]]
 
 
+def test_active_shim_without_registry_bindings_still_splits_mixed_batch() -> None:
+    """A spec-built backend leaves the layer registry empty, yet the runner
+    has a *PagedAttention shim active. The mixed batch must still be split:
+    combined, the backend keys on is_prefill=all(...) and runs the packed
+    prefill rows down its decode path (measured: engine death with
+    'block_tables first dimension must equal num_seqs' under 4 concurrent
+    requests)."""
+    engine = _make_engine()
+    calls = []
+    engine.config["phase_specific_expert_policy"] = False
+    engine.paged_attention_registry.bindings = []
+    engine.model_runner._get_paged_attention_classes = lambda: [object()]
+    engine.model_runner.execute = lambda batch: (
+        calls.append(list(batch.is_prefill))
+        or torch.zeros((batch.total_tokens, 1))
+    )
+    batch = make_mixed_batch(prefill_tokens=[11, 12], decode_tokens=[21])
+    _ = engine._execute_batch(batch)
+    assert calls == [[True], [False]]
+
+
 def test_get_stats_reports_disabled_expert_policy_without_prefetcher() -> None:
     engine = _make_engine()
     stats = engine.get_stats()

@@ -105,6 +105,62 @@ def _tol(dtype):
 
 
 @pytest.mark.parametrize("family", ["olmoe", "qwen3"])
+def test_two_sequences_packed_in_one_prefill_match_stock_attention(family):
+    """Two sequences of different length in the same prefill batch, padded to
+    the longest query the way ModelRunner.prepare_inputs does. The shim packs
+    the valid tokens; the backend must attend each sequence to itself. Each
+    row is compared with the stock attention run on that sequence alone."""
+    device, dtype = _device_and_dtype()
+    cfg, Stock, Shim, Rotary = _families()[family](2)
+    torch.manual_seed(4)
+    shim = Shim(cfg, layer_idx=0).to(device=device, dtype=dtype).eval()
+    stock = Stock(cfg, layer_idx=0).to(device=device, dtype=dtype).eval()
+    stock.load_state_dict(shim.state_dict())
+    rotary = Rotary(cfg).to(device)
+    lengths = [5, 3]
+    q_len = max(lengths)
+    hidden = torch.randn(len(lengths), q_len, cfg.hidden_size, device=device, dtype=dtype)
+    positions = torch.arange(q_len, device=device).unsqueeze(0).expand(len(lengths), -1)
+    cos, sin = rotary(hidden, positions)
+
+    backend = PagedAttentionBackend(
+        spec=KVCacheSpec(2, HEAD_DIM, dtype, BLOCK_SIZE), num_gpu_blocks=NUM_BLOCKS, num_layers=1, device=device
+    )
+    offsets = [0, lengths[0], lengths[0] + lengths[1]]
+    slots = list(range(0, lengths[0])) + list(range(2 * BLOCK_SIZE, 2 * BLOCK_SIZE + lengths[1]))
+    meta = AttentionMetadata(
+        block_tables=torch.tensor([[0, 1], [2, 3]], dtype=torch.int32, device=device),
+        max_seq_len=q_len,
+        num_prefill_tokens=sum(lengths),
+        num_decode_tokens=0,
+        slot_mapping=torch.tensor(slots, dtype=torch.int64, device=device),
+        is_prefill=True,
+        lengths=PagedBatchLengths(
+            query_lengths=torch.tensor(lengths, dtype=torch.int32, device=device),
+            query_offsets=torch.tensor(offsets, dtype=torch.int32, device=device),
+            context_lengths=torch.zeros(2, dtype=torch.int32, device=device),
+            kv_seq_lengths=torch.tensor(lengths, dtype=torch.int32, device=device),
+        ),
+    )
+    with torch.no_grad():
+        Shim.set_paged_context(backend, meta)
+        try:
+            out, _ = shim(hidden_states=hidden, position_embeddings=(cos, sin), attention_mask=None)
+        finally:
+            Shim.clear_paged_context()
+        for row, length in enumerate(lengths):
+            ref, _ = stock(
+                hidden_states=hidden[row : row + 1, :length],
+                position_embeddings=(cos[row : row + 1, :length], sin[row : row + 1, :length]),
+                attention_mask=_causal_mask(length, device, dtype),
+            )
+            diff = (out[row, :length].float() - ref[0].float()).abs().max().item()
+            assert torch.allclose(out[row, :length], ref[0], **_tol(dtype)), (
+                f"{family} row {row} (len {length}) differs from its stand-alone attention: max|diff|={diff:.4f}"
+            )
+
+
+@pytest.mark.parametrize("family", ["olmoe", "qwen3"])
 def test_two_layers_share_one_backend_without_aliasing(family):
     """Two shim instances (layer_idx 0 and 1) on one backend built with
     num_layers=2: each layer must read back its own KV. A backend sized for
