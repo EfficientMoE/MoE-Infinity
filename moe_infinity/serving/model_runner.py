@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 # Shims whose layers the runner registers with the paged backend (prefix reuse,
 # chunked prefill, layered store binding). Matched by class name, like
 # ``_get_paged_attention_classes``.
-_LAYER_REGISTERED_SHIMS = frozenset({"Qwen3PagedAttention", "OlmoePagedAttention"})
+_LAYER_REGISTERED_SHIMS = frozenset(
+    {"Qwen3PagedAttention", "OlmoePagedAttention"}
+)
 
 
 @runtime_checkable

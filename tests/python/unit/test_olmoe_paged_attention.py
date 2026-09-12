@@ -55,19 +55,42 @@ class _CausalSdpaBackend:
         self.query_lengths = query_lengths
         self.calls: list[dict] = []
 
-    def forward(self, query, key, value, attention_metadata=None, scale=None, layer_idx=0):
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        attention_metadata=None,
+        scale=None,
+        layer_idx=0,
+    ):
         self.calls.append(
-            {"q": query.shape, "k": key.shape, "v": value.shape, "layer_idx": layer_idx}
+            {
+                "q": query.shape,
+                "k": key.shape,
+                "v": value.shape,
+                "layer_idx": layer_idx,
+            }
         )
         groups = query.shape[1] // key.shape[1]
         outputs = []
         start = 0
         for length in self.query_lengths:
             q = query[start : start + length].transpose(0, 1)  # [H, T, D]
-            k = key[start : start + length].repeat_interleave(groups, dim=1).transpose(0, 1)
-            v = value[start : start + length].repeat_interleave(groups, dim=1).transpose(0, 1)
+            k = (
+                key[start : start + length]
+                .repeat_interleave(groups, dim=1)
+                .transpose(0, 1)
+            )
+            v = (
+                value[start : start + length]
+                .repeat_interleave(groups, dim=1)
+                .transpose(0, 1)
+            )
             scores = (q @ k.transpose(-1, -2)) * scale
-            mask = torch.triu(torch.ones(length, length, dtype=torch.bool), diagonal=1)
+            mask = torch.triu(
+                torch.ones(length, length, dtype=torch.bool), diagonal=1
+            )
             scores = scores.masked_fill(mask, float("-inf"))
             outputs.append((torch.softmax(scores, dim=-1) @ v).transpose(0, 1))
             start += length
@@ -76,13 +99,18 @@ class _CausalSdpaBackend:
 
 def _metadata(query_lengths: list[int]) -> SimpleNamespace:
     return SimpleNamespace(
-        lengths=SimpleNamespace(query_lengths=torch.tensor(query_lengths, dtype=torch.int32))
+        lengths=SimpleNamespace(
+            query_lengths=torch.tensor(query_lengths, dtype=torch.int32)
+        )
     )
 
 
 def _causal_mask(length: int) -> torch.Tensor:
     mask = torch.zeros(1, 1, length, length)
-    mask[..., torch.triu(torch.ones(length, length, dtype=torch.bool), diagonal=1)] = float("-inf")
+    mask[
+        ...,
+        torch.triu(torch.ones(length, length, dtype=torch.bool), diagonal=1),
+    ] = float("-inf")
     return mask
 
 
@@ -98,7 +126,9 @@ def _clear_context():
 
 
 @pytest.mark.parametrize("clip_qkv", [None, 0.5])
-def test_paged_forward_matches_stock_attention_single_sequence(clip_qkv) -> None:
+def test_paged_forward_matches_stock_attention_single_sequence(
+    clip_qkv,
+) -> None:
     torch.manual_seed(0)
     config = _config(clip_qkv=clip_qkv)
     shim = OlmoePagedAttention(config, layer_idx=0).eval()
@@ -143,7 +173,11 @@ def test_padded_batch_is_packed_and_scattered_back() -> None:
     backend = _CausalSdpaBackend(lengths)
     OlmoePagedAttention.set_paged_context(backend, _metadata(lengths))
     with torch.no_grad():
-        out, _ = shim(hidden_states=hidden, position_embeddings=(cos, sin), attention_mask=None)
+        out, _ = shim(
+            hidden_states=hidden,
+            position_embeddings=(cos, sin),
+            attention_mask=None,
+        )
 
     # the backend saw only the 5 valid tokens, not the 6 padded slots
     assert backend.calls[0]["q"][0] == sum(lengths)
@@ -159,10 +193,15 @@ def test_padded_batch_is_packed_and_scattered_back() -> None:
         with torch.no_grad():
             solo, _ = shim(
                 hidden_states=hidden[row : row + 1, :length],
-                position_embeddings=(cos[row : row + 1, :length], sin[row : row + 1, :length]),
+                position_embeddings=(
+                    cos[row : row + 1, :length],
+                    sin[row : row + 1, :length],
+                ),
                 attention_mask=None,
             )
-        torch.testing.assert_close(out[row, :length], solo[0], rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(
+            out[row, :length], solo[0], rtol=1e-5, atol=1e-5
+        )
 
 
 def test_without_paged_context_defers_to_stock_forward() -> None:
@@ -175,8 +214,16 @@ def test_without_paged_context_defers_to_stock_forward() -> None:
     hidden = torch.randn(1, length, config.hidden_size)
     cos, sin = _rope(config, hidden, torch.arange(length).unsqueeze(0))
     with torch.no_grad():
-        a, _ = shim(hidden_states=hidden, position_embeddings=(cos, sin), attention_mask=_causal_mask(length))
-        b, _ = stock(hidden_states=hidden, position_embeddings=(cos, sin), attention_mask=_causal_mask(length))
+        a, _ = shim(
+            hidden_states=hidden,
+            position_embeddings=(cos, sin),
+            attention_mask=_causal_mask(length),
+        )
+        b, _ = stock(
+            hidden_states=hidden,
+            position_embeddings=(cos, sin),
+            attention_mask=_causal_mask(length),
+        )
     torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
@@ -185,11 +232,15 @@ def test_kv_cache_spec_follows_olmoe_head_geometry() -> None:
     spec = OlmoePagedAttention.get_kv_cache_spec_for_config(config)
     assert spec == {"num_kv_heads": 2, "head_dim": 8}
     assert spec["head_dim"] == config.hidden_size // config.num_attention_heads
-    assert math.isclose(OlmoePagedAttention(config, layer_idx=0).scaling, 8**-0.5)
+    assert math.isclose(
+        OlmoePagedAttention(config, layer_idx=0).scaling, 8**-0.5
+    )
 
 
 def test_runner_match_set_and_registry_know_the_shim() -> None:
     from moe_infinity.serving import model_runner as runner_mod
 
     source = open(runner_mod.__file__, encoding="utf-8").read()
-    assert '"OlmoePagedAttention"' in source, "serving runner must match the OLMoE shim by name"
+    assert (
+        '"OlmoePagedAttention"' in source
+    ), "serving runner must match the OLMoE shim by name"

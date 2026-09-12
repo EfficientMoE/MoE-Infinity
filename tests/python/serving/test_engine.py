@@ -709,7 +709,9 @@ def test_disabled_policy_keeps_paged_prefill_then_decode() -> None:
     assert calls == [[True], [False]]
 
 
-def test_active_shim_without_registry_bindings_still_splits_mixed_batch() -> None:
+def test_active_shim_without_registry_bindings_still_splits_mixed_batch() -> (
+    None
+):
     """A spec-built backend leaves the layer registry empty, yet the runner
     has a *PagedAttention shim active. The mixed batch must still be split:
     combined, the backend keys on is_prefill=all(...) and runs the packed

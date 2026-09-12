@@ -120,7 +120,9 @@ class OlmoePagedAttention(OlmoeAttention):
 
         # OLMoE: RMSNorm over the whole projection, before the split into
         # heads; then the optional clamp.  Same order as OlmoeAttention.
-        query_states = cast(torch.Tensor, self.q_norm(self.q_proj(hidden_states)))
+        query_states = cast(
+            torch.Tensor, self.q_norm(self.q_proj(hidden_states))
+        )
         key_states = cast(torch.Tensor, self.k_norm(self.k_proj(hidden_states)))
         value_states = cast(torch.Tensor, self.v_proj(hidden_states))
 
@@ -225,7 +227,9 @@ class OlmoePagedAttention(OlmoeAttention):
         return attn_output, None
 
     @classmethod
-    def get_kv_cache_spec_for_config(cls, config: OlmoeConfig) -> dict[str, int]:
+    def get_kv_cache_spec_for_config(
+        cls, config: OlmoeConfig
+    ) -> dict[str, int]:
         head_dim = getattr(
             config,
             "head_dim",

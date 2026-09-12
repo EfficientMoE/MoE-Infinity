@@ -24,13 +24,17 @@ from moe_infinity.runtime.attention_types import (
 )
 
 
-def _causal_sdpa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float) -> torch.Tensor:
+def _causal_sdpa(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float
+) -> torch.Tensor:
     # q/k/v: [tokens, heads, head_dim] of ONE sequence
     groups = q.shape[1] // k.shape[1]
     qh = q.transpose(0, 1)
     kh = k.repeat_interleave(groups, dim=1).transpose(0, 1)
     vh = v.repeat_interleave(groups, dim=1).transpose(0, 1)
-    return F.scaled_dot_product_attention(qh, kh, vh, scale=scale, is_causal=True).transpose(0, 1)
+    return F.scaled_dot_product_attention(
+        qh, kh, vh, scale=scale, is_causal=True
+    ).transpose(0, 1)
 
 
 def _metadata(lengths: list[int], block_size: int) -> AttentionMetadata:
@@ -73,12 +77,26 @@ def _run(lengths: list[int], kv_heads: int) -> None:
     v = torch.randn(total, kv_heads, head_dim)
     scale = head_dim**-0.5
 
-    out = backend.forward(q, k, v, attention_metadata=_metadata(lengths, block_size), scale=scale, layer_idx=0)
+    out = backend.forward(
+        q,
+        k,
+        v,
+        attention_metadata=_metadata(lengths, block_size),
+        scale=scale,
+        layer_idx=0,
+    )
 
     start = 0
     for length in lengths:
-        expected = _causal_sdpa(q[start : start + length], k[start : start + length], v[start : start + length], scale)
-        torch.testing.assert_close(out[start : start + length], expected, rtol=1e-5, atol=1e-5)
+        expected = _causal_sdpa(
+            q[start : start + length],
+            k[start : start + length],
+            v[start : start + length],
+            scale,
+        )
+        torch.testing.assert_close(
+            out[start : start + length], expected, rtol=1e-5, atol=1e-5
+        )
         start += length
 
 
@@ -109,6 +127,13 @@ def test_second_sequence_is_not_a_continuation_of_the_first() -> None:
     q = torch.randn(3 + 1, heads, head_dim)
     k = torch.randn_like(q)
     v = torch.randn_like(q)
-    out = backend.forward(q, k, v, attention_metadata=_metadata([3, 1], block_size), scale=1.0, layer_idx=0)
+    out = backend.forward(
+        q,
+        k,
+        v,
+        attention_metadata=_metadata([3, 1], block_size),
+        scale=1.0,
+        layer_idx=0,
+    )
     # a single-token sequence attends only to itself: output == its own value
     torch.testing.assert_close(out[3], v[3], rtol=1e-5, atol=1e-5)
