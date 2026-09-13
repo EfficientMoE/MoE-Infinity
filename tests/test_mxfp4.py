@@ -34,21 +34,21 @@ def make_non_quantized_config():
 
 
 def test_is_mxfp4_quantized_positive():
-    from moe_infinity.utils.mxfp4 import is_mxfp4_quantized
+    from moe_store.parsing.mxfp4 import is_mxfp4_quantized
 
     config = make_mxfp4_config()
     assert is_mxfp4_quantized(config) is True
 
 
 def test_is_mxfp4_quantized_negative():
-    from moe_infinity.utils.mxfp4 import is_mxfp4_quantized
+    from moe_store.parsing.mxfp4 import is_mxfp4_quantized
 
     config = make_non_quantized_config()
     assert is_mxfp4_quantized(config) is False
 
 
 def test_get_modules_to_not_convert():
-    from moe_infinity.utils.mxfp4 import get_mxfp4_modules_to_not_convert
+    from moe_store.parsing.mxfp4 import get_mxfp4_modules_to_not_convert
 
     config = make_mxfp4_config()
     modules = get_mxfp4_modules_to_not_convert(config)
@@ -59,7 +59,7 @@ def test_get_modules_to_not_convert():
 
 
 def test_identify_mxfp4_pairs():
-    from moe_infinity.utils.mxfp4 import identify_mxfp4_pairs
+    from moe_store.parsing.mxfp4 import identify_mxfp4_pairs
 
     weight_names = [
         "model.layers.0.mlp.experts.gate_up_proj_blocks",

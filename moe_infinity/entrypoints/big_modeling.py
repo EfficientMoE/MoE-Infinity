@@ -92,14 +92,14 @@ class MoE:
             ) from exc
 
         from moe_store.parsing.hf_config import ensure_config_compat
+        from moe_store.parsing.quantization import (
+            detect_quantization,
+            validate_quantization_support,
+        )
         from moe_store.registry.constants import MODEL_MAPPING_NAMES
 
         from moe_infinity.runtime import OffloadEngine
         from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
-        from moe_infinity.utils.quantization import (
-            detect_quantization,
-            validate_quantization_support,
-        )
 
         # TODO: remove the torch version check once older versions are supported
         if is_torch_version is not None and not is_torch_version(">=", "2.0"):

@@ -66,7 +66,7 @@ endif()
 if(NOT DEFINED MOE_STORE_CSRC)
   execute_process(
     COMMAND "${Python3_EXECUTABLE}" "-c"
-            "import moe_store, os; print(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(moe_store.__file__))), 'csrc', 'store'))"
+            "import moe_store, os; print(os.path.join(os.path.dirname(os.path.abspath(moe_store.__file__)), 'csrc', 'store'))"
     OUTPUT_VARIABLE MOE_STORE_CSRC OUTPUT_STRIP_TRAILING_WHITESPACE
     RESULT_VARIABLE _MOE_STORE_RET)
   if(NOT _MOE_STORE_RET EQUAL 0)
