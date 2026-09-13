@@ -1,5 +1,5 @@
 def test_mxfp4_scales_tensors_skipped():
-    from moe_infinity.utils.mxfp4 import identify_mxfp4_pairs
+    from moe_store.parsing.mxfp4 import identify_mxfp4_pairs
 
     weight_keys = [
         "model.layers.0.mlp.experts.gate_up_proj_blocks",

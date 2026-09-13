@@ -1,7 +1,7 @@
 # Copyright (c) EfficientMoE.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for moe_infinity.utils.quantization — detection, validation, and cast decisions.
+"""Tests for moe_store.parsing.quantization — detection, validation, and cast decisions.
 
 TDD RED phase: these tests are written BEFORE the implementation exists.
 """
@@ -62,7 +62,7 @@ class TestQuantizationDetection:
 
     def test_unquantized_model_returns_none(self):
         """Standard fp16/bf16 config with no quant markers → None."""
-        from moe_infinity.utils.quantization import detect_quantization
+        from moe_store.parsing.quantization import detect_quantization
 
         config = _make_config()
         result = detect_quantization(config, "")
@@ -70,7 +70,7 @@ class TestQuantizationDetection:
 
     def test_gptq_from_config_quantization_config(self):
         """config.quantization_config with quant_method='gptq' → QuantizationInfo(method='gptq')."""
-        from moe_infinity.utils.quantization import detect_quantization
+        from moe_store.parsing.quantization import detect_quantization
 
         config = _make_config(
             quantization_config={
@@ -88,7 +88,7 @@ class TestQuantizationDetection:
 
     def test_awq_from_config_quantization_config(self):
         """config.quantization_config with quant_method='awq' → QuantizationInfo(method='awq')."""
-        from moe_infinity.utils.quantization import detect_quantization
+        from moe_store.parsing.quantization import detect_quantization
 
         config = _make_config(
             quantization_config={
@@ -104,7 +104,7 @@ class TestQuantizationDetection:
 
     def test_gptq_from_quantize_config_json(self):
         """No config.quantization_config but quantize_config.json exists → GPTQ detected."""
-        from moe_infinity.utils.quantization import detect_quantization
+        from moe_store.parsing.quantization import detect_quantization
 
         config = _make_config()  # no quantization_config attr
         ckpt_dir = _make_checkpoint_dir_with_file(
@@ -124,7 +124,7 @@ class TestQuantizationDetection:
 
     def test_awq_from_quant_config_json(self):
         """No config.quantization_config but quant_config.json exists → AWQ detected."""
-        from moe_infinity.utils.quantization import detect_quantization
+        from moe_store.parsing.quantization import detect_quantization
 
         config = _make_config()
         ckpt_dir = _make_checkpoint_dir_with_file(
@@ -144,7 +144,7 @@ class TestQuantizationDetection:
 
     def test_hqq_from_quantization_config_json(self):
         """quantization_config.json with type='hqq' → QuantizationInfo(method='hqq', supported=False)."""
-        from moe_infinity.utils.quantization import detect_quantization
+        from moe_store.parsing.quantization import detect_quantization
 
         config = _make_config()
         ckpt_dir = _make_checkpoint_dir_with_file(
@@ -163,7 +163,7 @@ class TestQuantizationDetection:
 
     def test_bnb_detected_as_unsupported(self):
         """quant_method='bitsandbytes' → QuantizationInfo(method='bitsandbytes', supported=False)."""
-        from moe_infinity.utils.quantization import detect_quantization
+        from moe_store.parsing.quantization import detect_quantization
 
         config = _make_config(
             quantization_config={
@@ -178,7 +178,7 @@ class TestQuantizationDetection:
 
     def test_gguf_checkpoint_detected_as_unsupported(self):
         """Checkpoint dir contains only .gguf files → QuantizationInfo(method='gguf', supported=False)."""
-        from moe_infinity.utils.quantization import detect_quantization
+        from moe_store.parsing.quantization import detect_quantization
 
         config = _make_config()
         ckpt_dir = _make_checkpoint_dir_with_gguf()
@@ -194,7 +194,7 @@ class TestQuantizationDetection:
 
     def test_exl2_detected_as_unsupported(self):
         """quant_method='exl2' → QuantizationInfo(method='exl2', supported=False)."""
-        from moe_infinity.utils.quantization import detect_quantization
+        from moe_store.parsing.quantization import detect_quantization
 
         config = _make_config(quantization_config={"quant_method": "exl2"})
         result = detect_quantization(config, "")
@@ -213,7 +213,7 @@ class TestQuantizationValidation:
 
     def test_gptq_passes_validation(self):
         """GPTQ QuantizationInfo does not raise."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             validate_quantization_support,
         )
@@ -231,7 +231,7 @@ class TestQuantizationValidation:
 
     def test_awq_passes_validation(self):
         """AWQ QuantizationInfo does not raise."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             validate_quantization_support,
         )
@@ -248,7 +248,7 @@ class TestQuantizationValidation:
 
     def test_hqq_raises_clear_error(self):
         """HQQ raises ValueError with message mentioning 'hqq' and 'not supported'."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             validate_quantization_support,
         )
@@ -266,7 +266,7 @@ class TestQuantizationValidation:
 
     def test_bnb_raises_clear_error(self):
         """bitsandbytes raises ValueError with actionable message."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             validate_quantization_support,
         )
@@ -284,7 +284,7 @@ class TestQuantizationValidation:
 
     def test_gguf_raises_clear_error(self):
         """GGUF raises ValueError suggesting llama.cpp or Ollama as alternatives."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             validate_quantization_support,
         )
@@ -302,7 +302,7 @@ class TestQuantizationValidation:
 
     def test_exl2_raises_clear_error(self):
         """EXL2 raises ValueError suggesting ExLlamaV2."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             validate_quantization_support,
         )
@@ -320,7 +320,7 @@ class TestQuantizationValidation:
 
     def test_unsupported_includes_model_name_in_error(self):
         """Error message includes the model name for user debugging."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             validate_quantization_support,
         )
@@ -347,7 +347,7 @@ class TestTensorCastDecision:
 
     def test_no_quant_always_casts(self):
         """quant_info=None → always returns True (existing behavior preserved)."""
-        from moe_infinity.utils.quantization import should_cast_tensor
+        from moe_store.parsing.quantization import should_cast_tensor
 
         assert (
             should_cast_tensor("model.layers.0.self_attn.q_proj.weight", None)
@@ -357,7 +357,7 @@ class TestTensorCastDecision:
 
     def test_gptq_skips_cast_for_qweight(self):
         """GPTQ: tensor named '*.qweight' → should_cast=False."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             should_cast_tensor,
         )
@@ -379,7 +379,7 @@ class TestTensorCastDecision:
 
     def test_gptq_skips_cast_for_qzeros(self):
         """GPTQ: '*.qzeros' → should_cast=False."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             should_cast_tensor,
         )
@@ -401,7 +401,7 @@ class TestTensorCastDecision:
 
     def test_gptq_skips_cast_for_scales(self):
         """GPTQ: '*.scales' → should_cast=False."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             should_cast_tensor,
         )
@@ -423,7 +423,7 @@ class TestTensorCastDecision:
 
     def test_gptq_skips_cast_for_g_idx(self):
         """GPTQ: '*.g_idx' → should_cast=False."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             should_cast_tensor,
         )
@@ -445,7 +445,7 @@ class TestTensorCastDecision:
 
     def test_gptq_casts_non_quant_tensors(self):
         """GPTQ: '*.weight' (not qweight) → should_cast=True."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             should_cast_tensor,
         )
@@ -466,7 +466,7 @@ class TestTensorCastDecision:
 
     def test_awq_skips_cast_for_qweight(self):
         """AWQ: '*.qweight' → should_cast=False."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             should_cast_tensor,
         )
@@ -488,7 +488,7 @@ class TestTensorCastDecision:
 
     def test_awq_skips_cast_for_qzeros(self):
         """AWQ: '*.qzeros' → should_cast=False."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             should_cast_tensor,
         )
@@ -510,7 +510,7 @@ class TestTensorCastDecision:
 
     def test_awq_skips_cast_for_scales(self):
         """AWQ: '*.scales' → should_cast=False."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             should_cast_tensor,
         )
@@ -532,7 +532,7 @@ class TestTensorCastDecision:
 
     def test_awq_casts_non_quant_tensors(self):
         """AWQ: regular tensors → should_cast=True."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             should_cast_tensor,
         )
@@ -552,7 +552,7 @@ class TestTensorCastDecision:
 
     def test_quant_dtype_preserves_int32_for_qweight(self):
         """get_quant_dtype: qweight → returns original tensor dtype (int32), not model dtype."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             get_quant_dtype_for_tensor,
         )
@@ -571,7 +571,7 @@ class TestTensorCastDecision:
 
     def test_quant_dtype_preserves_fp16_for_scales(self):
         """get_quant_dtype: scales → returns original tensor dtype (float16)."""
-        from moe_infinity.utils.quantization import (
+        from moe_store.parsing.quantization import (
             QuantizationInfo,
             get_quant_dtype_for_tensor,
         )
@@ -590,7 +590,7 @@ class TestTensorCastDecision:
 
     def test_quant_dtype_returns_none_for_regular_tensor(self):
         """get_quant_dtype: regular weight with no quant → returns None (use model dtype)."""
-        from moe_infinity.utils.quantization import get_quant_dtype_for_tensor
+        from moe_store.parsing.quantization import get_quant_dtype_for_tensor
 
         tensor = torch.zeros(1, dtype=torch.float32)
         result = get_quant_dtype_for_tensor("w1.weight", tensor, None)

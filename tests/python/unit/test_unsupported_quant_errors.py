@@ -3,12 +3,12 @@ import importlib
 from types import SimpleNamespace
 
 import pytest
-
-from moe_infinity.entrypoints.big_modeling import MoE
-from moe_infinity.utils.quantization import (
+from moe_store.parsing.quantization import (
     QuantizationInfo,
     validate_quantization_support,
 )
+
+from moe_infinity.entrypoints.big_modeling import MoE
 
 
 def _unsupported_info(method: str) -> QuantizationInfo:
@@ -47,7 +47,7 @@ class TestUnsupportedQuantizationErrors:
         import huggingface_hub
         from transformers import AutoConfig
 
-        quant_utils = importlib.import_module("moe_infinity.utils.quantization")
+        quant_utils = importlib.import_module("moe_store.parsing.quantization")
 
         model_config = SimpleNamespace(
             architectures=["MixtralForCausalLM"],
@@ -101,7 +101,7 @@ class TestUnsupportedQuantizationErrors:
         import huggingface_hub
         from transformers import AutoConfig
 
-        quant_utils = importlib.import_module("moe_infinity.utils.quantization")
+        quant_utils = importlib.import_module("moe_store.parsing.quantization")
 
         model_config = SimpleNamespace(
             architectures=["MixtralForCausalLM"],

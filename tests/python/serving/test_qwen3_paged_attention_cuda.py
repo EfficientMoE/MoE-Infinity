@@ -1,8 +1,8 @@
 import pytest
 import torch
+from moe_store.wrappers.qwen3_paged_attention import Qwen3PagedAttention
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 
-from moe_infinity.models.qwen3_paged_attention import Qwen3PagedAttention
 from moe_infinity.runtime.attention_backend import (
     LayerRegistration,
     PagedAttentionBackend,

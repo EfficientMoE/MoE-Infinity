@@ -3,14 +3,13 @@ from typing import cast
 
 import pytest
 import torch
-from transformers import PretrainedConfig
-
-from moe_infinity.utils.hf_config import (
+from moe_store.parsing.hf_config import (
     parse_expert_dtype,
     parse_expert_id,
     parse_moe_param,
     resolve_config_dtype,
 )
+from transformers import PretrainedConfig
 
 
 def _cfg(**kwargs) -> PretrainedConfig:

@@ -203,6 +203,7 @@ _STORE_SOURCES = [
     "core/parallel/expert_module.cpp",
     # store
     "core/store/tensor_store.cpp",
+    "core/store/v2_index_loader.cpp",
     # aio
     "core/aio/archer_aio_thread.cpp",
     "core/aio/archer_prio_aio_handle.cpp",
@@ -234,6 +235,49 @@ _STORE_SOURCES = [
     "core/python/py_archer_prefetch.cpp",
     "core/python/py_tensor_store.cpp",
 ]
+
+
+def _moe_store_csrc_dir():
+    # moe-store ships the v2 store C++ sources; MoE-Infinity compiles them
+    # into _store as a build-time source dependency (no cross-wheel .so
+    # linking). Requires the moe-store package at build time.
+    override = os.environ.get("MOE_STORE_CSRC")
+    if override:
+        return os.path.join(override, "store")
+    import moe_store
+
+    csrc = os.path.join(
+        os.path.dirname(os.path.abspath(moe_store.__file__)), "csrc", "store"
+    )
+    if not os.path.isfile(os.path.join(csrc, "index_v2.h")):
+        raise RuntimeError(
+            "moe-store csrc not found at %s; install moe-store from source "
+            "or set MOE_STORE_CSRC" % csrc
+        )
+    return csrc
+
+
+def _vendor_moe_store_csrc():
+    # setuptools rejects absolute source paths, so mirror the two files
+    # into an in-tree build dir on every build (kept in sync with the
+    # installed moe-store version).
+    import shutil
+
+    src = _moe_store_csrc_dir()
+    dst = os.path.join("build", "moe_store_csrc")
+    os.makedirs(dst, exist_ok=True)
+    for name in ("index_v2.h", "index_v2.cc"):
+        shutil.copyfile(os.path.join(src, name), os.path.join(dst, name))
+    return dst
+
+
+def _moe_store_csrc_sources():
+    return [os.path.join(_vendor_moe_store_csrc(), "index_v2.cc")]
+
+
+def _moe_store_csrc_includes():
+    return [os.path.abspath(_vendor_moe_store_csrc())]
+
 
 _STORE_EXTRA_LINK_ARGS = [
     "-luuid",
@@ -308,8 +352,8 @@ if cuda_available:
     ext_modules.append(
         cpp_extension.CUDAExtension(
             name="moe_infinity._store",
-            sources=_STORE_SOURCES,
-            include_dirs=COMMON_INCLUDE_PATHS,
+            sources=_STORE_SOURCES + _moe_store_csrc_sources(),
+            include_dirs=COMMON_INCLUDE_PATHS + _moe_store_csrc_includes(),
             library_dirs=_STORE_LIBRARY_DIRS,
             extra_compile_args={
                 "cxx": COMMON_CXX_ARGS,

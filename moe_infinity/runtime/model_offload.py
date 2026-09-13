@@ -36,6 +36,30 @@ except ImportError:
         pass
 
 
+from moe_store.parsing.gptq import is_gptq_packed_tensor, is_gptq_quantized
+from moe_store.parsing.mxfp4 import identify_mxfp4_pairs, is_mxfp4_quantized
+from moe_store.parsing.quantization import (
+    detect_quantization,
+    should_cast_tensor,
+    validate_quantization_support,
+)
+from moe_store.wrappers import (
+    DeepseekV2PagedAttention,
+    DeepseekV3PagedAttention,
+    Qwen3MoEBlock,
+    Qwen3PagedAttention,
+    SyncDbrxFFNBlock,
+    SyncDeepseekV2MoEBlock,
+    SyncDeepseekV3MoEBlock,
+    SyncGlm5NextMoEBlock,
+    SyncGlmMoeDsaMoEBlock,
+    SyncGptOssMLP,
+    SyncJambaMoEBlock,
+    SyncMixtralSparseMoeBlock,
+    SyncNllbMoeSparseMLP,
+    SyncOlmoeMoEBlock,
+    SyncQwen3_5MoeSparseMoeBlock,
+)
 from safetensors import safe_open
 from tqdm import tqdm
 from transformers import PretrainedConfig
@@ -53,23 +77,6 @@ from moe_infinity.memory import (
 from moe_infinity.memory.adaptive_precision_policy import (
     AdaptivePrecisionPolicy,
     ExpertKey,
-)
-from moe_infinity.models import (
-    DeepseekV2PagedAttention,
-    DeepseekV3PagedAttention,
-    Qwen3MoEBlock,
-    Qwen3PagedAttention,
-    SyncDbrxFFNBlock,
-    SyncDeepseekV2MoEBlock,
-    SyncDeepseekV3MoEBlock,
-    SyncGlm5NextMoEBlock,
-    SyncGlmMoeDsaMoEBlock,
-    SyncGptOssMLP,
-    SyncJambaMoEBlock,
-    SyncMixtralSparseMoeBlock,
-    SyncNllbMoeSparseMLP,
-    SyncOlmoeMoEBlock,
-    SyncQwen3_5MoeSparseMoeBlock,
 )
 from moe_infinity.runtime.adaptive_precision_allowlist import (
     RELEASED_ADAPTIVE_ENTRIES,
@@ -104,13 +111,6 @@ from moe_infinity.utils.async_transfer import (
     wait_transfer,
 )
 from moe_infinity.utils.device import get_default_device, get_device
-from moe_infinity.utils.gptq import is_gptq_packed_tensor, is_gptq_quantized
-from moe_infinity.utils.mxfp4 import identify_mxfp4_pairs, is_mxfp4_quantized
-from moe_infinity.utils.quantization import (
-    detect_quantization,
-    should_cast_tensor,
-    validate_quantization_support,
-)
 
 
 @dataclass(frozen=True)
@@ -849,6 +849,10 @@ class OffloadEngine(object):
         )
         self.engine_hooks = ArcherEngineHooks(self.archer_engine)
 
+        from moe_infinity.runtime.engine_ops import register_engine_ops
+
+        register_engine_ops()
+
         self.archer_config = _archer_config
         self.gpt_oss_offload_enabled = _gpt_oss_offload_enabled(
             getattr(self.config, "model_type", ""), self.archer_config
@@ -1054,6 +1058,20 @@ class OffloadEngine(object):
                 name_id_map_file = os.path.join(
                     self.checkpoint, "name_id_map.json"
                 )
+                if not os.path.exists(name_id_map_file) and os.path.exists(
+                    os.path.join(self.checkpoint, "store_index")
+                ):
+                    from moe_store.index import read_index
+
+                    v2_index = read_index(self.checkpoint)
+                    with open(name_id_map_file, "w") as f:
+                        json.dump(
+                            {
+                                member.name: member.tensor_id
+                                for _, member in v2_index.iter_members()
+                            },
+                            f,
+                        )
 
                 self.model_name = model_name = args[0]
 
@@ -1202,7 +1220,7 @@ class OffloadEngine(object):
                             "GlmMoeDsa" in arch0 or "Glm5Next" in arch0
                         ) and _has_fp8_blockwise(self.config)
                         if is_glm_fp8:
-                            from moe_infinity.utils.fp8 import (
+                            from moe_store.fp8 import (
                                 dequant_fp8_blockwise,
                             )
 
@@ -1746,7 +1764,7 @@ class OffloadEngine(object):
         rename = self._resident_ckpt_key_renamer()
         fusions = self._resident_ckpt_fusions()
         remaining = set(wanted)
-        from moe_infinity.utils.fp8 import dequant_fp8_blockwise
+        from moe_store.fp8 import dequant_fp8_blockwise
 
         def _resolve(param, name, weight, scale):
             if weight.dtype == torch.float8_e4m3fn:

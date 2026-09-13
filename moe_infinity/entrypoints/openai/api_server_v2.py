@@ -2158,7 +2158,7 @@ def _build_engine_config(
     qk_rope_head_dim = _resolve_int_attr(text_config, "qk_rope_head_dim")
     qk_nope_head_dim = _resolve_int_attr(text_config, "qk_nope_head_dim")
     if qk_rope_head_dim is not None and qk_nope_head_dim is not None:
-        from moe_infinity.models.deepseek_v2_paged_attention import (
+        from moe_store.wrappers.deepseek_v2_paged_attention import (
             DeepseekV2PagedAttention,
         )
 

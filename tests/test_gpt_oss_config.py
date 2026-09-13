@@ -28,7 +28,7 @@ def make_gpt_oss_config():
 
 
 def test_parse_moe_param_gpt_oss():
-    from moe_infinity.utils.hf_config import parse_moe_param
+    from moe_store.parsing.hf_config import parse_moe_param
 
     config = make_gpt_oss_config()
     num_layers, num_experts, num_encoder_layers = parse_moe_param(config)
@@ -38,7 +38,7 @@ def test_parse_moe_param_gpt_oss():
 
 
 def test_parse_expert_id_gpt_oss_gate_up_slice():
-    from moe_infinity.utils.hf_config import parse_expert_id
+    from moe_store.parsing.hf_config import parse_expert_id
 
     config = make_gpt_oss_config()
     assert parse_expert_id(
@@ -47,7 +47,7 @@ def test_parse_expert_id_gpt_oss_gate_up_slice():
 
 
 def test_parse_expert_id_gpt_oss_down_slice():
-    from moe_infinity.utils.hf_config import parse_expert_id
+    from moe_store.parsing.hf_config import parse_expert_id
 
     config = make_gpt_oss_config()
     assert parse_expert_id(
@@ -56,7 +56,7 @@ def test_parse_expert_id_gpt_oss_down_slice():
 
 
 def test_parse_expert_id_gpt_oss_rejects_out_of_range_expert():
-    from moe_infinity.utils.hf_config import parse_expert_id
+    from moe_store.parsing.hf_config import parse_expert_id
 
     config = make_gpt_oss_config()
     assert parse_expert_id(
@@ -65,7 +65,7 @@ def test_parse_expert_id_gpt_oss_rejects_out_of_range_expert():
 
 
 def test_parse_expert_id_gpt_oss_router():
-    from moe_infinity.utils.hf_config import parse_expert_id
+    from moe_store.parsing.hf_config import parse_expert_id
 
     config = make_gpt_oss_config()
     assert parse_expert_id("model.layers.5.mlp.router.weight", config) == (
@@ -75,7 +75,7 @@ def test_parse_expert_id_gpt_oss_router():
 
 
 def test_parse_expert_dtype_gpt_oss_none():
-    from moe_infinity.utils.hf_config import parse_expert_dtype
+    from moe_store.parsing.hf_config import parse_expert_dtype
 
     config = MagicMock()
     config.torch_dtype = None

@@ -4,7 +4,7 @@ import pytest
 
 
 def test_glm_registry_to_expert_type():
-    from moe_infinity.common.constants import (
+    from moe_store.registry.constants import (
         MODEL_MAPPING_NAMES,
         parse_expert_type,
     )
@@ -16,7 +16,7 @@ def test_glm_registry_to_expert_type():
 
 
 def test_glm_parse_moe_param_and_expert_id():
-    from moe_infinity.utils.hf_config import parse_expert_id, parse_moe_param
+    from moe_store.parsing.hf_config import parse_expert_id, parse_moe_param
 
     cfg = SimpleNamespace(
         architectures=["GlmMoeDsaForCausalLM"],
@@ -36,7 +36,8 @@ def test_glm_parse_moe_param_and_expert_id():
 
 
 def test_glm_wrapper_and_offload_importable():
+    from moe_store.wrappers import SyncGlmMoeDsaMoEBlock
+
     import moe_infinity.runtime.model_offload  # noqa: F401
-    from moe_infinity.models import SyncGlmMoeDsaMoEBlock
 
     assert SyncGlmMoeDsaMoEBlock is not None

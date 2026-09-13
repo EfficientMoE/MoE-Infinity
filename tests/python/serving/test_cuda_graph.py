@@ -448,7 +448,7 @@ def test_capture_and_replay_matches_eager_with_padding(
             device=device,
         )
     )
-    class_fqn = "moe_infinity.models.qwen3_paged_attention.Qwen3PagedAttention"
+    class_fqn = "moe_store.wrappers.qwen3_paged_attention.Qwen3PagedAttention"
     bindings = [
         types.SimpleNamespace(
             class_fqn=class_fqn,

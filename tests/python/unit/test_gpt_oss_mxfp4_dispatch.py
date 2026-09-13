@@ -150,7 +150,7 @@ def _native_dispatch(
     except Exception as exc:
         pytest.skip(f"native Archer extension unavailable: {exc}")
 
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     class Config:
         hidden_size = 64

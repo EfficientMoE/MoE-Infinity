@@ -64,4 +64,4 @@ repos:
     hooks:
     -   id: mypy
         args: [--config-file=pyproject.toml]
-        files: ^moe_infinity/utils/(hf_config|config)\.py$
+        files: ^moe_infinity/utils/config\.py$

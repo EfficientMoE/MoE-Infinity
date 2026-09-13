@@ -3,10 +3,10 @@ from typing import cast
 
 import torch
 import torch.nn.functional as F
+from moe_store.parsing.hf_config import parse_expert_id
 from transformers import PretrainedConfig
 
 from moe_infinity.runtime.model_offload import _remap_v5_batched_experts
-from moe_infinity.utils.hf_config import parse_expert_id
 
 
 def _cfg(arch, **kw):

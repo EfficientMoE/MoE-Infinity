@@ -30,7 +30,7 @@ def _glm_config(num_hidden_layers=78, n_routed_experts=256):
 def test_glm_registered_when_transformers_supports_it():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     pytest.importorskip("transformers.models.glm_moe_dsa")
-    from moe_infinity.common.constants import (
+    from moe_store.registry.constants import (
         MODEL_MAPPING_NAMES,
         MODEL_MAPPING_TYPES,
         parse_expert_type,
@@ -43,7 +43,7 @@ def test_glm_registered_when_transformers_supports_it():
 
 def test_glm_parse_moe_param():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from moe_infinity.utils.hf_config import parse_moe_param
+    from moe_store.parsing.hf_config import parse_moe_param
 
     assert parse_moe_param(_glm_config()) == (78, 256, 0)
 
@@ -61,13 +61,13 @@ def test_glm_parse_moe_param():
 )
 def test_glm_parse_expert_id(name, expected):
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from moe_infinity.utils.hf_config import parse_expert_id
+    from moe_store.parsing.hf_config import parse_expert_id
 
     assert parse_expert_id(name, _glm_config()) == expected
 
 
 def test_glm_fp8_dequant_blockwise():
-    from moe_infinity.utils.fp8 import dequant_fp8_blockwise
+    from moe_store.fp8 import dequant_fp8_blockwise
 
     torch.manual_seed(0)
     weight = torch.randn(256, 384).to(torch.float8_e4m3fn)
@@ -84,7 +84,7 @@ def test_glm_fp8_dequant_blockwise():
 
 
 def test_glm_fp8_dequant_state_dict():
-    from moe_infinity.utils.fp8 import dequant_fp8_state_dict
+    from moe_store.fp8 import dequant_fp8_state_dict
 
     weight = torch.randn(256, 384).to(torch.float8_e4m3fn)
     scale = torch.rand(2, 3, dtype=torch.float32) + 0.5
@@ -102,7 +102,7 @@ def test_glm_fp8_dequant_state_dict():
 
 
 def test_glm_fp8_selective_dequant_keeps_experts_fp8():
-    from moe_infinity.utils.fp8 import (
+    from moe_store.fp8 import (
         EXPERT_SCALE_KEY_RE,
         dequant_fp8_state_dict,
         stack_expert_scales,
@@ -148,7 +148,7 @@ def test_glm_cpp_dequant_matches_python():
             "moe_infinity._store is stubbed by conftest; native "
             "extension not built"
         )
-    from moe_infinity.utils.fp8 import dequant_fp8_blockwise
+    from moe_store.fp8 import dequant_fp8_blockwise
 
     torch.manual_seed(0)
     shapes = [
@@ -182,7 +182,7 @@ def test_glm_routing_parity_vs_hf():
             GlmMoeDsaConfig,
         )
 
-    from moe_infinity.models import SyncGlmMoeDsaMoEBlock
+    from moe_store.wrappers import SyncGlmMoeDsaMoEBlock
 
     if not hasattr(SyncGlmMoeDsaMoEBlock, "route_tokens_to_experts"):
         pytest.skip(

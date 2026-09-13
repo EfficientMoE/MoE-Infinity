@@ -1,7 +1,6 @@
 import torch
+from moe_store.wrappers import Qwen3MoEBlock
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
-
-from moe_infinity.models import Qwen3MoEBlock
 
 
 class _RecordingExecutor:

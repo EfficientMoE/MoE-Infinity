@@ -19,12 +19,13 @@ elif getattr(sys.modules["flash_attn"], "__spec__", None) is None:
         "flash_attn", loader=None
     )
 
+from moe_store.parsing.hf_config import parse_expert_id
+from moe_store.parsing.quantization import detect_quantization
+
 from moe_infinity.runtime.model_offload import (
     OffloadEngine,
     _write_model_signature,
 )
-from moe_infinity.utils.hf_config import parse_expert_id
-from moe_infinity.utils.quantization import detect_quantization
 
 
 class TestFullPrecisionRegression:

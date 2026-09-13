@@ -495,7 +495,7 @@ def test_consecutive_dispatches_each_pin_exactly_one_layer():
 
 
 def _make_gpt_oss_mlp():
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     torch.manual_seed(0)
     module = SyncGptOssMLP(

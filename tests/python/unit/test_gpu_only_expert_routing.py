@@ -155,15 +155,16 @@ def test_synchronous_native_submission_error_is_not_replayed_eagerly():
 
 
 def test_representative_adapters_keep_dispatch_wait_contract():
+    import importlib.util
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[3]
-    for relative in (
-        "moe_infinity/models/qwen.py",
-        "moe_infinity/models/mixtral.py",
-        "moe_infinity/models/deepseek.py",
+    for module in (
+        "moe_store.wrappers.qwen",
+        "moe_store.wrappers.mixtral",
+        "moe_store.wrappers.deepseek",
     ):
-        source = (root / relative).read_text(encoding="utf-8")
+        spec = importlib.util.find_spec(module)
+        source = Path(spec.origin).read_text(encoding="utf-8")
         dispatch_at = source.index("dispatch_local(")
         wait_at = source.index("wait_dispatch_local()", dispatch_at)
         assert dispatch_at < wait_at

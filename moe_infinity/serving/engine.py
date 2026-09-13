@@ -355,7 +355,7 @@ class ContinuousBatchingEngine:
             ),
             kv_swap_max_retries=swap_settings.kv_swap_max_retries,
         )
-        from moe_infinity.models.paged_attention_registry import (
+        from moe_store.wrappers.paged_attention_registry import (
             PagedAttentionLayerRegistry,
         )
 

@@ -7,13 +7,13 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from moe_store.wrappers import SyncQwen3_5MoeSparseMoeBlock
 from transformers import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
 
 from moe_infinity.distributed.expert_executor import (
     DistributedExpertExecutor,
 )
 from moe_infinity.entrypoints.big_modeling import MoE
-from moe_infinity.models import SyncQwen3_5MoeSparseMoeBlock
 from moe_infinity.spec_decode import (
     DFlashSpeculator,
     read_dflash_config,

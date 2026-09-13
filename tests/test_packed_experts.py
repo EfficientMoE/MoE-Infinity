@@ -36,7 +36,7 @@ def make_gpt_oss_config():
 
 
 def test_sync_gpt_oss_mlp_is_imported_in_model_offload():
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     assert issubclass(SyncGptOssMLP, nn.Module)
 
@@ -62,7 +62,7 @@ def test_packed_expert_slice_shape():
 
 
 def test_sync_gpt_oss_mlp_isinstance_detection():
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     config = make_gpt_oss_config()
     mlp = SyncGptOssMLP(config)
@@ -72,7 +72,7 @@ def test_sync_gpt_oss_mlp_isinstance_detection():
 
 
 def test_sync_gpt_oss_mlp_in_model_offload_imports():
-    import moe_infinity.models.gpt_oss as gpt_oss_mod
+    import moe_store.wrappers.gpt_oss as gpt_oss_mod
 
     assert hasattr(
         gpt_oss_mod, "SyncGptOssMLP"

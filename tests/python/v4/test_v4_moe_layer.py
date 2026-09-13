@@ -7,15 +7,14 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
-from moe_infinity.models.deepseek_v4 import (
+from moe_store.wrappers.deepseek_v4 import (
     DeepSeekV4PythonExpertExecutor,
     SyncDeepSeekV4MoEBlock,
     dequant_fp8_blockwise,
     fp8_shared_expert_forward,
     make_indexer_bundle_provider,
 )
-from moe_infinity.models.deepseek_v4.expert_bundle import TensorRef
+from moe_store.wrappers.deepseek_v4.expert_bundle import TensorRef
 
 
 def _v4_config():
@@ -103,7 +102,7 @@ def test_full_moe_layer_matches_reference(indexer, device):
 
     weights, indices = block.compute_routing(x)
     ref = torch.zeros_like(x, dtype=torch.float32)
-    from moe_infinity.models.deepseek_v4 import fp4_expert_forward
+    from moe_store.wrappers.deepseek_v4 import fp4_expert_forward
 
     for e in range(cfg.n_routed_experts):
         pos = indices == e

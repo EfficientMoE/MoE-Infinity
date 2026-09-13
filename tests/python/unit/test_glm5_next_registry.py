@@ -12,14 +12,13 @@ import json
 import os
 
 import pytest
-from transformers import PretrainedConfig
-
-from moe_infinity.common.constants import (
+from moe_store.parsing.hf_config import parse_expert_id, parse_moe_param
+from moe_store.registry.constants import (
     MODEL_MAPPING_NAMES,
     MODEL_MAPPING_TYPES,
     parse_expert_type,
 )
-from moe_infinity.utils.hf_config import parse_expert_id, parse_moe_param
+from transformers import PretrainedConfig
 
 FIXTURE = os.path.join(
     os.path.dirname(__file__),

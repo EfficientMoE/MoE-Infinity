@@ -2,6 +2,13 @@ import warnings
 
 import pytest
 import torch
+from moe_store.parsing.hf_config import parse_expert_id, parse_moe_param
+from moe_store.registry.constants import (
+    MODEL_MAPPING_NAMES,
+    MODEL_MAPPING_TYPES,
+    parse_expert_type,
+)
+from moe_store.wrappers import SyncQwen3_5MoeSparseMoeBlock
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
     Qwen3_5MoeConfig,
     Qwen3_5MoeTextConfig,
@@ -10,14 +17,7 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeSparseMoeBlock,
 )
 
-from moe_infinity.common.constants import (
-    MODEL_MAPPING_NAMES,
-    MODEL_MAPPING_TYPES,
-    parse_expert_type,
-)
-from moe_infinity.models import SyncQwen3_5MoeSparseMoeBlock
 from moe_infinity.runtime.model_offload import OffloadEngine
-from moe_infinity.utils.hf_config import parse_expert_id, parse_moe_param
 
 
 def _arch(name):

@@ -24,6 +24,7 @@ set(ARCHER_CORE_CXX_SOURCES
   ${CMAKE_SOURCE_DIR}/core/parallel/expert_module.cpp
   # store
   ${CMAKE_SOURCE_DIR}/core/store/tensor_store.cpp
+  ${CMAKE_SOURCE_DIR}/core/store/v2_index_loader.cpp
   # aio
   ${CMAKE_SOURCE_DIR}/core/aio/archer_aio_thread.cpp
   ${CMAKE_SOURCE_DIR}/core/aio/archer_prio_aio_handle.cpp
@@ -62,7 +63,21 @@ if(MOE_INFINITY_TESTING)
   target_compile_definitions(archer_core PUBLIC MOE_INFINITY_TESTING=1)
 endif()
 
+if(NOT DEFINED MOE_STORE_CSRC)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "-c"
+            "import moe_store, os; print(os.path.join(os.path.dirname(os.path.abspath(moe_store.__file__)), 'csrc', 'store'))"
+    OUTPUT_VARIABLE MOE_STORE_CSRC OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _MOE_STORE_RET)
+  if(NOT _MOE_STORE_RET EQUAL 0)
+    message(FATAL_ERROR "moe-store package not importable; install moe-store or set MOE_STORE_CSRC")
+  endif()
+endif()
+
+target_sources(archer_core PRIVATE ${MOE_STORE_CSRC}/index_v2.cc)
+
 target_include_directories(archer_core PUBLIC
+  ${MOE_STORE_CSRC}
   ${CMAKE_SOURCE_DIR}/core
   ${CMAKE_SOURCE_DIR}/extensions
   ${CUTLASS_DIR}/include

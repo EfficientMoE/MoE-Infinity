@@ -8,8 +8,7 @@ import os
 import pytest
 import torch
 import torch.nn.functional as F
-
-from moe_infinity.models.deepseek_v4 import (
+from moe_store.wrappers.deepseek_v4 import (
     dequant_fp4_e2m1,
     fp4_expert_forward,
 )

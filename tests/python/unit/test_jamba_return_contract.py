@@ -27,9 +27,8 @@ def test_forward_returns_bare_tensor():
     distributed execution layer: dispatch_local is a no-op and
     wait_dispatch_local returns an identity-shaped payload.
     """
+    from moe_store.wrappers.jamba import SyncJambaMoEBlock
     from transformers import JambaConfig
-
-    from moe_infinity.models.jamba import SyncJambaMoEBlock
 
     config = JambaConfig(
         hidden_size=16,

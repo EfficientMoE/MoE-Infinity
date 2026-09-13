@@ -302,11 +302,10 @@ def _make_transactional_backend(
 def test_model_runner_detects_real_qwen3_paged_attention(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from moe_store.wrappers.qwen3_paged_attention import Qwen3PagedAttention
     from transformers.models.qwen3_moe.configuration_qwen3_moe import (
         Qwen3MoeConfig,
     )
-
-    from moe_infinity.models.qwen3_paged_attention import Qwen3PagedAttention
 
     config = Qwen3MoeConfig(
         hidden_size=32,

@@ -34,7 +34,7 @@ def _tiny_config():
 
 
 def test_no_handrolled_softmax():
-    import moe_infinity.models.glm_moe_dsa as mod
+    import moe_store.wrappers.glm_moe_dsa as mod
 
     src = inspect.getsource(mod)
     assert "torch.softmax" not in src
@@ -42,8 +42,8 @@ def test_no_handrolled_softmax():
 
 
 def test_exported():
-    import moe_infinity.models as m
-    from moe_infinity.models import SyncGlmMoeDsaMoEBlock
+    import moe_store.wrappers as m
+    from moe_store.wrappers import SyncGlmMoeDsaMoEBlock
 
     assert SyncGlmMoeDsaMoEBlock is not None
     assert "SyncGlmMoeDsaMoEBlock" in m.__all__
@@ -54,11 +54,10 @@ def test_exported():
     reason="transformers build lacks GlmMoeDsaMoE.route_tokens_to_experts to compare against",
 )
 def test_routing_parity():
+    from moe_store.wrappers.glm_moe_dsa import SyncGlmMoeDsaMoEBlock
     from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
         GlmMoeDsaMoE,
     )
-
-    from moe_infinity.models.glm_moe_dsa import SyncGlmMoeDsaMoEBlock
 
     cfg = _tiny_config()
     torch.manual_seed(0)
@@ -76,7 +75,7 @@ def test_routing_parity():
 
 
 def test_executor_stays_unset():
-    from moe_infinity.models.glm_moe_dsa import SyncGlmMoeDsaMoEBlock
+    from moe_store.wrappers.glm_moe_dsa import SyncGlmMoeDsaMoEBlock
 
     cfg = _tiny_config()
     block = SyncGlmMoeDsaMoEBlock(cfg)
@@ -84,7 +83,7 @@ def test_executor_stays_unset():
 
 
 def test_forward_shape():
-    from moe_infinity.models.glm_moe_dsa import SyncGlmMoeDsaMoEBlock
+    from moe_store.wrappers.glm_moe_dsa import SyncGlmMoeDsaMoEBlock
 
     cfg = _tiny_config()
     block = SyncGlmMoeDsaMoEBlock(cfg).eval()

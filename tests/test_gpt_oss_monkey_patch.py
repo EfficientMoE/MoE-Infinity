@@ -29,8 +29,7 @@ def test_sync_gpt_oss_mlp_is_different_from_original():
     """SyncGptOssMLP must be a different class from GptOssMLP."""
     _ensure_flash_attn_stub_has_spec()
     import transformers.models.gpt_oss.modeling_gpt_oss as mod
-
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     assert (
         mod.GptOssMLP is not SyncGptOssMLP
@@ -41,8 +40,7 @@ def test_monkey_patch_mechanism():
     """Verify the monkey-patch mechanism works correctly (save/replace/restore)."""
     _ensure_flash_attn_stub_has_spec()
     import transformers.models.gpt_oss.modeling_gpt_oss as mod
-
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     original = mod.GptOssMLP
 

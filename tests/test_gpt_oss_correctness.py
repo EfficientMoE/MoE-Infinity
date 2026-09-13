@@ -27,7 +27,7 @@ _ensure_flash_attn_stub_has_spec()
 
 
 def test_sync_gpt_oss_mlp_forward_shape():
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     config = MagicMock()
     config.hidden_size = 64
@@ -52,7 +52,7 @@ def test_sync_gpt_oss_mlp_forward_shape():
 
 
 def test_sync_gpt_oss_mlp_router_logits_shape():
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     config = MagicMock()
     config.hidden_size = 32
@@ -72,7 +72,7 @@ def test_sync_gpt_oss_mlp_router_logits_shape():
 
 
 def test_gptoss_architecture_in_constants():
-    from moe_infinity.common.constants import MODEL_MAPPING_NAMES
+    from moe_store.registry.constants import MODEL_MAPPING_NAMES
 
     assert "gptoss" in MODEL_MAPPING_NAMES
     arch_str = "gptossforcausallm"
@@ -83,7 +83,7 @@ def test_gptoss_architecture_in_constants():
 
 
 def test_gptoss_parse_moe_param():
-    from moe_infinity.utils.hf_config import parse_moe_param
+    from moe_store.parsing.hf_config import parse_moe_param
 
     config = MagicMock()
     config.architectures = ["GptOssForCausalLM"]
