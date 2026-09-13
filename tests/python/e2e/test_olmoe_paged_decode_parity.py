@@ -56,6 +56,10 @@ SEQUENTIAL_PROMPTS = [
     "The three primary colors are",
 ]
 CONCURRENT_PROMPT = "Explain in one sentence why water expands when it freezes:"
+# Cycled to fill higher-concurrency batches (test_olmoe_decode_matches_reference_
+# at_concurrency below); reusing these four rather than inventing new prompt text
+# keeps every case teacher-forceable against the same reference methodology.
+ALL_PROMPTS = [*SEQUENTIAL_PROMPTS, CONCURRENT_PROMPT]
 MAX_NEW_TOKENS = 16
 # Same value used for both MoE() and the engine config below, as
 # api_server_v2 does at both its call sites (see _build_engine_config).
@@ -111,7 +115,10 @@ def _resolve_dtype(model: object) -> torch.dtype:
 
 
 def _build_engine_config(
-    model: object, kv_cache_ratio: float, device_memory_ratio: float
+    model: object,
+    kv_cache_ratio: float,
+    device_memory_ratio: float,
+    max_batch_size: int = 8,
 ) -> dict[str, object]:
     model_config = getattr(model, "config", None)
     if model_config is None:
@@ -148,7 +155,7 @@ def _build_engine_config(
         # passes the same value used for MoE(), matching production.
         "device_memory_ratio": device_memory_ratio,
         "kv_cache_ratio": kv_cache_ratio,
-        "max_batch_size": 8,
+        "max_batch_size": max_batch_size,
         "max_tokens_per_step": 2048,
         "block_size": 16,
         "num_layers": num_layers,
@@ -330,7 +337,9 @@ def olmoe_engine_bundle(tmp_path_factory: pytest.TempPathFactory):
     except Exception as exc:
         pytest.skip(f"Unable to initialize OLMoE for parity test: {exc}")
 
-    def build_engine(kv_cache_ratio: float = 0.15) -> Any:
+    def build_engine(
+        kv_cache_ratio: float = 0.15, max_batch_size: int = 8
+    ) -> Any:
         return ContinuousBatchingEngine(
             model=moe_model.model,
             engine=moe_model.engine,
@@ -338,6 +347,7 @@ def olmoe_engine_bundle(tmp_path_factory: pytest.TempPathFactory):
                 moe_model.model,
                 kv_cache_ratio=kv_cache_ratio,
                 device_memory_ratio=DEVICE_MEMORY_RATIO,
+                max_batch_size=max_batch_size,
             ),
             tokenizer=tokenizer,
         )
@@ -416,5 +426,49 @@ def test_olmoe_decode_matches_reference_concurrent(olmoe_engine_bundle) -> None:
     agreement = agree_total / token_total
     assert agreement >= AGREEMENT_THRESHOLD, (
         f"concurrent greedy agreement {agreement:.4f} "
+        f"({agree_total}/{token_total}) below {AGREEMENT_THRESHOLD}"
+    )
+
+
+@pytest.mark.parametrize("concurrency", [8, 16, 32])
+def test_olmoe_decode_matches_reference_at_concurrency(
+    olmoe_engine_bundle, concurrency: int
+) -> None:
+    """Beyond the 4-request concurrent case above: `max_batch_size` is
+    raised to match `concurrency` so a batch this size can actually be
+    packed into one prefill instead of being chunked by the engine's
+    default cap of 8 -- the scenario defects 2 and 3 were about."""
+    tokenizer, build_engine, local_model_dir = olmoe_engine_bundle
+    engine = build_engine(max_batch_size=concurrency)
+
+    prompts = [ALL_PROMPTS[i % len(ALL_PROMPTS)] for i in range(concurrency)]
+    prompt_ids_list = [tokenizer(p)["input_ids"] for p in prompts]
+    cases: list[tuple[list[int], list[int]]] = []
+    try:
+        outputs = _run_requests(
+            engine,
+            prompt_ids_list,
+            MAX_NEW_TOKENS,
+            id_prefix=f"conc{concurrency}",
+        )
+
+        for idx, prompt_ids in enumerate(prompt_ids_list):
+            generated = outputs[idx]
+            assert not _has_long_repeat(
+                generated
+            ), f"decode collapsed for {prompts[idx]!r}: {generated}"
+            cases.append((prompt_ids, generated))
+    finally:
+        engine.shutdown()
+
+    agree_total, token_total = (
+        sum(values)
+        for values in zip(
+            *_reference_agreement_subprocess(local_model_dir, cases)
+        )
+    )
+    agreement = agree_total / token_total
+    assert agreement >= AGREEMENT_THRESHOLD, (
+        f"concurrency={concurrency} greedy agreement {agreement:.4f} "
         f"({agree_total}/{token_total}) below {AGREEMENT_THRESHOLD}"
     )
