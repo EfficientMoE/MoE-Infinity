@@ -1019,6 +1019,27 @@ class PagedAttentionBackend:
                 self._fi_prefill.run(query_src, fi_store),
             )
 
+        # The shims pack the valid tokens of every sequence in the batch into
+        # one [tokens, heads, head_dim] tensor. One causal SDPA over that
+        # tensor would let sequence k attend to the tokens of the sequences
+        # packed before it (the FlashInfer branch above is per sequence via
+        # qo_indptr; this branch was not). Attend each sequence to itself.
+        offsets = self._prefill_query_offsets(metadata, int(query.shape[0]))
+        if offsets is not None:
+            parts = [
+                self._prefill_forward(
+                    query[start:end],
+                    key[start:end],
+                    value[start:end],
+                    metadata=None,
+                    scale=scale,
+                    layer_idx=layer_idx,
+                )
+                for start, end in zip(offsets[:-1], offsets[1:])
+                if end > start
+            ]
+            return torch.cat(parts, dim=0)
+
         q = (
             query.to(self.device, dtype=self.spec.dtype)
             .transpose(0, 1)
@@ -1470,6 +1491,32 @@ class PagedAttentionBackend:
             Optional[torch.Tensor], getattr(metadata, "slot_mapping", None)
         )
         return slot_mapping
+
+    @staticmethod
+    def _prefill_query_offsets(
+        metadata: Optional[AttentionMetadata | RuntimeAttentionMetadata],
+        num_tokens: int,
+    ) -> Optional[list[int]]:
+        """Per-sequence boundaries of a packed prefill, or ``None`` when the
+        batch holds a single sequence (or carries no lengths), in which case
+        the packed tensor is that one sequence."""
+        if metadata is None:
+            return None
+        lengths = getattr(metadata, "lengths", None)
+        offsets_src = getattr(lengths, "query_offsets", None)
+        if offsets_src is None:
+            return None
+        offsets = [
+            int(value)
+            for value in (
+                offsets_src.tolist()
+                if isinstance(offsets_src, torch.Tensor)
+                else offsets_src
+            )
+        ]
+        if len(offsets) <= 2 or offsets[-1] != num_tokens:
+            return None
+        return offsets
 
     @staticmethod
     def _get_block_tables(
