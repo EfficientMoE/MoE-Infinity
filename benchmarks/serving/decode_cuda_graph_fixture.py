@@ -42,14 +42,14 @@ def build_fixture(
     # importing runtime storage, whose allocator compatibility shim lives in
     # ``serving.kv_cache``.
     importlib.import_module("moe_infinity.serving")
+    from moe_store.wrappers.paged_attention_registry import (
+        PagedAttentionLayerRegistry,
+    )
+    from moe_store.wrappers.qwen3_paged_attention import Qwen3PagedAttention
     from transformers.models.qwen3_moe.configuration_qwen3_moe import (
         Qwen3MoeConfig,
     )
 
-    from moe_infinity.models.paged_attention_registry import (
-        PagedAttentionLayerRegistry,
-    )
-    from moe_infinity.models.qwen3_paged_attention import Qwen3PagedAttention
     from moe_infinity.runtime.attention_backend import PagedAttentionBackend
     from moe_infinity.runtime.attention_types import DecodeGraphCapability
     from moe_infinity.runtime.paged_kv_storage import (

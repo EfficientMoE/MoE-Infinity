@@ -4,12 +4,12 @@ import types
 
 import pytest
 import torch
-
-from moe_infinity.models.paged_attention_registry import (
+from moe_store.wrappers.paged_attention_registry import (
     LayerBoundPagedBackend,
     PagedAttentionLayerRegistry,
     PagedLayerBinding,
 )
+
 from moe_infinity.runtime.attention_backend import PagedAttentionBackend
 from moe_infinity.runtime.attention_types import DecodeGraphCapability
 from moe_infinity.runtime.paged_kv_storage import (
@@ -164,7 +164,7 @@ def _proven_binding(
     *,
     has_write_proof: bool = True,
 ) -> PagedLayerBinding:
-    class_fqn = "moe_infinity.models.qwen3_paged_attention.Qwen3PagedAttention"
+    class_fqn = "moe_store.wrappers.qwen3_paged_attention.Qwen3PagedAttention"
     proxy = LayerBoundPagedBackend(backend, layer_idx, storage.owner_id)
     return PagedLayerBinding(
         module=object(),

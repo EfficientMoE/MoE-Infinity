@@ -5,10 +5,11 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from moe_infinity.models.model_utils import (
+from moe_store.wrappers.model_utils import (
     apply_rotary_pos_emb,
     apply_rotary_pos_emb_deepseek,
 )
+
 from tests.python.ops.conftest import (
     BF16_ATOL,
     BF16_RTOL,

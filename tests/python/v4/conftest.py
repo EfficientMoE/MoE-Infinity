@@ -33,7 +33,7 @@ def v4_ckpt_dir():
 
 @pytest.fixture(scope="session")
 def indexer(v4_ckpt_dir):
-    from moe_infinity.models.deepseek_v4 import DeepSeekV4ExpertTensorIndexer
+    from moe_store.wrappers.deepseek_v4 import DeepSeekV4ExpertTensorIndexer
 
     return DeepSeekV4ExpertTensorIndexer(v4_ckpt_dir)
 

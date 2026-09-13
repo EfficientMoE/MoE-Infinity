@@ -7,7 +7,7 @@ pytest.importorskip(
     reason="transformers >= 5.12 required",
 )
 
-from moe_infinity.utils.hf_config import parse_expert_id
+from moe_store.parsing.hf_config import parse_expert_id
 
 GLM = SimpleNamespace(
     architectures=["GlmMoeDsaForCausalLM"],

@@ -1,8 +1,8 @@
 import pytest
 import torch
+from moe_store.fp8 import dequant_fp8_blockwise, quant_fp8_blockwise
 
 from moe_infinity.kernel.marlin_gemm import marlin_supports_shape
-from moe_infinity.utils.fp8 import dequant_fp8_blockwise, quant_fp8_blockwise
 
 
 def test_fp8_blockwise_roundtrip_is_deterministic_and_owns_scale():

@@ -25,7 +25,7 @@ def _get_attn_impl(model_name: str) -> str:
 _HF_WORKER = r"""
 import pickle, sys, torch
 from transformers import AutoModelForCausalLM, AutoConfig
-from moe_infinity.utils.hf_config import ensure_config_compat
+from moe_store.parsing.hf_config import ensure_config_compat
 
 model_name, attn_impl, input_ids_path, out_path = sys.argv[1:]
 input_ids = torch.load(input_ids_path, weights_only=True)

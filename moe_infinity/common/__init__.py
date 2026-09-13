@@ -1,1 +1,1 @@
-from .constants import *
+from moe_store.registry.constants import *

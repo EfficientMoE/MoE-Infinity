@@ -6,8 +6,7 @@ import pytest
 
 def test_glm_patch_replaces_moe_class():
     import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as glm_mod
-
-    from moe_infinity.models import SyncGlmMoeDsaMoEBlock
+    from moe_store.wrappers import SyncGlmMoeDsaMoEBlock
 
     original = glm_mod.GlmMoeDsaMoE
 
@@ -29,14 +28,15 @@ def test_glm_patch_replaces_moe_class():
 
 
 def test_sync_glm_moe_block_importable():
-    from moe_infinity.models import SyncGlmMoeDsaMoEBlock
+    from moe_store.wrappers import SyncGlmMoeDsaMoEBlock
 
     assert SyncGlmMoeDsaMoEBlock is not None
 
 
 def test_model_offload_imports_sync_glm():
+    from moe_store.wrappers import SyncGlmMoeDsaMoEBlock
+
     import moe_infinity.runtime.model_offload as mo
-    from moe_infinity.models import SyncGlmMoeDsaMoEBlock
 
     assert (
         hasattr(mo, "SyncGlmMoeDsaMoEBlock")

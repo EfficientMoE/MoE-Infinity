@@ -7,8 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
-from moe_infinity.models.deepseek_v4 import (
+from moe_store.wrappers.deepseek_v4 import (
     DeepSeekV4PythonExpertExecutor,
     SyncDeepSeekV4MoEBlock,
     fp4_expert_forward,
@@ -29,7 +28,7 @@ def _v4_config():
 
 
 def _load_gate(indexer, layer, name):
-    from moe_infinity.models.deepseek_v4.expert_bundle import TensorRef
+    from moe_store.wrappers.deepseek_v4.expert_bundle import TensorRef
 
     key = f"layers.{layer}.ffn.gate.{name}"
     shard = indexer._weight_map[key]

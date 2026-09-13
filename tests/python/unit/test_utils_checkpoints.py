@@ -2,8 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
-
-from moe_infinity.utils.checkpoints import get_checkpoint_paths
+from moe_store.checkpoints import get_checkpoint_paths
 
 
 def test_get_checkpoint_paths_with_single_file(tmp_path: Path):

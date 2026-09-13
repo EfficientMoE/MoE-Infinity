@@ -1,8 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
-
-from moe_infinity.models.glm_dsa import (
+from moe_store.wrappers.glm_dsa import (
     get_indexer_types,
     indexer_owner_map,
     num_owned_indexers,

@@ -63,6 +63,8 @@ _v4_fp4 = _load_ext(
 sys.modules["moe_infinity._v4_fp4"] = _v4_fp4
 setattr(moe_infinity, "_v4_fp4", _v4_fp4)
 
+from moe_store.wrappers.deepseek_v4 import load_sharded_v4_flash  # noqa: E402
+
 from benchmarks.contextpilot.benchmark_utils import (
     compute_percentiles,  # noqa: E402
 )
@@ -70,7 +72,6 @@ from benchmarks.contextpilot.dataset_utils import (  # noqa: E402
     get_workload_names,
     load_workload,
 )
-from moe_infinity.models.deepseek_v4 import load_sharded_v4_flash  # noqa: E402
 from moe_infinity.serving.contextpilot_middleware import (  # noqa: E402
     ContextPilotMiddleware,
 )

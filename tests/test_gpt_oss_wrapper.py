@@ -35,7 +35,7 @@ def make_gpt_oss_config():
 
 
 def _deterministic_mlp():
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     torch.manual_seed(137)
     mlp = SyncGptOssMLP(make_gpt_oss_config())
@@ -47,7 +47,7 @@ def _deterministic_mlp():
 
 
 def test_sync_gpt_oss_mlp_instantiation():
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     config = make_gpt_oss_config()
     mlp = SyncGptOssMLP(config)
@@ -81,7 +81,7 @@ def test_sync_gpt_oss_mlp_instantiation():
 
 
 def test_sync_gpt_oss_mlp_swiglu_activation():
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     config = make_gpt_oss_config()
     mlp = SyncGptOssMLP(config)
@@ -106,7 +106,7 @@ def test_sync_gpt_oss_mlp_swiglu_activation():
 
 
 def test_sync_gpt_oss_mlp_router_has_bias():
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     config = make_gpt_oss_config()
     mlp = SyncGptOssMLP(config)

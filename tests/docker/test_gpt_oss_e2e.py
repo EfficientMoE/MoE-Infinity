@@ -48,10 +48,9 @@ def _skip_if_no_cuda():
 def test_gpt_oss_config_parsing():
     """GPT-OSS config correctly parsed: 24 layers, 32 experts."""
     _skip_if_no_cuda()
+    from moe_store.parsing.hf_config import parse_moe_param
+    from moe_store.registry.constants import MODEL_MAPPING_NAMES
     from transformers import AutoConfig
-
-    from moe_infinity.common.constants import MODEL_MAPPING_NAMES
-    from moe_infinity.utils.hf_config import parse_moe_param
 
     config = AutoConfig.from_pretrained(CHECKPOINT, trust_remote_code=True)
     layers, experts, enc = parse_moe_param(config)

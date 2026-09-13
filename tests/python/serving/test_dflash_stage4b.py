@@ -762,8 +762,9 @@ def test_real_deepseek_rich_forward_writes_the_adapter_owned_cache_for_verify() 
 ):
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("transformers.models.deepseek_v3.modeling_deepseek_v3")
+    from moe_store.wrappers.deepseek_mla_attention import adapt_deepseek_model
+
     from moe_infinity.entrypoints.big_modeling import MoE
-    from moe_infinity.models.deepseek_mla_attention import adapt_deepseek_model
 
     config = transformers.DeepseekV3Config(
         hidden_size=16,
@@ -819,7 +820,8 @@ def test_real_deepseek_rich_forward_writes_the_adapter_owned_cache_for_verify() 
 def test_rich_verify_uses_one_position_per_tentative_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import moe_infinity.models.deepseek_mla_attention as mla_attention
+    import moe_store.wrappers.deepseek_mla_attention as mla_attention
+
     from moe_infinity.entrypoints.big_modeling import MoE
 
     calls: list[dict[str, object]] = []

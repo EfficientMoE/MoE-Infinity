@@ -25,9 +25,10 @@ _ensure_flash_attn_stub_has_spec()
 
 
 def test_gpt_oss_all_components_importable():
-    from moe_infinity.common.constants import MODEL_MAPPING_NAMES
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
-    from moe_infinity.utils.hf_config import parse_expert_id, parse_moe_param
+    from moe_store.parsing.hf_config import parse_expert_id, parse_moe_param
+    from moe_store.registry.constants import MODEL_MAPPING_NAMES
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
+
     from moe_infinity.utils.mxfp4 import (
         get_mxfp4_modules_to_not_convert,
         identify_mxfp4_pairs,
@@ -45,8 +46,7 @@ def test_gpt_oss_all_components_importable():
 
 def test_gpt_oss_monkey_patch_module_accessible():
     import transformers.models.gpt_oss.modeling_gpt_oss as mod
-
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     assert hasattr(mod, "GptOssMLP")
     assert mod.GptOssMLP is not SyncGptOssMLP
@@ -55,7 +55,7 @@ def test_gpt_oss_monkey_patch_module_accessible():
 def test_gpt_oss_120b_config_parseable():
     from unittest.mock import MagicMock
 
-    from moe_infinity.utils.hf_config import parse_moe_param
+    from moe_store.parsing.hf_config import parse_moe_param
 
     config_120b = MagicMock()
     config_120b.architectures = ["GptOssForCausalLM"]
@@ -111,10 +111,9 @@ def test_gpt_oss_20b_e2e():
 @pytest.mark.slow
 @pytest.mark.integration
 def test_gpt_oss_120b_config():
+    from moe_store.parsing.hf_config import parse_moe_param
+    from moe_store.registry.constants import MODEL_MAPPING_NAMES
     from transformers import AutoConfig
-
-    from moe_infinity.common.constants import MODEL_MAPPING_NAMES
-    from moe_infinity.utils.hf_config import parse_moe_param
 
     config = AutoConfig.from_pretrained(
         "openai/gpt-oss-120b", trust_remote_code=True

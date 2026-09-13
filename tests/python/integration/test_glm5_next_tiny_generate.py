@@ -19,8 +19,9 @@ def test_tiny_glm5_next_generates(tmp_path):
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
+    from moe_store.wrappers.glm5_next import SyncGlm5NextMoEBlock
+
     from moe_infinity import MoE
-    from moe_infinity.models.glm5_next import SyncGlm5NextMoEBlock
     from tests.python.integration._glm5_next_tiny import build_tiny_glm5_next
 
     d = build_tiny_glm5_next(str(tmp_path / "tiny"))

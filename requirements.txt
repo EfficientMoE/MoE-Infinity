@@ -3,6 +3,7 @@ chardet
 datasets>=2.12.0
 fastapi
 hjson
+moe-store @ git+https://github.com/EfficientMoE/moe-store.git
 ninja
 numpy
 nvtx
