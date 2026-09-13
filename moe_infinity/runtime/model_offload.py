@@ -36,6 +36,13 @@ except ImportError:
         pass
 
 
+from moe_store.parsing.gptq import is_gptq_packed_tensor, is_gptq_quantized
+from moe_store.parsing.mxfp4 import identify_mxfp4_pairs, is_mxfp4_quantized
+from moe_store.parsing.quantization import (
+    detect_quantization,
+    should_cast_tensor,
+    validate_quantization_support,
+)
 from moe_store.wrappers import (
     DeepseekV2PagedAttention,
     DeepseekV3PagedAttention,
@@ -104,13 +111,6 @@ from moe_infinity.utils.async_transfer import (
     wait_transfer,
 )
 from moe_infinity.utils.device import get_default_device, get_device
-from moe_infinity.utils.gptq import is_gptq_packed_tensor, is_gptq_quantized
-from moe_infinity.utils.mxfp4 import identify_mxfp4_pairs, is_mxfp4_quantized
-from moe_infinity.utils.quantization import (
-    detect_quantization,
-    should_cast_tensor,
-    validate_quantization_support,
-)
 
 
 @dataclass(frozen=True)

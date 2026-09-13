@@ -26,14 +26,13 @@ _ensure_flash_attn_stub_has_spec()
 
 def test_gpt_oss_all_components_importable():
     from moe_store.parsing.hf_config import parse_expert_id, parse_moe_param
-    from moe_store.registry.constants import MODEL_MAPPING_NAMES
-    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
-
-    from moe_infinity.utils.mxfp4 import (
+    from moe_store.parsing.mxfp4 import (
         get_mxfp4_modules_to_not_convert,
         identify_mxfp4_pairs,
         is_mxfp4_quantized,
     )
+    from moe_store.registry.constants import MODEL_MAPPING_NAMES
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     assert "gptoss" in MODEL_MAPPING_NAMES
     assert SyncGptOssMLP is not None

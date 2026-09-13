@@ -246,10 +246,9 @@ def _moe_store_csrc_dir():
         return os.path.join(override, "store")
     import moe_store
 
-    package_root = os.path.dirname(
-        os.path.dirname(os.path.abspath(moe_store.__file__))
+    csrc = os.path.join(
+        os.path.dirname(os.path.abspath(moe_store.__file__)), "csrc", "store"
     )
-    csrc = os.path.join(package_root, "csrc", "store")
     if not os.path.isfile(os.path.join(csrc, "index_v2.h")):
         raise RuntimeError(
             "moe-store csrc not found at %s; install moe-store from source "
