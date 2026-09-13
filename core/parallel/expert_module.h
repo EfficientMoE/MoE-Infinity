@@ -7,7 +7,7 @@
 #include <ATen/cuda/CUDAGraph.h>
 
 #include "model/model_topology.h"
-#include "aio/archer_tensor_handle.h"
+#include "store/tensor_store.h"
 #include "prefetch/expert_residency.h"
 
 // Expert type enum
@@ -98,12 +98,14 @@ class Expert : public torch::nn::Module {
 
     // Set weights
     for (size_t i = 0; i < Traits::num_weights; ++i) {
-      weights_[i] = kTensorIndex->find(tensor_ids[idx++])->second.tensor;
+      weights_[i] =
+          GetTensorStore()->index().find(tensor_ids[idx++])->second.tensor;
     }
 
     // Set biases
     for (size_t i = 0; i < Traits::num_biases; ++i) {
-      biases_[i] = kTensorIndex->find(tensor_ids[idx++])->second.tensor;
+      biases_[i] =
+          GetTensorStore()->index().find(tensor_ids[idx++])->second.tensor;
     }
   }
 

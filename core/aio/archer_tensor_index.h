@@ -60,5 +60,3 @@ class ArcherTensorIndex
     return offset;
   }
 };
-
-extern std::unique_ptr<ArcherTensorIndex> kTensorIndex;

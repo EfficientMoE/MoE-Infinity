@@ -96,8 +96,6 @@ std::string TensorStorageMeta::DebugString() const {
   return ss.str();
 }
 
-std::unique_ptr<ArcherTensorIndex> kTensorIndex(nullptr);
-
 void ArcherTensorIndex::Serialize(const char* path) {
   std::uint32_t size = this->size();
   std::ofstream ofs(path, std::ios::binary | std::ios::out | std::ios::trunc);

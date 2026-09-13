@@ -41,6 +41,7 @@ from tqdm import tqdm
 from transformers import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
+from moe_infinity.boundary import ArcherEngineHooks
 from moe_infinity.common import parse_expert_type
 from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import (
@@ -630,7 +631,7 @@ class OffloadEngine(object):
         instrumentation (plan Task 9) -- the fetch is unchanged, only timed.
         """
         start = time.perf_counter()
-        self.archer_engine.fetch_tensors(self.request_id, tensors)
+        self.engine_hooks.fetch_tensors(self.request_id, tensors)
         self._exposed_fetch_seconds += time.perf_counter() - start
 
     def get_exposed_fetch_seconds(self) -> float:
@@ -846,6 +847,7 @@ class OffloadEngine(object):
         self.archer_engine = self.prefetch_lib.prefetch_handle(
             self.checkpoint, _archer_config.device_memory_ratio
         )
+        self.engine_hooks = ArcherEngineHooks(self.archer_engine)
 
         self.archer_config = _archer_config
         self.gpt_oss_offload_enabled = _gpt_oss_offload_enabled(
@@ -2542,7 +2544,7 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                self.archer_engine.begin(
+                self.engine_hooks.begin(
                     self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF)
                 )
                 self.offload_set.add(param.data.data_ptr())
@@ -2556,7 +2558,7 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.begin(
+                self.engine_hooks.begin(
                     self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF)
                 )
                 self.offload_set.add(buf.data_ptr())
@@ -2583,7 +2585,7 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                self.archer_engine.end(
+                self.engine_hooks.end(
                     self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF)
                 )
                 self.offload_set.add(param.data.data_ptr())
@@ -2595,7 +2597,7 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.end(
+                self.engine_hooks.end(
                     self.request_id, buf, getattr(buf, "ar_id", 0xFFFFFFFF)
                 )
                 self.offload_set.add(buf.data_ptr())

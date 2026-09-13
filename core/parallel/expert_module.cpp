@@ -112,7 +112,7 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
   // expert's GPU memory cannot be evicted until OutputFunc resets to IDLE.
   std::vector<std::vector<int64_t>> tensor_shapes;
   for (size_t i = 0; i < tensor_ids.size(); i++) {
-    auto& tensor = kTensorIndex->find(tensor_ids[i])->second.tensor;
+    auto& tensor = GetTensorStore()->index().find(tensor_ids[i])->second.tensor;
     tensor_shapes.push_back(tensor.sizes().vec());
     param_[i].set_data(tensor);
   }

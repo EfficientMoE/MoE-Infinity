@@ -201,6 +201,8 @@ _STORE_SOURCES = [
     # parallel
     "core/parallel/expert_dispatcher.cpp",
     "core/parallel/expert_module.cpp",
+    # store
+    "core/store/tensor_store.cpp",
     # aio
     "core/aio/archer_aio_thread.cpp",
     "core/aio/archer_prio_aio_handle.cpp",
@@ -230,6 +232,7 @@ _STORE_SOURCES = [
     "extensions/kernel/v4_fp4/fp8_dequant.cu",
     # Python binding
     "core/python/py_archer_prefetch.cpp",
+    "core/python/py_tensor_store.cpp",
 ]
 
 _STORE_EXTRA_LINK_ARGS = [

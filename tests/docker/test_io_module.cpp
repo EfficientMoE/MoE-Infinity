@@ -22,6 +22,8 @@
 #include "aio/archer_tensor_index.h"
 #include "memory/pinned_memory_pool.h"
 
+static std::unique_ptr<ArcherTensorIndex> kTensorIndex;
+
 namespace py = pybind11;
 
 static py::dict make_result(bool passed, const std::string& detail) {
@@ -262,7 +264,7 @@ static py::dict test_tensor_store_read_roundtrip(std::string tmpdir) {
   bool match = false;
   std::string detail;
   try {
-    ArcherTensorHandle handle(tmpdir, 4);
+    ArcherTensorHandle handle(tmpdir, 4, kTensorIndex.get());
 
     auto tensor = torch::randn({256, 128});  // 131072 bytes (float32)
     handle.StoreTensor(42, tensor);
@@ -297,7 +299,7 @@ static py::dict test_tensor_offset_tracking(std::string tmpdir) {
   bool passed = false;
   std::string detail;
   try {
-    ArcherTensorHandle handle(tmpdir, 4);
+    ArcherTensorHandle handle(tmpdir, 4, kTensorIndex.get());
 
     // Create tensors of known sizes (float32)
     auto t0 = torch::randn({256});  // 1024 bytes
@@ -562,7 +564,7 @@ static py::dict test_multi_tensor_roundtrip(std::string tmpdir) {
   bool passed = false;
   std::string detail;
   try {
-    ArcherTensorHandle handle(tmpdir, 4);
+    ArcherTensorHandle handle(tmpdir, 4, kTensorIndex.get());
 
     auto t_f32 = torch::randn({64, 64});                   // float32
     auto t_f16 = torch::randn({64, 64}).to(torch::kHalf);  // float16
@@ -610,7 +612,7 @@ static py::dict test_tensor_index_serialization(std::string tmpdir) {
   std::string detail;
   try {
     {
-      ArcherTensorHandle handle(tmpdir, 2);
+      ArcherTensorHandle handle(tmpdir, 2, kTensorIndex.get());
       auto t0 = torch::randn({32});
       auto t1 = torch::randn({64});
       handle.StoreTensor(0, t0);

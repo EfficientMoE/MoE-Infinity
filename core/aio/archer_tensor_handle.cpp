@@ -21,11 +21,11 @@ const int c_io_queue_depth = 8;
 const char* ARCHER_PARAM_NAME = "archer_param";
 const char* ARCHER_IHDEX_NAME = "archer_index";
 
-std::unique_ptr<ArcherTensorHandle> kArcherTensorHandle(nullptr);
-
 ArcherTensorHandle::ArcherTensorHandle(const std::string& prefix,
-                                       int num_io_threads)
+                                       int num_io_threads,
+                                       ArcherTensorIndex* index)
     : prefix_(prefix),
+      index_(index),
       prio_aio_handle_(prefix, num_io_threads),
       file_id_(0),
       file_offset_(0) {
@@ -49,18 +49,18 @@ ArcherTensorHandle::ArcherTensorHandle(const std::string& prefix,
   auto ckpt_index_path = prefix_ + std::string(ARCHER_IHDEX_NAME);
   if (access(ckpt_index_path.c_str(), F_OK) != -1) {
     DLOG_INFO("Loading index file from ", ckpt_index_path);
-    kTensorIndex->Deserialize(ckpt_index_path.c_str());
+    index_->Deserialize(ckpt_index_path.c_str());
     is_serialized_ = true;
   } else {
     DLOG_INFO("Index file", ckpt_index_path, " does not exist, creating");
   }
-  DLOG_INFO("Index file size ", kTensorIndex->size());
+  DLOG_INFO("Index file size ", index_->size());
 }
 
 void ArcherTensorHandle::StoreTensor(const std::uint32_t tensor_id,
                                      torch::Tensor& buffer) {
-  auto it = kTensorIndex->find(tensor_id);
-  bool tensor_exists = (it != kTensorIndex->end());
+  auto it = index_->find(tensor_id);
+  bool tensor_exists = (it != index_->end());
 
   std::unique_lock<std::mutex> lock(mutex_);
   TensorStorageMeta tensor_meta{file_id_, file_offset_, buffer.nbytes(),
@@ -93,7 +93,7 @@ void ArcherTensorHandle::StoreTensor(const std::uint32_t tensor_id,
     file_offset_ += num_bytes_aligned;
   }
 
-  kTensorIndex->insert(std::make_pair(tensor_id, tensor_meta));
+  index_->insert(std::make_pair(tensor_id, tensor_meta));
 
   auto filename = GetIndexFileName(tensor_meta.file_id);
 
@@ -104,8 +104,8 @@ void ArcherTensorHandle::StoreTensor(const std::uint32_t tensor_id,
 
 int64_t ArcherTensorHandle::GetTensorSizeAligned(
     const std::uint32_t tensor_id) const {
-  auto it = kTensorIndex->find(tensor_id);
-  if (it == kTensorIndex->end()) {
+  auto it = index_->find(tensor_id);
+  if (it == index_->end()) {
     DLOG_FATAL("Tensor not found", tensor_id);
   }
   auto num_bytes = it->second.size;
@@ -116,8 +116,8 @@ int64_t ArcherTensorHandle::GetTensorSizeAligned(
 
 torch::TensorOptions ArcherTensorHandle::GetTensorOptions(
     const std::uint32_t tensor_id) const {
-  auto it = kTensorIndex->find(tensor_id);
-  if (it == kTensorIndex->end()) {
+  auto it = index_->find(tensor_id);
+  if (it == index_->end()) {
     DLOG_FATAL("Tensor not found", tensor_id);
   }
   return it->second.options;
@@ -126,8 +126,8 @@ torch::TensorOptions ArcherTensorHandle::GetTensorOptions(
 void ArcherTensorHandle::SetTensor(std::uint32_t tensor_id,
                                    torch::Tensor& buffer,
                                    const torch::Device& device) {
-  auto it = kTensorIndex->find(tensor_id);
-  if (it == kTensorIndex->end()) {
+  auto it = index_->find(tensor_id);
+  if (it == index_->end()) {
     DLOG_FATAL("Tensor not found", tensor_id);
   }
   // FIXME: this is may creates extra copy of data, need to be confirmed
@@ -139,8 +139,8 @@ void ArcherTensorHandle::SetTensor(std::uint32_t tensor_id,
 
 void ArcherTensorHandle::SetTensor(std::uint32_t tensor_id,
                                    torch::Tensor& buffer) {
-  auto it = kTensorIndex->find(tensor_id);
-  if (it == kTensorIndex->end()) {
+  auto it = index_->find(tensor_id);
+  if (it == index_->end()) {
     DLOG_FATAL("Tensor not found", tensor_id);
   }
   if (buffer.dtype() != it->second.tensor.dtype()) {
@@ -156,14 +156,14 @@ void ArcherTensorHandle::SetTensor(std::uint32_t tensor_id,
 
 void ArcherTensorHandle::RegisterTensor(const std::uint32_t tensor_id,
                                         torch::Tensor& buffer) {
-  auto it = kTensorIndex->find(tensor_id);
-  if (it == kTensorIndex->end()) {
+  auto it = index_->find(tensor_id);
+  if (it == index_->end()) {
     DLOG_FATAL("Tensor not found", tensor_id);
   }
 
   tensor_to_id_.insert(std::make_pair((void*)buffer.data_ptr(), tensor_id));
 
-  kTensorIndex->find(tensor_id)->second.tensor = buffer;
+  index_->find(tensor_id)->second.tensor = buffer;
 }
 
 std::string ArcherTensorHandle::GetIndexFileName(
@@ -191,8 +191,8 @@ void ArcherTensorHandle::UpdateTensorMap(void* old_data_ptr,
   auto tensor_id = it->second;
   tensor_to_id_.erase(it);
 
-  auto it2 = kTensorIndex->find(tensor_id);
-  if (it2 == kTensorIndex->end()) {
+  auto it2 = index_->find(tensor_id);
+  if (it2 == index_->end()) {
     DLOG_FATAL("Tensor not found in tensor_index_", tensor_id);
     return;
   }
@@ -205,8 +205,8 @@ void ArcherTensorHandle::UpdateTensorMap(void* old_data_ptr,
 
 void ArcherTensorHandle::ReadTensor(const uint32_t tensor_id, void* memory_ptr,
                                     bool on_demand) {
-  auto it = kTensorIndex->find(tensor_id);
-  if (it == kTensorIndex->end()) {
+  auto it = index_->find(tensor_id);
+  if (it == index_->end()) {
     DLOG_FATAL("Tensor not found", tensor_id);
   }
 
@@ -258,7 +258,7 @@ std::vector<std::unordered_map<std::string, py::object>>
 ArcherTensorHandle::GetCanonicalTensorIndexSnapshot() const {
   std::unique_lock<std::mutex> lock(mutex_);
   std::vector<std::pair<std::uint32_t, const TensorStorageMeta*>> rows;
-  for (const auto& entry : *kTensorIndex) {
+  for (const auto& entry : *index_) {
     if (derivative_owned_ids_.count(entry.first) > 0) {
       continue;
     }
@@ -318,7 +318,7 @@ void ArcherTensorHandle::RegisterDerivativeTensor(
   }
   auto scalar_type = DerivativeDtypeToScalarType(dtype);
   auto id = static_cast<std::uint32_t>(tensor_id);
-  if (kTensorIndex->find(id) != kTensorIndex->end() ||
+  if (index_->find(id) != index_->end() ||
       overlay_staged_.find(id) != overlay_staged_.end()) {
     throw std::invalid_argument("duplicate derivative tensor_id");
   }
@@ -351,7 +351,7 @@ void ArcherTensorHandle::CommitDerivativeOverlay(
     throw std::runtime_error("derivative overlay is not active");
   }
   for (auto& staged : overlay_staged_) {
-    kTensorIndex->emplace(staged.first, staged.second);
+    index_->emplace(staged.first, staged.second);
     derivative_owned_ids_.insert(staged.first);
   }
   overlay_staged_.clear();
