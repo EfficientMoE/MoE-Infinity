@@ -5,6 +5,8 @@
 
 #include "archer_tensor_handle.h"
 
+#include "store/v2_index_loader.h"
+
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
@@ -25,6 +27,7 @@ ArcherTensorHandle::ArcherTensorHandle(const std::string& prefix,
                                        int num_io_threads,
                                        ArcherTensorIndex* index)
     : prefix_(prefix),
+      data_file_stem_(ARCHER_PARAM_NAME),
       index_(index),
       prio_aio_handle_(prefix, num_io_threads),
       file_id_(0),
@@ -50,6 +53,9 @@ ArcherTensorHandle::ArcherTensorHandle(const std::string& prefix,
   if (access(ckpt_index_path.c_str(), F_OK) != -1) {
     DLOG_INFO("Loading index file from ", ckpt_index_path);
     index_->Deserialize(ckpt_index_path.c_str());
+    is_serialized_ = true;
+  } else if (LoadV2IndexInto(prefix_, index_)) {
+    data_file_stem_ = "store_data";
     is_serialized_ = true;
   } else {
     DLOG_INFO("Index file", ckpt_index_path, " does not exist, creating");
@@ -168,8 +174,7 @@ void ArcherTensorHandle::RegisterTensor(const std::uint32_t tensor_id,
 
 std::string ArcherTensorHandle::GetIndexFileName(
     const std::uint32_t file_id) const {
-  return prefix_ + std::string(ARCHER_PARAM_NAME) + "_" +
-         std::to_string(file_id);
+  return prefix_ + data_file_stem_ + "_" + std::to_string(file_id);
 }
 
 std::uint32_t ArcherTensorHandle::GetTensorId(void* tensor) const {

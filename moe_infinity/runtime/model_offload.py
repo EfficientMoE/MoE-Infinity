@@ -1058,6 +1058,20 @@ class OffloadEngine(object):
                 name_id_map_file = os.path.join(
                     self.checkpoint, "name_id_map.json"
                 )
+                if not os.path.exists(name_id_map_file) and os.path.exists(
+                    os.path.join(self.checkpoint, "store_index")
+                ):
+                    from moe_store.index import read_index
+
+                    v2_index = read_index(self.checkpoint)
+                    with open(name_id_map_file, "w") as f:
+                        json.dump(
+                            {
+                                member.name: member.tensor_id
+                                for _, member in v2_index.iter_members()
+                            },
+                            f,
+                        )
 
                 self.model_name = model_name = args[0]
 
