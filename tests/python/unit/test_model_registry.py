@@ -5,7 +5,7 @@ from typing import Any, cast
 
 def test_all_models_registered():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from moe_infinity.common.constants import (
+    from moe_store.registry.constants import (
         MODEL_MAPPING_NAMES,
         MODEL_MAPPING_TYPES,
     )
@@ -45,7 +45,7 @@ def test_all_models_registered():
 
 def test_model_types_complete():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from moe_infinity.common.constants import (
+    from moe_store.registry.constants import (
         MODEL_MAPPING_NAMES,
         MODEL_MAPPING_TYPES,
     )
@@ -61,7 +61,7 @@ def test_model_types_complete():
 
 def test_parse_expert_type_new_models():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from moe_infinity.common.constants import parse_expert_type
+    from moe_store.registry.constants import parse_expert_type
 
     for arch_prefix, expected_type in [
         ("DbrxForCausalLM", 4),
@@ -77,7 +77,7 @@ def test_parse_expert_type_new_models():
 
 def test_deepseek_uses_hf_classes():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from moe_infinity.common.constants import MODEL_MAPPING_NAMES
+    from moe_store.registry.constants import MODEL_MAPPING_NAMES
 
     deepseek_cls = MODEL_MAPPING_NAMES["deepseek"]
     assert (

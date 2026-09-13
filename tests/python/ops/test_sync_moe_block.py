@@ -179,7 +179,7 @@ def test_sync_mixtral_sparse_moe_block_matches_hf(seed_everything):
 
     try:
         sync_mixtral_module = importlib.import_module(
-            "moe_infinity.models.mixtral"
+            "moe_store.wrappers.mixtral"
         )
     except Exception as exc:
         pytest.skip(f"Unable to import SyncMixtralSparseMoeBlock: {exc}")
@@ -251,7 +251,7 @@ def test_sync_qwen3_sparse_moe_block_matches_hf(seed_everything):
         )
 
     try:
-        sync_qwen_module = importlib.import_module("moe_infinity.models.qwen")
+        sync_qwen_module = importlib.import_module("moe_store.wrappers.qwen")
     except Exception as exc:
         pytest.skip(f"Unable to import Qwen3MoEBlock replacement: {exc}")
 

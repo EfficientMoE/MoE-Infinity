@@ -331,16 +331,16 @@ def test_runtime_metadata_maps_partial_prefill_slots() -> None:
     assert metadata.slot_mapping.tolist() == [9 * 4 + 1, 9 * 4 + 2, 9 * 4 + 3]
 
 
+from moe_store.wrappers.paged_attention_registry import (  # noqa: E402
+    PagedAttentionLayerRegistry,
+)
+from moe_store.wrappers.qwen3_paged_attention import (  # noqa: E402
+    Qwen3PagedAttention,
+)
 from transformers.models.qwen3_moe.configuration_qwen3_moe import (  # noqa: E402
     Qwen3MoeConfig,
 )
 
-from moe_infinity.models.paged_attention_registry import (  # noqa: E402
-    PagedAttentionLayerRegistry,
-)
-from moe_infinity.models.qwen3_paged_attention import (  # noqa: E402
-    Qwen3PagedAttention,
-)
 from moe_infinity.runtime.attention_backend import (  # noqa: E402
     PagedAttentionBackend,
 )

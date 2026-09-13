@@ -1,8 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
-
-from moe_infinity.utils.hf_config import parse_expert_id, parse_moe_param
+from moe_store.parsing.hf_config import parse_expert_id, parse_moe_param
 
 
 def make_glm_config(num_hidden_layers=78, n_routed_experts=256):

@@ -7,14 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
-from moe_infinity.models.deepseek_v4 import (
+from moe_store.wrappers.deepseek_v4 import (
     DeepSeekV4PythonExpertExecutor,
     HostOffloadBundleProvider,
     SyncDeepSeekV4MoEBlock,
     make_indexer_bundle_provider,
 )
-from moe_infinity.models.deepseek_v4.expert_bundle import TensorRef
+from moe_store.wrappers.deepseek_v4.expert_bundle import TensorRef
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="host offload streaming requires CUDA"

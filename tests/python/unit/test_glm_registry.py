@@ -9,7 +9,7 @@ import pytest
 
 def test_glmmoedsa_key_in_mapping_names():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from moe_infinity.common.constants import MODEL_MAPPING_NAMES
+    from moe_store.registry.constants import MODEL_MAPPING_NAMES
 
     assert "glmmoedsa" in MODEL_MAPPING_NAMES, (
         "'glmmoedsa' not found in MODEL_MAPPING_NAMES; "
@@ -19,7 +19,7 @@ def test_glmmoedsa_key_in_mapping_names():
 
 def test_glmmoedsa_type_is_5():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from moe_infinity.common.constants import MODEL_MAPPING_TYPES
+    from moe_store.registry.constants import MODEL_MAPPING_TYPES
 
     assert MODEL_MAPPING_TYPES["glmmoedsa"] == 5, (
         f"Expected expert type 5 for 'glmmoedsa', "
@@ -29,7 +29,7 @@ def test_glmmoedsa_type_is_5():
 
 def test_glmmoedsa_class_not_none():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from moe_infinity.common.constants import MODEL_MAPPING_NAMES
+    from moe_store.registry.constants import MODEL_MAPPING_NAMES
 
     cls = MODEL_MAPPING_NAMES["glmmoedsa"]
     assert cls is not None, "MODEL_MAPPING_NAMES['glmmoedsa'] must not be None"
@@ -41,7 +41,7 @@ def test_glmmoedsa_class_not_none():
 
 def test_parse_expert_type_glmmoedsa():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from moe_infinity.common.constants import parse_expert_type
+    from moe_store.registry.constants import parse_expert_type
 
     config = SimpleNamespace(architectures=["GlmMoeDsaForCausalLM"])
     result = parse_expert_type(cast(Any, config))
@@ -53,7 +53,7 @@ def test_parse_expert_type_glmmoedsa():
 def test_guarded_import_does_not_crash_when_unavailable():
     import importlib
 
-    import moe_infinity.common.constants as _mod
+    import moe_store.registry.constants as _mod
 
     with patch.dict(sys.modules, {"transformers": None}):
         pass

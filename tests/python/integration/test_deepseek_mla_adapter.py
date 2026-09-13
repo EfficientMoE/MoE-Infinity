@@ -7,13 +7,14 @@ import torch
 
 transformers = pytest.importorskip("transformers")
 
-from moe_infinity.models.deepseek_mla_attention import (  # noqa: E402
+from moe_store.wrappers.deepseek_mla_attention import (  # noqa: E402
     adapt_deepseek_attention,
     adapt_deepseek_model,
     clear_deepseek_mla_context,
     is_deepseek_mla_eligible,
     set_deepseek_mla_context,
 )
+
 from moe_infinity.runtime.attention_types import AttentionMetadata  # noqa: E402
 from moe_infinity.serving.mla_cache import MLAPagedKVCache  # noqa: E402
 from moe_infinity.spec_decode.protocols import RichForwardResult  # noqa: E402

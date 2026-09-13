@@ -19,8 +19,9 @@ elif getattr(sys.modules["flash_attn"], "__spec__", None) is None:
         "flash_attn", loader=None
     )
 
+from moe_store.parsing.hf_config import parse_expert_id
+
 from moe_infinity.runtime.model_offload import OffloadEngine
-from moe_infinity.utils.hf_config import parse_expert_id
 from moe_infinity.utils.quantization import QuantizationInfo
 
 

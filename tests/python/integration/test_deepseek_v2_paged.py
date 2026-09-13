@@ -34,15 +34,15 @@ if (
 def _load_deepseek_v2_modeling_module() -> ModuleType:
     models_dir = _repo_root / "moe_infinity" / "models"
 
-    models_pkg = types.ModuleType("moe_infinity.models")
+    models_pkg = types.ModuleType("moe_store.wrappers")
     models_pkg.__path__ = [str(models_dir)]
-    sys.modules["moe_infinity.models"] = models_pkg
+    sys.modules["moe_store.wrappers"] = models_pkg
 
-    v2_pkg = types.ModuleType("moe_infinity.models.modeling_deepseek_v2")
+    v2_pkg = types.ModuleType("moe_store.wrappers.modeling_deepseek_v2")
     v2_pkg.__path__ = [str(_v2_dir)]
-    sys.modules["moe_infinity.models.modeling_deepseek_v2"] = v2_pkg
+    sys.modules["moe_store.wrappers.modeling_deepseek_v2"] = v2_pkg
 
-    module_name = "moe_infinity.models.modeling_deepseek_v2.modeling_deepseek"
+    module_name = "moe_store.wrappers.modeling_deepseek_v2.modeling_deepseek"
     existing = sys.modules.get(module_name)
     if existing is not None:
         return existing

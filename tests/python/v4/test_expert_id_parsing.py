@@ -5,7 +5,7 @@
 
 from types import SimpleNamespace
 
-from moe_infinity.utils.hf_config import parse_expert_id, parse_moe_param
+from moe_store.parsing.hf_config import parse_expert_id, parse_moe_param
 
 
 def _cfg(arch, **kw):

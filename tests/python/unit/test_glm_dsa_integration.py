@@ -1,12 +1,11 @@
 import pytest
-
-from moe_infinity.models.glm_dsa import (
+from moe_store.parsing.hf_config import parse_expert_id
+from moe_store.wrappers.glm_dsa import (
     get_indexer_types,
     indexer_owner_map,
     num_owned_indexers,
     owns_indexer,
 )
-from moe_infinity.utils.hf_config import parse_expert_id
 
 
 def _real_cfg():

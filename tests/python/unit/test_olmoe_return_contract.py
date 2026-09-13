@@ -34,9 +34,8 @@ def test_forward_returns_bare_tensor():
     wait_dispatch_local returns an identity-shaped payload, so what is under
     test is only what forward hands back.
     """
+    from moe_store.wrappers.olmoe import SyncOlmoeMoEBlock
     from transformers import OlmoeConfig
-
-    from moe_infinity.models.olmoe import SyncOlmoeMoEBlock
 
     config = OlmoeConfig(
         hidden_size=16,

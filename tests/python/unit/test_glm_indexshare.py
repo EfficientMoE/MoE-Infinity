@@ -1,6 +1,5 @@
 import pytest
-
-from moe_infinity.models.glm_dsa import (
+from moe_store.wrappers.glm_dsa import (
     indexer_owner_map,
     num_owned_indexers,
     owns_indexer,

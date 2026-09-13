@@ -58,11 +58,10 @@ def _has_glm5_next() -> bool:
     not _has_glm5_next(), reason="transformers lacks Glm5Next classes"
 )
 def test_block_layout_and_routing():
+    from moe_store.wrappers.glm5_next import SyncGlm5NextMoEBlock
     from transformers.models.glm5_next.configuration_glm5_next import (
         Glm5NextTextConfig,
     )
-
-    from moe_infinity.models.glm5_next import SyncGlm5NextMoEBlock
 
     torch.manual_seed(0)
     block = SyncGlm5NextMoEBlock(Glm5NextTextConfig(**_TINY_TEXT))

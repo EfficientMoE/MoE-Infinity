@@ -60,7 +60,8 @@ requires_moe_gate = pytest.mark.skipif(
     reason="DeepseekV2MoEGate removed in this Transformers version",
 )
 
-from moe_infinity.models.deepseek import DeepseekMoEBlock, DeepseekMoEGate
+from moe_store.wrappers.deepseek import DeepseekMoEBlock, DeepseekMoEGate
+
 from tests.python.ops.conftest import BF16_ATOL, BF16_RTOL, requires_cuda
 
 

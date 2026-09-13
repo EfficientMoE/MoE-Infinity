@@ -13,13 +13,12 @@ import os
 import pytest
 
 transformers = pytest.importorskip("transformers")
-from transformers import PretrainedConfig  # noqa: E402
-
-from moe_infinity.common.constants import (  # noqa: E402
+from moe_store.parsing.hf_config import parse_moe_param  # noqa: E402
+from moe_store.registry.constants import (  # noqa: E402
     MODEL_MAPPING_NAMES,
     parse_expert_type,
 )
-from moe_infinity.utils.hf_config import parse_moe_param  # noqa: E402
+from transformers import PretrainedConfig  # noqa: E402
 
 FIXTURE = os.path.join(
     os.path.dirname(__file__), "..", "..", "fixtures", "glm_5_3", "config.json"

@@ -6,7 +6,7 @@ import torch
 
 
 def test_sync_gpt_oss_mlp_packed_param_count():
-    from moe_infinity.models.gpt_oss import SyncGptOssMLP
+    from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
     config = MagicMock()
     config.hidden_size = 64

@@ -1,7 +1,6 @@
 import pytest
 import torch
-
-from moe_infinity.utils.fp8 import FP8_BLOCK, dequant_fp8_blockwise
+from moe_store.fp8 import FP8_BLOCK, dequant_fp8_blockwise
 
 
 def test_fp8_block_constant():
@@ -53,8 +52,8 @@ def test_dequant_per_block_scale_values():
 
 
 def test_back_compat_import_from_fp8_expert():
-    from moe_infinity.models.deepseek_v4.fp8_expert import FP8_BLOCK as blk
-    from moe_infinity.models.deepseek_v4.fp8_expert import (
+    from moe_store.wrappers.deepseek_v4.fp8_expert import FP8_BLOCK as blk
+    from moe_store.wrappers.deepseek_v4.fp8_expert import (
         dequant_fp8_blockwise as fn,
     )
 
@@ -63,9 +62,9 @@ def test_back_compat_import_from_fp8_expert():
 
 
 def test_back_compat_same_function():
-    from moe_infinity.models.deepseek_v4.fp8_expert import (
+    from moe_store.fp8 import dequant_fp8_blockwise as fn_utils
+    from moe_store.wrappers.deepseek_v4.fp8_expert import (
         dequant_fp8_blockwise as fn_expert,
     )
-    from moe_infinity.utils.fp8 import dequant_fp8_blockwise as fn_utils
 
     assert fn_utils is fn_expert

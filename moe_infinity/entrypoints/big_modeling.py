@@ -91,10 +91,11 @@ class MoE:
                 "huggingface_hub is required to load model checkpoints"
             ) from exc
 
-        from moe_infinity.common.constants import MODEL_MAPPING_NAMES
+        from moe_store.parsing.hf_config import ensure_config_compat
+        from moe_store.registry.constants import MODEL_MAPPING_NAMES
+
         from moe_infinity.runtime import OffloadEngine
         from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
-        from moe_infinity.utils.hf_config import ensure_config_compat
         from moe_infinity.utils.quantization import (
             detect_quantization,
             validate_quantization_support,
@@ -256,7 +257,7 @@ class MoE:
             )
         mla_cache = native_components.get("mla_cache")
         if mla_cache is not None:
-            from moe_infinity.models.deepseek_mla_attention import (
+            from moe_store.wrappers.deepseek_mla_attention import (
                 adapt_deepseek_model,
             )
 
@@ -394,7 +395,7 @@ class MoE:
             model_config, "qk_nope_head_dim"
         )
         if qk_rope_head_dim is not None and qk_nope_head_dim is not None:
-            from moe_infinity.models.deepseek_v2_paged_attention import (
+            from moe_store.wrappers.deepseek_v2_paged_attention import (
                 DeepseekV2PagedAttention,
             )
 
@@ -452,7 +453,7 @@ class MoE:
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         device_id = int(device.index or 0)
-        from moe_infinity.models.deepseek_mla_attention import (
+        from moe_store.wrappers.deepseek_mla_attention import (
             is_deepseek_mla_eligible,
         )
 
@@ -873,7 +874,7 @@ class MoE:
             if not use_paged_context and not use_mla_context:
                 outputs = self.model(input_tensor, **extra_kwargs)
             elif use_mla_context:
-                from moe_infinity.models.deepseek_mla_attention import (
+                from moe_store.wrappers.deepseek_mla_attention import (
                     clear_deepseek_mla_context,
                     set_deepseek_mla_context,
                 )
@@ -1006,7 +1007,7 @@ class MoE:
 
     def _configure_hook(self, input_ids: torch.LongTensor):
         if self.arch == "mixtral":
-            import moe_infinity.models.mixtral  # noqa: F401
+            import moe_store.wrappers.mixtral  # noqa: F401
 
         batch_size = input_ids.shape[0]
         self.seq_id_list = [

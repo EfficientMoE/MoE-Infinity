@@ -4,16 +4,16 @@ import importlib
 
 import pytest
 import torch
-from transformers.models.qwen3_moe.configuration_qwen3_moe import (
-    Qwen3MoeConfig,
-)
-
-from moe_infinity.models.paged_attention_registry import (
+from moe_store.wrappers.paged_attention_registry import (
     SUPPORTED_PAGED_CLASS_SPECS,
     LayerBoundPagedBackend,
     PagedAttentionLayerRegistry,
 )
-from moe_infinity.models.qwen3_paged_attention import Qwen3PagedAttention
+from moe_store.wrappers.qwen3_paged_attention import Qwen3PagedAttention
+from transformers.models.qwen3_moe.configuration_qwen3_moe import (
+    Qwen3MoeConfig,
+)
+
 from moe_infinity.runtime.attention_backend import PagedAttentionBackend
 from moe_infinity.runtime.attention_types import (
     AttentionMetadata as RuntimeAttentionMetadata,
@@ -131,7 +131,7 @@ def _instantiate_deepseek_paged_attention_or_skip(family: str, layer_idx: int):
 
 def test_registry_supports_only_exact_qwen3_paged_attention() -> None:
     assert tuple(SUPPORTED_PAGED_CLASS_SPECS) == (
-        ("moe_infinity.models.qwen3_paged_attention", "Qwen3PagedAttention"),
+        ("moe_store.wrappers.qwen3_paged_attention", "Qwen3PagedAttention"),
     )
 
 
@@ -148,7 +148,7 @@ def test_registry_binds_unique_layer_idx_and_storage_slice() -> None:
 
 
 def test_qwen3_routes_to_registered_layer_bound_backend() -> None:
-    class_fqn = "moe_infinity.models.qwen3_paged_attention.Qwen3PagedAttention"
+    class_fqn = "moe_store.wrappers.qwen3_paged_attention.Qwen3PagedAttention"
     module = _instantiate_supported_class(class_fqn, layer_idx=1)
     registry, recorder = _register_single_module(module, num_layers=2)
     _run_minimal_paged_forward(module)

@@ -28,10 +28,9 @@ def test_jamba_registration_matches_native_expert_layout():
     modeling = pytest.importorskip("transformers.models.jamba.modeling_jamba")
     if not hasattr(modeling, "JambaMLP"):
         pytest.skip("transformers does not expose JambaMLP")
+    from moe_store.registry.constants import parse_expert_type
+    from moe_store.wrappers.jamba import SyncJambaMoEBlock
     from transformers import JambaConfig
-
-    from moe_infinity.common.constants import parse_expert_type
-    from moe_infinity.models.jamba import SyncJambaMoEBlock
 
     config = JambaConfig(
         hidden_size=16,

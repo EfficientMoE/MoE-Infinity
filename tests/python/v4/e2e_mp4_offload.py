@@ -11,7 +11,7 @@ import model as M
 from model import ModelArgs, Transformer
 
 sys.path.insert(0, "/workspace/moe")
-from moe_infinity.models.deepseek_v4.official_offload_adapter import (
+from moe_store.wrappers.deepseek_v4.official_offload_adapter import (
     OfficialExpertHostStore,
     patch_moe_with_offload,
 )

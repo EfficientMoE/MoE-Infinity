@@ -5,8 +5,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-
-from moe_infinity.utils.fp8 import dequant_fp8_blockwise, quant_fp8_blockwise
+from moe_store.fp8 import dequant_fp8_blockwise, quant_fp8_blockwise
 
 
 @dataclass(frozen=True)

@@ -11,7 +11,7 @@ def test_native_fp8_dequant_matches_python():
         from moe_infinity._v4_fp4 import fp8_dequant_blockwise
     except Exception:
         pytest.skip("native fp8 dequant not built")
-    from moe_infinity.utils.fp8 import dequant_fp8_blockwise
+    from moe_store.fp8 import dequant_fp8_blockwise
 
     torch.manual_seed(0)
     N, K = 256, 512

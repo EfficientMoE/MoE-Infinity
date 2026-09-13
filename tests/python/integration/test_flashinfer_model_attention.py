@@ -7,6 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from moe_store.wrappers import (
+    DeepseekV2PagedAttention,
+    DeepseekV3PagedAttention,
+)
+from moe_store.wrappers.deepseek_v2_paged_attention import (
+    _paged_cache_head_dim,
+)
 from transformers.models.deepseek_v2 import modeling_deepseek_v2 as m2
 from transformers.models.deepseek_v2.configuration_deepseek_v2 import (
     DeepseekV2Config,
@@ -14,14 +21,6 @@ from transformers.models.deepseek_v2.configuration_deepseek_v2 import (
 from transformers.models.deepseek_v3 import modeling_deepseek_v3 as m3
 from transformers.models.deepseek_v3.configuration_deepseek_v3 import (
     DeepseekV3Config,
-)
-
-from moe_infinity.models import (
-    DeepseekV2PagedAttention,
-    DeepseekV3PagedAttention,
-)
-from moe_infinity.models.deepseek_v2_paged_attention import (
-    _paged_cache_head_dim,
 )
 
 
