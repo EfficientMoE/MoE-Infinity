@@ -73,6 +73,7 @@ class ArcherTensorHandle : public base::noncopyable {
   torch::ScalarType DerivativeDtypeToScalarType(const std::string& dtype) const;
 
   std::string prefix_;
+  std::string data_file_stem_;
   ArcherTensorIndex* index_;
   ArcherPrioAioHandle prio_aio_handle_;
   std::uint32_t file_id_;
