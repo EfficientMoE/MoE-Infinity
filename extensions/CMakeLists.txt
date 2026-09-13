@@ -7,6 +7,7 @@ find_library(torch_python_LIBRARY torch_python
 
 Python3_add_library(prefetch_op MODULE WITH_SOABI
   ${CMAKE_SOURCE_DIR}/core/python/py_archer_prefetch.cpp
+  ${CMAKE_SOURCE_DIR}/core/python/py_tensor_store.cpp
 )
 
 # --whole-archive forces all object files from the static lib into the shared

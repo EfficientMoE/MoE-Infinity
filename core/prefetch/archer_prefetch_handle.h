@@ -8,7 +8,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "aio/archer_tensor_handle.h"
+#include "store/tensor_store.h"
 #include "model/model_topology.h"
 #include "parallel/expert_dispatcher.h"
 #include "prefetch/expert_residency.h"
@@ -118,6 +118,7 @@ class ArcherPrefetchHandle {
   void ConfigureExpertCapacityAfterTopology();
 
   std::string prefix_;
+  std::shared_ptr<TensorStore> store_;
   std::unordered_map<std::size_t, std::unordered_set<std::uint32_t>>
       node_id_to_tensor_ids_;
   std::unordered_set<std::uint32_t> tensors_to_delete_;

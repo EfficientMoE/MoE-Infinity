@@ -12,9 +12,7 @@
 #include <cmath>
 #include <limits>
 #include <sstream>
-#include "aio/archer_prio_aio_handle.h"
-#include "aio/archer_tensor_handle.h"
-#include "aio/archer_tensor_index.h"
+#include "store/tensor_store.h"
 #include "common/time.h"
 #include "common/types.h"
 #include "memory/event_pool.h"
@@ -128,12 +126,12 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
 #ifndef NVTX_DISABLE
           nvtx3::scoped_range r_disk_cpu("disk_to_cpu");
 #endif
-          kArcherTensorHandle->ReadTensor(
+          GetTensorStore()->ReadTensor(
               tensor_id, static_cast<char*>(host_memory_ptr) + param_offset,
               on_demand);
         }
 
-        auto it = kTensorIndex->find(tensor_id);
+        auto it = GetTensorStore()->index().find(tensor_id);
         std::int64_t size_aligned =
             (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
 
@@ -241,7 +239,8 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
   device = target_device;
 }
 
-ArcherTopologyHandle::ArcherTopologyHandle() {}
+ArcherTopologyHandle::ArcherTopologyHandle(std::shared_ptr<TensorStore> store)
+    : store_(std::move(store)) {}
 
 NodePtrList ArcherTopologyHandle::GetLFUNodes(const torch::Device& device) {
   NodePtrList nodes;
@@ -547,8 +546,8 @@ void ArcherTopologyHandle::BuildTopologyFromSpecs(
       node_ptr->tensor_ids = tensor_ids;
       int64_t byte_size = 0;
       for (auto& tensor_id : tensor_ids) {
-        auto it = kTensorIndex->find(tensor_id);
-        if (it != kTensorIndex->end()) {
+        auto it = store_->index().find(tensor_id);
+        if (it != store_->index().end()) {
           std::int64_t size_aligned =
               (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
           byte_size += size_aligned;
@@ -701,7 +700,7 @@ void ArcherTopologyHandle::BuildTopologyFromSpecs(
 
       int64_t param_offset = 0;
       for (auto& tensor_id : node_ptr->tensor_ids) {
-        auto it = kTensorIndex->find(tensor_id);
+        auto it = store_->index().find(tensor_id);
         auto& meta = it->second;
         int64_t size_aligned =
             (static_cast<int64_t>(meta.size) + kAioAlignment - 1) &
@@ -720,8 +719,7 @@ void ArcherTopologyHandle::BuildTopologyFromSpecs(
 
     for (size_t fi = 0; fi < file_ids.size(); fi++) {
       uint32_t fid = file_ids[fi];
-      auto [buf, buf_size] =
-          read_partition(kArcherTensorHandle->GetIndexFileName(fid));
+      auto [buf, buf_size] = read_partition(store_->GetIndexFileName(fid));
       assert(buf != nullptr);
 
       auto& placements = tensors_by_file[fid];
@@ -755,14 +753,14 @@ void ArcherTopologyHandle::BuildTopologyFromSpecs(
 NodePtr ArcherTopologyHandle::CreateDetachedNode(
     const std::vector<TensorID>& tensor_ids, int gpu_id) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (tensor_ids.empty() || gpu_id < 0 || kTensorIndex == nullptr) {
+  if (tensor_ids.empty() || gpu_id < 0 || store_ == nullptr) {
     throw std::invalid_argument("invalid detached expert node request");
   }
 
   std::int64_t aligned_bytes = 0;
   for (const TensorID tensor_id : tensor_ids) {
-    const auto meta = kTensorIndex->find(tensor_id);
-    if (meta == kTensorIndex->end() || meta->second.size == 0 ||
+    const auto meta = store_->index().find(tensor_id);
+    if (meta == store_->index().end() || meta->second.size == 0 ||
         meta->second.size > static_cast<std::uint64_t>(
                                 std::numeric_limits<std::int64_t>::max())) {
       throw std::invalid_argument("invalid detached expert tensor metadata");
@@ -961,8 +959,9 @@ ArcherTopologyHandle::GetNumLayersAndExperts() {
 void SetModuleDisk(std::vector<TensorID>& tensor_ids) {
   // DLOG_TRACE("SetModuleDisk {} tensors", tensor_ids.size());
   for (const auto& tensor_id : tensor_ids) {
-    // void* old_ptr = kTensorIndex->find(tensor_id)->second.tensor.data_ptr();
-    auto it = kTensorIndex->find(tensor_id);
+    // void* old_ptr =
+    // GetTensorStore()->index().find(tensor_id)->second.tensor.data_ptr();
+    auto it = GetTensorStore()->index().find(tensor_id);
 
     at::TensorOptions options;
     options = options.device(torch::kCPU);
@@ -982,14 +981,14 @@ void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
   // Check whether all tensors sit contiguously in the same partition file.
   // If so, read the whole region in one I/O call instead of per-tensor.
   bool contiguous = true;
-  auto first_it = kTensorIndex->find(tensor_ids[0]);
+  auto first_it = GetTensorStore()->index().find(tensor_ids[0]);
   std::uint32_t file_id = first_it->second.file_id;
   std::int64_t start_offset = first_it->second.offset;
   std::int64_t expected_offset = start_offset;
   std::int64_t total_aligned = 0;
 
   for (const auto& tensor_id : tensor_ids) {
-    auto it = kTensorIndex->find(tensor_id);
+    auto it = GetTensorStore()->index().find(tensor_id);
     std::int64_t sz =
         (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
     if (it->second.file_id != file_id || it->second.offset != expected_offset) {
@@ -1001,15 +1000,15 @@ void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
   }
 
   if (contiguous && total_aligned > 0) {
-    auto filename = kArcherTensorHandle->GetIndexFileName(file_id);
-    kArcherTensorHandle->ReadBulk(filename, host_ptr, on_demand, total_aligned,
-                                  start_offset);
+    auto filename = GetTensorStore()->GetIndexFileName(file_id);
+    GetTensorStore()->ReadBulk(filename, host_ptr, on_demand, total_aligned,
+                               start_offset);
   } else {
     std::int64_t offset = 0;
     for (const auto& tensor_id : tensor_ids) {
-      kArcherTensorHandle->ReadTensor(
+      GetTensorStore()->ReadTensor(
           tensor_id, static_cast<char*>(host_ptr) + offset, on_demand);
-      auto it = kTensorIndex->find(tensor_id);
+      auto it = GetTensorStore()->index().find(tensor_id);
       std::int64_t sz =
           (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
       offset += sz;
@@ -1018,7 +1017,7 @@ void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
 
   std::int64_t param_size = 0;
   for (const auto& tensor_id : tensor_ids) {
-    auto it = kTensorIndex->find(tensor_id);
+    auto it = GetTensorStore()->index().find(tensor_id);
     auto options = torch::TensorOptions()
                        .dtype(it->second.options.dtype())
                        .layout(it->second.options.layout())
@@ -1045,7 +1044,7 @@ void SetModuleMemoryFromDisk_Views(std::vector<TensorID>& tensor_ids,
                                    void* host_ptr) {
   std::int64_t param_size = 0;
   for (const auto& tensor_id : tensor_ids) {
-    auto it = kTensorIndex->find(tensor_id);
+    auto it = GetTensorStore()->index().find(tensor_id);
     auto options = torch::TensorOptions()
                        .dtype(it->second.options.dtype())
                        .layout(it->second.options.layout())
@@ -1074,7 +1073,7 @@ void SetModuleCudaMemoryFromCPU(std::vector<TensorID>& tensor_ids,
   // DLOG_TRACE("SetModuleCudaMemoryFromCPU {} tensors", tensor_ids.size());
   std::int64_t param_size = 0;
   for (const auto& tensor_id : tensor_ids) {
-    auto it = kTensorIndex->find(tensor_id);
+    auto it = GetTensorStore()->index().find(tensor_id);
     DLOG_TRACE("SetModuleCudaMemoryFromCPU tensor {} -> {}",
                it->second.DebugString(), device.str());
     auto tensor_options = torch::TensorOptions()
@@ -1099,14 +1098,15 @@ void SetModuleMemoryFromCuda(std::vector<TensorID>& tensor_ids,
                              void* host_ptr) {
   std::int64_t param_size = 0;
   for (const auto& tensor_id : tensor_ids) {
-    // void* old_ptr = kTensorIndex->find(tensor_id)->second.tensor.data_ptr();
+    // void* old_ptr =
+    // GetTensorStore()->index().find(tensor_id)->second.tensor.data_ptr();
 
-    auto it = kTensorIndex->find(tensor_id);
+    auto it = GetTensorStore()->index().find(tensor_id);
     DLOG_TRACE("SetModuleMemoryFromCuda tensor {}", it->second.DebugString());
     it->second.tensor.set_data(
         torch::from_blob((char*)host_ptr + param_size, it->second.shape,
                          DoNothingDeleter<void>{}, it->second.options));
-    // kArcherTensorHandle->UpdateTensorMap(old_ptr,
+    // GetTensorStore()->UpdateTensorMap(old_ptr,
     // it->second.tensor.data_ptr());
     std::int64_t size_aligned =
         (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);

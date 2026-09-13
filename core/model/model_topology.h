@@ -24,6 +24,8 @@
 #include "memory/memory_pool.h"
 #include "prefetch/expert_policy.h"
 
+class TensorStore;
+
 enum NodeState {
   NODE_STATE_NONE = 0x0,
   NODE_STATE_CACHED = 0x1,
@@ -166,7 +168,7 @@ class ArcherTopologyHandle : public base::noncopyable {
  public:
   DELETE_COPY_AND_ASSIGN(ArcherTopologyHandle);
 
-  ArcherTopologyHandle();
+  explicit ArcherTopologyHandle(std::shared_ptr<TensorStore> store);
   ~ArcherTopologyHandle() = default;
 
   bool IsLastNode(const NodePtr& node);
@@ -227,6 +229,7 @@ class ArcherTopologyHandle : public base::noncopyable {
   };
   void BuildTopologyFromSpecs(const std::vector<StageSpec>& specs);
 
+  std::shared_ptr<TensorStore> store_;
   Pipeline pipeline_;
   std::unordered_set<HashID> visited_;
   std::unordered_map<HashID, std::uint64_t> last_active_stage_;

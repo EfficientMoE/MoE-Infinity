@@ -28,8 +28,8 @@ class ArcherTensorHandle : public base::noncopyable {
  public:
   static constexpr int64_t kPartitionSize = 10LL * 1024 * 1024 * 1024;
 
-  explicit ArcherTensorHandle(const std::string& prefix,
-                              int num_io_threads = 0);
+  explicit ArcherTensorHandle(const std::string& prefix, int num_io_threads,
+                              ArcherTensorIndex* index);
   ~ArcherTensorHandle() = default;
 
   void StoreTensor(const std::uint32_t tensor_id, torch::Tensor& buffer);
@@ -73,6 +73,7 @@ class ArcherTensorHandle : public base::noncopyable {
   torch::ScalarType DerivativeDtypeToScalarType(const std::string& dtype) const;
 
   std::string prefix_;
+  ArcherTensorIndex* index_;
   ArcherPrioAioHandle prio_aio_handle_;
   std::uint32_t file_id_;
   std::int64_t file_offset_;
@@ -89,5 +90,3 @@ class ArcherTensorHandle : public base::noncopyable {
 
   bool is_serialized_ = false;
 };
-
-extern std::unique_ptr<ArcherTensorHandle> kArcherTensorHandle;

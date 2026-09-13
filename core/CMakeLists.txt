@@ -22,6 +22,8 @@ set(ARCHER_CORE_CXX_SOURCES
   # parallel
   ${CMAKE_SOURCE_DIR}/core/parallel/expert_dispatcher.cpp
   ${CMAKE_SOURCE_DIR}/core/parallel/expert_module.cpp
+  # store
+  ${CMAKE_SOURCE_DIR}/core/store/tensor_store.cpp
   # aio
   ${CMAKE_SOURCE_DIR}/core/aio/archer_aio_thread.cpp
   ${CMAKE_SOURCE_DIR}/core/aio/archer_prio_aio_handle.cpp

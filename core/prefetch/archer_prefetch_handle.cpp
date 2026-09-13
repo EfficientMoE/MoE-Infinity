@@ -10,8 +10,6 @@
 #include <stdexcept>
 #include <cuda_runtime_api.h>
 #include <torch/extension.h>
-#include "aio/archer_tensor_handle.h"
-#include "aio/archer_tensor_index.h"
 #include "common/pytorch.h"
 #include "common/time.h"
 #include "memory/memory_pool.h"
@@ -46,10 +44,9 @@ ArcherPrefetchHandle::ArcherPrefetchHandle(const std::string& prefix,
   if (io_threads_env != nullptr) {
     num_io_threads = std::atoi(io_threads_env);
   }
-  kTensorIndex = std::make_unique<ArcherTensorIndex>();
-  kArcherTensorHandle =
-      std::make_unique<ArcherTensorHandle>(prefix, num_io_threads);
-  kTopologyHandle = std::make_unique<ArcherTopologyHandle>();
+  store_ = CreateV1TensorStore(prefix, num_io_threads);
+  SetCurrentTensorStore(store_);
+  kTopologyHandle = std::make_unique<ArcherTopologyHandle>(store_);
   kTaskPool = std::make_unique<ArcherTaskPool>();
   InitExpertResidency();
   kDeviceMemoryPool = std::make_unique<DeviceMemoryPool>();
@@ -101,8 +98,8 @@ ArcherPrefetchHandle::~ArcherPrefetchHandle() {
 
 void ArcherPrefetchHandle::CleanUpResources() {
   kTaskPool.reset();
-  kArcherTensorHandle.reset();
-  kTensorIndex.reset();
+  SetCurrentTensorStore(nullptr);
+  store_.reset();
   kTopologyHandle.reset();
   kDeviceMemoryPool.reset();
   kHostMemoryPool.reset();
@@ -143,41 +140,40 @@ void ArcherPrefetchHandle::ResetCache() {
 
 std::vector<std::unordered_map<std::string, py::object>>
 ArcherPrefetchHandle::GetCanonicalTensorIndexSnapshot() const {
-  return kArcherTensorHandle->GetCanonicalTensorIndexSnapshot();
+  return store_->GetCanonicalTensorIndexSnapshot();
 }
 
 void ArcherPrefetchHandle::BeginDerivativeOverlay(
     const std::string& generation, std::int64_t canonical_max_tensor_id,
     std::int64_t canonical_max_file_id) {
-  kArcherTensorHandle->BeginDerivativeOverlay(
-      generation, canonical_max_tensor_id, canonical_max_file_id);
+  store_->BeginDerivativeOverlay(generation, canonical_max_tensor_id,
+                                 canonical_max_file_id);
 }
 
 void ArcherPrefetchHandle::RegisterDerivativeTensor(
     const std::string& generation, std::int64_t tensor_id, std::int64_t file_id,
     std::int64_t offset, std::int64_t size,
     const std::vector<std::int64_t>& shape, const std::string& dtype) {
-  kArcherTensorHandle->RegisterDerivativeTensor(generation, tensor_id, file_id,
-                                                offset, size, shape, dtype);
+  store_->RegisterDerivativeTensor(generation, tensor_id, file_id, offset, size,
+                                   shape, dtype);
 }
 
 void ArcherPrefetchHandle::CommitDerivativeOverlay(
     const std::string& generation) {
-  kArcherTensorHandle->CommitDerivativeOverlay(generation);
+  store_->CommitDerivativeOverlay(generation);
 }
 
 void ArcherPrefetchHandle::AbortDerivativeOverlay(
     const std::string& generation) {
-  kArcherTensorHandle->AbortDerivativeOverlay(generation);
+  store_->AbortDerivativeOverlay(generation);
 }
 
 void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
                                          torch::Tensor& buffer,
                                          std::uint32_t explicit_id) {
-  auto tensor_id =
-      (explicit_id != UINT32_MAX)
-          ? explicit_id
-          : kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
+  auto tensor_id = (explicit_id != UINT32_MAX)
+                       ? explicit_id
+                       : store_->GetTensorId((void*)buffer.data_ptr());
   void* old_ptr = (void*)buffer.data_ptr();
   DLOG_TRACE("Acquire tensor ", tensor_id, old_ptr);
 
@@ -222,16 +218,15 @@ void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
     }
   }
 
-  kArcherTensorHandle->SetTensor(tensor_id, buffer);
-  kArcherTensorHandle->UpdateTensorMap(old_ptr, (void*)buffer.data_ptr());
+  store_->SetTensor(tensor_id, buffer);
+  store_->UpdateTensorMap(old_ptr, (void*)buffer.data_ptr());
 }
 void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
                                          torch::Tensor& buffer,
                                          std::uint32_t explicit_id) {
-  auto tensor_id =
-      (explicit_id != UINT32_MAX)
-          ? explicit_id
-          : kArcherTensorHandle->GetTensorId((void*)buffer.data_ptr());
+  auto tensor_id = (explicit_id != UINT32_MAX)
+                       ? explicit_id
+                       : store_->GetTensorId((void*)buffer.data_ptr());
   void* old_ptr = (void*)buffer.data_ptr();
   DLOG_TRACE("Release tensor ", tensor_id, old_ptr);
 
@@ -291,7 +286,7 @@ void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
   options = options.dtype(buffer.dtype());
   auto zero_tensor = torch::zeros({1}, options);
   buffer.set_data(zero_tensor);
-  kArcherTensorHandle->UpdateTensorMap(old_ptr, (void*)buffer.data_ptr());
+  store_->UpdateTensorMap(old_ptr, (void*)buffer.data_ptr());
 }
 
 void ArcherPrefetchHandle::PrefetchTensors(
@@ -409,31 +404,29 @@ void ArcherPrefetchHandle::FetchTensors(
 
 void ArcherPrefetchHandle::OffloadTensor(torch::Tensor& tensor,
                                          const std::uint32_t tensor_id) {
-  kArcherTensorHandle->StoreTensor(tensor_id, tensor);
+  store_->StoreTensor(tensor_id, tensor);
 
   auto ckpt_index_path = prefix_ + std::string(ARCHER_IHDEX_NAME);
 
   std::unique_lock<std::mutex> lock(mutex_);
-  kTensorIndex->Serialize(ckpt_index_path.c_str());
+  store_->index().Serialize(ckpt_index_path.c_str());
 }
 
 void ArcherPrefetchHandle::RegisterTensor(torch::Tensor& tensor,
                                           const std::uint32_t tensor_id) {
-  kArcherTensorHandle->RegisterTensor(tensor_id, tensor);
+  store_->RegisterTensor(tensor_id, tensor);
 }
 
 void ArcherPrefetchHandle::RegisterModule(torch::nn::Module& module) {
   for (auto it = module.parameters().begin(); it != module.parameters().end();
        ++it) {
-    auto tensor_id =
-        kArcherTensorHandle->GetTensorId((void*)(*it).unsafeGetTensorImpl());
-    kArcherTensorHandle->RegisterTensor(tensor_id, *it);
+    auto tensor_id = store_->GetTensorId((void*)(*it).unsafeGetTensorImpl());
+    store_->RegisterTensor(tensor_id, *it);
   }
 
   for (auto it = module.buffers().begin(); it != module.buffers().end(); ++it) {
-    auto tensor_id =
-        kArcherTensorHandle->GetTensorId((void*)(*it).unsafeGetTensorImpl());
-    kArcherTensorHandle->RegisterTensor(tensor_id, *it);
+    auto tensor_id = store_->GetTensorId((void*)(*it).unsafeGetTensorImpl());
+    store_->RegisterTensor(tensor_id, *it);
   }
 }
 
@@ -629,9 +622,9 @@ std::size_t ArcherPrefetchHandle::PrefetchExpertVariants(
 
 bool ArcherPrefetchHandle::IsTensorOffloaded(const std::uint32_t tensor_id) {
   std::unique_lock<std::mutex> lock(mutex_);
-  auto it = kTensorIndex->find(tensor_id);
-  // DLOG_TRACE("Check tensor {} {}", tensor_id, it == kTensorIndex->end());
-  bool is_offloaded = it != kTensorIndex->end();
+  auto it = store_->index().find(tensor_id);
+  // DLOG_TRACE("Check tensor {} {}", tensor_id, it == store_->index().end());
+  bool is_offloaded = it != store_->index().end();
   if (is_offloaded) {
     it->second.id = tensor_id;
   }
@@ -659,19 +652,18 @@ void ArcherPrefetchHandle::SetTensorDevice(torch::Tensor& tensor,
 }
 
 bool ArcherPrefetchHandle::IsTensorIndexInitialized() const {
-  return kArcherTensorHandle->IsTensorIndexInitialized();
+  return store_->IsTensorIndexInitialized();
 }
 
 bool ArcherPrefetchHandle::IsTensorOnDevice(const torch::Tensor& tensor) const {
-  auto tensor_id = kArcherTensorHandle->GetTensorId((void*)tensor.data_ptr());
+  auto tensor_id = store_->GetTensorId((void*)tensor.data_ptr());
   auto node = kTopologyHandle->GetNodeFromTensorID(tensor_id);
   return node->device.is_cuda();
 }
 
 void ArcherPrefetchHandle::UpdateTensorMap(std::uint64_t old_data_ptr,
                                            std::uint64_t new_data_ptr) {
-  kArcherTensorHandle->UpdateTensorMap((void*)old_data_ptr,
-                                       (void*)new_data_ptr);
+  store_->UpdateTensorMap((void*)old_data_ptr, (void*)new_data_ptr);
 }
 
 bool ArcherPrefetchHandle::IsTensorOnDevice(const TensorID tensor_id) const {

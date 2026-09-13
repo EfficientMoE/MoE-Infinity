@@ -9,6 +9,8 @@
 #include "model/moe.h"
 #include "kernel/ops.h"
 
+void BindTensorStoreSurface(py::class_<ArcherPrefetchHandle>& cls);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("init_moe_layer", InitMoELayer,
         "Initialize the MoE layer with the specified parameters.");
@@ -32,18 +34,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readonly("source_device", &PrefetchSample::source_device)
       .def_readonly("outcome", &PrefetchSample::outcome);
 
-  py::class_<ArcherPrefetchHandle>(m, "prefetch_handle")
-      .def(py::init<const std::string&, const double>())
-
-      .def("offload", &ArcherPrefetchHandle::OffloadTensor)
-      .def("register", (void(ArcherPrefetchHandle::*)(torch::Tensor&,
-                                                      const std::uint32_t)) &
-                           ArcherPrefetchHandle::RegisterTensor)
-      //    .def("register",
-      //         (void(ArcherPrefetchHandle::*)(torch::nn::Module&)) &
-      //             ArcherPrefetchHandle::RegisterModule)
-      .def("register", (void(ArcherPrefetchHandle::*)(torch::Tensor*)) &
-                           ArcherPrefetchHandle::RegisterTensor)
+  py::class_<ArcherPrefetchHandle> prefetch_handle_cls(m, "prefetch_handle");
+  BindTensorStoreSurface(prefetch_handle_cls);
+  prefetch_handle_cls.def(py::init<const std::string&, const double>())
       .def("set_tensor_device",
            (void(ArcherPrefetchHandle::*)(torch::Tensor&, torch::Device)) &
                ArcherPrefetchHandle::SetTensorDevice)
@@ -105,12 +98,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            &ArcherPrefetchHandle::PrefetchExpertVariants, py::arg("keys"),
            py::arg("priority") = kBackgroundPrefetchPriority,
            py::arg("phase") = "mixed")
-      .def("update_tensor_map",
-           (void(ArcherPrefetchHandle::*)(std::uint64_t, std::uint64_t)) &
-               ArcherPrefetchHandle::UpdateTensorMap)
-      .def("is_tensor_offloaded", &ArcherPrefetchHandle::IsTensorOffloaded)
-      .def("is_tensor_index_initialized",
-           &ArcherPrefetchHandle::IsTensorIndexInitialized)
       .def("is_tensor_on_device",
            (bool(ArcherPrefetchHandle::*)(const torch::Tensor&) const) &
                ArcherPrefetchHandle::IsTensorOnDevice)
@@ -139,16 +126,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            &ArcherPrefetchHandle::ReplaceCacheCandidates)
       .def("enqueue_prefetch", &ArcherPrefetchHandle::EnqueuePrefetch)
       .def("fetch_tensors", &ArcherPrefetchHandle::FetchTensors)
-      .def("get_canonical_tensor_index_snapshot",
-           &ArcherPrefetchHandle::GetCanonicalTensorIndexSnapshot)
-      .def("begin_derivative_overlay",
-           &ArcherPrefetchHandle::BeginDerivativeOverlay)
-      .def("register_derivative_tensor",
-           &ArcherPrefetchHandle::RegisterDerivativeTensor)
-      .def("commit_derivative_overlay",
-           &ArcherPrefetchHandle::CommitDerivativeOverlay)
-      .def("abort_derivative_overlay",
-           &ArcherPrefetchHandle::AbortDerivativeOverlay)
       .def("clean_up_resources", &ArcherPrefetchHandle::CleanUpResources)
       .def("resize_expert_cache", &ArcherPrefetchHandle::ResizeExpertCache,
            py::arg("device_id"), py::arg("target_bytes"))
