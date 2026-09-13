@@ -61,7 +61,7 @@ markers = [
 ]
 
 [tool.mypy]
-files = ["moe_infinity/utils/hf_config.py", "moe_infinity/utils/config.py"]
+files = ["moe_infinity/utils/config.py"]
 follow_imports = "skip"
 python_version = "3.9"
 ignore_missing_imports = true
