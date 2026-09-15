@@ -2183,7 +2183,16 @@ class ContinuousBatchingEngine:
     def _execute_batch(self, batch: BatchMetadata) -> torch.Tensor:
         has_prefill = any(batch.is_prefill)
         has_decode = any(not p for p in batch.is_prefill)
-        uses_paged = bool(self.paged_attention_registry.bindings)
+        # The layer registry is only populated when the KV cache has a bound
+        # storage (and it binds Qwen3 alone); a spec-built backend leaves it
+        # empty while a *PagedAttention shim is still active in the runner.
+        # A mixed prefill+decode batch must be split in that case too: the
+        # backend keys on ``is_prefill = all(...)`` and would run the packed
+        # prefill rows down its decode path (``block_tables first dimension
+        # must equal num_seqs``).
+        uses_paged = bool(self.paged_attention_registry.bindings) or bool(
+            self.model_runner._get_paged_attention_classes()
+        )
 
         phase_policy_enabled = bool(
             self.config.get("phase_specific_expert_policy", False)
