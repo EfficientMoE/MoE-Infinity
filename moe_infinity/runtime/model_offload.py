@@ -60,6 +60,11 @@ from moe_store.wrappers import (
     SyncOlmoeMoEBlock,
     SyncQwen3_5MoeSparseMoeBlock,
 )
+
+try:
+    from moe_store.wrappers import OlmoePagedAttention
+except ImportError:
+    OlmoePagedAttention = None
 from safetensors import safe_open
 from tqdm import tqdm
 from transformers import PretrainedConfig
@@ -998,6 +1003,13 @@ class OffloadEngine(object):
         transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock = (
             SyncOlmoeMoEBlock
         )
+        if OlmoePagedAttention is not None:
+            transformers.models.olmoe.modeling_olmoe._old_olmoe_attention = (
+                transformers.models.olmoe.modeling_olmoe.OlmoeAttention
+            )
+            transformers.models.olmoe.modeling_olmoe.OlmoeAttention = (
+                OlmoePagedAttention
+            )
 
         transformers.models.jamba.modeling_jamba._old_jamba_moe = (
             transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock
@@ -1613,6 +1625,10 @@ class OffloadEngine(object):
         _q35_mod = transformers.models.qwen3_5_moe.modeling_qwen3_5_moe
         if hasattr(_q35_mod, "_old_qwen3_5_sparse_moe"):
             _q35_mod.Qwen3_5MoeSparseMoeBlock = _q35_mod._old_qwen3_5_sparse_moe
+
+        _olmoe_mod = transformers.models.olmoe.modeling_olmoe
+        if hasattr(_olmoe_mod, "_old_olmoe_attention"):
+            _olmoe_mod.OlmoeAttention = _olmoe_mod._old_olmoe_attention
 
         try:
             import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
