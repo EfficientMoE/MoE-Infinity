@@ -506,3 +506,19 @@ def test_every_prepared_buffer_uses_exact_storage_device() -> None:
     tensors = prepared.tensor_values()
     assert tensors
     assert all(tensor.device == storage.spec.device for tensor in tensors)
+
+
+def test_olmoe_paged_attention_is_in_runner_match_set() -> None:
+    class OlmoePagedAttention:
+        @classmethod
+        def set_paged_context(cls, backend: object, metadata: object) -> None:
+            _ = backend, metadata
+
+        @classmethod
+        def clear_paged_context(cls) -> None:
+            pass
+
+    model = types.SimpleNamespace(modules=lambda: [OlmoePagedAttention()])
+    runner = ModelRunner(model, MockOffloadEngine(), device=torch.device("cpu"))
+
+    assert runner._get_paged_attention_classes() == [OlmoePagedAttention]
