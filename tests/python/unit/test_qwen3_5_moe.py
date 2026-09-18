@@ -168,3 +168,38 @@ def test_qwen3_5_topology_distinguishes_shared_and_routed_experts():
         if ".shared_expert" in name
     }
     assert shared_ids <= set(shared_stage)
+
+
+def _qwen35_resident(name: str) -> bool:
+    engine = object.__new__(OffloadEngine)
+    engine.config = _arch("Qwen3_5MoeForConditionalGeneration")
+    return engine._is_shared_expert_param(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "model.visual.patch_embed.proj.weight",
+        "model.visual.pos_embed.weight",
+        "model.visual.blocks.0.attn.qkv.weight",
+        "model.visual.blocks.23.mlp.linear_fc2.weight",
+        "model.visual.merger.linear_fc1.weight",
+        "model.language_model.embed_tokens.weight",
+        "model.language_model.layers.0.mlp.shared_expert.gate_proj.weight",
+        "lm_head.weight",
+    ],
+)
+def test_qwen3_5_vision_tower_and_backbone_stay_resident(name):
+    assert _qwen35_resident(name) is True
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "model.language_model.layers.13.mlp.experts.7.gate_proj.weight",
+        "model.language_model.layers.0.mlp.experts.255.down_proj.weight",
+        "mtp.layers.0.mlp.experts.0.gate_proj.weight",
+    ],
+)
+def test_qwen3_5_routed_experts_and_mtp_stay_offloaded(name):
+    assert _qwen35_resident(name) is False
