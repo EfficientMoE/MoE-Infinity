@@ -67,7 +67,9 @@ jobs:
 
       - name: Install CPU-compatible runtime deps
         run: |
-          grep -v -E '^(flash-attn|nvtx|sglang-kernel)' requirements.txt \
+          # Temporary until moe-store~=0.2.1 is published on PyPI.
+          pip install --no-deps 'moe-store @ git+https://github.com/EfficientMoE/moe-store.git@v0.2.0'
+          grep -v -E '^(flash-attn|moe-store|nvtx|sglang-kernel)' requirements.txt \
             | pip install -r /dev/stdin 2>&1 || true
 
       - name: Install test tools
