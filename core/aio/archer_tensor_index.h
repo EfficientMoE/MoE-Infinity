@@ -17,8 +17,6 @@
 #include "common/pytorch.h"
 #include "common/types.h"
 
-static const std::uint32_t kTensorIndexVersion = 1;
-
 struct TensorStorageMeta {
   std::uint32_t file_id;
   std::int64_t offset;

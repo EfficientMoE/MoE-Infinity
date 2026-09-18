@@ -63,3 +63,16 @@ def test_testing_definition_is_consistent_across_build_systems() -> None:
     )
     assert "target_compile_definitions(archer_core" in core_cmake
     assert "target_compile_definitions(prefetch_op" in extensions_cmake
+
+
+def test_legacy_tensor_store_globals_are_absent_from_engine_core() -> None:
+    forbidden = ("kArcherTensorHandle", "kTensorIndex")
+    offenders = []
+    for path in (ROOT / "core").rglob("*"):
+        if not path.is_file() or "tensor_store" in path.name:
+            continue
+        text = path.read_text(errors="ignore")
+        if any(symbol in text for symbol in forbidden):
+            offenders.append(path.relative_to(ROOT).as_posix())
+
+    assert offenders == []
