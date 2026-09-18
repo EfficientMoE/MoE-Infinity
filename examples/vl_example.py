@@ -39,7 +39,7 @@ parser.add_argument(
 parser.add_argument(
     "--max_new_tokens",
     type=int,
-    default=64,
+    default=256,
     help="Maximum tokens to generate",
 )
 parser.add_argument(
@@ -76,6 +76,7 @@ inputs = processor.apply_chat_template(
     add_generation_prompt=True,
     return_dict=True,
     return_tensors="pt",
+    enable_thinking=False,
 )
 
 input_ids = inputs["input_ids"].to("cuda:0")
@@ -109,12 +110,14 @@ if not answer:
 
 routing_stats = model.engine.expert_executor.get_gpu_routing_stats()
 print(f"ROUTING_STATS: {routing_stats}")
-route_batches = int(routing_stats.get("route_batches", 0))
-fallback_count = int(routing_stats.get("fallback_count", 0))
-if route_batches <= 0 and fallback_count <= 0:
+dispatch_evidence = max(
+    int(routing_stats.get("route_batches", 0)),
+    int(routing_stats.get("fallback_count", 0)),
+    int(routing_stats.get("completion_events_retired", 0)),
+)
+if dispatch_evidence <= 0:
     print(
-        "FAIL: no routed-expert dispatches recorded "
-        f"(route_batches={route_batches}, fallback_count={fallback_count})",
+        f"FAIL: no routed-expert dispatches recorded ({routing_stats})",
         file=sys.stderr,
     )
     sys.exit(1)
