@@ -103,7 +103,8 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
         (host_memory_ptr == nullptr && device_memory_ptr == nullptr);
 
     if (from_disk && target_device.is_cuda()) {
-      // Pipelined path: disk -> host -> GPU with per-tensor overlap
+      // A v2 expert group is contiguous by construction. Read the complete
+      // group once, then transfer its packed host buffer to the GPU.
       host_memory_ptr =
           kHostMemoryPool->AllocateMemory(id, byte_size, CPU_DEVICE);
       assert(host_memory_ptr != nullptr);
@@ -119,33 +120,19 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
       }
 
       auto start_time = MCIROSECONDS_SINCE_EPOCH;
-      std::int64_t param_offset = 0;
-      for (const auto& tensor_id : tensor_ids) {
-        // Read tensor from disk into host buffer
-        {
+      {
 #ifndef NVTX_DISABLE
-          nvtx3::scoped_range r_disk_cpu("disk_to_cpu");
+        nvtx3::scoped_range r_disk_cpu("disk_to_cpu");
 #endif
-          GetTensorStore()->ReadTensor(
-              tensor_id, static_cast<char*>(host_memory_ptr) + param_offset,
-              on_demand);
-        }
+        SetModuleMemoryFromDisk(tensor_ids, host_memory_ptr, on_demand);
+      }
 
-        auto it = GetTensorStore()->index().find(tensor_id);
-        std::int64_t size_aligned =
-            (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
-
-        // Async copy this tensor's data to GPU (overlaps with next disk read)
-        {
+      {
 #ifndef NVTX_DISABLE
-          nvtx3::scoped_range r_h2d("cpu_to_gpu");
+        nvtx3::scoped_range r_h2d("cpu_to_gpu");
 #endif
-          CudaMemcpyAsync(static_cast<char*>(device_memory_ptr) + param_offset,
-                          static_cast<char*>(host_memory_ptr) + param_offset,
-                          size_aligned, cudaMemcpyHostToDevice, h2d_stream);
-        }
-
-        param_offset += size_aligned;
+        CudaMemcpyAsync(device_memory_ptr, host_memory_ptr, byte_size,
+                        cudaMemcpyHostToDevice, h2d_stream);
       }
       {
 #ifndef NVTX_DISABLE
@@ -162,8 +149,7 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
         cudaStreamDestroy(h2d_stream);
       }
 
-      // Create torch tensor views on both host and device buffers
-      SetModuleMemoryFromDisk_Views(tensor_ids, host_memory_ptr);
+      // SetModuleMemoryFromDisk created the host views while filling the group.
       SetModuleCudaMemoryFromCPU(tensor_ids, device_memory_ptr, target_device);
       auto end_time = MCIROSECONDS_SINCE_EPOCH;
       DLOG_TRACE("PipelinedDiskToGpu time: {} us", end_time - start_time);
