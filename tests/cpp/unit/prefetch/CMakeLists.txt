@@ -44,6 +44,21 @@ target_link_libraries(test_topology_lifecycle PRIVATE archer_core GTest::gtest_m
 target_include_directories(test_topology_lifecycle PRIVATE ${CMAKE_SOURCE_DIR}/core)
 target_link_libraries(test_topology_lifecycle PRIVATE Python3::Python)
 add_test(NAME topology_lifecycle COMMAND test_topology_lifecycle)
+
+add_executable(test_tensor_store_one_read
+  test_tensor_store_one_read.cpp
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/v4_fp4/fp8_dequant.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/v4_fp4/mxfp4_dequant.cu
+)
+set_target_properties(test_tensor_store_one_read PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+)
+target_link_libraries(test_tensor_store_one_read PRIVATE archer_core GTest::gtest_main)
+target_include_directories(test_tensor_store_one_read PRIVATE ${CMAKE_SOURCE_DIR}/core)
+target_link_libraries(test_tensor_store_one_read PRIVATE Python3::Python)
+add_test(NAME tensor_store_one_read COMMAND test_tensor_store_one_read)
+
 cmake_minimum_required(VERSION 3.18)
 
 find_package(GTest REQUIRED)
