@@ -67,11 +67,10 @@ jobs:
 
       - name: Install CPU-compatible runtime deps
         run: |
-          # Temporary until moe-store~=0.2.1 is published on PyPI. Pinned to
-          # the feat/minimax-m3-wrapper SHA (EfficientMoE/moe-store#8) for the
-          # SyncMiniMaxM3VLSparseMoeBlock import; re-pin to the v0.2.1 tag
-          # once that PR merges and the release is cut.
-          pip install --no-deps 'moe-store @ git+https://github.com/EfficientMoE/moe-store.git@ab31ec1b8534551a9ec4490b708484dbf3228265'
+          # Installs from the release tag until the PyPI publish of
+          # moe-store 0.2.1 is verified; then this can move to the plain
+          # requirements.txt pin (moe-store~=0.2.1).
+          pip install --no-deps 'moe-store @ git+https://github.com/EfficientMoE/moe-store.git@v0.2.1'
           grep -v -E '^(flash-attn|moe-store|nvtx|sglang-kernel)' requirements.txt \
             | pip install -r /dev/stdin 2>&1 || true
 
