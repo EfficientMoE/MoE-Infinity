@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 
 class SequenceStatus(Enum):
@@ -36,6 +36,7 @@ class SequenceData:
     seq_id: int
     prompt_token_ids: list[int]
     sampling_params: SamplingParams
+    multimodal_inputs: Optional[dict[str, Any]] = None
     output_token_ids: list[int] = field(default_factory=list)
     status: SequenceStatus = SequenceStatus.WAITING
     num_computed_tokens: int = 0
