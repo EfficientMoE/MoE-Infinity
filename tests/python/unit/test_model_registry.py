@@ -34,6 +34,8 @@ def test_all_models_registered():
         expected_models.add("qwen3vlmoe")
     if "qwen3omnimoe" in MODEL_MAPPING_NAMES:
         expected_models.add("qwen3omnimoe")
+    if "minimaxm3" in MODEL_MAPPING_NAMES:
+        expected_models.add("minimaxm3")
     actual_models = set(MODEL_MAPPING_NAMES.keys())
     assert expected_models == actual_models, (
         f"Missing: {expected_models - actual_models}, "

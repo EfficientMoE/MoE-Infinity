@@ -24,6 +24,7 @@ from moe_store.wrappers import (
     SyncGlmMoeDsaMoEBlock,
     SyncGptOssMLP,
     SyncJambaMoEBlock,
+    SyncMiniMaxM3VLSparseMoeBlock,
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
     SyncOlmoeMoEBlock,
@@ -114,6 +115,13 @@ def install_transformers_model_overrides() -> None:
     except (ImportError, AttributeError):
         pass
 
+    try:
+        minimax_m3 = _model_module("minimax_m3_vl")
+        minimax_m3._old_minimax_m3_vl_moe = minimax_m3.MiniMaxM3VLSparseMoeBlock
+        minimax_m3.MiniMaxM3VLSparseMoeBlock = SyncMiniMaxM3VLSparseMoeBlock
+    except (ImportError, AttributeError):
+        pass
+
 
 def restore_context_transformers_model_overrides() -> None:
     gpt_oss = _model_module("gpt_oss")
@@ -138,6 +146,15 @@ def restore_context_transformers_model_overrides() -> None:
         glm5_next = _model_module("glm5_next")
         if hasattr(glm5_next, "_old_glm5_next_moe"):
             glm5_next.Glm5NextTextMoE = glm5_next._old_glm5_next_moe
+    except (ImportError, AttributeError):
+        pass
+
+    try:
+        minimax_m3 = _model_module("minimax_m3_vl")
+        if hasattr(minimax_m3, "_old_minimax_m3_vl_moe"):
+            minimax_m3.MiniMaxM3VLSparseMoeBlock = (
+                minimax_m3._old_minimax_m3_vl_moe
+            )
     except (ImportError, AttributeError):
         pass
 
