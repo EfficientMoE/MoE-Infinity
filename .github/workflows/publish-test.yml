@@ -61,6 +61,11 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install "setuptools>=78.1.1,<82" "setuptools-scm>=8" wheel ninja py-cpuinfo build
           python3 -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+          # setup.py imports moe_store at build time to vendor its csrc into
+          # the _store extension (_moe_store_csrc_dir). Install the exact pin
+          # from requirements.txt. --no-deps: only the package files are needed
+          # (importing moe_store is stdlib-only) and torch is installed above.
+          python3 -m pip install --no-deps "$(grep -E '^moe-store' requirements.txt)"
 
       - name: Fetch CUTLASS headers
         run: |
@@ -85,8 +90,12 @@ jobs:
 
       - name: Build Source
         if: ${{ matrix.python-version == '3.10' }}
+        # --no-isolation: an isolated build env would pip-install bare torch
+        # (CUDA-enabled default wheel), making setup.py take the cuda_available
+        # path and fail on the missing moe_store import. The runner env already
+        # has everything setup.py needs.
         run: |
-          python3 -m build --sdist
+          python3 -m build --sdist --no-isolation
 
       - name: Rename Wheel
         run: |
