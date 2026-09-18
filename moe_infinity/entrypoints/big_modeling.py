@@ -187,7 +187,13 @@ class MoE:
         # GLM-DSA remains unsupported by the native engine. Qwen3.5 builds the
         # native components, but generate() below admits them only for greedy,
         # batch-1 DFlash; ordinary generation still uses HF's hybrid-cache path.
-        if getattr(model_config, "model_type", "") == "glm_moe_dsa":
+        # MiniMax-M3 uses block-sparse (Lightning Indexer) attention that the
+        # native paged backend does not support yet, so it runs through HF's
+        # eager path too (initial support; optimized kernels are a follow-up).
+        if getattr(model_config, "model_type", "") in (
+            "glm_moe_dsa",
+            "minimax_m3_vl",
+        ):
             self.use_native_engine = False
         default_max_seq_length = getattr(
             model_config, "max_position_embeddings", None
@@ -239,6 +245,7 @@ class MoE:
                 or arch == "gptoss"
                 or arch == "qwen3"
                 or arch == "qwen3_5"
+                or arch == "minimaxm3"
             ):
                 is_flash_attn_available = False
         except ImportError:

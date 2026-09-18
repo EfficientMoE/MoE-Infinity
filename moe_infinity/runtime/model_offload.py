@@ -51,6 +51,7 @@ from moe_store.wrappers import (
     SyncGlmMoeDsaMoEBlock,
     SyncGptOssMLP,
     SyncJambaMoEBlock,
+    SyncMiniMaxM3VLSparseMoeBlock,
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
     SyncOlmoeMoEBlock,
@@ -1344,6 +1345,7 @@ class OffloadEngine(object):
                         or isinstance(module, SyncJambaMoEBlock)
                         or isinstance(module, SyncGlmMoeDsaMoEBlock)
                         or isinstance(module, SyncGlm5NextMoEBlock)
+                        or isinstance(module, SyncMiniMaxM3VLSparseMoeBlock)
                     ):
                         module.archer_engine = self.archer_engine
                         module.archer_config = self.archer_config
@@ -1375,18 +1377,22 @@ class OffloadEngine(object):
                     "glm_moe_dsa",
                     "qwen3_5_moe",
                     "glm5_next",
+                    "minimax_m3_vl",
                 ):
                     self._load_resident_shared_experts(model)
                     for _name in list(self.name_id_map.keys()):
                         if self._is_shared_expert_param(_name):
                             del self.name_id_map[_name]
 
-                # glm5_next keeps the whole non-expert backbone resident, so
-                # no archer forward hook ever moves those modules; place them
-                # on the GPU once here (offload-managed tensors stay behind as
-                # placeholders and are excluded via name_id_map membership).
+                # glm5_next and minimax_m3_vl keep the whole non-expert
+                # backbone resident (attention, embeddings, shared expert,
+                # vision tower / multimodal projector), so no archer forward
+                # hook ever moves those modules; place them on the GPU once
+                # here (offload-managed tensors stay behind as placeholders and
+                # are excluded via name_id_map membership).
                 if (
-                    getattr(self.config, "model_type", "") == "glm5_next"
+                    getattr(self.config, "model_type", "")
+                    in ("glm5_next", "minimax_m3_vl")
                     and torch.cuda.is_available()
                 ):
                     _resident_device = torch.device("cuda", 0)
@@ -1554,6 +1560,14 @@ class OffloadEngine(object):
         # KDA linear attention, DSA indexer, mHC hyper-connections, vision
         # tower (model.visual.*), and lm_head all stay resident.
         if getattr(self.config, "model_type", "") == "glm5_next":
+            _, expert_id = parse_expert_id(name, self.config)
+            return expert_id is None
+        # MiniMax-M3 (minimax_m3_vl): same whole-namespace policy as glm5_next.
+        # Only the routed experts are offloaded; the text backbone, shared
+        # expert, vision tower (model.vision_tower.*), and multimodal projector
+        # all stay resident (parse_expert_id returns None for every non-routed
+        # key, including the shared_experts already caught above).
+        if getattr(self.config, "model_type", "") == "minimax_m3_vl":
             _, expert_id = parse_expert_id(name, self.config)
             return expert_id is None
         return False
