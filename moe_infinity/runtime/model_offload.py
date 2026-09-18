@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Callable, Dict, Optional, Type, Union
 
 import torch
-import transformers
 
 try:
     from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear
@@ -44,10 +43,7 @@ from moe_store.parsing.quantization import (
     validate_quantization_support,
 )
 from moe_store.wrappers import (
-    DeepseekV2PagedAttention,
-    DeepseekV3PagedAttention,
     Qwen3MoEBlock,
-    Qwen3PagedAttention,
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
@@ -60,17 +56,17 @@ from moe_store.wrappers import (
     SyncOlmoeMoEBlock,
     SyncQwen3_5MoeSparseMoeBlock,
 )
-
-try:
-    from moe_store.wrappers import OlmoePagedAttention
-except ImportError:
-    OlmoePagedAttention = None
 from safetensors import safe_open
 from tqdm import tqdm
 from transformers import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
 from moe_infinity.boundary import ArcherEngineHooks
+from moe_infinity.boundary.transformers_model_overrides import (
+    install_transformers_model_overrides,
+    restore_context_transformers_model_overrides,
+    restore_runtime_transformers_model_overrides,
+)
 from moe_infinity.common import parse_expert_type
 from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import (
@@ -970,97 +966,7 @@ class OffloadEngine(object):
         )
 
         activate_empty_init()
-
-        transformers.models.nllb_moe.modeling_nllb_moe._old_sparse_mlp = (
-            transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP
-        )
-        transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP = (
-            SyncNllbMoeSparseMLP
-        )
-        transformers.models.mixtral.modeling_mixtral._old_sparse_mlp = (
-            transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock
-        )
-        transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock = (
-            SyncMixtralSparseMoeBlock
-        )
-
-        transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
-        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = Qwen3MoEBlock
-
-        transformers.models.qwen3_moe.modeling_qwen3_moe._old_qwen3_attention = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention
-        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention = (
-            Qwen3PagedAttention
-        )
-
-        transformers.models.dbrx.modeling_dbrx._old_dbrx_ffn = (
-            transformers.models.dbrx.modeling_dbrx.DbrxFFN
-        )
-        transformers.models.dbrx.modeling_dbrx.DbrxFFN = SyncDbrxFFNBlock
-
-        transformers.models.olmoe.modeling_olmoe._old_olmoe_moe = (
-            transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock
-        )
-        transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock = (
-            SyncOlmoeMoEBlock
-        )
-        if OlmoePagedAttention is not None:
-            transformers.models.olmoe.modeling_olmoe._old_olmoe_attention = (
-                transformers.models.olmoe.modeling_olmoe.OlmoeAttention
-            )
-            transformers.models.olmoe.modeling_olmoe.OlmoeAttention = (
-                OlmoePagedAttention
-            )
-
-        transformers.models.jamba.modeling_jamba._old_jamba_moe = (
-            transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock
-        )
-        transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock = (
-            SyncJambaMoEBlock
-        )
-
-        _dsv2_mod = transformers.models.deepseek_v2.modeling_deepseek_v2
-        _dsv2_cls = getattr(_dsv2_mod, "DeepseekV2MoE", None) or getattr(
-            _dsv2_mod, "DeepseekV2Moe", None
-        )
-        _dsv2_mod._old_deepseek_v2_moe = _dsv2_cls
-        _dsv2_attr = (
-            "DeepseekV2MoE"
-            if hasattr(_dsv2_mod, "DeepseekV2MoE")
-            else "DeepseekV2Moe"
-        )
-        setattr(_dsv2_mod, _dsv2_attr, SyncDeepseekV2MoEBlock)
-        _dsv2_mod._old_deepseek_v2_attention = _dsv2_mod.DeepseekV2Attention
-        _dsv2_mod.DeepseekV2Attention = DeepseekV2PagedAttention
-        _dsv3_mod = transformers.models.deepseek_v3.modeling_deepseek_v3
-        _dsv3_mod._old_deepseek_v3_moe = _dsv3_mod.DeepseekV3MoE
-        _dsv3_mod.DeepseekV3MoE = SyncDeepseekV3MoEBlock
-        _dsv3_mod._old_deepseek_v3_attention = _dsv3_mod.DeepseekV3Attention
-        _dsv3_mod.DeepseekV3Attention = DeepseekV3PagedAttention
-
-        transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp = (
-            transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP
-        )
-        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = SyncGptOssMLP
-
-        _q35_mod = transformers.models.qwen3_5_moe.modeling_qwen3_5_moe
-        _q35_mod._old_qwen3_5_sparse_moe = _q35_mod.Qwen3_5MoeSparseMoeBlock
-        _q35_mod.Qwen3_5MoeSparseMoeBlock = SyncQwen3_5MoeSparseMoeBlock
-
-        try:
-            import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
-
-            _glm_mod._old_glm_moe_dsa_moe = _glm_mod.GlmMoeDsaMoE
-            _glm_mod.GlmMoeDsaMoE = SyncGlmMoeDsaMoEBlock
-        except (ImportError, AttributeError):
-            pass
-
-        try:
-            import transformers.models.glm5_next.modeling_glm5_next as _glm5n_mod
-
-            _glm5n_mod._old_glm5_next_moe = _glm5n_mod.Glm5NextTextMoE
-            _glm5n_mod.Glm5NextTextMoE = SyncGlm5NextMoEBlock
-        except (ImportError, AttributeError):
-            pass
+        install_transformers_model_overrides()
 
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
@@ -1618,33 +1524,7 @@ class OffloadEngine(object):
         PreTrainedModel.post_init = PreTrainedModel._old_post_init
 
         deactivate_empty_init()
-
-        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
-            transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
-        )
-        _q35_mod = transformers.models.qwen3_5_moe.modeling_qwen3_5_moe
-        if hasattr(_q35_mod, "_old_qwen3_5_sparse_moe"):
-            _q35_mod.Qwen3_5MoeSparseMoeBlock = _q35_mod._old_qwen3_5_sparse_moe
-
-        _olmoe_mod = transformers.models.olmoe.modeling_olmoe
-        if hasattr(_olmoe_mod, "_old_olmoe_attention"):
-            _olmoe_mod.OlmoeAttention = _olmoe_mod._old_olmoe_attention
-
-        try:
-            import transformers.models.glm_moe_dsa.modeling_glm_moe_dsa as _glm_mod
-
-            if hasattr(_glm_mod, "_old_glm_moe_dsa_moe"):
-                _glm_mod.GlmMoeDsaMoE = _glm_mod._old_glm_moe_dsa_moe
-        except (ImportError, AttributeError):
-            pass
-
-        try:
-            import transformers.models.glm5_next.modeling_glm5_next as _glm5n_mod
-
-            if hasattr(_glm5n_mod, "_old_glm5_next_moe"):
-                _glm5n_mod.Glm5NextTextMoE = _glm5n_mod._old_glm5_next_moe
-        except (ImportError, AttributeError):
-            pass
+        restore_context_transformers_model_overrides()
 
     def _is_shared_expert_param(self, name: str) -> bool:
         # DeepSeek names shared experts ".shared_experts." (plural); Qwen3.5-MoE
@@ -2682,54 +2562,4 @@ class OffloadEngine(object):
 
     # clean runtime hooks
     def clean_up(self):
-        transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP = (
-            transformers.models.nllb_moe.modeling_nllb_moe._old_sparse_mlp
-        )
-
-        transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock = (
-            transformers.models.mixtral.modeling_mixtral._old_sparse_mlp
-        )
-
-        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp
-
-        if hasattr(
-            transformers.models.qwen3_moe.modeling_qwen3_moe,
-            "_old_qwen3_attention",
-        ):
-            transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeAttention = transformers.models.qwen3_moe.modeling_qwen3_moe._old_qwen3_attention
-
-        transformers.models.dbrx.modeling_dbrx.DbrxFFN = (
-            transformers.models.dbrx.modeling_dbrx._old_dbrx_ffn
-        )
-
-        transformers.models.olmoe.modeling_olmoe.OlmoeSparseMoeBlock = (
-            transformers.models.olmoe.modeling_olmoe._old_olmoe_moe
-        )
-
-        transformers.models.jamba.modeling_jamba.JambaSparseMoeBlock = (
-            transformers.models.jamba.modeling_jamba._old_jamba_moe
-        )
-
-        _dsv2_mod2 = transformers.models.deepseek_v2.modeling_deepseek_v2
-        _dsv2_attr2 = (
-            "DeepseekV2MoE"
-            if hasattr(_dsv2_mod2, "DeepseekV2MoE")
-            else "DeepseekV2Moe"
-        )
-        setattr(_dsv2_mod2, _dsv2_attr2, _dsv2_mod2._old_deepseek_v2_moe)
-        if hasattr(_dsv2_mod2, "_old_deepseek_v2_attention"):
-            _dsv2_mod2.DeepseekV2Attention = (
-                _dsv2_mod2._old_deepseek_v2_attention
-            )
-        _dsv3_mod2 = transformers.models.deepseek_v3.modeling_deepseek_v3
-        _dsv3_mod2.DeepseekV3MoE = _dsv3_mod2._old_deepseek_v3_moe
-        if hasattr(_dsv3_mod2, "_old_deepseek_v3_attention"):
-            _dsv3_mod2.DeepseekV3Attention = (
-                _dsv3_mod2._old_deepseek_v3_attention
-            )
-        transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP = (
-            transformers.models.gpt_oss.modeling_gpt_oss._old_gpt_oss_mlp
-        )
-        _q35_mod = transformers.models.qwen3_5_moe.modeling_qwen3_5_moe
-        if hasattr(_q35_mod, "_old_qwen3_5_sparse_moe"):
-            _q35_mod.Qwen3_5MoeSparseMoeBlock = _q35_mod._old_qwen3_5_sparse_moe
+        restore_runtime_transformers_model_overrides()
