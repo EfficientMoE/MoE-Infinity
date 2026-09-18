@@ -552,6 +552,7 @@ class ContinuousBatchingEngine:
         sampling_params: SamplingParams,
         on_token: Optional[Callable[[RequestOutput], None]] = None,
         n: int = 1,
+        multimodal_inputs: Optional[dict[str, Any]] = None,
     ) -> None:
         if request_id in self._request_to_seq_ids:
             raise ValueError(f"request_id '{request_id}' already exists")
@@ -569,6 +570,11 @@ class ContinuousBatchingEngine:
                 seq_id=seq_id,
                 prompt_token_ids=list(prompt_token_ids),
                 sampling_params=sampling_params,
+                multimodal_inputs=(
+                    dict(multimodal_inputs)
+                    if multimodal_inputs is not None
+                    else None
+                ),
             )
             sequences.append(sequence)
             self._sequences[seq_id] = sequence

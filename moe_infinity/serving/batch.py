@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
@@ -66,6 +67,7 @@ class BatchMetadata:
     is_prefill: list[bool]
     block_tables: list[list[int]]
     sampling_params: list[SamplingParams]
+    multimodal_inputs: dict[str, Any] | None = None
     prefill_is_terminal: list[bool] = field(default_factory=list)
 
     def __init__(
@@ -79,6 +81,7 @@ class BatchMetadata:
         seq_lengths: list[int] | None = None,
         context_lengths: list[int] | None = None,
         token_offsets: list[int] | None = None,
+        multimodal_inputs: dict[str, Any] | None = None,
         prefill_is_terminal: list[bool] | None = None,
     ) -> None:
         self.seq_ids = seq_ids
@@ -87,6 +90,7 @@ class BatchMetadata:
         self.prefill_is_terminal = list(prefill_is_terminal or [])
         self.block_tables = list(block_tables or [])
         self.sampling_params = list(sampling_params or [])
+        self.multimodal_inputs = multimodal_inputs
         if lengths is None:
             if seq_lengths is None:
                 raise ValueError(
@@ -273,6 +277,11 @@ def _slice_batch(batch: BatchMetadata, seq_indices: list[int]) -> BatchMetadata:
     block_tables = [batch.block_tables[i] for i in seq_indices]
     sampling_params = [batch.sampling_params[i] for i in seq_indices]
     prefill_is_terminal = [batch.prefill_is_terminal[i] for i in seq_indices]
+    multimodal_inputs = (
+        batch.multimodal_inputs
+        if any(batch.is_prefill[i] for i in seq_indices)
+        else None
+    )
 
     src_offsets = batch.query_offsets
     input_token_ids: list[int] = []
@@ -296,6 +305,7 @@ def _slice_batch(batch: BatchMetadata, seq_indices: list[int]) -> BatchMetadata:
         is_prefill=is_prefill,
         block_tables=block_tables,
         sampling_params=sampling_params,
+        multimodal_inputs=multimodal_inputs,
         prefill_is_terminal=prefill_is_terminal,
     )
 
@@ -326,6 +336,30 @@ def split_prefill_decode_batch(batch: BatchMetadata) -> SplitBatchMetadata:
 
 class BatchBuilder:
     @staticmethod
+    def _merge_multimodal_inputs(
+        sequences: list[SequenceData],
+    ) -> dict[str, Any] | None:
+        values_by_key: dict[str, list[Any]] = {}
+        for sequence in sequences:
+            if sequence.multimodal_inputs is None:
+                continue
+            for key, value in sequence.multimodal_inputs.items():
+                values_by_key.setdefault(key, []).append(value)
+
+        if not values_by_key:
+            return None
+
+        merged: dict[str, Any] = {}
+        for key, values in values_by_key.items():
+            if all(isinstance(value, torch.Tensor) for value in values):
+                merged[key] = torch.cat(values, dim=0)
+            elif len(values) == 1:
+                merged[key] = values[0]
+            else:
+                merged[key] = values
+        return merged
+
+    @staticmethod
     def from_scheduler_output(
         scheduler_output: SchedulerOutput,
         sequences: dict[int, SequenceData],
@@ -343,6 +377,7 @@ class BatchBuilder:
         block_tables: list[list[int]] = []
         sampling_params: list[SamplingParams] = []
         prefill_is_terminal: list[bool] = []
+        multimodal_sequences: list[SequenceData] = []
 
         for seq_id in scheduler_output.prefill_seq_ids:
             sequence = sequences[seq_id]
@@ -365,6 +400,8 @@ class BatchBuilder:
             prefill_is_terminal.append(terminal)
             block_tables.append(kv_cache.get_block_table(seq_id))
             sampling_params.append(sequence.sampling_params)
+            if sequence.multimodal_inputs is not None:
+                multimodal_sequences.append(sequence)
 
         for seq_id in scheduler_output.decode_seq_ids:
             sequence = sequences[seq_id]
@@ -407,6 +444,9 @@ class BatchBuilder:
             is_prefill=is_prefill,
             block_tables=block_tables,
             sampling_params=sampling_params,
+            multimodal_inputs=BatchBuilder._merge_multimodal_inputs(
+                multimodal_sequences
+            ),
             prefill_is_terminal=prefill_is_terminal,
         )
 

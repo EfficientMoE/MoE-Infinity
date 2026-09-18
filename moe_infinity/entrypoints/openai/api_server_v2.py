@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import base64
 import collections
 import importlib
 import json
@@ -9,9 +10,15 @@ import os
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
+from io import BytesIO
 from threading import Event, Lock, RLock
 from types import SimpleNamespace
 from typing import Any, Literal, Optional, cast
+from urllib.parse import urlparse
+from urllib.request import urlopen
+
+import torch
+from PIL import Image
 
 try:
     fastapi = importlib.import_module("fastapi")
@@ -128,6 +135,7 @@ app = fastapi.FastAPI()
 engine: Optional[ContinuousBatchingEngine] = None
 stream_manager: Optional[StreamManager] = None
 tokenizer: Optional[object] = None
+processor: Optional[object] = None
 model_name_global: Optional[str] = None
 runtime_max_seq_length: int = 4096
 
@@ -564,7 +572,7 @@ def initialize_with_model(
     server is started via CLI), this function wires a *pre-existing* MoE
     instance into the continuous-batching engine.
     """
-    global engine, stream_manager, tokenizer, model_name_global
+    global engine, stream_manager, tokenizer, processor, model_name_global
     global runtime_max_seq_length, _health_state
 
     hf_model = getattr(moe_model, "model", moe_model)
@@ -599,7 +607,14 @@ def initialize_with_model(
     )
     engine_config = _build_engine_config(args=args, model=hf_model)
 
-    tokenizer = tok
+    model_processor = getattr(moe_model, "processor", None)
+    if (
+        model_processor is None
+        and getattr(tok, "image_processor", None) is not None
+    ):
+        model_processor = tok
+    processor = model_processor
+    tokenizer = getattr(model_processor, "tokenizer", tok)
     model_name_global = model_name
     configured_max_seq_length = engine_config.get("max_seq_length")
     if isinstance(configured_max_seq_length, int):
@@ -1072,6 +1087,174 @@ def _chat_prompt_to_token_ids(request: ChatCompletionRequest) -> list[int]:
     return _tokenize_text(rendered)
 
 
+class _MultimodalInputError(ValueError):
+    pass
+
+
+def _image_url_from_part(part: dict[str, Any]) -> str:
+    image_url = part.get("image_url")
+    if isinstance(image_url, dict):
+        image_url = image_url.get("url")
+    if not isinstance(image_url, str) or not image_url:
+        raise _MultimodalInputError("image_url content part requires a URL")
+    return image_url
+
+
+def _decode_image_url(image_url: str) -> Image.Image:
+    parsed = urlparse(image_url)
+    try:
+        if parsed.scheme == "data":
+            metadata, separator, encoded = image_url.partition(",")
+            if not separator or ";base64" not in metadata:
+                raise _MultimodalInputError(
+                    "image data URL must contain base64-encoded data"
+                )
+            image_bytes = base64.b64decode(encoded, validate=True)
+        elif parsed.scheme in {"http", "https"}:
+            with urlopen(image_url, timeout=10) as response:  # noqa: S310
+                image_bytes = response.read(20 * 1024 * 1024 + 1)
+            if len(image_bytes) > 20 * 1024 * 1024:
+                raise _MultimodalInputError(
+                    "image URL exceeds the 20 MiB limit"
+                )
+        else:
+            raise _MultimodalInputError(
+                "image_url must use a data, http, or https URL"
+            )
+
+        with Image.open(BytesIO(image_bytes)) as opened:
+            opened.load()
+            return opened.convert("RGB")
+    except _MultimodalInputError:
+        raise
+    except Exception as exc:
+        raise _MultimodalInputError(
+            f"failed to decode image input: {exc}"
+        ) from exc
+
+
+def _normalize_multimodal_messages(messages: Any) -> tuple[Any, bool]:
+    if not isinstance(messages, list):
+        return messages, False
+
+    normalized: list[dict[str, Any]] = []
+    has_images = False
+    for message in messages:
+        copied = dict(message)
+        content = copied.get("content")
+        if not isinstance(content, list):
+            normalized.append(copied)
+            continue
+
+        normalized_content: list[Any] = []
+        for raw_part in content:
+            if (
+                not isinstance(raw_part, dict)
+                or raw_part.get("type") != "image_url"
+            ):
+                normalized_content.append(raw_part)
+                continue
+            has_images = True
+            normalized_content.append(
+                {
+                    "type": "image",
+                    "image": _decode_image_url(_image_url_from_part(raw_part)),
+                }
+            )
+        copied["content"] = normalized_content
+        normalized.append(copied)
+    return normalized, has_images
+
+
+def _extract_prompt_token_ids(input_ids: Any) -> list[int]:
+    if isinstance(input_ids, torch.Tensor):
+        if input_ids.ndim != 2 or input_ids.shape[0] != 1:
+            raise _MultimodalInputError(
+                "multimodal processor must return one input_ids row"
+            )
+        return [int(token_id) for token_id in input_ids[0].tolist()]
+    if (
+        isinstance(input_ids, list)
+        and len(input_ids) == 1
+        and isinstance(input_ids[0], list)
+    ):
+        return [int(token_id) for token_id in input_ids[0]]
+    raise _MultimodalInputError(
+        "multimodal processor did not return batched input_ids"
+    )
+
+
+def _chat_request_inputs(
+    request: ChatCompletionRequest,
+) -> tuple[list[int], dict[str, Any] | None]:
+    normalized_messages, has_images = _normalize_multimodal_messages(
+        request.messages
+    )
+    if not has_images:
+        return _chat_prompt_to_token_ids(request), None
+    if processor is None:
+        raise _MultimodalInputError("model does not support image input")
+
+    apply_chat_template_fn = getattr(processor, "apply_chat_template", None)
+    if not callable(apply_chat_template_fn):
+        raise _MultimodalInputError("model does not support image input")
+    try:
+        processed = apply_chat_template_fn(
+            conversation=normalized_messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+    except Exception as exc:
+        raise _MultimodalInputError(
+            f"failed to process image input: {exc}"
+        ) from exc
+    if not hasattr(processed, "items"):
+        raise _MultimodalInputError(
+            "multimodal processor must return a mapping of model inputs"
+        )
+
+    processed_inputs = dict(processed.items())
+    prompt_token_ids = _extract_prompt_token_ids(
+        processed_inputs.get("input_ids")
+    )
+    multimodal_inputs = {
+        key: value
+        for key, value in processed_inputs.items()
+        if key not in {"input_ids", "attention_mask", "position_ids"}
+    }
+    if not multimodal_inputs:
+        raise _MultimodalInputError("model does not support image input")
+    return prompt_token_ids, multimodal_inputs
+
+
+def _resolve_processor_and_tokenizer(
+    model_name: str,
+) -> tuple[object, object | None]:
+    transformers_module = importlib.import_module("transformers")
+    auto_tokenizer = getattr(transformers_module, "AutoTokenizer")
+    auto_processor = getattr(transformers_module, "AutoProcessor", None)
+
+    loaded = None
+    if auto_processor is not None:
+        try:
+            loaded = auto_processor.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+            )
+        except Exception:
+            pass
+    if loaded is None:
+        loaded = auto_tokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+        )
+    if getattr(loaded, "image_processor", None) is None:
+        return loaded, None
+    return getattr(loaded, "tokenizer", loaded), loaded
+
+
 def _ensure_runtime_ready() -> tuple[ContinuousBatchingEngine, StreamManager]:
     if engine is None:
         raise HTTPException(status_code=503, detail="engine not initialized")
@@ -1089,6 +1272,7 @@ async def _wait_non_stream_result(
     sampling_params: SamplingParams,
     raw_request: Request,
     expected_sequences: int = 1,
+    multimodal_inputs: dict[str, Any] | None = None,
 ) -> list[_FinalSequenceResult]:
     runtime_engine, _ = _ensure_runtime_ready()
     done_event = Event()
@@ -1125,13 +1309,16 @@ async def _wait_non_stream_result(
             if len(finished_seq_ids) >= expected_sequences:
                 done_event.set()
 
-    runtime_engine.add_request(
+    add_request_kwargs: dict[str, Any] = dict(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         on_token=on_token,
         n=expected_sequences,
     )
+    if multimodal_inputs is not None:
+        add_request_kwargs["multimodal_inputs"] = multimodal_inputs
+    runtime_engine.add_request(**add_request_kwargs)
 
     while not done_event.is_set():
         if await raw_request.is_disconnected():
@@ -1352,6 +1539,7 @@ async def _initialize_model() -> None:
     global runtime_max_seq_length
     global stream_manager
     global tokenizer
+    global processor
     global model_name_global
     global _startup_watchdog
     global _decode_watchdog
@@ -1381,13 +1569,8 @@ async def _initialize_model() -> None:
         )
 
     try:
-        from transformers import AutoTokenizer
-
         model_name_global = args.model
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.model,
-            trust_remote_code=True,
-        )
+        tokenizer, processor = _resolve_processor_and_tokenizer(args.model)
 
         enable_deepseek_mla_paging = bool(
             getattr(args, "enable_deepseek_mla_paging", False)
@@ -1954,8 +2137,16 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
     )
     original_messages = request.messages
     request.messages = processed_messages
+    multimodal_inputs: dict[str, Any] | None = None
     try:
-        prompt_token_ids = _chat_prompt_to_token_ids(request)
+        prompt_token_ids, multimodal_inputs = _chat_request_inputs(request)
+    except _MultimodalInputError as exc:
+        return create_error_response(
+            status_code=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
     finally:
         request.messages = original_messages
 
@@ -1996,13 +2187,16 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
                 finish_reason=output.finish_reason,
             )
 
-        runtime_engine.add_request(
+        add_request_kwargs: dict[str, Any] = dict(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             on_token=on_stream_token,
             n=1,
         )
+        if multimodal_inputs is not None:
+            add_request_kwargs["multimodal_inputs"] = multimodal_inputs
+        runtime_engine.add_request(**add_request_kwargs)
         return StreamingResponse(
             _chat_event_generator(
                 request_id=request_id,
@@ -2018,6 +2212,7 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
         sampling_params=sampling_params,
         raw_request=raw_request,
         expected_sequences=requested_n,
+        multimodal_inputs=multimodal_inputs,
     )
     sequence_results = [
         _apply_response_format_validation(result, request.response_format)

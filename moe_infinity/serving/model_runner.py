@@ -226,7 +226,7 @@ class ModelRunner:
         )
         self._warned_no_paged_shim = False
 
-    def prepare_inputs(self, batch: BatchMetadata) -> dict[str, torch.Tensor]:
+    def prepare_inputs(self, batch: BatchMetadata) -> dict[str, Any]:
         num_seqs = len(batch.seq_ids)
         query_lengths = batch.query_lengths
         query_offsets = batch.query_offsets
@@ -272,11 +272,19 @@ class ModelRunner:
             position_ids[seq_idx, :seq_len] = position_tensor
             attention_mask[seq_idx, :seq_len] = 1
 
-        return {
+        prepared: dict[str, Any] = {
             "input_ids": input_ids,
             "position_ids": position_ids,
             "attention_mask": attention_mask,
         }
+        if batch.multimodal_inputs is not None:
+            for key, value in batch.multimodal_inputs.items():
+                prepared[key] = (
+                    value.to(self.device)
+                    if isinstance(value, torch.Tensor)
+                    else value
+                )
+        return prepared
 
     def _expert_phase(self, batch: BatchMetadata) -> ExpertPhase:
         if batch.is_prefill and all(batch.is_prefill):

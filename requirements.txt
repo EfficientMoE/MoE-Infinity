@@ -10,6 +10,7 @@ nvtx
 openai
 optimum>=1.17.1
 packaging>=20.0
+pillow
 protobuf
 py-cpuinfo
 pyarrow
