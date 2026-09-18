@@ -154,7 +154,7 @@ if COMMON_NVTX_INCLUDE_DIR is not None:
 COMMON_NVCC_ARGS = [
     "-O3",
     "--use_fast_math",
-    "-std=c++17",
+    "-std=c++20",
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
     "-U__CUDA_NO_HALF2_OPERATORS__",
@@ -162,6 +162,7 @@ COMMON_NVCC_ARGS = [
 
 COMMON_CXX_ARGS = [
     "-O3",
+    "-std=c++20",
     "-Wall",
     "-Wno-reorder",
     "-fPIC",
@@ -424,8 +425,8 @@ if cuda_available:
                 "extensions/kernel/v4_fp4/fp8_dequant.cu",
             ],
             extra_compile_args={
-                "cxx": ["-O3", "-std=c++17", "-fPIC"],
-                "nvcc": ["-O3", "--use_fast_math", "-std=c++17"]
+                "cxx": ["-O3", "-std=c++20", "-fPIC"],
+                "nvcc": ["-O3", "--use_fast_math", "-std=c++20"]
                 + _v4fp4_arch_flags,
             },
         )
@@ -436,7 +437,7 @@ if cuda_available:
             name="moe_infinity._marlin",
             sources=_MARLIN_SOURCES,
             extra_compile_args={
-                "nvcc": ["-O3", "--use_fast_math", "-std=c++17"]
+                "nvcc": ["-O3", "--use_fast_math", "-std=c++20"]
                 + _cuda_arch_flags,
             },
         )

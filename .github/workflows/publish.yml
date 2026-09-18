@@ -76,11 +76,9 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install "setuptools>=78.1.1,<82" "setuptools-scm>=8" wheel ninja py-cpuinfo build
           python3 -m pip install torch --index-url https://download.pytorch.org/whl/cu128
-          # setup.py imports moe_store at build time to vendor its csrc into
-          # the _store extension (_moe_store_csrc_dir). Install the exact pin
-          # from requirements.txt. --no-deps: only the package files are needed
-          # (importing moe_store is stdlib-only) and torch is installed above.
-          python3 -m pip install --no-deps "$(grep -E '^moe-store' requirements.txt)"
+          # Temporary until moe-store~=0.2.1 is published on PyPI: metadata uses
+          # the release range, while CI vendors csrc from the current git tag.
+          python3 -m pip install --no-deps 'moe-store @ git+https://github.com/EfficientMoE/moe-store.git@v0.2.0'
 
       - name: Fetch CUTLASS headers
         run: |
