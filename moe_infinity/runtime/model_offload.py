@@ -1538,6 +1538,12 @@ class OffloadEngine(object):
         # the GatedDeltaNet linear-attention layers, which are not compatible
         # with the native offload engine's begin/end lifecycle.
         if getattr(self.config, "model_type", "") == "qwen3_5_moe":
+            # Stage 2 (VL activation): keep the vision tower resident too.
+            # It is small relative to the 256 routed experts and must be
+            # materialized for image prefill; MTP weights ("mtp.*") remain
+            # offloaded and unused.
+            if "visual." in name:
+                return True
             if "language_model." in name:
                 _, expert_id = parse_expert_id(name, self.config)
                 return expert_id is None
