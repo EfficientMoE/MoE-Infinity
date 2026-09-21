@@ -17,7 +17,8 @@ pyarrow
 pydantic>=1.10.19,<2
 scipy
 sentencepiece
-sglang-kernel>=0.4.0
+# 0.4.7 declares torch==2.13.0 (cu13), which clobbers the cu12 torch build and breaks nvcc-matched compiles (#231)
+sglang-kernel>=0.4.0,<0.4.7
 sphinx
 transformers>=5.3.0,<6
 uvicorn
