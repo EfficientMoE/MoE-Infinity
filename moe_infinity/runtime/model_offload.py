@@ -59,6 +59,9 @@ from moe_store.wrappers import (
 )
 from safetensors import safe_open
 from tqdm import tqdm
+
+# Generic HF glue, not model-arch knowledge (accepted per #223 import-gate
+# triage): PreTrainedModel.post_init is patched to a no-op during offload setup.
 from transformers import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
