@@ -77,3 +77,17 @@ a claim that any particular DeepSeek DFlash pair has been validated.
 
 Use `Not recorded` rather than extrapolating hardware, pairing, route-ahead,
 sampling, rich batching, or paged-cache support from an adjacent capability.
+
+## Synthetic FP8 expert stores
+
+Any bf16-native MoE checkpoint in the table above can be converted into a
+synthetic FP8 expert store with `moe-store convert <ckpt> <store>
+--quantize-experts fp8` (issue #234 Phase 1). The store keeps routed-expert
+weights as e4m3 with 128x128 blockwise fp32 `weight_scale_inv` members and
+advertises `quantization_config = {quant_method: fp8, fmt: e4m3,
+weight_block_size: [128, 128]}` via `store_meta.json`; the engine merges that
+metadata at load time and serves the store through the same protected
+blockwise-FP8 dequant path used for checkpoint-native FP8 models (GLM-5.2,
+DeepSeek-V3). Attention, router, and shared-expert weights stay bf16.
+Validated conversion targets: `deepseek-ai/DeepSeek-V2-Lite-Chat` and
+`mistralai/Mixtral-8x7B-Instruct-v0.1`.
