@@ -48,6 +48,8 @@ const std::string Node::str() {
   return std::string(buffer);
 }
 
+std::atomic<std::int64_t> ArcherTopologyHandle::expert_h2d_bytes_total_{0};
+
 Node::Node()
     : corr_id(0),
       byte_size(0),
@@ -133,6 +135,8 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
 #endif
         CudaMemcpyAsync(device_memory_ptr, host_memory_ptr, byte_size,
                         cudaMemcpyHostToDevice, h2d_stream);
+        ArcherTopologyHandle::expert_h2d_bytes_total_.fetch_add(
+            byte_size, std::memory_order_relaxed);
       }
       {
 #ifndef NVTX_DISABLE
@@ -181,6 +185,8 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
       if (stream == nullptr) {
         CudaMemcpy(device_memory_ptr, host_memory_ptr, byte_size,
                    cudaMemcpyHostToDevice);
+        ArcherTopologyHandle::expert_h2d_bytes_total_.fetch_add(
+            byte_size, std::memory_order_relaxed);
       } else {
         {
 #ifndef NVTX_DISABLE
@@ -188,6 +194,8 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
 #endif
           CudaMemcpyAsync(device_memory_ptr, host_memory_ptr, byte_size,
                           cudaMemcpyHostToDevice, stream);
+          ArcherTopologyHandle::expert_h2d_bytes_total_.fetch_add(
+              byte_size, std::memory_order_relaxed);
         }
         {
 #ifndef NVTX_DISABLE
@@ -374,6 +382,14 @@ ArcherTopologyHandle::GetResidentAndWastedBytes() {
     }
   }
   return std::make_tuple(resident, wasted);
+}
+
+std::int64_t ArcherTopologyHandle::GetExpertH2DBytesTotal() {
+  return expert_h2d_bytes_total_.load(std::memory_order_relaxed);
+}
+
+void ArcherTopologyHandle::ResetExpertTransferStats() {
+  expert_h2d_bytes_total_.store(0, std::memory_order_relaxed);
 }
 
 std::vector<std::size_t> ArcherTopologyHandle::GetChildVisitCounts() {

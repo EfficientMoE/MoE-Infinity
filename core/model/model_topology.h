@@ -200,6 +200,11 @@ class ArcherTopologyHandle : public base::noncopyable {
 
   std::vector<std::vector<std::size_t>> GetNodeVisitCounts();
   std::tuple<std::int64_t, std::int64_t> GetResidentAndWastedBytes();
+  std::int64_t GetExpertH2DBytesTotal();
+  void ResetExpertTransferStats();
+  // Cumulative bytes of every offloaded-group H2D copy (issue #234 Phase 1,
+  // Task 6b). Same accounting granularity as GetResidentAndWastedBytes.
+  static std::atomic<std::int64_t> expert_h2d_bytes_total_;
   std::vector<std::size_t> GetChildVisitCounts();
   void SetNodeVisitCounts(const std::vector<std::size_t>& visit_counts);
   void SetChildVisitCounts(const std::vector<std::size_t>& visit_counts);

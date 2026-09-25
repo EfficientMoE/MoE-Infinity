@@ -478,6 +478,14 @@ std::int64_t ArcherPrefetchHandle::GetWastedPrefetchBytes() {
   return std::get<1>(kTopologyHandle->GetResidentAndWastedBytes());
 }
 
+std::int64_t ArcherPrefetchHandle::GetExpertH2DBytesTotal() {
+  return kTopologyHandle->GetExpertH2DBytesTotal();
+}
+
+void ArcherPrefetchHandle::ResetExpertTransferStats() {
+  kTopologyHandle->ResetExpertTransferStats();
+}
+
 void ArcherPrefetchHandle::SetTrace(const torch::Tensor& trace) {
   if (trace.dim() != 3 || !trace.is_contiguous() || !trace.is_cpu()) {
     DLOG_ERROR("Trace should be a contiguous 3D tensor on CPU");
