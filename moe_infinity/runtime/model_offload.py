@@ -799,7 +799,7 @@ class OffloadEngine(object):
         self._kv_cache_manager = manager
 
     def deliver_fp8_scales_to_dispatcher(self):
-        scales = getattr(self, "_glm_fp8_scales", None)
+        scales = getattr(self, "_blockwise_fp8_scales", None)
         if not scales:
             return
         dispatcher = getattr(self, "expert_dispatcher", None)
@@ -808,10 +808,10 @@ class OffloadEngine(object):
             set_scales(scales)
         else:
             warnings.warn(
-                "GLM-5.2-FP8 routed experts are kept FP8 in the store but the "
-                "native set_scales dispatcher API is unavailable; build the "
-                "moe_infinity._v4_fp4 extension with fp8-in-store support. "
-                "Routed experts will not be dequantized correctly.",
+                "blockwise-FP8 routed experts are kept FP8 in the store but "
+                "the native set_scales dispatcher API is unavailable; build "
+                "the moe_infinity._v4_fp4 extension with fp8-in-store "
+                "support. Routed experts will not be dequantized correctly.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -1073,18 +1073,17 @@ class OffloadEngine(object):
                         _expand_gpt_oss_packed_experts(state_dict, self.config)
 
                         is_gptq_ckpt = is_gptq_quantized(self.config)
-                        _arch0_cast = (
-                            getattr(self.config, "architectures", None) or [""]
-                        )[0]
-                        is_glm_fp8_ckpt = (
-                            "GlmMoeDsa" in _arch0_cast
-                            or "Glm5Next" in _arch0_cast
-                        ) and _has_fp8_blockwise(self.config)
+                        # Blockwise-FP8 handling is keyed off the (possibly
+                        # store-meta-merged) quantization_config, not the GLM
+                        # architecture string, so synthetic FP8 stores of
+                        # bf16-native archs take the same protected path
+                        # (issue #234 Phase 1, Task 6).
+                        is_blockwise_fp8_ckpt = _has_fp8_blockwise(self.config)
                         self._cast_state_dict_tensors(
                             state_dict,
                             is_gptq_ckpt=is_gptq_ckpt,
                             is_mxfp4_ckpt=is_mxfp4_ckpt,
-                            is_glm_fp8_ckpt=is_glm_fp8_ckpt,
+                            is_blockwise_fp8_ckpt=is_blockwise_fp8_ckpt,
                         )
 
                         if (
@@ -1135,19 +1134,13 @@ class OffloadEngine(object):
                                 del state_dict[blocks_key]
                                 del state_dict[scales_key]
 
-                        arch0 = (
-                            getattr(self.config, "architectures", None) or [""]
-                        )[0]
-                        is_glm_fp8 = (
-                            "GlmMoeDsa" in arch0 or "Glm5Next" in arch0
-                        ) and _has_fp8_blockwise(self.config)
-                        if is_glm_fp8:
+                        if _has_fp8_blockwise(self.config):
                             from moe_store.fp8 import (
                                 dequant_fp8_blockwise,
                             )
 
-                            if not hasattr(self, "_glm_fp8_scales"):
-                                self._glm_fp8_scales = {}
+                            if not hasattr(self, "_blockwise_fp8_scales"):
+                                self._blockwise_fp8_scales = {}
                             fp8_pairs = _identify_fp8_blockwise_pairs(
                                 list(state_dict.keys())
                             )
@@ -1161,7 +1154,7 @@ class OffloadEngine(object):
                                 if _is_routed_expert_key(base_key):
                                     # Routed expert: keep FP8 in the host store;
                                     # the dispatcher dequantizes on-device.
-                                    self._glm_fp8_scales[base_key] = s
+                                    self._blockwise_fp8_scales[base_key] = s
                                 else:
                                     # Required by the model: attention, dense MLP
                                     # and shared experts run in PyTorch (not the
@@ -1207,14 +1200,8 @@ class OffloadEngine(object):
                     with open(name_id_map_file, "r") as f:
                         self.name_id_map = json.load(f)
 
-                    _arch0_reload = (
-                        getattr(self.config, "architectures", None) or [""]
-                    )[0]
-                    if (
-                        "GlmMoeDsa" in _arch0_reload
-                        or "Glm5Next" in _arch0_reload
-                    ) and _has_fp8_blockwise(self.config):
-                        self._rebuild_glm_fp8_scales_from_ckpt()
+                    if _has_fp8_blockwise(self.config):
+                        self._rebuild_blockwise_fp8_scales_from_ckpt()
 
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
@@ -1895,13 +1882,13 @@ class OffloadEngine(object):
             for candidate in (name, f"{model.base_model_prefix}.{name}"):
                 self.name_id_map.pop(candidate, None)
 
-    def _rebuild_glm_fp8_scales_from_ckpt(self):
+    def _rebuild_blockwise_fp8_scales_from_ckpt(self):
         # Reload-from-store path: FP8 block scales are NOT persisted in the store,
         # so rebuild them from the checkpoint. Deliver every scale (superset): the
         # dispatcher only applies a scale to a weight that is actually stored FP8,
         # so scales for BF16-dequantized weights are simply ignored. This keeps
         # reload compatible with stores whose non-routed weights are still FP8.
-        self._glm_fp8_scales = {}
+        self._blockwise_fp8_scales = {}
         for ckpt in self.ckpt_files:
             if not ckpt.endswith(".safetensors"):
                 continue
@@ -1912,7 +1899,7 @@ class OffloadEngine(object):
                         continue
                     base = k[: -len("_scale_inv")]
                     if base in keys:
-                        self._glm_fp8_scales[base] = f.get_tensor(k)
+                        self._blockwise_fp8_scales[base] = f.get_tensor(k)
 
     def get_topology(self, model):
         name_lst = []
@@ -2196,7 +2183,7 @@ class OffloadEngine(object):
         *,
         is_gptq_ckpt: bool = False,
         is_mxfp4_ckpt: bool = False,
-        is_glm_fp8_ckpt: bool = False,
+        is_blockwise_fp8_ckpt: bool = False,
     ) -> None:
         quant_info = getattr(self, "_quant_info", None)
 
@@ -2208,7 +2195,7 @@ class OffloadEngine(object):
                     state_dict[k] = v.to("cpu")
                     continue
 
-                if is_glm_fp8_ckpt and (
+                if is_blockwise_fp8_ckpt and (
                     k.endswith("_scale_inv") or v.dtype == torch.float8_e4m3fn
                 ):
                     state_dict[k] = v.to("cpu")
