@@ -3,7 +3,7 @@ chardet
 datasets>=2.12.0
 fastapi
 hjson
-moe-store~=0.2.1
+moe-store~=0.2.1  # TODO(release): bump moe-store~=0.2.2 before merge (#234 Phase 1)
 ninja
 numpy
 nvtx
