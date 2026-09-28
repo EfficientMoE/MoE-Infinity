@@ -55,7 +55,6 @@ Stable options from `api_server_v2.py`:
 | `--max-n` | `16` | Cap for parallel sampling `n` / `best_of` |
 | `--enable-prefix-caching` | off | Enable correctness-preserving prefix KV reuse (Qwen3 + FlashInfer) |
 | `--prefix-cache-max-entries` | 1000 | Max prefix-index entries (startup-only, >= 1) |
-| `--enable-prefix-caching` | off | Enable prefix-cache bookkeeping flag |
 | `--kv-cache-format` | `native` | KV storage format: `native` or `int8_sym` (opt-in) |
 | `--no-kv-cache-format-fallback` | off | Refuse a native fallback when `int8_sym` is unsupported |
 | `--enable-decode-cuda-graphs` | off | Permit decode graph qualification; unsafe runtimes still run eagerly |
