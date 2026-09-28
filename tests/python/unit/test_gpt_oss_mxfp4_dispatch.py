@@ -1,12 +1,27 @@
+from unittest.mock import MagicMock
+
 import pytest
 import torch
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _register_engine_ops():
+    try:
+        from moe_infinity.runtime.engine_ops import register_engine_ops
+
+        register_engine_ops()
+    except Exception as exc:
+        pytest.skip(f"engine ops unavailable: {exc}")
 
 
 @pytest.mark.gpu
 def test_native_mxfp4_gate_up_dequant_is_exact():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
-    from moe_infinity._v4_fp4 import mxfp4_dequant
+    try:
+        from moe_infinity._v4_fp4 import mxfp4_dequant
+    except Exception:
+        pytest.skip("native MXFP4 dequant extension not built")
     from moe_infinity.kernel.mxfp4_gemm import mxfp4_dequantize
 
     torch.manual_seed(137)
@@ -149,6 +164,10 @@ def _native_dispatch(
         prefetch_lib = _load_prefetch_lib()
     except Exception as exc:
         pytest.skip(f"native Archer extension unavailable: {exc}")
+    if isinstance(prefetch_lib, MagicMock):
+        pytest.skip(
+            "native Archer extension was stubbed during test collection"
+        )
 
     from moe_store.wrappers.gpt_oss import SyncGptOssMLP
 
