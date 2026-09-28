@@ -4,19 +4,6 @@ GLM-5.2 is the `glm_moe_dsa` route in MoE-Infinity. The registered class is
 `GlmMoeDsaForCausalLM`, and the checkpoint used in this repo is
 `zai-org/GLM-5.2-FP8`.
 
-## Quick start
-
-GLM-5.2 runs through the drop-in `MoE` class:
-
-```python
-from moe_infinity import MoE
-
-model = MoE("zai-org/GLM-5.2-FP8", {
-    "offload_path": "/ssd/moe-infinity/glm-5.2",
-    "device_memory_ratio": 0.5,
-})
-```
-
 ## Maturity and compatibility
 
 - Transformers floor: `>= 5.12`

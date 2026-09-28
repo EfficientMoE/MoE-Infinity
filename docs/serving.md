@@ -393,13 +393,15 @@ does not preempt or swap admitted sessions. External cache consumers can still
 invalidate reserved headroom; such allocator failures clean up the affected
 request and are currently re-raised by the engine step.
 
-Route-ahead is observer-only, and pairing evidence, executor reachability,
+There is no real DeepSeek DFlash target/drafter pair validation in the repo.
+Stage 4b's tiny/local DeepSeek adapter tests establish ownership and attention
+metadata only. GPT-OSS has named valid pairs, but its resident expert path has
+no executor route-ahead. Qwen evidence is tiny-fixture only.
+
+Route-ahead is observer-only. Pairing evidence, executor reachability,
 prefetch-fired evidence, and cache ownership are reported as separate facts.
-GPT-OSS has named valid pairs but its resident expert path attaches no executor
-route-ahead. For the full evidence boundary (no real DeepSeek pair; Qwen
-tiny-fixture only), direct batching, RNG caveats, benchmarks, and exact CPU/GPU
-gates, see [DFlash unified execution](dflash.md) and the
-[compatibility matrix](model-compatibility.md).
+See [DFlash unified execution](dflash.md) for direct batching, RNG caveats,
+benchmarks, and exact CPU/GPU gates.
 
 ## Operational Endpoints
 

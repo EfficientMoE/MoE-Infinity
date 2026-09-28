@@ -44,7 +44,7 @@ This open-sourced version is HuggingFace-friendly and differs from the version r
 - **DFlash.** The experimental direct speculator API supports batch-1 greedy and sampled draft/verify without a stable API promise; deprecated `MoE.generate()` and continuous serving delegate only greedy singleton requests. Batch>1 is currently greedy-only on the bare HuggingFace target path. Route-ahead is an executor-path capability, not evidence of a validated target/drafter pair; see the model-by-model status in [docs/dflash.md](docs/dflash.md#compatibility).
 - **Production serving.** OpenAI-compatible HTTP server with continuous batching, paged KV cache, request scheduling with preemption, streaming (SSE), runtime hot reload, watchdog/health monitoring, and crash-recovery logging. A prefix-cache flag and cache scaffolding exist, but the current OpenAI request path does not actively reuse cached prefixes; see [docs/serving.md](docs/serving.md#prefix-caching).
 - **Acceleration-aware.** Automatically integrates with [FlashAttention](https://github.com/Dao-AILab/flash-attention) and uses FlashInfer where the selected standard paged-attention backend supports it, with graceful fallback to built-in kernels. DeepSeek MLA currently uses the correct PyTorch fallback and does not claim FlashInfer acceleration.
-- **DFlash.** Experimental speculative decoding with one unified session core across direct, deprecated-sync, and serving draft/verify paths; capability-gated rich batching and default-off Stage 4b paged MLA. See the [DFlash](#dflash) section and [docs/dflash.md](docs/dflash.md).
+- **DFlash.** One session semantic core now covers direct, deprecated-sync, and serving draft/verify decisions. The experimental direct bare-HF API supports batch-1/batch>1 greedy, sampled, and mixed rows. Physical rich batching is capability-gated; unsupported MLA/hybrid wrappers run grouped per-request sessions. Serving keeps Stage 4a dynamic fallback, with default-off Stage 4b paged MLA limited to eligible greedy batch-1 DeepSeek V2/V3. Pairing and executor route-ahead evidence remain separate; see [docs/dflash.md](docs/dflash.md).
 - **Multi-GPU.** Single-server multi-GPU with round-robin expert distribution, per-GPU caching, and an in-memory N-way tensor-parallel shard loader; see [docs/multi-gpu.md](docs/multi-gpu.md) and [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Supported Models
@@ -69,11 +69,25 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 
 > DeepSeek-V4-Flash is only registered when your installed `transformers` provides `DeepseekV4ForCausalLM`; otherwise it is skipped automatically. Path A uses the HF-native `MoE` wrapper, and Path B uses the official FP4 offload loader. See [docs/model-compatibility.md](docs/model-compatibility.md) and [moe_infinity/models/deepseek_v4/README.md](./moe_infinity/models/deepseek_v4/README.md).
 
-> Qwen3.5-MoE (`Qwen3_5MoeForConditionalGeneration`, requires `transformers` >= 5.12) is a vision-language checkpoint served text-only, with its 256 routed experts offloaded and the text backbone, shared expert, and `lm_head` resident on GPU. See [docs/model-compatibility.md](docs/model-compatibility.md#model-specific-notes) for the full resident set, recommended settings, and validated scope.
+> Qwen3.5-MoE (`Qwen3_5MoeForConditionalGeneration`, requires `transformers` >= 5.12) is a vision-language checkpoint served text-only. Its 256 routed experts are offloaded while the text backbone, token embeddings, hybrid linear and full attention layers, shared expert, and `lm_head` stay resident on GPU. The v5 packed expert tensors expand to per-expert on load. Vision and MTP weights are present but unused for text generation. See [docs/model-compatibility.md](docs/model-compatibility.md).
+
+Text-only Qwen3.5-MoE quick start:
+
+```python
+from moe_infinity import MoE
+
+model = MoE("Qwen/Qwen3.5-35B-A3B", {
+    "offload_path": "/ssd/moe-infinity/qwen3.5-35b-a3b",
+    "device_memory_ratio": 0.5,
+})
+```
+
+See the [model compatibility matrix](docs/model-compatibility.md) for the
+validated scope and current limitations.
 
 > GLM-5.3-Flash (`Glm5NextForConditionalGeneration`, `model_type="glm5_next"`) requires `transformers` >= 5.16 and is registered only when that class is importable, otherwise it is skipped automatically. Its 288 routed FP8 experts per MoE layer are offloaded, while the KDA linear-attention layers, DSA indexer, mHC hyper-connections, shared expert, vision tower, and MTP weights stay resident (text-only serving). Sparse attention uses `attn_implementation="eager"`.
 
-> GLM-5.2 (`GlmMoeDsaForCausalLM`, `model_type="glm_moe_dsa"`) requires `transformers` >= 5.12 and is registered only when that class is importable. Its 256 routed FP8 experts are offloaded while the dense layers, shared expert, MLA attention, DSA indexer, and MTP layer stay resident. See the [GLM-5.2 guide](docs/glm-5.2.md).
+> GLM-5.2 (`GlmMoeDsaForCausalLM`, `model_type="glm_moe_dsa"`) requires `transformers` >= 5.12 and is registered only when that class is importable, otherwise it is skipped automatically. Its 256 routed FP8 experts are offloaded, while the 3 dense layers, shared expert, MLA attention, DSA indexer, and MTP layer stay resident. The routed experts stay FP8 in the host store, and non-routed FP8 weights are dequantized to BF16 on load. Sparse attention uses `attn_implementation="eager"`. See [docs/glm-5.2.md](docs/glm-5.2.md) and [docs/model-compatibility.md](docs/model-compatibility.md).
 
 > GLM-5.3 (`zai-org/GLM-5.3`, native FP8) reuses the same `GlmMoeDsaForCausalLM` base as GLM-5.2 — all gains are post-training — so it runs through the identical registry entry and FP8 expert-offload path (config resolution is pinned by `tests/python/unit/test_glm53_registry.py`). Its chat template adds `reasoning_effort` (`low`/`high`/`max`, default `max`) and `clear_thinking`; pass them through the tokenizer's chat template as needed.
 
@@ -243,7 +257,34 @@ DeepSeek-V4-Flash depends on the validated mp4/official-container setup, so this
 
 ### GLM-5.2 (FP8 Expert Offloading)
 
-GLM-5.2 (`zai-org/GLM-5.2-FP8`) runs through the drop-in `MoE` class. See the [GLM-5.2 guide](docs/glm-5.2.md) for the quick start, FP8 expert offloading, the resident weight set, and serving/speculative-decode limitations.
+GLM-5.2 (`zai-org/GLM-5.2-FP8`) runs through the drop-in `MoE` class:
+
+```python
+from moe_infinity import MoE
+
+model = MoE("zai-org/GLM-5.2-FP8", {
+    "offload_path": "/ssd/moe-infinity/glm-5.2",
+    "device_memory_ratio": 0.5,
+})
+```
+
+> **Memory note:** the FP8 block-scaled routed experts stay FP8 in the host store and are dequantized on-device by the expert dispatcher. Weights that run in PyTorch rather than the dispatcher, namely MLA attention, the DSA indexer, the dense-layer MLPs, and the shared expert, are dequantized to BF16 on load. Requires `transformers` >= 5.12.
+
+## DFlash
+
+See [docs/dflash.md](docs/dflash.md) for unified session semantics, direct
+greedy/sampled/mixed batching, per-row RNG and scalar-generator correlation,
+dense reconstruction, output padding and `last_generated_lengths`, grouped
+versus physical rich execution, Stage 4a/4b ownership, and the separate pairing
+versus executor evidence matrix. No real DeepSeek DFlash pair or GPT-OSS
+executor route-ahead is implied.
+
+No-download rollout gate:
+
+```bash
+python benchmarks/dflash/validate_unified_execution.py --fixture tiny \
+  --require-cache-invariants --require-order-invariance
+```
 
 ### Benchmarking
 
@@ -296,22 +337,6 @@ curl http://localhost:8000/v1/completions -H 'Content-Type: application/json' -d
 ```
 
 For the full serving surface, auth, watchdogs, DFlash, and operational endpoints, see [docs/serving.md](docs/serving.md).
-
-## DFlash
-
-See [docs/dflash.md](docs/dflash.md) for unified session semantics, direct
-greedy/sampled/mixed batching, per-row RNG and scalar-generator correlation,
-dense reconstruction, output padding and `last_generated_lengths`, grouped
-versus physical rich execution, Stage 4a/4b ownership, and the separate pairing
-versus executor evidence matrix. No real DeepSeek DFlash pair or GPT-OSS
-executor route-ahead is implied.
-
-No-download rollout gate:
-
-```bash
-python benchmarks/dflash/validate_unified_execution.py --fixture tiny \
-  --require-cache-invariants --require-order-invariance
-```
 
 ## ContextPilot Integration (Optional)
 
