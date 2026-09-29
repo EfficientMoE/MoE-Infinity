@@ -384,6 +384,19 @@ ArcherTopologyHandle::GetResidentAndWastedBytes() {
   return std::make_tuple(resident, wasted);
 }
 
+std::int64_t ArcherTopologyHandle::GetResidentSparseExpertCount() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::int64_t resident = 0;
+  for (const auto& stage : pipeline_.stages) {
+    if (stage == nullptr || !stage->is_sparse) continue;
+    for (const auto& node_body : stage->nodes) {
+      if (node_body == nullptr || node_body->node == nullptr) continue;
+      if (node_body->node->device.is_cuda()) ++resident;
+    }
+  }
+  return resident;
+}
+
 std::int64_t ArcherTopologyHandle::GetExpertH2DBytesTotal() {
   return expert_h2d_bytes_total_.load(std::memory_order_relaxed);
 }

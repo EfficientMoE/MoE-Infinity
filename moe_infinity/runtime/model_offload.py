@@ -1883,12 +1883,33 @@ class OffloadEngine(object):
                 self.name_id_map.pop(candidate, None)
 
     def _rebuild_blockwise_fp8_scales_from_ckpt(self):
-        # Reload-from-store path: FP8 block scales are NOT persisted in the store,
-        # so rebuild them from the checkpoint. Deliver every scale (superset): the
-        # dispatcher only applies a scale to a weight that is actually stored FP8,
-        # so scales for BF16-dequantized weights are simply ignored. This keeps
-        # reload compatible with stores whose non-routed weights are still FP8.
+        # Synthetic-FP8 v2 stores persist weight/scale pairs in the same expert
+        # group. Load those scales from the authoritative store before falling
+        # back to checkpoint-native FP8 models whose legacy stores omit scales.
         self._blockwise_fp8_scales = {}
+        try:
+            from moe_store.convert.writer import read_member_tensor
+            from moe_store.index import read_index
+
+            store_index = read_index(self.checkpoint)
+            for group in store_index.groups:
+                if not group.is_expert:
+                    continue
+                for member in group.members:
+                    if not member.name.endswith("_scale_inv"):
+                        continue
+                    base = member.name[: -len("_scale_inv")]
+                    self._blockwise_fp8_scales[base] = read_member_tensor(
+                        self.checkpoint, group, member
+                    )
+        except (FileNotFoundError, ValueError):
+            pass
+        if self._blockwise_fp8_scales:
+            return
+
+        # Legacy checkpoint-native FP8 stores omit scale tensors. Deliver every
+        # checkpoint scale (a safe superset): the dispatcher only applies scales
+        # to routed weights that are actually stored as FP8.
         for ckpt in self.ckpt_files:
             if not ckpt.endswith(".safetensors"):
                 continue

@@ -6,10 +6,12 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from moe_infinity.entrypoints.big_modeling import (
     _merge_store_quantization_config,
 )
+from moe_infinity.runtime.model_offload import OffloadEngine
 
 _FP8_QC = {
     "quant_method": "fp8",
@@ -60,3 +62,29 @@ def test_conflicting_existing_config_raises(tmp_path):
     cfg = SimpleNamespace(quantization_config={"quant_method": "gptq"})
     with pytest.raises(RuntimeError, match="already-quantized"):
         _merge_store_quantization_config(cfg, str(tmp_path))
+
+
+def test_synthetic_fp8_scales_reload_from_store(monkeypatch):
+    scale = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    member = SimpleNamespace(
+        name="model.layers.1.mlp.experts.2.gate_proj.weight_scale_inv"
+    )
+    group = SimpleNamespace(is_expert=True, members=(member,))
+
+    monkeypatch.setattr(
+        "moe_store.index.read_index",
+        lambda store_dir: SimpleNamespace(groups=(group,)),
+    )
+    monkeypatch.setattr(
+        "moe_store.convert.writer.read_member_tensor",
+        lambda store_dir, actual_group, actual_member: scale,
+    )
+
+    engine = object.__new__(OffloadEngine)
+    engine.checkpoint = "/synthetic-fp8-store"
+    engine.ckpt_files = ["/checkpoint-without-scales.safetensors"]
+    engine._rebuild_blockwise_fp8_scales_from_ckpt()
+
+    assert engine._blockwise_fp8_scales == {
+        "model.layers.1.mlp.experts.2.gate_proj.weight": scale
+    }

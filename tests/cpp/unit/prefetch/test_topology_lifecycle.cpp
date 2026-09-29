@@ -15,6 +15,13 @@ std::string MakePrefix(const char* name) {
   return prefix;
 }
 
+TEST(TopologyLifecycle, ResidentExpertCountApiSignaturesExist) {
+  auto topology_count = &ArcherTopologyHandle::GetResidentSparseExpertCount;
+  auto handle_count = &ArcherPrefetchHandle::GetResidentExpertCount;
+  EXPECT_NE(topology_count, nullptr);
+  EXPECT_NE(handle_count, nullptr);
+}
+
 TEST(TopologyLifecycle, SecondConstructionThrowsInsteadOfCorrupting) {
   ArcherPrefetchHandle first(MakePrefix("a"), 0.5);
   ASSERT_NE(kTopologyHandle, nullptr);

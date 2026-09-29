@@ -53,7 +53,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-prompts", type=int, default=32)
     parser.add_argument("--seq-length", type=int, default=512)
     parser.add_argument("--gen-tokens", type=int, default=32)
-    parser.add_argument("--device-memory-ratio", type=float, default=0.35)
+    # Keep the fixed budget below the bf16 expert footprint so both arms
+    # measure cache density rather than saturating at the model's expert count.
+    parser.add_argument("--device-memory-ratio", type=float, default=0.15)
     parser.add_argument(
         "--skip-gates",
         action="store_true",
@@ -83,6 +85,23 @@ def _call(obj, name):
         except Exception:
             return None
     return None
+
+
+def _json_safe(value):
+    """Convert native metric values into JSON-serializable Python objects."""
+    try:
+        import torch
+    except ImportError:
+        torch = None
+
+    if torch is not None and isinstance(value, torch.Tensor):
+        value = value.detach().cpu()
+        return value.item() if value.numel() == 1 else value.tolist()
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def _percentiles(values):
@@ -151,12 +170,15 @@ def run_store(checkpoint, store_dir, args):
         "expert_h2d_bytes_total": _call(archer, "get_expert_h2d_bytes_total"),
         "resident_expert_count": _call(archer, "get_resident_expert_count")
         or _call(archer, "get_expert_cache_size"),
-        "cache_hit_rate": _call(archer, "get_hit_rate"),
+        "cache_hit_rate": _json_safe(_call(archer, "get_hit_rate")),
         "wasted_prefetch_bytes": _call(archer, "get_wasted_prefetch_bytes"),
         "ttft_s": _percentiles(ttft),
         "tpot_s": _percentiles(tpot),
     }
 
+    # The native runtime deliberately allows one loaded model per process.
+    # Release its process-wide topology before constructing the paired arm.
+    _call(archer, "clean_up_resources")
     del model
     gc.collect()
     torch.cuda.empty_cache()

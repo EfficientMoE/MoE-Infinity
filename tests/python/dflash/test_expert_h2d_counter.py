@@ -58,5 +58,9 @@ def test_native_binding_surface():
     lib = getattr(prefetch, "prefetch_handle", None)
     if lib is None:
         pytest.skip("prefetch_handle extension class unavailable")
-    for name in ("get_expert_h2d_bytes_total", "reset_expert_transfer_stats"):
+    for name in (
+        "get_expert_h2d_bytes_total",
+        "get_resident_expert_count",
+        "reset_expert_transfer_stats",
+    ):
         assert hasattr(lib, name), name

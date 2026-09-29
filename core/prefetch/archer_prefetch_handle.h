@@ -60,6 +60,7 @@ class ArcherPrefetchHandle {
   torch::Tensor GetTrace();
   torch::Tensor GetHitRate();
   std::int64_t GetExpertOccupancyBytes();
+  std::int64_t GetResidentExpertCount() const;
   std::int64_t GetWastedPrefetchBytes();
   std::int64_t GetExpertH2DBytesTotal();
   void ResetExpertTransferStats();

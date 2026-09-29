@@ -329,6 +329,14 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
     auto& down_proj =
         (expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE) ? param_[2] : param_[1];
 
+    TORCH_CHECK(gate_proj.scalar_type() == torch::kBFloat16 &&
+                    up_proj.scalar_type() == torch::kBFloat16 &&
+                    down_proj.scalar_type() == torch::kBFloat16,
+                "expert projections must be BF16 before execution; got gate=",
+                gate_proj.scalar_type(), ", up=", up_proj.scalar_type(),
+                ", down=", down_proj.scalar_type(), ", representation=",
+                static_cast<int>(representation_execution_kind_));
+
     auto& gate_out = buffer_[2];
     auto& fused_out = buffer_[3];
 
