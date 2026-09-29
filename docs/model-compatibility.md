@@ -78,6 +78,18 @@ a claim that any particular DeepSeek DFlash pair has been validated.
 Use `Not recorded` rather than extrapolating hardware, pairing, route-ahead,
 sampling, rich batching, or paged-cache support from an adjacent capability.
 
+## Model-specific notes
+
+### Qwen3.5-MoE
+
+`Qwen3_5MoeForConditionalGeneration` (requires `transformers` >= 5.12) is a
+vision-language checkpoint served text-only. Its 256 routed experts are
+offloaded while the text backbone, token embeddings, hybrid linear and full
+attention layers, shared expert, and `lm_head` stay resident on GPU. The v5
+packed expert tensors expand to per-expert on load; vision and MTP weights are
+present but unused for text generation. A `device_memory_ratio` near `0.5` is a
+reasonable starting point.
+
 ## Synthetic FP8 expert stores
 
 Any bf16-native MoE checkpoint in the table above can be converted into a

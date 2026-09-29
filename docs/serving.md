@@ -55,7 +55,6 @@ Stable options from `api_server_v2.py`:
 | `--max-n` | `16` | Cap for parallel sampling `n` / `best_of` |
 | `--enable-prefix-caching` | off | Enable correctness-preserving prefix KV reuse (Qwen3 + FlashInfer) |
 | `--prefix-cache-max-entries` | 1000 | Max prefix-index entries (startup-only, >= 1) |
-| `--enable-prefix-caching` | off | Enable prefix-cache bookkeeping flag |
 | `--kv-cache-format` | `native` | KV storage format: `native` or `int8_sym` (opt-in) |
 | `--no-kv-cache-format-fallback` | off | Refuse a native fallback when `int8_sym` is unsupported |
 | `--enable-decode-cuda-graphs` | off | Permit decode graph qualification; unsafe runtimes still run eagerly |
@@ -393,15 +392,13 @@ does not preempt or swap admitted sessions. External cache consumers can still
 invalidate reserved headroom; such allocator failures clean up the affected
 request and are currently re-raised by the engine step.
 
-There is no real DeepSeek DFlash target/drafter pair validation in the repo.
-Stage 4b's tiny/local DeepSeek adapter tests establish ownership and attention
-metadata only. GPT-OSS has named valid pairs, but its resident expert path has
-no executor route-ahead. Qwen evidence is tiny-fixture only.
-
-Route-ahead is observer-only. Pairing evidence, executor reachability,
+Route-ahead is observer-only, and pairing evidence, executor reachability,
 prefetch-fired evidence, and cache ownership are reported as separate facts.
-See [DFlash unified execution](dflash.md) for direct batching, RNG caveats,
-benchmarks, and exact CPU/GPU gates.
+GPT-OSS has named valid pairs but its resident expert path attaches no executor
+route-ahead. For the full evidence boundary (no real DeepSeek pair; Qwen
+tiny-fixture only), direct batching, RNG caveats, benchmarks, and exact CPU/GPU
+gates, see [DFlash unified execution](dflash.md) and the
+[compatibility matrix](model-compatibility.md).
 
 ## Operational Endpoints
 
