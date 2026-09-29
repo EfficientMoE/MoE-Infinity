@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import logging
 import threading
 import time
 
 import pytest
-from _pytest.logging import LogCaptureFixture
 from _pytest.monkeypatch import MonkeyPatch
 
 import moe_infinity.serving.contextpilot_middleware as middleware_module
@@ -417,11 +415,12 @@ def test_process_completion_request_returns_string() -> None:
     assert isinstance(output, str)
 
 
-def test_process_completion_request_survives_optimize_index_error(
+def test_completion_prompt_does_not_call_contextpilot(
     monkeypatch: MonkeyPatch,
-    caplog: LogCaptureFixture,
 ) -> None:
-    class IndexErrorCP:
+    called = {"optimize": 0, "reorder": 0}
+
+    class AssertingCP:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
 
@@ -430,21 +429,26 @@ def test_process_completion_request_survives_optimize_index_error(
         ) -> list[dict[str, str]]:
             _ = contexts
             _ = query
-            raise IndexError("list index out of range")
+            called["optimize"] += 1
+            raise AssertionError("optimize must not be called")
 
-    monkeypatch.setattr(middleware_module, "ContextPilot", IndexErrorCP)
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = contexts
+            _ = conversation_id
+            called["reorder"] += 1
+            raise AssertionError("reorder must not be called")
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", AssertingCP)
     middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
 
-    with caplog.at_level(logging.WARNING):
-        output = middleware.process_completion_request(
-            "the capital of france is"
-        )
+    output = middleware.process_completion_request("the capital of france is")
 
     assert output == "the capital of france is"
-    assert not any(
-        "completion optimize failed" in record.getMessage()
-        for record in caplog.records
-    )
+    assert called == {"optimize": 0, "reorder": 0}
 
 
 def test_explicit_conversation_dedup_waits_until_second_turn(

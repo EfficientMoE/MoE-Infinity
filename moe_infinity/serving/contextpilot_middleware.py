@@ -135,66 +135,13 @@ class ContextPilotMiddleware:
         if not self._enabled:
             return prompt
 
-        try:
-            started_at = time.monotonic()
-            with self._lock:
-                try:
-                    optimized = self._cp.optimize([], str(prompt))
-                except TypeError:
-                    optimized = self._cp.optimize(docs=[], query=str(prompt))
-            reorder_latency_ms = (time.monotonic() - started_at) * 1000
-            if not optimized:
-                with self._stats_lock:
-                    self._requests_processed += 1
-                    self._reorder_count += 1
-                    self._last_reorder_latency_ms = reorder_latency_ms
-                    self._last_dedup_latency_ms = 0.0
-                    self._last_tokens_saved = 0
-                    self._last_savings_pct = 0.0
-                return prompt
-
-            for message in reversed(optimized):
-                content = message.get("content")
-                if isinstance(content, str):
-                    with self._stats_lock:
-                        self._requests_processed += 1
-                        self._reorder_count += 1
-                        self._last_reorder_latency_ms = reorder_latency_ms
-                        self._last_dedup_latency_ms = 0.0
-                        self._last_tokens_saved = 0
-                        self._last_savings_pct = 0.0
-                    return content
-            with self._stats_lock:
-                self._requests_processed += 1
-                self._reorder_count += 1
-                self._last_reorder_latency_ms = reorder_latency_ms
-                self._last_dedup_latency_ms = 0.0
-                self._last_tokens_saved = 0
-                self._last_savings_pct = 0.0
-            return prompt
-        except (ValueError, IndexError) as exc:
-            # ContextPilot.optimize can't index the empty context set a bare
-            # completion prompt produces (issue #146 Bug 3); the chat path
-            # guards the same way. Preserve the prompt without a warning.
-            logger.debug(
-                "ContextPilot.optimize raised %s; preserving prompt", exc
-            )
-            with self._stats_lock:
-                self._requests_processed += 1
-                self._last_reorder_latency_ms = 0.0
-                self._last_dedup_latency_ms = 0.0
-                self._last_tokens_saved = 0
-                self._last_savings_pct = 0.0
-            return prompt
-        except Exception as exc:
-            logger.warning("ContextPilot completion optimize failed: %s", exc)
-            with self._stats_lock:
-                self._requests_processed += 1
-                self._last_reorder_latency_ms = 0.0
-                self._last_dedup_latency_ms = 0.0
-                self._last_tokens_saved = 0
-                self._last_savings_pct = 0.0
-            return prompt
+        with self._stats_lock:
+            self._requests_processed += 1
+            self._last_reorder_latency_ms = 0.0
+            self._last_dedup_latency_ms = 0.0
+            self._last_tokens_saved = 0
+            self._last_savings_pct = 0.0
+        return prompt
 
     def on_request_complete(self, request_id: str) -> None:
         if not self._enabled:
