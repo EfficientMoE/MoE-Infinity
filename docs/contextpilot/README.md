@@ -144,11 +144,19 @@ curl http://localhost:8000/contextpilot/status
 | `token_savings_total` | Total prompt tokens removed so far |
 | `token_savings_avg_pct` | Average percent token savings across processed requests |
 | `eviction_sync` | Nested counters for terminal eviction events: `incoming`, `removed`, `not_found` |
-| `cp_index_size` | Current number of live ContextPilot index entries, when available |
+| `cp_index_size` | `len(ContextPilot.get_all_request_ids())`, or `0` when ContextPilot is absent |
 | `fallback_count` | Total times MoE-Infinity fell back after ContextPilot errors |
 | `last_fallback_count` | Latest recorded fallback counter snapshot |
 | `debug` | Whether debug endpoints are enabled |
 | `fault` | Active injected fault mode |
+
+## ContextPilot 0.5.0 serving behavior
+
+- Chat requests call `ContextPilot.reorder`. Roles stay attached to their document strings. The serving path does not rebuild the transcript with `optimize()`.
+- Cross-turn dedup runs only when the OpenAI `user` field is a non-empty string. That string is the `conversation_id`. The first turn for that user keeps the original document text. Later turns replace documents already seen for that user with reference hints.
+- Anonymous requests pass the serving request id as the reorder conversation key, so they do not share ContextPilot's default conversation.
+- Completion prompts are not rewritten.
+- Phase C waiting-queue overlap scores stay `0.0` on ContextPilot 0.5.0. That class has no `predict_prefix_reuse`.
 
 ## Troubleshooting
 
@@ -156,9 +164,13 @@ curl http://localhost:8000/contextpilot/status
 
 Real ContextPilot needs Python 3.10+. On Python 3.8/3.9, the middleware auto-disables with a warning. Install the package in a Python 3.10+ environment to enable ContextPilot features.
 
-### `pip install contextpilot` may pull the wrong package
+### PyPI `contextpilot` 0.5.x is EfficientContext/ContextPilot
 
-There is a package name conflict on PyPI. One package named `contextpilot` is a different project and may pull in `elasticsearch`. If you hit that dependency path, use the known ContextPilot checkout under `/tmp/ContextPilot`, or install the intended package in a clean Python 3.10+ environment before enabling Phase B or Phase C.
+PyPI `contextpilot` 0.5.x is [EfficientContext/ContextPilot](https://github.com/EfficientContext/ContextPilot). That package depends on `elasticsearch==8.18.1`. MoE-Infinity does not import Elasticsearch. Install it in a Python 3.10+ environment:
+
+```bash
+pip install 'contextpilot>=0.5.0,<0.6'
+```
 
 ### ContextPilot seems disabled even with the CLI flag
 

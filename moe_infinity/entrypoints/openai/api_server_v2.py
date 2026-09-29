@@ -392,11 +392,13 @@ def _contextpilot_index_size(middleware: Optional[Any]) -> int:
     if middleware is None:
         return 0
 
-    cp_obj = getattr(middleware, "_cp", None)
-    live_index_obj = getattr(cp_obj, "live_index", None)
-    if isinstance(live_index_obj, dict):
-        return len(live_index_obj)
-    return 0
+    size_fn = getattr(middleware, "cp_index_size", None)
+    if not callable(size_fn):
+        return 0
+    try:
+        return int(size_fn())
+    except Exception:
+        return 0
 
 
 def _ensure_cp_middleware_initialized() -> Optional[Any]:
@@ -475,6 +477,7 @@ def _process_chat_messages_with_contextpilot(
     messages: Any,
     *,
     request_id: str,
+    conversation_id: str | None = None,
 ) -> Any:
     if not isinstance(messages, list):
         return messages
@@ -490,7 +493,11 @@ def _process_chat_messages_with_contextpilot(
         if fault != "none":
             raise RuntimeError(f"CP fault injected: {fault}")
 
-        processed_messages = middleware.process_chat_request(messages)
+        processed_messages = middleware.process_chat_request(
+            messages,
+            serving_request_id=request_id,
+            conversation_id=conversation_id,
+        )
         _log_contextpilot_request_metrics(
             request_id=request_id,
             middleware=middleware,
@@ -2131,9 +2138,12 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
         stop=request.stop,
         logprobs=request.top_logprobs if request.logprobs else request.logprobs,
     )
+    user = request.user
+    conversation_id = user if isinstance(user, str) and user else None
     processed_messages = _process_chat_messages_with_contextpilot(
         request.messages,
         request_id=request_id,
+        conversation_id=conversation_id,
     )
     original_messages = request.messages
     request.messages = processed_messages

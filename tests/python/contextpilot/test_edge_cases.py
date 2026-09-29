@@ -53,23 +53,21 @@ def test_concurrent_reorder_same_context(monkeypatch: MonkeyPatch) -> None:
             self.max_active = 0
             cp_holder["instance"] = self
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
             with self._guard:
                 self._active += 1
                 self.max_active = max(self.max_active, self._active)
                 if self._active > 1:
-                    raise RuntimeError("concurrent optimize detected")
+                    raise RuntimeError("concurrent reorder detected")
 
             try:
                 time.sleep(0.005)
-                output = [
-                    {"role": "system", "content": value} for value in contexts
-                ]
-                output.append({"role": "user", "content": query})
-                output.append({"role": "assistant", "content": "ok"})
-                return output
+                return ([list(contexts)], [0])
             finally:
                 with self._guard:
                     self._active -= 1
@@ -92,9 +90,8 @@ def test_concurrent_reorder_same_context(monkeypatch: MonkeyPatch) -> None:
     ]
     expected = [
         {"role": "system", "content": "policy"},
-        {"role": "system", "content": "context-a"},
+        {"role": "assistant", "content": "context-a"},
         {"role": "user", "content": "same final query"},
-        {"role": "assistant", "content": "ok"},
     ]
 
     barrier = threading.Barrier(10)
@@ -140,14 +137,16 @@ def test_abort_mid_reorder(monkeypatch: MonkeyPatch) -> None:
             _ = use_gpu
             self.calls = 0
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
-            _ = contexts
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("reorder aborted")
-            return [{"role": "assistant", "content": f"ok:{query}"}]
+            return ([list(reversed(list(contexts)))], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", AbortOnceCP)
     middleware = ContextPilotMiddleware(
@@ -156,14 +155,22 @@ def test_abort_mid_reorder(monkeypatch: MonkeyPatch) -> None:
         reorder_enabled=True,
         dedup_enabled=False,
     )
-    messages = [{"role": "user", "content": "recover me"}]
+    messages = [
+        {"role": "system", "content": "doc-a"},
+        {"role": "assistant", "content": "doc-b"},
+        {"role": "user", "content": "recover me"},
+    ]
 
     first = middleware.process_chat_request(messages)
     second = middleware.process_chat_request(messages)
     stats = middleware.get_token_savings()
 
     assert first == messages
-    assert second == [{"role": "assistant", "content": "ok:recover me"}]
+    assert second == [
+        {"role": "assistant", "content": "doc-b"},
+        {"role": "system", "content": "doc-a"},
+        {"role": "user", "content": "recover me"},
+    ]
     assert stats["requests_processed"] == 2
 
 
@@ -174,13 +181,33 @@ def test_cp_restart_recovery(
     class RestartingCP:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
+            self._ids: set[str] = set()
 
-        def on_request_complete(self, request_id: str) -> None:
-            _ = request_id
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            self._ids = {"req-restart"}
+            return ([list(contexts)], [0])
+
+        def get_all_request_ids(self) -> set[str]:
+            return set(self._ids)
+
+        def remove_requests(self, request_ids: set[str]) -> dict[str, int]:
+            _ = request_ids
             raise ConnectionError("contextpilot sidecar unavailable")
 
     monkeypatch.setattr(middleware_module, "ContextPilot", RestartingCP)
     cp_middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+    _ = cp_middleware.process_chat_request(
+        [
+            {"role": "system", "content": "doc"},
+            {"role": "user", "content": "q"},
+        ],
+        serving_request_id="req-restart",
+    )
     adapter = EvictionSyncAdapter(cp_middleware)
 
     with caplog.at_level(logging.WARNING):
@@ -218,18 +245,20 @@ def test_empty_context_list(monkeypatch: MonkeyPatch) -> None:
 
 
 def test_unicode_documents(monkeypatch: MonkeyPatch) -> None:
+    calls: list[str] = []
+
     class EchoCP:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
-            output = [
-                {"role": "system", "content": value} for value in contexts
-            ]
-            output.append({"role": "user", "content": query})
-            return output
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            calls.append("reorder")
+            return ([list(contexts)], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", EchoCP)
     middleware = ContextPilotMiddleware(
@@ -253,21 +282,24 @@ def test_unicode_documents(monkeypatch: MonkeyPatch) -> None:
         "mixed: English-日本語-русский",
         "请总结并保留原文🙂",
     ]
+    assert calls == ["reorder"]
 
 
 def test_very_large_context(monkeypatch: MonkeyPatch) -> None:
+    calls: list[str] = []
+
     class EchoCP:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
-            output = [
-                {"role": "system", "content": value} for value in contexts
-            ]
-            output.append({"role": "user", "content": query})
-            return output
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            calls.append("reorder")
+            return ([list(contexts)], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", EchoCP)
     middleware = ContextPilotMiddleware(
@@ -292,6 +324,7 @@ def test_very_large_context(monkeypatch: MonkeyPatch) -> None:
     assert isinstance(output, list) and len(output) >= 3
     assert any(msg["content"] == large_a for msg in output)
     assert any(msg["content"] == large_b for msg in output)
+    assert calls == ["reorder"]
 
 
 def test_clock_skew_eviction_race() -> None:
@@ -337,18 +370,20 @@ def test_clock_skew_eviction_race() -> None:
 
 
 def test_memory_pressure_large_batch(monkeypatch: MonkeyPatch) -> None:
+    calls: list[str] = []
+
     class EchoCP:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
-            output = [
-                {"role": "system", "content": value} for value in contexts
-            ]
-            output.append({"role": "user", "content": query})
-            return output
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            calls.append("reorder")
+            return ([list(contexts)], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", EchoCP)
     middleware = ContextPilotMiddleware(
@@ -369,6 +404,8 @@ def test_memory_pressure_large_batch(monkeypatch: MonkeyPatch) -> None:
             ]
         )
         assert output
+
+    assert calls == ["reorder"] * 50
 
     _ = gc.collect()
     after_current, _ = tracemalloc.get_traced_memory()

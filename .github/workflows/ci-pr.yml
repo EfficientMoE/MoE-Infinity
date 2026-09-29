@@ -92,7 +92,7 @@ jobs:
             -v
 
       - name: Install contextpilot
-        run: pip install contextpilot
+        run: pip install 'contextpilot>=0.5.0,<0.6'
 
       - name: Run contextpilot CPU tests
         run: |
