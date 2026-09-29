@@ -461,7 +461,7 @@ setup(
     extras_require={
         "flashinfer": ["flashinfer-python"],
         "flash_attn": ["flash-attn>=2.5.2"],
-        "contextpilot": ["contextpilot>=0.4.0"],
+        "contextpilot": ["contextpilot>=0.5.0,<0.6"],
     },
     author="EfficientMoE Team",
     long_description=read_readme(),

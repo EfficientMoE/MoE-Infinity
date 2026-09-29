@@ -156,9 +156,13 @@ curl http://localhost:8000/contextpilot/status
 
 Real ContextPilot needs Python 3.10+. On Python 3.8/3.9, the middleware auto-disables with a warning. Install the package in a Python 3.10+ environment to enable ContextPilot features.
 
-### `pip install contextpilot` may pull the wrong package
+### PyPI `contextpilot` 0.5.x is EfficientContext/ContextPilot
 
-There is a package name conflict on PyPI. One package named `contextpilot` is a different project and may pull in `elasticsearch`. If you hit that dependency path, use the known ContextPilot checkout under `/tmp/ContextPilot`, or install the intended package in a clean Python 3.10+ environment before enabling Phase B or Phase C.
+PyPI `contextpilot` 0.5.x is [EfficientContext/ContextPilot](https://github.com/EfficientContext/ContextPilot). That package depends on `elasticsearch==8.18.1`. MoE-Infinity does not import Elasticsearch. Install it in a Python 3.10+ environment:
+
+```bash
+pip install 'contextpilot>=0.5.0,<0.6'
+```
 
 ### ContextPilot seems disabled even with the CLI flag
 
