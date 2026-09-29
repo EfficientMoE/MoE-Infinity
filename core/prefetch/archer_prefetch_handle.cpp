@@ -474,8 +474,30 @@ std::int64_t ArcherPrefetchHandle::GetExpertOccupancyBytes() {
   return std::get<0>(kTopologyHandle->GetResidentAndWastedBytes());
 }
 
+std::int64_t ArcherPrefetchHandle::GetResidentExpertCount() const {
+  if (manager_enabled_ && kExpertResidencyManager != nullptr) {
+    std::int64_t resident = 0;
+    for (int gpu_id = 0; gpu_id < kNumDevices(); ++gpu_id) {
+      resident += static_cast<std::int64_t>(
+          kExpertResidencyManager->ResidentCount(gpu_id));
+    }
+    return resident;
+  }
+  return kTopologyHandle == nullptr
+             ? 0
+             : kTopologyHandle->GetResidentSparseExpertCount();
+}
+
 std::int64_t ArcherPrefetchHandle::GetWastedPrefetchBytes() {
   return std::get<1>(kTopologyHandle->GetResidentAndWastedBytes());
+}
+
+std::int64_t ArcherPrefetchHandle::GetExpertH2DBytesTotal() {
+  return kTopologyHandle->GetExpertH2DBytesTotal();
+}
+
+void ArcherPrefetchHandle::ResetExpertTransferStats() {
+  kTopologyHandle->ResetExpertTransferStats();
 }
 
 void ArcherPrefetchHandle::SetTrace(const torch::Tensor& trace) {

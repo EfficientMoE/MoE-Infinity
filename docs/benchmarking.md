@@ -631,3 +631,25 @@ python benchmarks/expert_io_microbench/nsys_parser.py \
   ownership contracts.
 - Results apply to single-host personal-machine offloading only. They are not
   multi-node results and are not promises of DeepEP or paper-level speedups.
+
+## Paired-store FP8 parity benchmark
+
+`benchmarks/fp8_store/bench_store_parity.py` compares a bf16 store against a
+synthetic FP8 store of the same checkpoint and asserts the issue #234 Phase 1
+release gates in-script:
+
+```bash
+python benchmarks/fp8_store/bench_store_parity.py \
+    --checkpoint deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --store-a /tmp/dsl-bf16 --store-b /tmp/dsl-fp8
+```
+
+Hard gates: FP8 expert transfer bytes <= 55% of bf16 (native
+`expert_h2d_bytes_total` counter, reset before each run), teacher-forced
+mean-NLL delta <= 1% relative (reuses `benchmarks/eval/perplexity.py`), and
+resident-expert count >= 1.8x at a fixed cache budget. TTFT and TPOT
+percentiles (p50/p95/p99) plus cache hit rate and wasted-prefetch bytes are
+reported as characterization without a hard latency threshold. Per-store
+results and a gate summary are written as JSON
+(`bench_store_parity.json`, `bench_store_parity_summary.json`) next to the
+stores.

@@ -40,7 +40,7 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def resolve_dataset(dataset: str, split: str) -> tuple[str, str | None, str]:
     if dataset == "wikitext":
-        return "wikitext", "wikitext-2-raw-v1", split
+        return "Salesforce/wikitext", "wikitext-2-raw-v1", split
     if dataset == "c4":
         return "allenai/c4", "en", "validation" if split == "test" else split
     if dataset == "ptb":
@@ -107,7 +107,10 @@ def evaluate_perplexity(
     total_tokens = 0
     processed = 0
 
-    with torch.inference_mode():
+    # Native expert dispatch retains tensors for asynchronous worker threads.
+    # no_grad avoids autograd bookkeeping without creating inference tensors,
+    # whose cross-thread mutation is rejected by recent PyTorch versions.
+    with torch.no_grad():
         for start in range(0, min(len(dataset), max_samples), batch_size):
             batch_texts = dataset[start : start + batch_size]
             encoded = tokenizer(

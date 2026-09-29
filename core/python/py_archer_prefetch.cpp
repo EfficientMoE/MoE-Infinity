@@ -65,8 +65,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                ArcherPrefetchHandle::GetHitRate)
       .def("get_expert_occupancy_bytes",
            &ArcherPrefetchHandle::GetExpertOccupancyBytes)
+      .def("get_resident_expert_count",
+           &ArcherPrefetchHandle::GetResidentExpertCount)
       .def("get_wasted_prefetch_bytes",
            &ArcherPrefetchHandle::GetWastedPrefetchBytes)
+      .def("get_expert_h2d_bytes_total",
+           &ArcherPrefetchHandle::GetExpertH2DBytesTotal)
+      .def("reset_expert_transfer_stats",
+           &ArcherPrefetchHandle::ResetExpertTransferStats)
       .def("set_trace", (void(ArcherPrefetchHandle::*)(const torch::Tensor&)) &
                             ArcherPrefetchHandle::SetTrace)
       //    .def("trace_request",

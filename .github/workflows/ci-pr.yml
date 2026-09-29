@@ -67,8 +67,8 @@ jobs:
 
       - name: Install CPU-compatible runtime deps
         run: |
-          # GitHub tags are authoritative; PyPI mirroring is optional.
-          pip install --no-deps 'moe-store @ git+https://github.com/EfficientMoE/moe-store.git@v0.2.1'
+          # GitHub Releases are authoritative; PyPI mirroring is optional.
+          pip install --no-deps 'moe-store @ git+https://github.com/EfficientMoE/moe-store.git@v0.2.2'
           grep -v -E '^(flash-attn|moe-store|nvtx|sglang-kernel)' requirements.txt \
             | pip install -r /dev/stdin 2>&1 || true
 
