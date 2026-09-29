@@ -245,18 +245,20 @@ def test_empty_context_list(monkeypatch: MonkeyPatch) -> None:
 
 
 def test_unicode_documents(monkeypatch: MonkeyPatch) -> None:
+    calls: list[str] = []
+
     class EchoCP:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
-            output = [
-                {"role": "system", "content": value} for value in contexts
-            ]
-            output.append({"role": "user", "content": query})
-            return output
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            calls.append("reorder")
+            return ([list(contexts)], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", EchoCP)
     middleware = ContextPilotMiddleware(
@@ -280,21 +282,24 @@ def test_unicode_documents(monkeypatch: MonkeyPatch) -> None:
         "mixed: English-日本語-русский",
         "请总结并保留原文🙂",
     ]
+    assert calls == ["reorder"]
 
 
 def test_very_large_context(monkeypatch: MonkeyPatch) -> None:
+    calls: list[str] = []
+
     class EchoCP:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
-            output = [
-                {"role": "system", "content": value} for value in contexts
-            ]
-            output.append({"role": "user", "content": query})
-            return output
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            calls.append("reorder")
+            return ([list(contexts)], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", EchoCP)
     middleware = ContextPilotMiddleware(
@@ -319,6 +324,7 @@ def test_very_large_context(monkeypatch: MonkeyPatch) -> None:
     assert isinstance(output, list) and len(output) >= 3
     assert any(msg["content"] == large_a for msg in output)
     assert any(msg["content"] == large_b for msg in output)
+    assert calls == ["reorder"]
 
 
 def test_clock_skew_eviction_race() -> None:
@@ -364,18 +370,20 @@ def test_clock_skew_eviction_race() -> None:
 
 
 def test_memory_pressure_large_batch(monkeypatch: MonkeyPatch) -> None:
+    calls: list[str] = []
+
     class EchoCP:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
-            output = [
-                {"role": "system", "content": value} for value in contexts
-            ]
-            output.append({"role": "user", "content": query})
-            return output
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            calls.append("reorder")
+            return ([list(contexts)], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", EchoCP)
     middleware = ContextPilotMiddleware(
@@ -396,6 +404,8 @@ def test_memory_pressure_large_batch(monkeypatch: MonkeyPatch) -> None:
             ]
         )
         assert output
+
+    assert calls == ["reorder"] * 50
 
     _ = gc.collect()
     after_current, _ = tracemalloc.get_traced_memory()

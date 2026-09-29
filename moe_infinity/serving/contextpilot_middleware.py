@@ -63,6 +63,7 @@ class ContextPilotMiddleware:
         self._last_tokens_saved = 0
         self._last_savings_pct = 0.0
         self._serving_to_cp_ids: dict[str, set[str]] = {}
+        self._serving_before_ids: dict[str, set[str]] = {}
 
     def process_chat_request(
         self,
@@ -149,6 +150,17 @@ class ContextPilotMiddleware:
 
         with self._lock:
             request_ids = self._serving_to_cp_ids.pop(request_id, None)
+            before_ids = self._serving_before_ids.pop(request_id, None)
+            if request_ids is None and before_ids is not None:
+                try:
+                    request_ids = self._snapshot_request_ids() - before_ids
+                except Exception as exc:
+                    logger.warning(
+                        "ContextPilot request-id snapshot failed for %s: %s",
+                        request_id,
+                        exc,
+                    )
+                    return
             if not request_ids:
                 return
             try:
@@ -167,6 +179,24 @@ class ContextPilotMiddleware:
             return len(self._snapshot_request_ids())
         except Exception:
             return 0
+
+    def _record_new_request_ids(
+        self, serving_request_id: str | None, before_ids: set[str]
+    ) -> None:
+        if not isinstance(serving_request_id, str) or not serving_request_id:
+            return
+        try:
+            new_ids = self._snapshot_request_ids() - before_ids
+        except Exception as exc:
+            logger.warning(
+                "ContextPilot request-id snapshot failed for %s: %s",
+                serving_request_id,
+                exc,
+            )
+            self._serving_before_ids[serving_request_id] = set(before_ids)
+            return
+        if new_ids:
+            self._serving_to_cp_ids[serving_request_id] = new_ids
 
     def _snapshot_request_ids(self) -> set[str]:
         getter = getattr(self._cp, "get_all_request_ids", None)
@@ -274,18 +304,12 @@ class ContextPilotMiddleware:
                 docs = self._apply_cross_turn_dedup(docs, conversation_id)
                 for slot, doc in zip(doc_slots, docs):
                     working[slot]["content"] = doc
+            before_ids: set[str] = set()
             try:
                 before_ids = self._snapshot_request_ids()
                 reordered = self._cp.reorder(
                     docs, conversation_id=conversation_key
                 )
-                new_ids = self._snapshot_request_ids() - before_ids
-                if (
-                    isinstance(serving_request_id, str)
-                    and serving_request_id
-                    and new_ids
-                ):
-                    self._serving_to_cp_ids[serving_request_id] = new_ids
             except (AttributeError, TypeError, ValueError, IndexError) as exc:
                 logger.debug(
                     "ContextPilot.reorder raised %s; preserving original order",
@@ -295,6 +319,7 @@ class ContextPilotMiddleware:
             except Exception as exc:
                 logger.warning("ContextPilot reorder failed: %s", exc)
                 return self._copy_messages(messages)
+            self._record_new_request_ids(serving_request_id, before_ids)
 
         if (
             not isinstance(reordered, tuple)

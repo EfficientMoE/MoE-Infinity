@@ -384,6 +384,52 @@ def test_cp_index_size_uses_get_all_request_ids(
     assert middleware.cp_index_size() == 3
 
 
+def test_snapshot_failure_after_reorder_still_evicts(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class FakeCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+            self._ids: set[str] = {"req-old"}
+            self._snapshots = 0
+            self.removed: list[set[str]] = []
+
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            self._ids.add("req-new")
+            return ([list(contexts)], [0])
+
+        def get_all_request_ids(self) -> set[str]:
+            self._snapshots += 1
+            if self._snapshots == 2:
+                raise RuntimeError("snapshot failed")
+            return set(self._ids)
+
+        def remove_requests(self, request_ids: set[str]) -> dict[str, int]:
+            self.removed.append(set(request_ids))
+            return {"removed_count": len(request_ids)}
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+    output = middleware.process_chat_request(
+        [
+            {"role": "system", "content": "doc"},
+            {"role": "user", "content": "q"},
+        ],
+        serving_request_id="srv-9",
+    )
+    middleware.on_request_complete("srv-9")
+    cp = middleware._cp
+    assert isinstance(cp, FakeCP)
+
+    assert output[0]["content"] == "doc"
+    assert cp.removed == [{"req-new"}]
+
+
 def test_on_request_complete_doesnt_raise() -> None:
     middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
 
