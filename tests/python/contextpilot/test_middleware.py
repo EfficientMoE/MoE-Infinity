@@ -18,7 +18,7 @@ requires_contextpilot = pytest.mark.skipif(
 )
 
 
-def test_process_chat_request_returns_messages(
+def test_process_chat_request_preserves_roles_and_reorders_docs(
     monkeypatch: MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -27,12 +27,14 @@ def test_process_chat_request_returns_messages(
         def __init__(self, use_gpu: bool = False) -> None:
             captured["use_gpu"] = use_gpu
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
             captured["contexts"] = list(contexts)
-            captured["query"] = query
-            return [{"role": "assistant", "content": "optimized"}]
+            captured["conversation_id"] = conversation_id
+            return ([["reply-a", "rule", "ctx-a"]], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
     middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
@@ -43,17 +45,25 @@ def test_process_chat_request_returns_messages(
         {"role": "user", "content": "final query"},
     ]
 
-    output = middleware.process_chat_request(messages)
+    output = middleware.process_chat_request(
+        messages, serving_request_id="srv-1"
+    )
 
-    assert isinstance(output, list)
-    assert output and isinstance(output[0], dict)
+    assert output == [
+        {"role": "assistant", "content": "reply-a"},
+        {"role": "system", "content": "rule"},
+        {"role": "user", "content": "ctx-a"},
+        {"role": "user", "content": "final query"},
+    ]
     assert captured["use_gpu"] is False
     assert captured["contexts"] == ["rule", "ctx-a", "reply-a"]
-    assert captured["query"] == "final query"
+    assert captured["conversation_id"] == "srv-1"
 
 
-def test_graceful_fallback_on_exception(monkeypatch: MonkeyPatch) -> None:
-    class ExplodingCP:
+def test_reorder_non_permutation_keeps_original(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class FakeCP:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
 
@@ -62,11 +72,87 @@ def test_graceful_fallback_on_exception(monkeypatch: MonkeyPatch) -> None:
         ) -> list[dict[str, str]]:
             _ = contexts
             _ = query
+            return [{"role": "system", "content": "only-one"}]
+
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = contexts
+            _ = conversation_id
+            return ([["only-one"]], [0])
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+    messages = [
+        {"role": "system", "content": "alpha"},
+        {"role": "assistant", "content": "beta"},
+        {"role": "user", "content": "query"},
+    ]
+
+    output = middleware.process_chat_request(messages)
+
+    assert output == messages
+
+
+def test_non_string_content_skips_reorder(monkeypatch: MonkeyPatch) -> None:
+    called = {"reorder": False}
+
+    class FakeCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+
+        def optimize(
+            self, contexts: list[str], query: str
+        ) -> list[dict[str, str]]:
+            _ = contexts
+            _ = query
+            return [{"role": "user", "content": "flattened"}]
+
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = contexts
+            _ = conversation_id
+            called["reorder"] = True
+            return ([list(contexts)], [0])
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+    messages = [
+        {"role": "system", "content": "rule"},
+        {"role": "user", "content": ["image"]},
+    ]
+
+    output = middleware.process_chat_request(messages)
+
+    assert called["reorder"] is False
+    assert output[1]["content"] == ["image"]
+
+
+def test_graceful_fallback_on_exception(monkeypatch: MonkeyPatch) -> None:
+    class ExplodingCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = contexts
+            _ = conversation_id
             raise RuntimeError("boom")
 
     monkeypatch.setattr(middleware_module, "ContextPilot", ExplodingCP)
     middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
-    original = [{"role": "user", "content": "hello"}]
+    original = [
+        {"role": "system", "content": "doc"},
+        {"role": "user", "content": "hello"},
+    ]
 
     output = middleware.process_chat_request(original)
 
@@ -88,19 +174,21 @@ def test_thread_safety(monkeypatch: MonkeyPatch) -> None:
             self.max_active = 0
             cp_holder["instance"] = self
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
-            _ = contexts
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
             with self._guard:
                 self._active += 1
                 self.max_active = max(self.max_active, self._active)
                 if self._active > 1:
-                    raise RuntimeError("concurrent optimize detected")
+                    raise RuntimeError("concurrent reorder detected")
 
             try:
                 time.sleep(0.01)
-                return [{"role": "assistant", "content": f"optimized:{query}"}]
+                return ([list(contexts)], [0])
             finally:
                 with self._guard:
                     self._active -= 1
@@ -115,7 +203,10 @@ def test_thread_safety(monkeypatch: MonkeyPatch) -> None:
     def _worker(i: int) -> None:
         try:
             output = middleware.process_chat_request(
-                [{"role": "user", "content": f"query-{i}"}]
+                [
+                    {"role": "system", "content": f"doc-{i}"},
+                    {"role": "user", "content": f"query-{i}"},
+                ]
             )
             outputs.append(output)
         except Exception as exc:
@@ -130,7 +221,9 @@ def test_thread_safety(monkeypatch: MonkeyPatch) -> None:
     assert not errors
     assert len(outputs) == 10
     assert all(
-        output and output[0]["content"].startswith("optimized:")
+        output
+        and output[0]["role"] == "system"
+        and output[0]["content"].startswith("doc-")
         for output in outputs
     )
     cp = cp_holder["instance"]
@@ -155,19 +248,25 @@ def test_status_metrics_nonblocking_during_slow_optimize(
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
             optimize_started.set()
             _ = optimize_release.wait(timeout=5.0)
-            return [{"role": "user", "content": query}]
+            return ([list(contexts)], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", SlowCP)
     middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
 
     worker = threading.Thread(
         target=lambda: middleware.process_chat_request(
-            [{"role": "user", "content": "hi"}]
+            [
+                {"role": "system", "content": "slow-doc"},
+                {"role": "user", "content": "hi"},
+            ]
         )
     )
     worker.start()
@@ -254,13 +353,13 @@ def test_dedup_removes_duplicates(monkeypatch: MonkeyPatch) -> None:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
-            output = [{"role": "system", "content": ctx} for ctx in contexts]
-            if query:
-                output.append({"role": "user", "content": query})
-            return output
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            return ([list(contexts)], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
     middleware = ContextPilotMiddleware(

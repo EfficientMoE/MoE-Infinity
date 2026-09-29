@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import Counter
 from typing import Any, Optional, cast
 
 try:
@@ -39,7 +40,7 @@ class ContextPilotMiddleware:
         if ContextPilot is None:
             logger.warning(
                 "contextpilot package not installed; ContextPilot features disabled. "
-                "Install with: pip install contextpilot>=0.4.0 (requires Python 3.10+)"
+                "Install with: pip install 'contextpilot>=0.5.0,<0.6' (requires Python 3.10+)"
             )
             self._enabled = False
             self._reorder_enabled = False
@@ -63,7 +64,11 @@ class ContextPilotMiddleware:
         self._last_savings_pct = 0.0
 
     def process_chat_request(
-        self, messages: list[dict[str, str]]
+        self,
+        messages: list[dict[str, str]],
+        *,
+        serving_request_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> list[dict[str, str]]:
         if not self._enabled:
             return messages
@@ -75,7 +80,11 @@ class ContextPilotMiddleware:
             dedup_latency_ms = 0.0
             if self._reorder_enabled:
                 reorder_started_at = time.monotonic()
-                optimized_messages = self._reorder_messages(messages)
+                optimized_messages = self._reorder_messages(
+                    messages,
+                    serving_request_id=serving_request_id,
+                    conversation_id=conversation_id,
+                )
                 reorder_latency_ms = (
                     time.monotonic() - reorder_started_at
                 ) * 1000
@@ -244,86 +253,117 @@ class ContextPilotMiddleware:
             if message.get("role") != "user":
                 continue
             content = message.get("content")
-            if content is None:
+            if not isinstance(content, str):
                 continue
             last_user_index = index
-            query = str(content)
+            query = content
 
         return query, last_user_index
 
-    def _reorder_messages(
-        self, messages: list[dict[str, str]]
+    @staticmethod
+    def _copy_messages(
+        messages: list[dict[str, str]],
     ) -> list[dict[str, str]]:
-        query, query_index = self._extract_query(messages)
-        contexts: list[str] = []
+        return [dict(message) for message in messages]
 
-        for index, message in enumerate(messages):
-            content = message.get("content")
-            if content is None:
+    @staticmethod
+    def _conversation_key(
+        serving_request_id: str | None,
+        conversation_id: str | None,
+    ) -> str | None:
+        if isinstance(conversation_id, str) and conversation_id:
+            return conversation_id
+        if isinstance(serving_request_id, str) and serving_request_id:
+            return serving_request_id
+        return None
+
+    def _reorder_messages(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        serving_request_id: str | None,
+        conversation_id: str | None,
+    ) -> list[dict[str, str]]:
+        if any(
+            not isinstance(message.get("content"), str) for message in messages
+        ):
+            return self._copy_messages(messages)
+
+        _query, query_index = self._extract_query(messages)
+        doc_slots = [
+            index for index in range(len(messages)) if index != query_index
+        ]
+        if not doc_slots:
+            return self._copy_messages(messages)
+
+        first_slot = doc_slots[0]
+        last_slot = doc_slots[-1]
+        for index in range(first_slot, last_slot + 1):
+            if index == query_index:
                 continue
+            if not isinstance(messages[index].get("content"), str):
+                return self._copy_messages(messages)
 
-            role = message.get("role")
-            if (
-                query_index is not None
-                and index == query_index
-                and role == "user"
-            ):
-                continue
-            contexts.append(str(content))
-
+        docs = [str(messages[index]["content"]) for index in doc_slots]
+        conversation_key = self._conversation_key(
+            serving_request_id, conversation_id
+        )
         with self._lock:
             try:
-                optimized = self._cp.optimize(contexts, query)
-            except TypeError:
-                optimized = self._cp.optimize(docs=contexts, query=query)
-            except (ValueError, IndexError) as exc:
+                reordered = self._cp.reorder(
+                    docs, conversation_id=conversation_key
+                )
+            except (AttributeError, TypeError, ValueError, IndexError) as exc:
                 logger.debug(
-                    "ContextPilot.optimize raised %s; preserving original order",
+                    "ContextPilot.reorder raised %s; preserving original order",
                     exc,
                 )
-                return [dict(message) for message in messages]
-        if not isinstance(optimized, list):
-            return [dict(message) for message in messages]
-        return [dict(message) for message in optimized]
+                return self._copy_messages(messages)
+            except Exception as exc:
+                logger.warning("ContextPilot reorder failed: %s", exc)
+                return self._copy_messages(messages)
+
+        if (
+            not isinstance(reordered, tuple)
+            or not reordered
+            or not isinstance(reordered[0], list)
+            or not reordered[0]
+            or not isinstance(reordered[0][0], list)
+        ):
+            return self._copy_messages(messages)
+        new_docs = cast(list[object], reordered[0][0])
+        if not self._same_string_multiset(docs, new_docs):
+            logger.debug(
+                "ContextPilot.reorder result is not a permutation; "
+                "preserving original order"
+            )
+            return self._copy_messages(messages)
+
+        buckets: dict[str, list[dict[str, str]]] = {}
+        for index in doc_slots:
+            content = str(messages[index]["content"])
+            buckets.setdefault(content, []).append(dict(messages[index]))
+        rebuilt: list[dict[str, str]] = []
+        for doc in new_docs:
+            if not isinstance(doc, str):
+                return self._copy_messages(messages)
+            bucket = buckets.get(doc)
+            if not bucket:
+                return self._copy_messages(messages)
+            rebuilt.append(bucket.pop(0))
+        if query_index is not None:
+            rebuilt.append(dict(messages[query_index]))
+        return rebuilt
+
+    @staticmethod
+    def _same_string_multiset(docs: list[str], new_docs: list[object]) -> bool:
+        if any(not isinstance(doc, str) for doc in new_docs):
+            return False
+        return Counter(docs) == Counter(cast(list[str], new_docs))
 
     def _deduplicate_messages(
         self, messages: list[dict[str, str]]
     ) -> tuple[list[dict[str, str]], int, float]:
-        with self._lock:
-            deduplicate_fn = getattr(self._cp, "deduplicate", None)
-            deduped: object = None
-            if callable(deduplicate_fn):
-                try:
-                    deduped = deduplicate_fn(messages)
-                except (TypeError, ValueError, IndexError) as exc:
-                    logger.debug(
-                        "ContextPilot.deduplicate signature mismatch (%s); "
-                        "using internal fallback dedup",
-                        exc,
-                    )
-                    deduped = None
-            if isinstance(deduped, list):
-                normalized: list[dict[str, str]] = []
-                deduped_list = cast(list[object], deduped)
-                for candidate in deduped_list:
-                    if not isinstance(candidate, dict):
-                        continue
-                    message_dict = cast(dict[object, object], candidate)
-                    role_obj = message_dict.get("role")
-                    content_obj = message_dict.get("content")
-                    normalized.append(
-                        {
-                            "role": ("" if role_obj is None else str(role_obj)),
-                            "content": (
-                                "" if content_obj is None else str(content_obj)
-                            ),
-                        }
-                    )
-                tokens_saved, pct = self._estimate_tokens_saved(
-                    messages, normalized
-                )
-                return normalized, tokens_saved, pct
-
         return self._fallback_deduplicate(messages)
 
     @staticmethod

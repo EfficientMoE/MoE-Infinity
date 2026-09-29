@@ -53,23 +53,21 @@ def test_concurrent_reorder_same_context(monkeypatch: MonkeyPatch) -> None:
             self.max_active = 0
             cp_holder["instance"] = self
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
             with self._guard:
                 self._active += 1
                 self.max_active = max(self.max_active, self._active)
                 if self._active > 1:
-                    raise RuntimeError("concurrent optimize detected")
+                    raise RuntimeError("concurrent reorder detected")
 
             try:
                 time.sleep(0.005)
-                output = [
-                    {"role": "system", "content": value} for value in contexts
-                ]
-                output.append({"role": "user", "content": query})
-                output.append({"role": "assistant", "content": "ok"})
-                return output
+                return ([list(contexts)], [0])
             finally:
                 with self._guard:
                     self._active -= 1
@@ -92,9 +90,8 @@ def test_concurrent_reorder_same_context(monkeypatch: MonkeyPatch) -> None:
     ]
     expected = [
         {"role": "system", "content": "policy"},
-        {"role": "system", "content": "context-a"},
+        {"role": "assistant", "content": "context-a"},
         {"role": "user", "content": "same final query"},
-        {"role": "assistant", "content": "ok"},
     ]
 
     barrier = threading.Barrier(10)
@@ -140,14 +137,16 @@ def test_abort_mid_reorder(monkeypatch: MonkeyPatch) -> None:
             _ = use_gpu
             self.calls = 0
 
-        def optimize(
-            self, contexts: list[str], query: str
-        ) -> list[dict[str, str]]:
-            _ = contexts
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("reorder aborted")
-            return [{"role": "assistant", "content": f"ok:{query}"}]
+            return ([list(reversed(list(contexts)))], [0])
 
     monkeypatch.setattr(middleware_module, "ContextPilot", AbortOnceCP)
     middleware = ContextPilotMiddleware(
@@ -156,14 +155,22 @@ def test_abort_mid_reorder(monkeypatch: MonkeyPatch) -> None:
         reorder_enabled=True,
         dedup_enabled=False,
     )
-    messages = [{"role": "user", "content": "recover me"}]
+    messages = [
+        {"role": "system", "content": "doc-a"},
+        {"role": "assistant", "content": "doc-b"},
+        {"role": "user", "content": "recover me"},
+    ]
 
     first = middleware.process_chat_request(messages)
     second = middleware.process_chat_request(messages)
     stats = middleware.get_token_savings()
 
     assert first == messages
-    assert second == [{"role": "assistant", "content": "ok:recover me"}]
+    assert second == [
+        {"role": "assistant", "content": "doc-b"},
+        {"role": "system", "content": "doc-a"},
+        {"role": "user", "content": "recover me"},
+    ]
     assert stats["requests_processed"] == 2
 
 
