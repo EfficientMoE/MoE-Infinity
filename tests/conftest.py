@@ -6,6 +6,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# The native extensions link against torch's shared libraries (libc10.so &
+# friends). Import torch first so those are loaded; otherwise the probes below
+# fail with OSError on GPU hosts and the REAL extensions get stubbed out.
+try:
+    import torch  # noqa: F401
+except ImportError:
+    pass
+
 _OPTIONAL_CUDA_MODULES = [
     "nvtx",
     "flash_attn",

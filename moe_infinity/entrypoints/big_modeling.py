@@ -45,6 +45,48 @@ def extract_context_feature(hidden_states, layer_ids=(1, 9, 17, 25, 33)):
     return torch.cat(selected, dim=-1)
 
 
+def _merge_store_quantization_config(model_config, offload_path):
+    """Merge a synthetic-FP8 store's quantization_config into model_config.
+
+    Reads ``store_meta.json`` (written by ``moe-store convert
+    --quantize-experts fp8``) via ``moe_store.index.read_store_meta``. Old
+    stores without the sidecar return ``None`` and are a no-op. If the source
+    checkpoint already advertises a different ``quantization_config``, raise:
+    quantizing an already-quantized source is rejected on the converter side,
+    and the engine mirrors that guard.
+    """
+    if not offload_path:
+        return model_config
+    try:
+        from moe_store.index import read_store_meta
+    except ImportError:
+        return model_config
+    meta = read_store_meta(offload_path)
+    if not meta or not meta.get("quantize_experts"):
+        return model_config
+    store_qc = meta.get("quantization_config")
+    if not store_qc:
+        return model_config
+    existing = getattr(model_config, "quantization_config", None)
+    if existing is not None:
+        existing_dict = (
+            existing.to_dict()
+            if hasattr(existing, "to_dict")
+            else dict(existing)
+        )
+        if existing_dict != store_qc:
+            raise RuntimeError(
+                "offload store advertises quantize_experts="
+                f"{meta['quantization_config']!r} but the source checkpoint "
+                f"already has quantization_config={existing_dict!r}; "
+                "refusing to serve a quantized store converted from an "
+                "already-quantized source"
+            )
+        return model_config
+    model_config.quantization_config = dict(store_qc)
+    return model_config
+
+
 class MoE:
     """
     Loads a (potentially sharded) checkpoint inside a model, potentially sending weights to a given device as they are
@@ -126,6 +168,17 @@ class MoE:
         )
         model_config = ensure_config_compat(model_config)
 
+        # Parse the engine config FIRST so the offload store dir is known,
+        # then merge any synthetic-FP8 store metadata into the model config
+        # BEFORE every detect_quantization call (issue #234 Phase 1, Task 3).
+        if isinstance(config, dict):
+            engine_config = ArcherConfig.load_from_json(config)
+        else:
+            engine_config = ArcherConfig.load_from_file(config)
+        model_config = _merge_store_quantization_config(
+            model_config, getattr(engine_config, "offload_path", "")
+        )
+
         quant_info = detect_quantization(model_config, "")
         if quant_info is not None:
             validate_quantization_support(quant_info, model_name_or_path)
@@ -176,10 +229,7 @@ class MoE:
 
             checkpoint_paths = get_checkpoint_paths(model_path)
 
-        if isinstance(config, dict):
-            engine_config = ArcherConfig.load_from_json(config)
-        else:
-            engine_config = ArcherConfig.load_from_file(config)
+        # engine_config was parsed above, before quantization detection.
 
         self.use_native_engine = bool(
             getattr(engine_config, "use_native_engine", True)
