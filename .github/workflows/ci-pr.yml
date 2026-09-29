@@ -67,9 +67,8 @@ jobs:
 
       - name: Install CPU-compatible runtime deps
         run: |
-          # Pin the merged Phase 1 store implementation until moe-store 0.2.2
-          # is published; v0.2.1 predates store_meta.json support.
-          pip install --no-deps 'moe-store @ git+https://github.com/EfficientMoE/moe-store.git@143ffbf6ceb4acc594dc368ab526ac299183689c'
+          # GitHub Releases are authoritative; PyPI mirroring is optional.
+          pip install --no-deps 'moe-store @ git+https://github.com/EfficientMoE/moe-store.git@v0.2.2'
           grep -v -E '^(flash-attn|moe-store|nvtx|sglang-kernel)' requirements.txt \
             | pip install -r /dev/stdin 2>&1 || true
 
