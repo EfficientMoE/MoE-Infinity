@@ -144,11 +144,19 @@ curl http://localhost:8000/contextpilot/status
 | `token_savings_total` | Total prompt tokens removed so far |
 | `token_savings_avg_pct` | Average percent token savings across processed requests |
 | `eviction_sync` | Nested counters for terminal eviction events: `incoming`, `removed`, `not_found` |
-| `cp_index_size` | Current number of live ContextPilot index entries, when available |
+| `cp_index_size` | `len(ContextPilot.get_all_request_ids())`, or `0` when ContextPilot is absent |
 | `fallback_count` | Total times MoE-Infinity fell back after ContextPilot errors |
 | `last_fallback_count` | Latest recorded fallback counter snapshot |
 | `debug` | Whether debug endpoints are enabled |
 | `fault` | Active injected fault mode |
+
+## ContextPilot 0.5.0 serving behavior
+
+- Chat requests call `ContextPilot.reorder`. Roles stay attached to their document strings. The serving path does not rebuild the transcript with `optimize()`.
+- Cross-turn dedup runs only when the OpenAI `user` field is a non-empty string. That string is the `conversation_id`. The first turn for that user keeps the original document text. Later turns replace documents already seen for that user with reference hints.
+- Anonymous requests pass the serving request id as the reorder conversation key, so they do not share ContextPilot's default conversation.
+- Completion prompts are not rewritten.
+- Phase C waiting-queue overlap scores stay `0.0` on ContextPilot 0.5.0. That class has no `predict_prefix_reuse`.
 
 ## Troubleshooting
 
