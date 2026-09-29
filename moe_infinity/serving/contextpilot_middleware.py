@@ -308,7 +308,12 @@ class ContextPilotMiddleware:
         conversation_key = self._conversation_key(
             serving_request_id, conversation_id
         )
+        working = self._copy_messages(messages)
         with self._lock:
+            if isinstance(conversation_id, str) and conversation_id:
+                docs = self._apply_cross_turn_dedup(docs, conversation_id)
+                for slot, doc in zip(doc_slots, docs):
+                    working[slot]["content"] = doc
             try:
                 reordered = self._cp.reorder(
                     docs, conversation_id=conversation_key
@@ -341,8 +346,8 @@ class ContextPilotMiddleware:
 
         buckets: dict[str, list[dict[str, str]]] = {}
         for index in doc_slots:
-            content = str(messages[index]["content"])
-            buckets.setdefault(content, []).append(dict(messages[index]))
+            content = str(working[index]["content"])
+            buckets.setdefault(content, []).append(dict(working[index]))
         rebuilt: list[dict[str, str]] = []
         for doc in new_docs:
             if not isinstance(doc, str):
@@ -352,8 +357,46 @@ class ContextPilotMiddleware:
                 return self._copy_messages(messages)
             rebuilt.append(bucket.pop(0))
         if query_index is not None:
-            rebuilt.append(dict(messages[query_index]))
+            rebuilt.append(dict(working[query_index]))
         return rebuilt
+
+    def _apply_cross_turn_dedup(
+        self, docs: list[str], conversation_id: str
+    ) -> list[str]:
+        if not self._dedup_enabled:
+            return docs
+        deduplicate_fn = getattr(self._cp, "deduplicate", None)
+        if not callable(deduplicate_fn):
+            return docs
+        try:
+            results = deduplicate_fn([docs], conversation_id=conversation_id)
+        except (AttributeError, TypeError, ValueError, IndexError) as exc:
+            logger.debug(
+                "ContextPilot.deduplicate raised %s; keeping documents",
+                exc,
+            )
+            return docs
+        except Exception as exc:
+            logger.warning("ContextPilot deduplicate failed: %s", exc)
+            return docs
+        if (
+            not isinstance(results, list)
+            or not results
+            or not isinstance(results[0], dict)
+        ):
+            return docs
+        row = cast(dict[object, object], results[0])
+        overlapping = row.get("overlapping_docs")
+        hints = row.get("reference_hints")
+        if not isinstance(overlapping, list) or not isinstance(hints, list):
+            return docs
+        hint_for: dict[str, str] = {}
+        overlapping_list = cast(list[object], overlapping)
+        hint_list = cast(list[object], hints)
+        for doc, hint in zip(overlapping_list, hint_list):
+            if isinstance(doc, str) and isinstance(hint, str):
+                hint_for[doc] = hint
+        return [hint_for.get(doc, doc) for doc in docs]
 
     @staticmethod
     def _same_string_multiset(docs: list[str], new_docs: list[object]) -> bool:

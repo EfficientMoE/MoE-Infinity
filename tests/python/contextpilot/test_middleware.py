@@ -348,6 +348,162 @@ def test_process_completion_request_survives_optimize_index_error(
     )
 
 
+def test_explicit_conversation_dedup_waits_until_second_turn(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    hint = "Please refer to [Doc shared] from the previous conversation."
+
+    class FakeCP:
+        dedup_calls: int
+
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+            self.dedup_calls = 0
+
+        def deduplicate(
+            self,
+            contexts: list[list[str]],
+            conversation_id: str,
+            hint_template: str | None = None,
+        ) -> list[dict[str, object]]:
+            _ = contexts
+            _ = conversation_id
+            _ = hint_template
+            self.dedup_calls += 1
+            if self.dedup_calls == 1:
+                raise ValueError("no history")
+            return [
+                {
+                    "new_docs": ["new"],
+                    "overlapping_docs": ["shared"],
+                    "reference_hints": [hint],
+                    "deduplicated_docs": ["new"],
+                }
+            ]
+
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            return ([list(contexts)], [0])
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+    first = middleware.process_chat_request(
+        [
+            {"role": "system", "content": "shared"},
+            {"role": "user", "content": "q1"},
+        ],
+        conversation_id="user-a",
+    )
+    second = middleware.process_chat_request(
+        [
+            {"role": "system", "content": "shared"},
+            {"role": "system", "content": "new"},
+            {"role": "user", "content": "q2"},
+        ],
+        conversation_id="user-a",
+    )
+
+    assert any(message["content"] == "shared" for message in first)
+    assert any(message["content"] == hint for message in second)
+    assert any(message["content"] == "new" for message in second)
+    assert all(message["content"] != "shared" for message in second)
+
+
+def test_anonymous_requests_do_not_call_deduplicate(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    class FakeCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+
+        def deduplicate(
+            self,
+            contexts: list[list[str]],
+            conversation_id: str,
+            hint_template: str | None = None,
+        ) -> list[dict[str, object]]:
+            _ = contexts
+            _ = hint_template
+            seen.append(("dedup", conversation_id))
+            raise ValueError("should not be called")
+
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            seen.append(("reorder", conversation_id))
+            return ([list(contexts)], [0])
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+    for serving_id in ("srv-1", "srv-2"):
+        _ = middleware.process_chat_request(
+            [
+                {"role": "system", "content": "doc"},
+                {"role": "user", "content": "q"},
+            ],
+            serving_request_id=serving_id,
+        )
+
+    assert [item for item in seen if item[0] == "dedup"] == []
+    assert [item for item in seen if item[0] == "reorder"] == [
+        ("reorder", "srv-1"),
+        ("reorder", "srv-2"),
+    ]
+
+
+def test_same_turn_dedup_does_not_run_after_reorder(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    class FakeCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+
+        def deduplicate(
+            self,
+            contexts: list[list[str]],
+            conversation_id: str,
+            hint_template: str | None = None,
+        ) -> list[dict[str, object]]:
+            _ = contexts
+            _ = conversation_id
+            _ = hint_template
+            order.append("dedup")
+            raise ValueError("first turn")
+
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            order.append("reorder")
+            return ([list(contexts)], [0])
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+    _ = middleware.process_chat_request(
+        [
+            {"role": "system", "content": "doc"},
+            {"role": "user", "content": "q"},
+        ],
+        serving_request_id="srv",
+        conversation_id="user-a",
+    )
+
+    assert order.count("dedup") == 1
+    assert order == ["dedup", "reorder"]
+
+
 def test_dedup_removes_duplicates(monkeypatch: MonkeyPatch) -> None:
     class FakeCP:
         def __init__(self, use_gpu: bool = False) -> None:

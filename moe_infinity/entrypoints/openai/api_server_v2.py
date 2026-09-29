@@ -475,6 +475,7 @@ def _process_chat_messages_with_contextpilot(
     messages: Any,
     *,
     request_id: str,
+    conversation_id: str | None = None,
 ) -> Any:
     if not isinstance(messages, list):
         return messages
@@ -490,7 +491,11 @@ def _process_chat_messages_with_contextpilot(
         if fault != "none":
             raise RuntimeError(f"CP fault injected: {fault}")
 
-        processed_messages = middleware.process_chat_request(messages)
+        processed_messages = middleware.process_chat_request(
+            messages,
+            serving_request_id=request_id,
+            conversation_id=conversation_id,
+        )
         _log_contextpilot_request_metrics(
             request_id=request_id,
             middleware=middleware,
@@ -2131,9 +2136,12 @@ async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
         stop=request.stop,
         logprobs=request.top_logprobs if request.logprobs else request.logprobs,
     )
+    user = request.user
+    conversation_id = user if isinstance(user, str) and user else None
     processed_messages = _process_chat_messages_with_contextpilot(
         request.messages,
         request_id=request_id,
+        conversation_id=conversation_id,
     )
     original_messages = request.messages
     request.messages = processed_messages
