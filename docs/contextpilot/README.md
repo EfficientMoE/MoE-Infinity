@@ -32,7 +32,8 @@ Core modules:
 ## Installation
 
 ```bash
-pip install moe-infinity[contextpilot]
+# From a MoE-Infinity source checkout:
+pip install -e '.[contextpilot]'
 ```
 
 Notes:
