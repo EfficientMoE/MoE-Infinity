@@ -287,6 +287,105 @@ def test_status_metrics_nonblocking_during_slow_optimize(
     assert "reorder_latency_ms" in metrics
 
 
+def test_on_request_complete_removes_only_new_contextpilot_ids(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class FakeCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+            self._ids = {"req-old"}
+            self.removed: list[set[str]] = []
+
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            self._ids = {"req-old", "req-new"}
+            return ([list(contexts)], [0])
+
+        def get_all_request_ids(self) -> set[str]:
+            return set(self._ids)
+
+        def remove_requests(self, request_ids: set[str]) -> dict[str, object]:
+            self.removed.append(set(request_ids))
+            return {"removed_count": len(request_ids)}
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+    _ = middleware.process_chat_request(
+        [
+            {"role": "system", "content": "doc"},
+            {"role": "user", "content": "q"},
+        ],
+        serving_request_id="srv-9",
+    )
+    cp = middleware._cp
+    assert isinstance(cp, FakeCP)
+    middleware.on_request_complete("srv-9")
+    middleware.on_request_complete("srv-9")
+
+    assert cp.removed == [{"req-new"}]
+
+
+def test_unrelated_serving_id_is_not_removed(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class FakeCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+            self._ids = {"req-old"}
+            self.removed: list[set[str]] = []
+
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            self._ids = {"req-old", "req-new"}
+            return ([list(contexts)], [0])
+
+        def get_all_request_ids(self) -> set[str]:
+            return set(self._ids)
+
+        def remove_requests(self, request_ids: set[str]) -> dict[str, object]:
+            self.removed.append(set(request_ids))
+            return {}
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+    _ = middleware.process_chat_request(
+        [
+            {"role": "system", "content": "doc"},
+            {"role": "user", "content": "q"},
+        ],
+        serving_request_id="srv-9",
+    )
+    middleware.on_request_complete("other")
+    cp = middleware._cp
+    assert isinstance(cp, FakeCP)
+    assert cp.removed == []
+
+
+def test_cp_index_size_uses_get_all_request_ids(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class FakeCP:
+        def __init__(self, use_gpu: bool = False) -> None:
+            _ = use_gpu
+
+        def get_all_request_ids(self) -> set[str]:
+            return {"req-a", "req-b", "req-c"}
+
+    monkeypatch.setattr(middleware_module, "ContextPilot", FakeCP)
+    middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+
+    assert not hasattr(middleware._cp, "live_index")
+    assert middleware.cp_index_size() == 3
+
+
 def test_on_request_complete_doesnt_raise() -> None:
     middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
 

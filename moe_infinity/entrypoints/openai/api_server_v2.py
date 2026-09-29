@@ -392,11 +392,13 @@ def _contextpilot_index_size(middleware: Optional[Any]) -> int:
     if middleware is None:
         return 0
 
-    cp_obj = getattr(middleware, "_cp", None)
-    live_index_obj = getattr(cp_obj, "live_index", None)
-    if isinstance(live_index_obj, dict):
-        return len(live_index_obj)
-    return 0
+    size_fn = getattr(middleware, "cp_index_size", None)
+    if not callable(size_fn):
+        return 0
+    try:
+        return int(size_fn())
+    except Exception:
+        return 0
 
 
 def _ensure_cp_middleware_initialized() -> Optional[Any]:

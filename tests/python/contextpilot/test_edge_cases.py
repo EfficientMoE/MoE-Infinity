@@ -181,13 +181,33 @@ def test_cp_restart_recovery(
     class RestartingCP:
         def __init__(self, use_gpu: bool = False) -> None:
             _ = use_gpu
+            self._ids: set[str] = set()
 
-        def on_request_complete(self, request_id: str) -> None:
-            _ = request_id
+        def reorder(
+            self,
+            contexts: list[str],
+            conversation_id: str | None = None,
+        ) -> tuple[list[list[str]], list[int]]:
+            _ = conversation_id
+            self._ids = {"req-restart"}
+            return ([list(contexts)], [0])
+
+        def get_all_request_ids(self) -> set[str]:
+            return set(self._ids)
+
+        def remove_requests(self, request_ids: set[str]) -> dict[str, int]:
+            _ = request_ids
             raise ConnectionError("contextpilot sidecar unavailable")
 
     monkeypatch.setattr(middleware_module, "ContextPilot", RestartingCP)
     cp_middleware = ContextPilotMiddleware(use_gpu=False, enabled=True)
+    _ = cp_middleware.process_chat_request(
+        [
+            {"role": "system", "content": "doc"},
+            {"role": "user", "content": "q"},
+        ],
+        serving_request_id="req-restart",
+    )
     adapter = EvictionSyncAdapter(cp_middleware)
 
     with caplog.at_level(logging.WARNING):

@@ -62,6 +62,7 @@ class ContextPilotMiddleware:
         self._last_dedup_latency_ms = 0.0
         self._last_tokens_saved = 0
         self._last_savings_pct = 0.0
+        self._serving_to_cp_ids: dict[str, set[str]] = {}
 
     def process_chat_request(
         self,
@@ -200,22 +201,34 @@ class ContextPilotMiddleware:
             return
 
         with self._lock:
+            request_ids = self._serving_to_cp_ids.pop(request_id, None)
+            if not request_ids:
+                return
             try:
-                self._call_if_present("on_request_complete", request_id)
-                self._call_if_present("evict", request_id)
-                self._call_if_present("remove_request", request_id)
-                self._call_if_present("remove", request_id)
-                self._call_if_present("delete", request_id)
-                live_index_obj = getattr(self._cp, "live_index", None)
-                if isinstance(live_index_obj, dict):
-                    live_index = cast(dict[str, object], live_index_obj)
-                    _ = live_index.pop(request_id, None)
+                _ = self._cp.remove_requests(set(request_ids))
             except Exception as exc:
                 logger.warning(
                     "ContextPilot request cleanup failed for %s: %s",
                     request_id,
                     exc,
                 )
+
+    def cp_index_size(self) -> int:
+        if self._cp is None:
+            return 0
+        try:
+            return len(self._snapshot_request_ids())
+        except Exception:
+            return 0
+
+    def _snapshot_request_ids(self) -> set[str]:
+        getter = getattr(self._cp, "get_all_request_ids", None)
+        if not callable(getter):
+            return set()
+        found = getter()
+        if isinstance(found, (set, list, tuple)):
+            return {str(item) for item in found}
+        return set()
 
     def is_enabled(self) -> bool:
         return self._enabled
@@ -315,9 +328,17 @@ class ContextPilotMiddleware:
                 for slot, doc in zip(doc_slots, docs):
                     working[slot]["content"] = doc
             try:
+                before_ids = self._snapshot_request_ids()
                 reordered = self._cp.reorder(
                     docs, conversation_id=conversation_key
                 )
+                new_ids = self._snapshot_request_ids() - before_ids
+                if (
+                    isinstance(serving_request_id, str)
+                    and serving_request_id
+                    and new_ids
+                ):
+                    self._serving_to_cp_ids[serving_request_id] = new_ids
             except (AttributeError, TypeError, ValueError, IndexError) as exc:
                 logger.debug(
                     "ContextPilot.reorder raised %s; preserving original order",
@@ -443,35 +464,6 @@ class ContextPilotMiddleware:
         if original_token_estimate > 0:
             savings_pct = (saved_tokens / original_token_estimate) * 100.0
         return deduped_messages, saved_tokens, savings_pct
-
-    @staticmethod
-    def _estimate_tokens_saved(
-        before: list[dict[str, str]],
-        after: list[dict[str, str]],
-    ) -> tuple[int, float]:
-        before_tokens = 0
-        after_tokens = 0
-
-        for message in before:
-            content = message.get("content")
-            if isinstance(content, str):
-                before_tokens += len(content) // 4
-
-        for message in after:
-            content = message.get("content")
-            if isinstance(content, str):
-                after_tokens += len(content) // 4
-
-        saved_tokens = max(0, before_tokens - after_tokens)
-        savings_pct = 0.0
-        if before_tokens > 0:
-            savings_pct = (saved_tokens / before_tokens) * 100.0
-        return saved_tokens, savings_pct
-
-    def _call_if_present(self, method_name: str, request_id: str) -> None:
-        method = getattr(self._cp, method_name, None)
-        if callable(method):
-            _ = method(request_id)
 
 
 __all__ = ["ContextPilotMiddleware"]
