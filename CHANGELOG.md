@@ -32,6 +32,9 @@ All notable changes to MoE-Infinity will be documented in this file.
 - Root README is now a concise discovery surface and points readers to the docs hub, model compatibility, DFlash, serving, troubleshooting, architecture, and changelog.
 - Release notes are split out of README and tracked here instead of being presented as shipped releases.
 - Package version is now derived from git tags by setuptools-scm and written to `moe_infinity/_version.py` at build time, replacing the manual `MOEINF_VERSION`, `NIGHTLY_BASE_VERSION`, and hardcoded `setup.py`/`__init__.py` version strings.
+- GitHub Releases are now the authoritative distribution channel: tagged
+  releases attach Python 3.10–3.12 CUDA wheels and an sdist, nightlies retain
+  build artifacts in Actions, and PyPI mirroring is an optional manual step.
 
 ### Deprecated
 
@@ -42,7 +45,6 @@ All notable changes to MoE-Infinity will be documented in this file.
 - Serving-path DFlash now truncates KV cache to the committed prefix after each verify step, so emitted and cached tokens stay aligned.
 - GPT-OSS resident-load path now materializes MXFP4 blocks, scales, router, biases, and attention sinks instead of leaving placeholder tensors in place.
 - GLM FP8 store and reload parity now stays stable across fresh stores and reloads.
-- PyPI publishing for both stable (`publish.yml`) and nightly (`publish-test.yml`): stable releases now take their version from the pushed git tag instead of always publishing `0.0.1`, and nightly sdists carry their version in `PKG-INFO` so `pip install --pre moe-infinity` no longer fails with a `MetadataInconsistent` version mismatch on rebuild.
 - `MOE_DISABLE_FUSED_KERNELS=1` no longer raises `TypeError` on decode: `fused_decode_attention` now has its own eager fallback instead of delegating to `paged_attention_fwd`, which takes a different KV cache layout and a required `num_kv_heads` argument.
 
 ### Known Limitations

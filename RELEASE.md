@@ -40,28 +40,32 @@ This checklist is manual. It does not introduce a required automated CI gate.
 
 Stable releases are automated through GitHub Actions workflows in `.github/workflows/`:
 
-- `.github/workflows/publish.yml`: builds and publishes tagged stable releases (`v*`) to PyPI and creates a GitHub release.
-- `.github/workflows/publish-test.yml`: publishes nightly pre-release builds from `main` to PyPI.
+- `.github/workflows/publish.yml`: creates tagged GitHub Releases (`v*`) and
+  attaches Python 3.10–3.12 CUDA wheels plus the source distribution, then
+  attempts an optional non-blocking PyPI sdist mirror.
+- `.github/workflows/publish-test.yml`: builds wheels and an sdist from `main`
+  and retains them as GitHub Actions artifacts for 14 days.
 - `.github/workflows/build-test.yml`: build validation for pull requests.
 
-### One-time PyPI setup (Trusted Publishing)
+GitHub Releases are authoritative. PyPI publishing is optional and does not gate the GitHub Release, normal CI, issue closure, or the next development cycle.
 
-Publishing authenticates via PyPI Trusted Publishing (OIDC); there are no PyPI
-username/password/token secrets in the repository. The `pypa/gh-action-pypi-publish`
-action reads credentials only from its `user`/`password` inputs (not from
-`TWINE_*` env vars) and, with none supplied plus `id-token: write`, uses OIDC.
+### Optional PyPI setup
 
-Before the first successful publish, register a trusted publisher on PyPI once
-per workflow, at `https://pypi.org/manage/project/moe-infinity/settings/publishing/`:
+The optional job authenticates through PyPI Trusted Publishing (OIDC).
+Register a publisher only if maintainers decide to mirror a release:
 
 - Owner: `EfficientMoE`
 - Repository name: `MoE-Infinity`
-- Workflow name: `publish-test.yml` (nightly) — then add a second, identical
-  entry with Workflow name `publish.yml` (stable)
+- Workflow name: `publish.yml`
 - Environment: leave blank
 
-Until these are registered, the publish step fails with
-`invalid-publisher: ... no corresponding publisher`.
+Without this configuration, only the optional non-blocking job fails; the
+workflow and its GitHub Release remain successful and valid.
+
+Because the MoE-Infinity sdist declares `moe-store` as a versioned runtime
+dependency, mirror the matching moe-store release first if both projects are
+being copied to PyPI. GitHub installation remains unaffected because users
+install both release wheels together.
 
 ### Steps to Release a New Version
 To release a new version, such as version 1.0.0, follow this order:
@@ -74,14 +78,11 @@ To release a new version, such as version 1.0.0, follow this order:
    - Versions are derived from the git tag at build time (see `pyproject.toml`
      `[tool.setuptools_scm]`) and written to `moe_infinity/_version.py`. There
      are no version strings to edit in `setup.py` or `moe_infinity/__init__.py`.
-   - Tag `vX.Y.Z` publishes stable `X.Y.Z`. Every later commit on `main`
-     publishes as the next-patch pre-release `X.Y.(Z+1).devN`, so nightlies
-     always sort above the last stable and below the next one, with no manual
-     `NIGHTLY_BASE_VERSION` bump.
-   - First release only: the repository has no tags yet, so until the first tag
-     exists nightlies version as `0.1.devN`. Create the initial tag (for example
-     `git tag v0.0.1`) on the release commit to anchor the `0.0.x` series;
-     afterwards nightlies become `0.0.2.devN` automatically.
+   - Tag `vX.Y.Z` builds stable `X.Y.Z` artifacts. Every later commit on
+     `main` builds as the next-patch pre-release `X.Y.(Z+1).devN`, with no
+     manual `NIGHTLY_BASE_VERSION` bump.
+   - MoE-Infinity and moe-store release tags must match because the native
+     build vendors moe-store sources from `${GITHUB_REF_NAME}`.
 2. Review the release checklist above
    - confirm model and capability coverage
    - verify install and quick starts
@@ -95,12 +96,15 @@ To release a new version, such as version 1.0.0, follow this order:
     git push origin v1.0.0
     ```
 
-Upon a successful tag push, the release workflow will create a release draft, build artifacts, and publish the package to PyPI.
+Upon a successful tag push, the release workflow first builds every matrix
+artifact, then creates the GitHub Release with its wheels and sdist attached.
+Only after the GitHub Release exists does the workflow attempt its non-blocking
+PyPI mirror. Verify the GitHub assets independently of that optional job.
 
 
 ## Manual Package Building and Publishing
 
-For developers who prefer to manually build and publish their package to PyPI, the following steps provide a detailed guide to execute this process effectively.
+The following manual process is retained only as a PyPI recovery path.
 
 1. Start by cloning the repository and navigating to the root directory of the package:
     ```bash
