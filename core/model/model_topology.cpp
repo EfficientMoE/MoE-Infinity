@@ -618,9 +618,13 @@ void ArcherTopologyHandle::BuildTopologyFromSpecs(
   // families keep every non-expert tensor resident (e.g. qwen3_5_moe,
   // glm5_next) have NO dense nodes at all, so the back() placement must also
   // be guarded against an empty vector.
-  int num_dense_nodes_per_device = std::max(
-      1, static_cast<int>(
-             std::ceil(static_cast<double>(dense_nodes.size()) / num_gpu / 2)));
+  //
+  // The quota deliberately keeps the original truncating integer division
+  // (NOT a true ceil): the truncated quota is the placement contract pinned
+  // by tests/python/integration/test_topology_runtime_parity.py, and a float
+  // ceil shifts the round-robin phase every sparse node inherits.
+  int num_dense_nodes_per_device =
+      std::max(1, static_cast<int>(dense_nodes.size()) / num_gpu / 2);
   // int total_dense_nodes = dense_nodes.size();
   int counter = 0;
   DLOG_INFO("Moving dense parameters to CPU");
