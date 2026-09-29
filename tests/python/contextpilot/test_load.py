@@ -50,11 +50,14 @@ class _FakeContextPilot:
     def __init__(self, use_gpu: bool = False) -> None:
         _ = use_gpu
 
-    def optimize(self, contexts: list[str], query: str) -> list[dict[str, str]]:
+    def reorder(
+        self,
+        contexts: list[str],
+        conversation_id: str | None = None,
+    ) -> tuple[list[list[str]], list[int]]:
+        _ = conversation_id
         time.sleep(0.002)
-        optimized = [{"role": "system", "content": ctx} for ctx in contexts]
-        optimized.append({"role": "user", "content": query})
-        return optimized
+        return ([list(contexts)], [0])
 
 
 def test_10_concurrent_requests_no_errors(monkeypatch: MonkeyPatch) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import Counter
 from typing import Any, Optional, cast
 
 try:
@@ -39,7 +40,7 @@ class ContextPilotMiddleware:
         if ContextPilot is None:
             logger.warning(
                 "contextpilot package not installed; ContextPilot features disabled. "
-                "Install with: pip install contextpilot>=0.4.0 (requires Python 3.10+)"
+                "Install with: pip install 'contextpilot>=0.5.0,<0.6' (requires Python 3.10+)"
             )
             self._enabled = False
             self._reorder_enabled = False
@@ -61,9 +62,15 @@ class ContextPilotMiddleware:
         self._last_dedup_latency_ms = 0.0
         self._last_tokens_saved = 0
         self._last_savings_pct = 0.0
+        self._serving_to_cp_ids: dict[str, set[str]] = {}
+        self._serving_before_ids: dict[str, set[str]] = {}
 
     def process_chat_request(
-        self, messages: list[dict[str, str]]
+        self,
+        messages: list[dict[str, str]],
+        *,
+        serving_request_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> list[dict[str, str]]:
         if not self._enabled:
             return messages
@@ -75,7 +82,11 @@ class ContextPilotMiddleware:
             dedup_latency_ms = 0.0
             if self._reorder_enabled:
                 reorder_started_at = time.monotonic()
-                optimized_messages = self._reorder_messages(messages)
+                optimized_messages = self._reorder_messages(
+                    messages,
+                    serving_request_id=serving_request_id,
+                    conversation_id=conversation_id,
+                )
                 reorder_latency_ms = (
                     time.monotonic() - reorder_started_at
                 ) * 1000
@@ -125,88 +136,76 @@ class ContextPilotMiddleware:
         if not self._enabled:
             return prompt
 
-        try:
-            started_at = time.monotonic()
-            with self._lock:
-                try:
-                    optimized = self._cp.optimize([], str(prompt))
-                except TypeError:
-                    optimized = self._cp.optimize(docs=[], query=str(prompt))
-            reorder_latency_ms = (time.monotonic() - started_at) * 1000
-            if not optimized:
-                with self._stats_lock:
-                    self._requests_processed += 1
-                    self._reorder_count += 1
-                    self._last_reorder_latency_ms = reorder_latency_ms
-                    self._last_dedup_latency_ms = 0.0
-                    self._last_tokens_saved = 0
-                    self._last_savings_pct = 0.0
-                return prompt
-
-            for message in reversed(optimized):
-                content = message.get("content")
-                if isinstance(content, str):
-                    with self._stats_lock:
-                        self._requests_processed += 1
-                        self._reorder_count += 1
-                        self._last_reorder_latency_ms = reorder_latency_ms
-                        self._last_dedup_latency_ms = 0.0
-                        self._last_tokens_saved = 0
-                        self._last_savings_pct = 0.0
-                    return content
-            with self._stats_lock:
-                self._requests_processed += 1
-                self._reorder_count += 1
-                self._last_reorder_latency_ms = reorder_latency_ms
-                self._last_dedup_latency_ms = 0.0
-                self._last_tokens_saved = 0
-                self._last_savings_pct = 0.0
-            return prompt
-        except (ValueError, IndexError) as exc:
-            # ContextPilot.optimize can't index the empty context set a bare
-            # completion prompt produces (issue #146 Bug 3); the chat path
-            # guards the same way. Preserve the prompt without a warning.
-            logger.debug(
-                "ContextPilot.optimize raised %s; preserving prompt", exc
-            )
-            with self._stats_lock:
-                self._requests_processed += 1
-                self._last_reorder_latency_ms = 0.0
-                self._last_dedup_latency_ms = 0.0
-                self._last_tokens_saved = 0
-                self._last_savings_pct = 0.0
-            return prompt
-        except Exception as exc:
-            logger.warning("ContextPilot completion optimize failed: %s", exc)
-            with self._stats_lock:
-                self._requests_processed += 1
-                self._last_reorder_latency_ms = 0.0
-                self._last_dedup_latency_ms = 0.0
-                self._last_tokens_saved = 0
-                self._last_savings_pct = 0.0
-            return prompt
+        with self._stats_lock:
+            self._requests_processed += 1
+            self._last_reorder_latency_ms = 0.0
+            self._last_dedup_latency_ms = 0.0
+            self._last_tokens_saved = 0
+            self._last_savings_pct = 0.0
+        return prompt
 
     def on_request_complete(self, request_id: str) -> None:
         if not self._enabled:
             return
 
         with self._lock:
+            request_ids = self._serving_to_cp_ids.pop(request_id, None)
+            before_ids = self._serving_before_ids.pop(request_id, None)
+            if request_ids is None and before_ids is not None:
+                try:
+                    request_ids = self._snapshot_request_ids() - before_ids
+                except Exception as exc:
+                    logger.warning(
+                        "ContextPilot request-id snapshot failed for %s: %s",
+                        request_id,
+                        exc,
+                    )
+                    return
+            if not request_ids:
+                return
             try:
-                self._call_if_present("on_request_complete", request_id)
-                self._call_if_present("evict", request_id)
-                self._call_if_present("remove_request", request_id)
-                self._call_if_present("remove", request_id)
-                self._call_if_present("delete", request_id)
-                live_index_obj = getattr(self._cp, "live_index", None)
-                if isinstance(live_index_obj, dict):
-                    live_index = cast(dict[str, object], live_index_obj)
-                    _ = live_index.pop(request_id, None)
+                _ = self._cp.remove_requests(set(request_ids))
             except Exception as exc:
                 logger.warning(
                     "ContextPilot request cleanup failed for %s: %s",
                     request_id,
                     exc,
                 )
+
+    def cp_index_size(self) -> int:
+        if self._cp is None:
+            return 0
+        try:
+            return len(self._snapshot_request_ids())
+        except Exception:
+            return 0
+
+    def _record_new_request_ids(
+        self, serving_request_id: str | None, before_ids: set[str]
+    ) -> None:
+        if not isinstance(serving_request_id, str) or not serving_request_id:
+            return
+        try:
+            new_ids = self._snapshot_request_ids() - before_ids
+        except Exception as exc:
+            logger.warning(
+                "ContextPilot request-id snapshot failed for %s: %s",
+                serving_request_id,
+                exc,
+            )
+            self._serving_before_ids[serving_request_id] = set(before_ids)
+            return
+        if new_ids:
+            self._serving_to_cp_ids[serving_request_id] = new_ids
+
+    def _snapshot_request_ids(self) -> set[str]:
+        getter = getattr(self._cp, "get_all_request_ids", None)
+        if not callable(getter):
+            return set()
+        found = getter()
+        if isinstance(found, (set, list, tuple)):
+            return {str(item) for item in found}
+        return set()
 
     def is_enabled(self) -> bool:
         return self._enabled
@@ -244,86 +243,163 @@ class ContextPilotMiddleware:
             if message.get("role") != "user":
                 continue
             content = message.get("content")
-            if content is None:
+            if not isinstance(content, str):
                 continue
             last_user_index = index
-            query = str(content)
+            query = content
 
         return query, last_user_index
 
-    def _reorder_messages(
-        self, messages: list[dict[str, str]]
+    @staticmethod
+    def _copy_messages(
+        messages: list[dict[str, str]],
     ) -> list[dict[str, str]]:
-        query, query_index = self._extract_query(messages)
-        contexts: list[str] = []
+        return [dict(message) for message in messages]
 
-        for index, message in enumerate(messages):
-            content = message.get("content")
-            if content is None:
+    @staticmethod
+    def _conversation_key(
+        serving_request_id: str | None,
+        conversation_id: str | None,
+    ) -> str | None:
+        if isinstance(conversation_id, str) and conversation_id:
+            return conversation_id
+        if isinstance(serving_request_id, str) and serving_request_id:
+            return serving_request_id
+        return None
+
+    def _reorder_messages(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        serving_request_id: str | None,
+        conversation_id: str | None,
+    ) -> list[dict[str, str]]:
+        if any(
+            not isinstance(message.get("content"), str) for message in messages
+        ):
+            return self._copy_messages(messages)
+
+        _query, query_index = self._extract_query(messages)
+        doc_slots = [
+            index for index in range(len(messages)) if index != query_index
+        ]
+        if not doc_slots:
+            return self._copy_messages(messages)
+
+        first_slot = doc_slots[0]
+        last_slot = doc_slots[-1]
+        for index in range(first_slot, last_slot + 1):
+            if index == query_index:
                 continue
+            if not isinstance(messages[index].get("content"), str):
+                return self._copy_messages(messages)
 
-            role = message.get("role")
-            if (
-                query_index is not None
-                and index == query_index
-                and role == "user"
-            ):
-                continue
-            contexts.append(str(content))
-
+        docs = [str(messages[index]["content"]) for index in doc_slots]
+        conversation_key = self._conversation_key(
+            serving_request_id, conversation_id
+        )
+        working = self._copy_messages(messages)
         with self._lock:
+            if isinstance(conversation_id, str) and conversation_id:
+                docs = self._apply_cross_turn_dedup(docs, conversation_id)
+                for slot, doc in zip(doc_slots, docs):
+                    working[slot]["content"] = doc
+            before_ids: set[str] = set()
             try:
-                optimized = self._cp.optimize(contexts, query)
-            except TypeError:
-                optimized = self._cp.optimize(docs=contexts, query=query)
-            except (ValueError, IndexError) as exc:
+                before_ids = self._snapshot_request_ids()
+                reordered = self._cp.reorder(
+                    docs, conversation_id=conversation_key
+                )
+            except (AttributeError, TypeError, ValueError, IndexError) as exc:
                 logger.debug(
-                    "ContextPilot.optimize raised %s; preserving original order",
+                    "ContextPilot.reorder raised %s; preserving original order",
                     exc,
                 )
-                return [dict(message) for message in messages]
-        if not isinstance(optimized, list):
-            return [dict(message) for message in messages]
-        return [dict(message) for message in optimized]
+                return self._copy_messages(messages)
+            except Exception as exc:
+                logger.warning("ContextPilot reorder failed: %s", exc)
+                return self._copy_messages(messages)
+            self._record_new_request_ids(serving_request_id, before_ids)
+
+        if (
+            not isinstance(reordered, tuple)
+            or not reordered
+            or not isinstance(reordered[0], list)
+            or not reordered[0]
+            or not isinstance(reordered[0][0], list)
+        ):
+            return self._copy_messages(messages)
+        new_docs = cast(list[object], reordered[0][0])
+        if not self._same_string_multiset(docs, new_docs):
+            logger.debug(
+                "ContextPilot.reorder result is not a permutation; "
+                "preserving original order"
+            )
+            return self._copy_messages(messages)
+
+        buckets: dict[str, list[dict[str, str]]] = {}
+        for index in doc_slots:
+            content = str(working[index]["content"])
+            buckets.setdefault(content, []).append(dict(working[index]))
+        rebuilt: list[dict[str, str]] = []
+        for doc in new_docs:
+            if not isinstance(doc, str):
+                return self._copy_messages(messages)
+            bucket = buckets.get(doc)
+            if not bucket:
+                return self._copy_messages(messages)
+            rebuilt.append(bucket.pop(0))
+        if query_index is not None:
+            rebuilt.append(dict(working[query_index]))
+        return rebuilt
+
+    def _apply_cross_turn_dedup(
+        self, docs: list[str], conversation_id: str
+    ) -> list[str]:
+        if not self._dedup_enabled:
+            return docs
+        deduplicate_fn = getattr(self._cp, "deduplicate", None)
+        if not callable(deduplicate_fn):
+            return docs
+        try:
+            results = deduplicate_fn([docs], conversation_id=conversation_id)
+        except (AttributeError, TypeError, ValueError, IndexError) as exc:
+            logger.debug(
+                "ContextPilot.deduplicate raised %s; keeping documents",
+                exc,
+            )
+            return docs
+        except Exception as exc:
+            logger.warning("ContextPilot deduplicate failed: %s", exc)
+            return docs
+        if (
+            not isinstance(results, list)
+            or not results
+            or not isinstance(results[0], dict)
+        ):
+            return docs
+        row = cast(dict[object, object], results[0])
+        overlapping = row.get("overlapping_docs")
+        hints = row.get("reference_hints")
+        if not isinstance(overlapping, list) or not isinstance(hints, list):
+            return docs
+        hint_for: dict[str, str] = {}
+        overlapping_list = cast(list[object], overlapping)
+        hint_list = cast(list[object], hints)
+        for doc, hint in zip(overlapping_list, hint_list):
+            if isinstance(doc, str) and isinstance(hint, str):
+                hint_for[doc] = hint
+        return [hint_for.get(doc, doc) for doc in docs]
+
+    @staticmethod
+    def _same_string_multiset(docs: list[str], new_docs: list[object]) -> bool:
+        if any(not isinstance(doc, str) for doc in new_docs):
+            return False
+        return Counter(docs) == Counter(cast(list[str], new_docs))
 
     def _deduplicate_messages(
         self, messages: list[dict[str, str]]
     ) -> tuple[list[dict[str, str]], int, float]:
-        with self._lock:
-            deduplicate_fn = getattr(self._cp, "deduplicate", None)
-            deduped: object = None
-            if callable(deduplicate_fn):
-                try:
-                    deduped = deduplicate_fn(messages)
-                except (TypeError, ValueError, IndexError) as exc:
-                    logger.debug(
-                        "ContextPilot.deduplicate signature mismatch (%s); "
-                        "using internal fallback dedup",
-                        exc,
-                    )
-                    deduped = None
-            if isinstance(deduped, list):
-                normalized: list[dict[str, str]] = []
-                deduped_list = cast(list[object], deduped)
-                for candidate in deduped_list:
-                    if not isinstance(candidate, dict):
-                        continue
-                    message_dict = cast(dict[object, object], candidate)
-                    role_obj = message_dict.get("role")
-                    content_obj = message_dict.get("content")
-                    normalized.append(
-                        {
-                            "role": ("" if role_obj is None else str(role_obj)),
-                            "content": (
-                                "" if content_obj is None else str(content_obj)
-                            ),
-                        }
-                    )
-                tokens_saved, pct = self._estimate_tokens_saved(
-                    messages, normalized
-                )
-                return normalized, tokens_saved, pct
-
         return self._fallback_deduplicate(messages)
 
     @staticmethod
@@ -360,35 +436,6 @@ class ContextPilotMiddleware:
         if original_token_estimate > 0:
             savings_pct = (saved_tokens / original_token_estimate) * 100.0
         return deduped_messages, saved_tokens, savings_pct
-
-    @staticmethod
-    def _estimate_tokens_saved(
-        before: list[dict[str, str]],
-        after: list[dict[str, str]],
-    ) -> tuple[int, float]:
-        before_tokens = 0
-        after_tokens = 0
-
-        for message in before:
-            content = message.get("content")
-            if isinstance(content, str):
-                before_tokens += len(content) // 4
-
-        for message in after:
-            content = message.get("content")
-            if isinstance(content, str):
-                after_tokens += len(content) // 4
-
-        saved_tokens = max(0, before_tokens - after_tokens)
-        savings_pct = 0.0
-        if before_tokens > 0:
-            savings_pct = (saved_tokens / before_tokens) * 100.0
-        return saved_tokens, savings_pct
-
-    def _call_if_present(self, method_name: str, request_id: str) -> None:
-        method = getattr(self._cp, method_name, None)
-        if callable(method):
-            _ = method(request_id)
 
 
 __all__ = ["ContextPilotMiddleware"]

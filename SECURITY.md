@@ -2,14 +2,16 @@
 
 ## Supported Versions
 
-MoE-Infinity currently publishes from the `0.0.x` series (base version set in `setup.py` as `0.0.1`, with CI-generated `0.0.x.dev*` nightly pre-release builds published to PyPI).
+MoE-Infinity publishes versioned wheels and source distributions through
+GitHub Releases. Development snapshots are retained as GitHub Actions
+artifacts; an optional PyPI mirror may not exist for every release.
 
 We provide security support for the latest maintained code as follows:
 
 | Version | Supported |
 | --- | --- |
 | `main` branch (latest development) | ✅ |
-| Latest `0.0.x` release on PyPI | ✅ |
+| Latest GitHub Release | ✅ |
 | Older/unpinned snapshots and forks | ❌ |
 
 If you are running a custom fork, please first verify whether the issue reproduces on `main`.

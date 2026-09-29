@@ -21,7 +21,7 @@ This open-sourced version is HuggingFace-friendly and differs from the version r
 - [Installation](#installation)
     - [Prerequisites](#prerequisites)
     - [Install from conda environment](#install-from-conda-environment)
-    - [Install from PyPI](#install-from-pypi)
+    - [Install from a GitHub Release](#install-from-a-github-release)
     - [Install from Source](#install-from-source)
     - [Enable FlashAttention (Optional)](#enable-flashattention-optional)
     - [Enable FlashInfer (Optional)](#enable-flashinfer-optional)
@@ -75,13 +75,14 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 
 ## Installation
 
-We recommend installing MoE-Infinity in a virtual environment. To install MoE-Infinity, you can either install it from PyPI or build it from source.
+We recommend installing MoE-Infinity in a virtual environment. GitHub Releases are the authoritative source for versioned artifacts; source builds cover CUDA/PyTorch combinations that do not match the published wheels.
 
 ### Prerequisites
 
 - Python 3.10+ (3.12 recommended). Some required dependencies (e.g. `sglang-kernel`) publish wheels for Python ≥ 3.10 only, so Python 3.8/3.9 will fail to install.
 - A CUDA-capable GPU. The from-source build targets compute capabilities `sm_80`/`sm_90` by default; for Blackwell (`sm_120`, e.g. RTX PRO 6000 / RTX 50-series) build with `MOE_ENABLE_SM120=1` (see [Install from Source](#install-from-source)).
 - When building from source, a CUDA toolkit whose major version matches your installed PyTorch build (PyTorch enforces this at compile time).
+- `gh` (GitHub CLI) for the release-install commands below.
 - Recommended: isolated virtual environment (conda or venv).
 
 ### Install from conda environment
@@ -89,20 +90,37 @@ We recommend installing MoE-Infinity in a virtual environment. To install MoE-In
 ```bash
 conda create -n moe-infinity python=3.12
 conda activate moe-infinity
-# install from either PyPI or Source will trigger requirements.txt automatically
+# installing from either a GitHub Release or source installs runtime dependencies
 ```
 
-### Install from PyPI
+### Install from a GitHub Release
 
-> **Note:** Official PyPI wheels are not published yet, the current `moe-infinity` entry on PyPI is a placeholder that does **not** contain the runtime. Importing `MoE` from it will fail. Until the official release, please [install from source](#install-from-source).
+Install matching `moe-store` and MoE-Infinity assets together so pip can
+satisfy the versioned dependency without consulting PyPI. Published native
+wheels target CUDA 12.8 and the Python version encoded in their filename.
 
 ```bash
-# (available once official wheels are published) stable release
-pip install moe-infinity
+TAG=v0.2.1
+PYTAG=cp312
+mkdir -p /tmp/moe-infinity-release
 
-# (available once official wheels are published) nightly / pre-release build
-pip install --pre moe-infinity
+gh release download "$TAG" \
+  --repo EfficientMoE/moe-store \
+  --pattern 'moe_store-*.whl' \
+  --dir /tmp/moe-infinity-release
+gh release download "$TAG" \
+  --repo EfficientMoE/MoE-Infinity \
+  --pattern "moe_infinity-*${PYTAG}*manylinux*.whl" \
+  --dir /tmp/moe-infinity-release
+
+pip install /tmp/moe-infinity-release/*.whl
+python -c "from moe_infinity import MoE; print('MoE-Infinity import OK')"
 ```
+
+PyPI publishing is optional. The current `moe-infinity` PyPI project contains
+an obsolete placeholder, so do not use `pip install moe-infinity` unless the
+corresponding GitHub Release explicitly states that its sdist was also
+published there.
 
 ### Install from Source
 
@@ -121,12 +139,16 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 git clone --depth 1 https://github.com/NVIDIA/cutlass.git ~/cutlass
 export CUTLASS_DIR=~/cutlass
 
-# 4. Build and install MoE-Infinity
+# 4. Install the matching moe-store sources (change the tag as needed)
+pip install --no-deps \
+  "moe-store @ git+https://github.com/EfficientMoE/moe-store.git@v0.2.1"
+
+# 5. Build and install MoE-Infinity
 git clone https://github.com/EfficientMoE/MoE-Infinity.git
 cd MoE-Infinity
 pip install --no-build-isolation -e .
 
-# 5. Ensure a recent libstdc++ is available for the compiled extensions
+# 6. Ensure a recent libstdc++ is available for the compiled extensions
 conda install -c conda-forge libstdcxx-ng=12 # with conda; otherwise install libstdc++ (gcc 12+) via your package manager
 ```
 
