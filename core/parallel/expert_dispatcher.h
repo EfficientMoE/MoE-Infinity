@@ -282,6 +282,10 @@ class ExpertDispatcher : public base::noncopyable {
   std::int64_t GetCacheOccupancyBytes();
   std::int64_t GetCacheOccupancyBytes(int device_id);
   double GetCacheHitRate() const;
+  // Per-layer GPU residency snapshot: one byte per expert (1 == on GPU, 0 ==
+  // off GPU). Returns an empty vector when residency is unknown (layer_idx < 0,
+  // no experts registered, or any expert lacks a node at that layer).
+  std::vector<std::uint8_t> ResidentOnGpu(int layer_idx) const;
 
   ResizeToken BeginMemoryResize(int device_id, int timeout_ms);
   void EndMemoryResize(const ResizeToken& token);
