@@ -1,6 +1,6 @@
 # Issue 234 Phase 2 — drop-on-miss expert skipping
 
-Draft for review. This does not implement the policy. Merge is blocked on accepting the decision checkpoint below.
+Draft for review. This is the spec. The task list is `docs/superpowers/plans/2026-09-30-expert-drop-on-miss.md`. Merge is blocked on accepting the decision checkpoint below.
 
 **Goal:** Under an explicit opt-in, skip non-resident routed experts instead of stalling on a fetch, then renormalize the surviving routing weights.
 
@@ -22,15 +22,24 @@ Proposed policy, to accept or replace before any runtime code:
 3. Candidates are the lowest-weight selected experts. Drop them until the next drop would push the token's cumulative dropped weight above `expert_drop_mass_budget`, or until `min_k` experts remain. `min_k` is at least 1.
 4. Shared experts are not in the routed top-k mask. This phase must not change the shared-expert module path (`shared_expert` parameters stay resident and always execute).
 5. Renormalize by rescaling surviving post-softmax weights (`w /= w.sum()`). Do not re-softmax logits.
-6. If the layer's selected weights are flat (`w_min / w_max` above `expert_drop_flatness_floor`), skip the rule for that layer and count a flatness bypass. This is the OLMoE guard.
-7. The expert predictor and route-ahead prefetch still observe the pre-drop route, so a dropped expert is not starved out of future fetches.
-8. `expert_drop_mass_budget` and `expert_drop_flatness_floor` ship unset-as-disabled until the three-point accuracy curve in the QA gate picks them. This draft does not choose numeric defaults.
+6. Flatness is per token, over that token's selected weights. If `w_min / w_max > expert_drop_flatness_floor`, skip the token and count a flatness bypass. This is the OLMoE guard. Equality with the floor does not bypass.
+7. This step's `set_inputs`, `enqueue_expert`, `dispatch_experts`, and the current-layer route-ahead pin use the post-drop mask, so a dropped expert is not fetched for this execution. `correct_prefetch(layer + 1)` receives the pre-drop expert union so the id still counts toward the next layer. `correct_to_native_route` receives the post-drop ids so the cache is not refilled with an expert this step refused to run.
+8. Pinned config, copied by the implementation plan:
+   - `expert_drop_policy`: `"off"` (default) or `"on_miss"`.
+   - `expert_drop_min_k`: `1`. Values below 1 are rejected.
+   - `expert_drop_mass_budget`: `0.0`, range `[0, 1]`. `on_miss` with budget `0` does not rewrite tensors. No non-zero budget is the default. The eval curve records budgets `0.05`, `0.10`, and `0.20` and does not fail on perplexity.
+   - `expert_drop_flatness_floor`: `0.5`, range `[0, 1]`.
+   - Tie break: lower weight first, then higher expert id.
+   - A missing residency probe, an exception, or a vector whose length is not the expert count means every expert is treated as resident.
+   - A selected weight that is non-finite or negative leaves that token unchanged.
+   - The output mask is a subset of the input mask. False bits stay false.
+   - Budget `0` returns the input tensors as the same objects.
 
 ## Where it runs
 
-`DistributedExpertExecutor.dispatch_local` (`moe_infinity/distributed/expert_executor.py`) is the last Python seam before `set_inputs` and `enqueue_expert`. Apply a pure function to `router_mask` and `router_weights` there, after the route is known and before `set_inputs`. `enqueue_expert` then sees only survivors, so a dropped expert is not fetched.
+`DistributedExpertExecutor.dispatch_local` (`moe_infinity/distributed/expert_executor.py`) is the last Python seam before `set_inputs` and `enqueue_expert`. Apply a pure function to a copy of `router_mask` and `router_weights` there, and pass the rewritten tensors to `set_inputs` and to the enqueue path. The multi-rank `dispatch()` RPC path is unchanged: residency is local to the worker that owns the cache.
 
-There is no Python predicate today for "is this expert GPU-resident?" Residency is owned by `ExpertResidencyManager`. The first code task is a read-only query used only when the policy is on. The off path must not call it.
+GPU residency is `expert_node->node->device.is_cuda()`, the same predicate as the cache-hit check in `ExpertDispatcher::Enqueue` (`core/parallel/expert_dispatcher.cpp` around the `cache_hit` assignment). Expose it as a read-only `resident_on_gpu(layer_idx)` binding. The off path must not call it.
 
 ## File map
 
@@ -38,9 +47,9 @@ There is no Python predicate today for "is this expert GPU-resident?" Residency 
 |---|---|
 | `moe_infinity/runtime/expert_drop.py` | Pure selection, mass budget, flatness bypass, renormalization. No dispatcher imports. |
 | `moe_infinity/utils/config.py` | `expert_drop_policy` (`off`/`on_miss`), `expert_drop_min_k`, `expert_drop_mass_budget`, `expert_drop_flatness_floor`. Validate on parse. |
-| `moe_infinity/distributed/expert_executor.py` | When policy is `on_miss`, rewrite mask and weights before `set_inputs`. Record drop counters. Prefetch still uses the original route. |
-| Native residency query | Read-only "resident expert ids for this layer" binding. No admission or eviction change. |
-| `tests/python/unit/test_expert_drop.py` | CPU tests listed below. |
+| `moe_infinity/distributed/expert_executor.py` | When policy is `on_miss` and the budget is positive, rewrite mask and weights before `set_inputs`. Current-layer fetch uses the post-drop mask. Next-layer `correct_prefetch` uses the pre-drop union. |
+| `core/parallel/expert_dispatcher.h` / `.cpp`, `core/python/py_archer_prefetch.cpp` | Read-only `resident_on_gpu(layer_idx)`. No admission or eviction change. |
+| `tests/python/unit/test_expert_drop.py`, `test_expert_drop_executor.py`, `test_resident_on_gpu_binding.py`, `test_expert_drop_gates.py` | CPU tests for selection, dispatch wiring, the binding name, and the latency gate. |
 
 ## QA gate (from #234)
 
