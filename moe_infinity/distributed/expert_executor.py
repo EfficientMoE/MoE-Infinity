@@ -146,7 +146,6 @@ class DistributedExpertExecutor:
             "shape_bypasses": 0,
             "drops_by_layer": {},
         }
-        self._resident_probe_cache = None
         self.precision_policy = None
         self.last_executor_evidence = _executor_evidence(
             wiring_reachable=True,
@@ -427,7 +426,6 @@ class DistributedExpertExecutor:
             if key != "drops_by_layer":
                 self._expert_drop_stats[key] = 0
         self._expert_drop_stats["drops_by_layer"] = {}
-        self._resident_probe_cache = None
 
     def _apply_expert_drop(self, layer_id, router_mask, router_weights):
         policy = getattr(self.archer_config, "expert_drop_policy", "off")
@@ -451,24 +449,19 @@ class DistributedExpertExecutor:
             return router_mask, router_weights, None
 
         num_experts = router_mask.shape[-1]
-        cached_resident = self._resident_probe_cache
-        if cached_resident is not None and cached_resident[0] == layer_id:
-            resident = cached_resident[1]
-        else:
-            resident_probe = getattr(
-                self.expert_dispatcher, "resident_on_gpu", None
-            )
-            try:
-                if not callable(resident_probe):
-                    raise RuntimeError("resident_on_gpu is unavailable")
-                resident_values = resident_probe(layer_id)
-                if len(resident_values) != num_experts:
-                    raise RuntimeError("resident_on_gpu returned wrong length")
-                resident = torch.tensor(resident_values, dtype=torch.bool)
-            except Exception:
-                self._expert_drop_stats["residency_unknown"] += 1
-                resident = torch.ones(num_experts, dtype=torch.bool)
-            self._resident_probe_cache = (layer_id, resident)
+        resident_probe = getattr(
+            self.expert_dispatcher, "resident_on_gpu", None
+        )
+        try:
+            if not callable(resident_probe):
+                raise RuntimeError("resident_on_gpu is unavailable")
+            resident_values = resident_probe(layer_id)
+            if len(resident_values) != num_experts:
+                raise RuntimeError("resident_on_gpu returned wrong length")
+            resident = torch.tensor(resident_values, dtype=torch.bool)
+        except Exception:
+            self._expert_drop_stats["residency_unknown"] += 1
+            resident = torch.ones(num_experts, dtype=torch.bool)
 
         try:
             mask, weights, counts = select_expert_drops(

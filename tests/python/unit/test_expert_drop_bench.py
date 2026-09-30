@@ -181,7 +181,7 @@ def test_no_change_returns_original_tensors() -> None:
     assert counts == ExpertDropCounts(1, 0, 0, 0)
 
 
-def test_resident_probe_is_memoized_per_layer_and_reset() -> None:
+def test_resident_probe_runs_for_each_dispatch() -> None:
     class Dispatcher:
         def __init__(self) -> None:
             self.calls = 0
@@ -207,13 +207,11 @@ def test_resident_probe_is_memoized_per_layer_and_reset() -> None:
     executor._apply_expert_drop(3, mask, weights)
     executor._apply_expert_drop(3, mask, weights)
 
-    assert dispatcher.calls == 1
-    assert executor._resident_probe_cache[0] == 3
-    assert executor._resident_probe_cache[1].device.type == "cpu"
+    assert dispatcher.calls == 2
 
     executor.reset_expert_drop_stats()
     executor._apply_expert_drop(3, mask, weights)
-    assert dispatcher.calls == 2
+    assert dispatcher.calls == 3
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

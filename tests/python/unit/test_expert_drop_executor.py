@@ -131,6 +131,21 @@ def test_budget_zero_does_not_probe():
     assert executor.get_expert_drop_stats()["budget_disabled"] == 1
 
 
+def test_consecutive_dispatches_reprobe_residency():
+    executor, dispatcher = make_executor(policy="on_miss", budget=1.0)
+    mask = torch.tensor([[True, True]])
+    weights = torch.tensor([[0.75, 0.25]])
+
+    dispatcher.resident = [1, 1]
+    first_mask, _, _ = executor._apply_expert_drop(0, mask, weights)
+    dispatcher.resident = [1, 0]
+    second_mask, _, _ = executor._apply_expert_drop(0, mask, weights)
+
+    assert dispatcher.resident_calls == [0, 0]
+    assert first_mask is mask
+    assert second_mask.tolist() == [[True, False]]
+
+
 def test_bad_shape_enqueues_everyone():
     executor, dispatcher = make_executor(policy="on_miss", budget=0.25)
     dispatcher.resident = [0, 0, 0]
