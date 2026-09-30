@@ -21,12 +21,31 @@ Accept or replace before any harness or docs diff:
 |---|---|
 | `docs/model-compatibility.md` | Replace the "Qwen3.5 is text-only / vision unused" lines. Add a MiniMax-M3 row with the license and the evidence boundary above. |
 | `examples/vl_keyword_eval.py` | Read a JSON list of image, prompt, and keyword. Call the same generate path as `vl_example.py`. Print per-GPU max memory and the keyword score. Exit non-zero under 16/20. |
-| Fixture list | Paths only, checked into the repo. Image bytes stay on the rig. Missing images skip with a message, so CI does not download M3. |
+| `tests/fixtures/vl/minimax_m3_keyword_eval.json` (new) | Frozen 20-row acceptance list. Paths only; image bytes stay on the M3 rig. |
+| `tests/fixtures/vl/keyword_eval_cpu.json` (new) | Three-row path-only fixture for answer-injection tests; paths need not exist in fake mode. |
+| `tests/python/unit/test_vl_keyword_eval.py` (new) | Subprocess coverage for 3/3 success, 1/3 failure, and model-load bypass. |
+| `tests/python/unit/test_vl_model_compatibility_docs.py` (new) | Pin the Qwen3.5 vision/residency wording and MiniMax-M3 license/evidence boundary. |
+
+## Fixture and test interface
+
+- `tests/fixtures/vl/minimax_m3_keyword_eval.json` uses this complete schema; the CPU fixture uses the same `items` schema with exactly three rows:
+
+```json
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"array","minItems":20,"maxItems":20,"items":{"type":"object","additionalProperties":false,"required":["id","image","prompt","keyword"],"properties":{"id":{"type":"string","minLength":1},"image":{"type":"string","minLength":1},"prompt":{"type":"string","minLength":1},"keyword":{"type":"string","minLength":1}}}}
+```
+
+- Concrete acceptance row: `{"id":"m3-001","image":"tests/fixtures/vl/images/m3-001.jpg","prompt":"What animal is shown?","keyword":"cat"}`. Before the harness diff, the PR author and M3 rig operator jointly freeze the issue #221 acceptance set as exactly 20 such rows in `tests/fixtures/vl/minimax_m3_keyword_eval.json`; that checked-in file is the record of IDs, repo-relative rig-local image paths, prompts, keywords, and order. No image bytes enter git. The rig operator places the 20 untracked bytes at the listed paths on the M3 checkout. Real mode reports each missing image as `SKIP` and does not download it.
+- `tests/fixtures/vl/keyword_eval_cpu.json` has the exact rows `cpu-1`/`tests/fixtures/vl/images/cpu-1.jpg`/`Name the animal.`/`cat`, `cpu-2`/`tests/fixtures/vl/images/cpu-2.jpg`/`Name the color.`/`red`, and `cpu-3`/`tests/fixtures/vl/images/cpu-3.jpg`/`How many objects?`/`two`, encoded with the four keys above.
+- `examples/vl_keyword_eval.py --fixture <path> --fake-answers '<json-object>'` parses an `id`-to-answer JSON object. Fake mode validates the fixture and scores those strings, but performs no image existence check and imports/constructs neither `AutoProcessor` nor `MoE`; real mode lazily loads them and follows `vl_example.py`'s `apply_chat_template` plus greedy `model.generate` path.
+- The score gate is `ceil(0.8 * row_count)`: 16/20 for acceptance and 3/3 for the CPU fixture. Missing fake-answer IDs count as misses. A met gate returns 0; malformed fixtures/answers or a score below the gate return non-zero.
 
 ## QA gate
 
-- CPU: the eval script exits 0 on a three-row fake list when the injected answers contain the keywords, and exits non-zero at 1/3.
-- GPU, Qwen3.5: `vl_example.py --expect cat` still prints `PASS` and a non-zero dispatch counter.
+- CPU, direct pass: `python examples/vl_keyword_eval.py --fixture tests/fixtures/vl/keyword_eval_cpu.json --fake-answers '{"cpu-1":"cat","cpu-2":"red","cpu-3":"two"}'`; expected score `3/3`, no model-load output, exit 0.
+- CPU, direct fail: `python examples/vl_keyword_eval.py --fixture tests/fixtures/vl/keyword_eval_cpu.json --fake-answers '{"cpu-1":"cat","cpu-2":"wrong","cpu-3":"wrong"}'`; expected score `1/3`, exit non-zero.
+- CPU, pytest: `python -m pytest tests/python/unit/test_vl_keyword_eval.py -q`; expected 3/3 and 1/3 subprocess assertions pass, exit 0.
+- Docs: `tests/python/unit/test_vl_model_compatibility_docs.py` reads `docs/model-compatibility.md` via `Path(__file__).resolve().parents[3]` and asserts the exact substrings `visual.*`, `MTP`, `unused`, `MiniMax-M3`, `MiniMax Community License`, `BF16`, `eager attention`, `native engine off`, and `no real-checkpoint evidence`. Run `python -m pytest tests/python/unit/test_vl_model_compatibility_docs.py -q`; expected exit 0.
+- GPU, Qwen3.5: `python examples/vl_example.py --image tests/fixtures/images/cat.jpg --expect cat` still prints `PASS` and a non-zero dispatch counter; exit 0.
 - GPU, M3, ≥1TB host RAM + NVMe: one cat smoke, then the 20-pair score. Paste both logs on #221. That paste is what closes the checkpoint-evidence item.
 
 ## Non-goals
