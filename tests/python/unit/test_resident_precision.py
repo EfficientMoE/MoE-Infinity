@@ -115,14 +115,15 @@ from moe_infinity.runtime.resident_precision import maybe_apply_uniform_fp8
 
 
 class _Dispatcher:
-    def __init__(self):
+    def __init__(self, *, accepts_targets=True):
         self.targets = None
         self.epoch = None
+        self.accepts_targets = accepts_targets
 
     def set_precision_targets(self, targets, epoch):
         self.targets = list(targets)
         self.epoch = epoch
-        return True
+        return self.accepts_targets
 
 
 def test_legacy_mode_does_not_set_targets():
@@ -148,6 +149,18 @@ def test_uniform_mode_sets_fp8_targets_once():
         (0, 1, "fp8_e4m3_block128", 3),
         (0, 2, "fp8_e4m3_block128", 3),
     }
+
+
+def test_uniform_mode_rejects_failed_target_publication():
+    dispatcher = _Dispatcher(accepts_targets=False)
+
+    with pytest.raises(RuntimeError, match="uniform FP8 residency"):
+        maybe_apply_uniform_fp8(
+            dispatcher,
+            (_variant(0, 1),),
+            mode="uniform_fp8",
+            generation=3,
+        )
 
 
 def test_mixed_manifest_does_not_call_the_dispatcher():

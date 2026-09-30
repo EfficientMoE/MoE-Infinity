@@ -93,14 +93,25 @@ def maybe_apply_uniform_fp8(
     # dispatcher is touched, so the caller must not fall through to the online
     # adaptive policy. The exception is intentionally left uncaught.
     plan = load_time_fp8_plan(variants, generation=generation)
+    publish_uniform_fp8_plan(dispatcher, variants, plan)
+    return True
+
+
+def publish_uniform_fp8_plan(
+    dispatcher,
+    variants: Sequence[CandidateVariantSpec],
+    plan: PrecisionPlan,
+) -> None:
     generations = {
         (
             ExpertKey(variant.layer_id, variant.expert_id),
             variant.format,
-        ): generation
+        ): plan.epoch
         for variant in variants
     }
-    dispatcher.set_precision_targets(
+    if not dispatcher.set_precision_targets(
         plan.as_native_targets(generations), plan.epoch
-    )
-    return True
+    ):
+        raise RuntimeError(
+            "uniform FP8 residency target publication was rejected"
+        )
