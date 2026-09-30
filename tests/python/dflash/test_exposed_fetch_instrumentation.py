@@ -27,6 +27,7 @@ import time
 from unittest.mock import MagicMock
 
 from benchmarks.dflash.bench_prefetch_priority import _exposed_fetch_seconds
+from moe_infinity.boundary import ArcherEngineHooks
 from moe_infinity.runtime.model_offload import OffloadEngine
 
 
@@ -35,6 +36,7 @@ def _bare_engine() -> OffloadEngine:
     engine.request_id = 7
     engine._exposed_fetch_seconds = 0.0
     engine.archer_engine = MagicMock()
+    engine.engine_hooks = ArcherEngineHooks(engine.archer_engine)
     return engine
 
 
