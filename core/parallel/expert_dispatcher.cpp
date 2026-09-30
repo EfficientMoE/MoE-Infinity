@@ -941,7 +941,9 @@ std::vector<std::uint8_t> ExpertDispatcher::ResidentOnGpu(int layer_idx) const {
     if (!expert_node || !expert_node->node) {
       return {};
     }
-    residency.push_back(expert_node->node->device.is_cuda() ? 1 : 0);
+    residency.push_back(
+        expert_node->node->resident_on_gpu.load(std::memory_order_acquire) ? 1
+                                                                           : 0);
   }
   return residency;
 }
