@@ -35,9 +35,9 @@ def select_expert_drops(
 ) -> tuple[torch.Tensor, torch.Tensor, ExpertDropCounts]:
     """Select non-resident routed experts to drop under a mass budget.
 
-    The ``mass_budget == 0`` fast path returns the input ``router_mask`` and
-    ``router_weights`` objects unchanged (aliased); every other path returns
-    freshly copied mask and weight tensors.
+    The input ``router_mask`` and ``router_weights`` objects are returned
+    unchanged (aliased) when the budget is zero or no row changes. Changed
+    decisions return fresh mask and weight tensors.
     """
     if router_mask.dim() != 2:
         raise ValueError("router_mask must be a 2-D tensor")
@@ -62,11 +62,11 @@ def select_expert_drops(
     if router_mask.is_cuda:
         packed_parts = (
             router_weights.reshape(-1),
-            router_mask.reshape(-1).to(dtype=router_weights.dtype),
+            router_mask.reshape(-1),
         )
         resident_is_packed = resident.is_cuda
         if resident_is_packed:
-            packed_parts += (resident.to(dtype=router_weights.dtype),)
+            packed_parts += (resident,)
         packed = torch.cat(packed_parts).cpu()
         weights_end = router_weights.numel()
         mask_end = weights_end + router_mask.numel()
@@ -93,8 +93,8 @@ def select_expert_drops(
         tokens_seen += 1
         mask_row = out_mask[r]
         w_row = out_w[r]
-        selected = torch.nonzero(mask_row, as_tuple=False).flatten().tolist()
-        if len(selected) <= min_k:
+        selected_count = int(mask_row.sum().item())
+        if selected_count <= min_k:
             continue
         selected_weights = w_row[mask_row]
         finite = bool(torch.isfinite(selected_weights).all())
@@ -114,13 +114,16 @@ def select_expert_drops(
             .flatten()
             .flip(0)
         )
-        candidate_order = torch.argsort(w_row[candidate_ids], stable=True)
-        candidate_ids = candidate_ids[candidate_order]
+        if candidate_ids.numel() == 0:
+            continue
+        if candidate_ids.numel() > 1:
+            candidate_order = torch.argsort(w_row[candidate_ids], stable=True)
+            candidate_ids = candidate_ids[candidate_order]
         cumulative_mass = torch.cumsum(
             w_row[candidate_ids], dim=0, dtype=torch.float64
         )
         budget_count = int((cumulative_mass <= mass_budget).sum().item())
-        dropped_here = min(budget_count, len(selected) - min_k)
+        dropped_here = min(budget_count, selected_count - min_k)
 
         if dropped_here == 0:
             continue
@@ -135,24 +138,17 @@ def select_expert_drops(
         if float(surviving_sum.item()) != 0.0:
             out_w[r][surviving] = out_w[r][surviving] / surviving_sum
 
-    if (
-        original_mask_device.type == "cuda"
-        and original_mask_device == original_weight_device
-    ):
-        packed_output = torch.cat(
-            (out_w.reshape(-1), out_mask.reshape(-1).to(dtype=out_w.dtype))
-        ).to(device=original_weight_device)
-        weights_end = out_w.numel()
-        device_w = packed_output[:weights_end].reshape(out_w.shape)
-        device_mask = packed_output[weights_end:].reshape(out_mask.shape).bool()
-    else:
-        device_mask = out_mask.to(device=original_mask_device)
-        device_w = out_w.to(device=original_weight_device)
+    counts = ExpertDropCounts(
+        tokens_seen, tokens_changed, experts_dropped, flatness_bypasses
+    )
+    if tokens_changed == 0:
+        return router_mask, router_weights, counts
+
+    device_mask = out_mask.to(device=original_mask_device)
+    device_w = out_w.to(device=original_weight_device)
 
     return (
         device_mask,
         device_w,
-        ExpertDropCounts(
-            tokens_seen, tokens_changed, experts_dropped, flatness_bypasses
-        ),
+        counts,
     )

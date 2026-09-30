@@ -162,6 +162,25 @@ def test_randomized_equivalence_with_reference() -> None:
         assert actual_counts == expected_counts, f"case {case}"
 
 
+def test_no_change_returns_original_tensors() -> None:
+    mask = torch.tensor([[True, True, False]])
+    weights = torch.tensor([[0.75, 0.25, 0.0]])
+    resident = torch.ones(3, dtype=torch.bool)
+
+    out_mask, out_weights, counts = select_expert_drops(
+        mask,
+        weights,
+        resident,
+        min_k=1,
+        mass_budget=0.2,
+        flatness_floor=1.0,
+    )
+
+    assert out_mask is mask
+    assert out_weights is weights
+    assert counts == ExpertDropCounts(1, 0, 0, 0)
+
+
 def test_resident_probe_is_memoized_per_layer_and_reset() -> None:
     class Dispatcher:
         def __init__(self) -> None:
@@ -204,11 +223,20 @@ def test_cuda_drop_decision_microbenchmark() -> None:
     mask = torch.zeros((1, 64), dtype=torch.bool, device="cuda")
     selected = torch.randperm(64, device="cuda", generator=generator)[:6]
     mask[0, selected] = True
-    resident = torch.rand(64, device="cuda", generator=generator) >= 0.3
+    selected_cpu = selected.cpu()
+    resident = torch.rand(64, generator=torch.Generator().manual_seed(7)) >= 0.3
+    resident[selected_cpu] = True
+    resident[selected_cpu[-1]] = False
+    weights[0, selected[-1]] = 0.01
     kwargs = {"min_k": 1, "mass_budget": 0.2, "flatness_floor": 1.0}
     layers_per_token = 26
     warmup_tokens = 5
     timed_tokens = 50
+
+    _, _, changed_counts = select_expert_drops(
+        mask, weights, resident, **kwargs
+    )
+    assert changed_counts.tokens_changed == 1
 
     def measure(selector) -> float:
         for _ in range(warmup_tokens * layers_per_token):
@@ -233,3 +261,32 @@ def test_cuda_drop_decision_microbenchmark() -> None:
 
     assert new_time < reference_time * 0.5, result
     assert new_us < 100.0, result
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cuda_no_change_microbenchmark() -> None:
+    generator = torch.Generator(device="cuda").manual_seed(20260930)
+    weights = torch.rand((1, 64), device="cuda", generator=generator)
+    mask = torch.zeros((1, 64), dtype=torch.bool, device="cuda")
+    selected = torch.randperm(64, device="cuda", generator=generator)[:6]
+    mask[0, selected] = True
+    resident = torch.ones(64, dtype=torch.bool)
+    kwargs = {"min_k": 1, "mass_budget": 0.2, "flatness_floor": 1.0}
+    layers_per_token = 26
+    warmup_tokens = 5
+    timed_tokens = 50
+
+    for _ in range(warmup_tokens * layers_per_token):
+        select_expert_drops(mask, weights, resident, **kwargs)
+    torch.cuda.synchronize()
+    started = time.perf_counter()
+    for _ in range(timed_tokens * layers_per_token):
+        select_expert_drops(mask, weights, resident, **kwargs)
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - started
+    calls = timed_tokens * layers_per_token
+    per_call_us = elapsed * 1e6 / calls
+    result = f"no-change={elapsed:.6f}s ({per_call_us:.2f} us/call)"
+    print(result)
+
+    assert per_call_us < 60.0, result
