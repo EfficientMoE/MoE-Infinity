@@ -34,3 +34,8 @@ def test_gates_reject_nonpositive_baselines():
         resident_ratio_passes(18, 0)
     with pytest.raises(ValueError):
         nll_gate_passes(0.0, 1.0)
+
+
+def test_nll_gate_rejects_negative_fp8_measurement():
+    with pytest.raises(ValueError, match="NLL values"):
+        nll_gate_passes(1.0, -0.1)

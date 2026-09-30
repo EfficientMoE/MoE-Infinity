@@ -40,6 +40,9 @@ def nll_gate_passes(nll_bf16: float, nll_fp8: float) -> bool:
         or not math.isfinite(nll_bf16)
         or not math.isfinite(nll_fp8)
         or nll_bf16 <= 0
+        or nll_fp8 < 0
     ):
-        raise ValueError("NLL values must be finite with BF16 NLL above zero")
+        raise ValueError(
+            "NLL values must be finite with BF16 NLL above zero and FP8 NLL non-negative"
+        )
     return (nll_fp8 - nll_bf16) / nll_bf16 <= 0.01
