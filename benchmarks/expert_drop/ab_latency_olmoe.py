@@ -41,15 +41,20 @@ PROMPTS = [
 ]
 
 
-class _ITLStreamer:
-    def __init__(self):
-        self.timestamps = []
+_TOKEN_TIMES = []
 
-    def put(self, value):
-        self.timestamps.append(time.perf_counter())
 
-    def end(self):
-        pass
+def _install_token_timer():
+    from moe_infinity.engine.generation_loop import GenerationEngine
+
+    original = GenerationEngine._sample
+
+    def timed_sample(self, logits, params):
+        token = original(self, logits, params)
+        _TOKEN_TIMES.append(time.perf_counter())
+        return token
+
+    GenerationEngine._sample = timed_sample
 
 
 def main():
@@ -77,6 +82,7 @@ def main():
     if args.policy == "on_miss":
         config["expert_drop_mass_budget"] = args.mass_budget
     model = MoE(args.checkpoint, config)
+    _install_token_timer()
 
     itl_ms = []
     outputs = []
@@ -84,21 +90,28 @@ def main():
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(
             "cuda:0"
         )
-        streamer = _ITLStreamer()
-        with torch.inference_mode():
-            out = model.generate(
-                input_ids,
-                max_new_tokens=args.max_new_tokens,
-                min_new_tokens=args.max_new_tokens,
-                do_sample=False,
-                streamer=streamer,
-            )
-        ts = streamer.timestamps
+        _TOKEN_TIMES.clear()
+        out = model.generate(
+            input_ids,
+            max_new_tokens=args.max_new_tokens,
+            min_new_tokens=args.max_new_tokens,
+            do_sample=False,
+        )
+        ts = list(_TOKEN_TIMES)
         itl_ms.extend((b - a) * 1e3 for a, b in zip(ts[1:], ts[2:]))
         outputs.append(tokenizer.decode(out[0][-16:], skip_special_tokens=True))
 
+    drop_stats = None
+    engine = getattr(model, "engine", None) or getattr(model, "_engine", None)
+    for holder in (model, engine, getattr(model, "archer_engine", None)):
+        executor = getattr(holder, "expert_executor", None)
+        if executor is not None and hasattr(executor, "get_expert_drop_stats"):
+            drop_stats = executor.get_expert_drop_stats()
+            break
+
     t = torch.tensor(itl_ms, dtype=torch.float64)
     result = {
+        "drop_stats": drop_stats,
         "policy": args.policy,
         "mass_budget": args.mass_budget,
         "samples": len(itl_ms),
