@@ -33,8 +33,34 @@ Recorded output: block size `128`; causal token mask `key_position > position_id
 | `moe_infinity/boundary/transformers_model_overrides.py` | Install/restore the `MiniMaxM3VLAttention` replacement at the exact hook above. |
 | `examples/vl_example.py` | Add `--enable-minimax-m3-indexer-kernel` and pass it into the `MoE` config for the smoke gate. |
 | `tests/python/unit/test_minimax_m3_indexer.py` | Tiny eager-versus-kernel and default-off no-op tests; skip only when the installed module is absent. |
+| `benchmarks/minimax_m3/gates.py` | Pure 20% speedup gate and recorded sweep-row builder. |
+| `benchmarks/minimax_m3/bench_indexer_attention.py` | No-download, module-level eager-versus-kernel prefill microbenchmark. |
+| `tests/python/unit/test_minimax_m3_bench_gates.py` | CPU gate boundary, validation, row, and CLI-help tests. |
+
+## Kernel performance microbenchmark
+
+Installed `transformers==5.12.0` defaults are `hidden_size=6144`, `num_attention_heads=64`, `num_key_value_heads=4`, and `head_dim=128` (`index_n_heads=4`). Use this production geometry; set layer 0 to `"minimax_m3_sparse"` so `MiniMaxM3VLAttention(config, 0)` constructs its indexer.
+
+1. First write `tests/python/unit/test_minimax_m3_bench_gates.py`: assert `kernel_speedup_passes(100.0, 80.0)` and reject `80.0 + 2**-20`; assert `speedup_row(8192, 100.0, 75.0) == {"seq_len": 8192, "t_eager_ms": 100.0, "t_kernel_ms": 75.0, "speedup": 4.0 / 3.0}`; loop over zero, negative, NaN, and infinity in every applicable argument and require `ValueError`; run the benchmark with `--help` in a subprocess and require exit 0. Run `pytest -q tests/python/unit/test_minimax_m3_bench_gates.py`; before implementation expect import failure.
+2. Create `benchmarks/minimax_m3/gates.py`. `kernel_speedup_passes(t_eager_ms, t_kernel_ms)` validates finite positive timings and returns `t_kernel_ms <= 0.8 * t_eager_ms`. `speedup_row(seq_len, t_eager_ms, t_kernel_ms)` validates a finite positive sequence length and timings, then returns the exact dict above with `speedup=t_eager_ms / t_kernel_ms`.
+3. Create `benchmarks/minimax_m3/bench_indexer_attention.py`. Its module docstring states the manual GPU command below. Seed random initialization, instantiate one BF16 eval-mode attention module without downloading a checkpoint, generate BF16 hidden states plus rotary inputs, and run prefill forward at `S in (2048, 8192, 16384)` through eager and the selected kernel with identical weights and inputs. Time each path using CUDA events with 5 warmups, 20 measured iterations, and synchronization around each sample; report `speedup_row` JSON per length. Only `S=8192` is enforced. `--enforce --t-eager-ms X --t-kernel-ms Y` prints `pass` or `fail` and exits 0 only on pass; `--help` exits 0 without CUDA.
+4. Run `pytest -q tests/python/unit/test_minimax_m3_bench_gates.py`; expected: `4 passed`.
 
 ## QA gate
+
+The CPU performance-gate tests always run:
+
+```bash
+pytest -q tests/python/unit/test_minimax_m3_bench_gates.py
+```
+
+Expected: `4 passed`. Manually run the GPU sweep and paste all three rows plus the enforcement output on the implementation PR:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python benchmarks/minimax_m3/bench_indexer_attention.py
+```
+
+The sweep prints a ready-to-run `--enforce --t-eager-ms X --t-kernel-ms Y` command populated from its `S=8192` row; run and paste it. The `S=2048` and `S=16384` rows are record-only. If the `S=8192` kernel time is not at most 80% of eager, the kernel does not land and the provider choice from the decision checkpoint is revisited.
 
 Use `torch.manual_seed(0)`, BF16, `B=1`, `S_q=S_k=17`, `H_q=4`, `H_kv=2`, `D=16`, fixture block size `4`, top-k blocks `2`, and local blocks `1`. Build `block_indices` with the installed `MiniMaxM3VLIndexer`; compare the kernel output to installed HF eager attention using `rtol=1e-2, atol=1e-2`. The fixture must include `-1` padding and a query whose future block would otherwise score highest.
 
