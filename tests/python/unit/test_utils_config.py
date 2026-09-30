@@ -8,6 +8,31 @@ import pytest
 from moe_infinity.utils.config import ArcherConfig
 
 
+def test_adaptive_resident_mode_defaults_to_legacy(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.warns(UserWarning):
+        config = ArcherConfig(offload_path="/tmp")
+    assert config.adaptive_expert_precision is False
+    assert config.adaptive_resident_mode == "legacy"
+
+
+def test_uniform_fp8_mode_is_accepted(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.warns(UserWarning):
+        config = ArcherConfig(
+            offload_path="/tmp", adaptive_resident_mode="uniform_fp8"
+        )
+    assert config.adaptive_resident_mode == "uniform_fp8"
+    assert config.adaptive_expert_precision is False
+
+
+def test_unknown_resident_mode_is_rejected(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.raises(ValueError, match="adaptive_resident_mode"):
+        with pytest.warns(UserWarning):
+            ArcherConfig(offload_path="/tmp", adaptive_resident_mode="int4")
+
+
 def test_load_from_json_sets_paths_and_threads(monkeypatch):
     monkeypatch.setattr("torch.cuda.device_count", lambda: 2)
     config = ArcherConfig.load_from_json(

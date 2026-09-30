@@ -136,6 +136,14 @@ class ArcherConfig:
             "help": "Opt-in adaptive mixed-precision expert policy. Default False. Never enabled by default; validated only when True."
         },
     )
+    adaptive_resident_mode: str = field(
+        default="legacy",
+        metadata={
+            "help": (
+                "'legacy' keeps the online adaptive policy; 'uniform_fp8' pins every released expert to load-time FP8 and does not change format online."
+            )
+        },
+    )
     adaptive_hbm_budget_bytes: int = field(
         default=0,
         metadata={
@@ -580,4 +588,9 @@ class ArcherConfig:
         ):
             raise ValueError(
                 "min_free_mla_blocks_after_admission must be an integer >= 1"
+            )
+        if self.adaptive_resident_mode not in ("legacy", "uniform_fp8"):
+            raise ValueError(
+                "adaptive_resident_mode must be 'legacy' or 'uniform_fp8', "
+                f"got {self.adaptive_resident_mode!r}"
             )

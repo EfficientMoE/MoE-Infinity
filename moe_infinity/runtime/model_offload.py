@@ -98,6 +98,10 @@ from moe_infinity.runtime.expert_variant_manifest import (
     load_derivative_overlay,
 )
 from moe_infinity.runtime.hooks import *
+from moe_infinity.runtime.resident_precision import (
+    load_time_fp8_plan,
+    publish_uniform_fp8_plan,
+)
 from moe_infinity.utils import (
     ArcherConfig,
     moe_text_config,
@@ -124,6 +128,70 @@ class AdaptivePrecisionResolution:
     fallback_reason: Optional[str]
     capabilities: ModelPrecisionCapabilities
     manifest: object | None = None
+
+
+def _configure_adaptive_precision_dispatcher(
+    dispatcher,
+    executor,
+    archer_config,
+    manifest,
+    *,
+    manager_enabled=None,
+    phase_enabled=None,
+    native_handle=None,
+):
+    native_generation = int(manifest.generation[1:])
+    mode = getattr(archer_config, "adaptive_resident_mode", "legacy")
+    uniform_plan = None
+    if mode == "uniform_fp8":
+        uniform_plan = load_time_fp8_plan(
+            manifest.variants, generation=native_generation
+        )
+
+    if manager_enabled is not None:
+        dispatcher.configure_residency_manager(manager_enabled, phase_enabled)
+        native_handle.configure_residency_manager(
+            manager_enabled, phase_enabled
+        )
+    dispatcher.set_adaptive_hbm_budget_bytes(
+        archer_config.adaptive_hbm_budget_bytes
+    )
+    for variant in manifest.variants:
+        dispatcher.register_expert_variant(
+            variant.layer_id,
+            variant.expert_id,
+            variant.format.value,
+            native_generation,
+            variant.execution.value,
+            list(variant.tensor_ids),
+            list(variant.tensor_roles),
+            variant.payload_bytes,
+            variant.aligned_bytes,
+            variant.workspace_bytes,
+        )
+
+    if uniform_plan is not None:
+        publish_uniform_fp8_plan(dispatcher, manifest.variants, uniform_plan)
+        return
+
+    catalog = {}
+    generations = {}
+    for variant in manifest.variants:
+        key = ExpertKey(variant.layer_id, variant.expert_id)
+        catalog.setdefault(key, {})[variant.format] = variant.aligned_bytes
+        generations[(key, variant.format)] = native_generation
+    policy = AdaptivePrecisionPolicy(
+        archer_config.adaptive_hbm_budget_bytes,
+        archer_config.adaptive_hotness_decay,
+        archer_config.adaptive_promotion_threshold,
+        archer_config.adaptive_demotion_threshold,
+        archer_config.adaptive_min_residency_epochs,
+        archer_config.adaptive_transition_cooldown_epochs,
+        catalog,
+        generations=generations,
+        epoch_tokens=archer_config.adaptive_policy_epoch_tokens,
+    )
+    executor.set_precision_policy(policy)
 
 
 def _resolve_adaptive_precision(
@@ -1446,50 +1514,23 @@ class OffloadEngine(object):
                         False,
                     )
                 )
-                self.expert_dispatcher.configure_residency_manager(
-                    manager_enabled, phase_enabled
-                )
-                self.archer_engine.configure_residency_manager(
-                    manager_enabled, phase_enabled
-                )
                 if resolution.enabled:
-                    self.expert_dispatcher.set_adaptive_hbm_budget_bytes(
-                        self.archer_config.adaptive_hbm_budget_bytes
+                    _configure_adaptive_precision_dispatcher(
+                        self.expert_dispatcher,
+                        self.expert_executor,
+                        self.archer_config,
+                        resolution.manifest,
+                        manager_enabled=manager_enabled,
+                        phase_enabled=phase_enabled,
+                        native_handle=self.archer_engine,
                     )
-                    for variant in resolution.manifest.variants:
-                        self.expert_dispatcher.register_expert_variant(
-                            variant.layer_id,
-                            variant.expert_id,
-                            variant.format.value,
-                            int(resolution.manifest.generation[1:]),
-                            variant.execution.value,
-                            list(variant.tensor_ids),
-                            list(variant.tensor_roles),
-                            variant.payload_bytes,
-                            variant.aligned_bytes,
-                            variant.workspace_bytes,
-                        )
-                    catalog = {}
-                    generations = {}
-                    native_generation = int(resolution.manifest.generation[1:])
-                    for variant in resolution.manifest.variants:
-                        key = ExpertKey(variant.layer_id, variant.expert_id)
-                        catalog.setdefault(key, {})[variant.format] = (
-                            variant.aligned_bytes
-                        )
-                        generations[(key, variant.format)] = native_generation
-                    policy = AdaptivePrecisionPolicy(
-                        self.archer_config.adaptive_hbm_budget_bytes,
-                        self.archer_config.adaptive_hotness_decay,
-                        self.archer_config.adaptive_promotion_threshold,
-                        self.archer_config.adaptive_demotion_threshold,
-                        self.archer_config.adaptive_min_residency_epochs,
-                        self.archer_config.adaptive_transition_cooldown_epochs,
-                        catalog,
-                        generations=generations,
-                        epoch_tokens=self.archer_config.adaptive_policy_epoch_tokens,
+                else:
+                    self.expert_dispatcher.configure_residency_manager(
+                        manager_enabled, phase_enabled
                     )
-                    self.expert_executor.set_precision_policy(policy)
+                    self.archer_engine.configure_residency_manager(
+                        manager_enabled, phase_enabled
+                    )
                 self.expert_precision_resolution = resolution
                 return model
 
