@@ -923,6 +923,29 @@ double ExpertDispatcher::GetCacheHitRate() const {
   return static_cast<double>(hits) / static_cast<double>(access);
 }
 
+std::vector<std::uint8_t> ExpertDispatcher::ResidentOnGpu(int layer_idx) const {
+  std::vector<std::uint8_t> residency;
+  if (layer_idx < 0 || experts_.empty()) {
+    return residency;
+  }
+  residency.reserve(static_cast<std::size_t>(num_experts_));
+  for (int expert_idx = 0; expert_idx < num_experts_; ++expert_idx) {
+    if (expert_idx >= static_cast<int>(experts_.size())) {
+      return {};
+    }
+    const auto& expert_list = experts_[expert_idx];
+    if (layer_idx >= static_cast<int>(expert_list.size())) {
+      return {};
+    }
+    const auto& expert_node = expert_list[layer_idx];
+    if (!expert_node || !expert_node->node) {
+      return {};
+    }
+    residency.push_back(expert_node->node->device.is_cuda() ? 1 : 0);
+  }
+  return residency;
+}
+
 // void ExpertDispatcher::GPUThreadFunc(int gpu_id) {
 //   while (!main_thread_stop_flag_.load()) {
 //   }

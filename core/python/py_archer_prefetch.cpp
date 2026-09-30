@@ -186,6 +186,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("layer_idx"), py::arg("expert_idx"), py::arg("gpu_id") = -1,
            py::arg("remote") = false,
            py::arg("phase") = static_cast<int>(ExpertPhase::MIXED))
+      .def("resident_on_gpu", &ExpertDispatcher::ResidentOnGpu,
+           py::arg("layer_idx"))
       .def("set_inputs", &ExpertDispatcher::SetInputs)
       .def("set_inputs_with_invocation",
            &ExpertDispatcher::SetInputsWithInvocation)
