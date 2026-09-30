@@ -144,6 +144,30 @@ class ArcherConfig:
             )
         },
     )
+    expert_drop_policy: str = field(
+        default="off",
+        metadata={
+            "help": "Opt-in expert drop policy. Default 'off' (no experts dropped). 'on_miss' drops only non-resident routed experts."
+        },
+    )
+    expert_drop_min_k: int = field(
+        default=1,
+        metadata={
+            "help": "Minimum number of routed experts to keep when dropping. Must be >= 1."
+        },
+    )
+    expert_drop_mass_budget: float = field(
+        default=0.0,
+        metadata={
+            "help": "Fraction of router probability mass in [0, 1] eligible for dropping. Budget 0 rewrites nothing (default)."
+        },
+    )
+    expert_drop_flatness_floor: float = field(
+        default=0.5,
+        metadata={
+            "help": "Flatness floor in [0, 1] below which drops are suppressed. Default is off overall; only active when policy is 'on_miss'."
+        },
+    )
     adaptive_hbm_budget_bytes: int = field(
         default=0,
         metadata={
@@ -593,4 +617,26 @@ class ArcherConfig:
             raise ValueError(
                 "adaptive_resident_mode must be 'legacy' or 'uniform_fp8', "
                 f"got {self.adaptive_resident_mode!r}"
+            )
+        if self.expert_drop_policy not in ("off", "on_miss"):
+            raise ValueError(
+                f"expert_drop_policy must be 'off' or 'on_miss', got {self.expert_drop_policy!r}"
+            )
+        if self.expert_drop_min_k < 1:
+            raise ValueError(
+                f"expert_drop_min_k must be >= 1, got {self.expert_drop_min_k}"
+            )
+        if (
+            not math.isfinite(self.expert_drop_mass_budget)
+            or not 0.0 <= self.expert_drop_mass_budget <= 1.0
+        ):
+            raise ValueError(
+                f"expert_drop_mass_budget must be in [0, 1], got {self.expert_drop_mass_budget}"
+            )
+        if (
+            not math.isfinite(self.expert_drop_flatness_floor)
+            or not 0.0 <= self.expert_drop_flatness_floor <= 1.0
+        ):
+            raise ValueError(
+                f"expert_drop_flatness_floor must be in [0, 1], got {self.expert_drop_flatness_floor}"
             )
