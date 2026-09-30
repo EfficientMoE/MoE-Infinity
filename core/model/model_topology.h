@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cuda_runtime_api.h>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -63,6 +64,7 @@ struct Node {
       DEFAULT_CUDA_DEVICE;  // FIXME: should be set by scheduler
   torch::Device default_host = CPU_DEVICE;
   torch::Device initial_host = DISK_DEVICE;
+  std::atomic<bool> resident_on_gpu{false};
 
   std::atomic_uint8_t state{0};  // 0 for ready, 1 for moving
 
