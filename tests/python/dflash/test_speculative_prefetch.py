@@ -371,7 +371,9 @@ def test_observe_records_decision_but_preserves_legacy_issue():
     prefetcher, engine = _make_prefetcher(num_layers=8, num_experts=4)
     prefetcher.configure_overlap_policy(_config(policy="observe"))
     prefetcher.speculative_prefetch(2, LOGITS)
-    engine.prefetch_tensors.assert_called_once_with([301, 302], priority=2)
+    engine.prefetch_tensors.assert_called_once_with(
+        [301, 302], priority=2, phase=int(ExpertPhase.MIXED)
+    )
     assert prefetcher.overlap_prefetch_stats()["decisions"] == 1
 
 

@@ -501,7 +501,6 @@ class ExpertPrefetcher(object):
         missed = [e for e in actual_expert_ids if e not in predicted]
         if missed:
             self.prefetch_experts_list(layer_idx, missed, phase=phase)
-            self.prefetch_experts_list(layer_idx, missed)
 
         self._last_speculative_prediction = set()
 
