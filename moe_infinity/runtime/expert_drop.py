@@ -19,9 +19,9 @@ class ExpertDropCounts:
     flatness_bypasses: int
 
 
-def _validate_fraction(value: float, name: str) -> None:
+def _validate_fraction(value: float, message: str) -> None:
     if not math.isfinite(value) or value < 0.0 or value > 1.0:
-        raise ValueError(name)
+        raise ValueError(message)
 
 
 def select_expert_drops(
@@ -33,16 +33,26 @@ def select_expert_drops(
     mass_budget: float,
     flatness_floor: float,
 ) -> tuple[torch.Tensor, torch.Tensor, ExpertDropCounts]:
+    """Select non-resident routed experts to drop under a mass budget.
+
+    The ``mass_budget == 0`` fast path returns the input ``router_mask`` and
+    ``router_weights`` objects unchanged (aliased); every other path returns
+    freshly copied mask and weight tensors.
+    """
     if router_mask.dim() != 2:
-        raise ValueError("router_mask")
+        raise ValueError("router_mask must be a 2-D tensor")
     if router_weights.shape != router_mask.shape:
-        raise ValueError("router_weights")
+        raise ValueError("router_weights must match router_mask shape")
     if resident.shape != (router_mask.shape[-1],):
-        raise ValueError("resident")
+        raise ValueError("resident must have shape (num_experts,)")
     if min_k < 1:
-        raise ValueError("min_k")
-    _validate_fraction(mass_budget, "mass_budget")
-    _validate_fraction(flatness_floor, "flatness_floor")
+        raise ValueError("min_k must be >= 1")
+    _validate_fraction(
+        mass_budget, "mass_budget must be a finite float in [0, 1]"
+    )
+    _validate_fraction(
+        flatness_floor, "flatness_floor must be a finite float in [0, 1]"
+    )
 
     if mass_budget == 0:
         return router_mask, router_weights, ExpertDropCounts(0, 0, 0, 0)
@@ -70,11 +80,13 @@ def select_expert_drops(
         if max_weight == 0.0:
             continue
         min_weight = float(selected_weights.min().item())
+        # Strict ">" bypasses only flatter rows; equality still drops.
         if min_weight / max_weight > flatness_floor:
             flatness_bypasses += 1
             continue
 
         candidates = [i for i in selected if not bool(resident[i])]
+        # Sort weight asc, expert id desc: higher id is dropped first on ties.
         candidates.sort(key=lambda i: (float(w_row[i].item()), -i))
 
         remaining = len(selected)
