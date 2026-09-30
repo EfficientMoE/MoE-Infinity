@@ -152,3 +152,153 @@ def select_expert_drops(
         device_w,
         counts,
     )
+
+
+@dataclass(frozen=True)
+class ExpertDropCountTensors:
+    """Device-resident drop statistics.
+
+    Every field is a 0-dim integer tensor on the selection device. Callers
+    accumulate these lazily (e.g. into a device-side stats buffer) and only
+    synchronize when stats are actually read, keeping the decode hot path
+    free of host round-trips.
+    """
+
+    tokens_seen: torch.Tensor
+    tokens_changed: torch.Tensor
+    experts_dropped: torch.Tensor
+    flatness_bypasses: torch.Tensor
+
+
+def select_expert_drops_device(
+    router_mask: torch.Tensor,
+    router_weights: torch.Tensor,
+    resident: torch.Tensor,
+    *,
+    min_k: int,
+    mass_budget: float,
+    flatness_floor: float,
+) -> tuple[torch.Tensor, torch.Tensor, ExpertDropCountTensors]:
+    """Device-side, fully vectorized variant of :func:`select_expert_drops`.
+
+    Semantics are identical to the CPU reference, but the selection is
+    expressed entirely as tensor ops on ``router_mask.device``: no ``.cpu()``,
+    no ``.item()``, and no data-dependent Python branching, so the call
+    enqueues work without forcing a host synchronization (PROTOTYPE for
+    issue #234 Phase 2, option (a) of the decision checkpoint).
+
+    Differences from the CPU reference, by design:
+
+    - ``counts`` are 0-dim device tensors (:class:`ExpertDropCountTensors`).
+    - Fresh mask/weight tensors are returned whenever ``mass_budget > 0``,
+      even if no row changed (detecting "no change" would require a sync).
+      ``mass_budget == 0`` still aliases the inputs.
+    """
+    if router_mask.dim() != 2:
+        raise ValueError("router_mask must be a 2-D tensor")
+    if router_weights.shape != router_mask.shape:
+        raise ValueError("router_weights must match router_mask shape")
+    if resident.shape != (router_mask.shape[-1],):
+        raise ValueError("resident must have shape (num_experts,)")
+    if type(min_k) is not int or min_k < 1:
+        raise ValueError("min_k must be an integer >= 1")
+    _validate_fraction(
+        mass_budget, "mass_budget must be a finite float in [0, 1]"
+    )
+    _validate_fraction(
+        flatness_floor, "flatness_floor must be a finite float in [0, 1]"
+    )
+
+    device = router_mask.device
+    num_rows, num_experts = router_mask.shape
+
+    def _zero() -> torch.Tensor:
+        return torch.zeros((), dtype=torch.int64, device=device)
+
+    if mass_budget == 0:
+        zero = _zero()
+        return (
+            router_mask,
+            router_weights,
+            ExpertDropCountTensors(zero, zero, zero, zero),
+        )
+
+    mask = router_mask.bool()
+    w = router_weights
+    resident_dev = resident.to(device=device, dtype=torch.bool)
+
+    zero_w = torch.zeros((), dtype=w.dtype, device=device)
+    neg_inf = torch.full((), float("-inf"), dtype=w.dtype, device=device)
+    pos_inf = torch.full((), float("inf"), dtype=w.dtype, device=device)
+
+    selected_count = mask.sum(-1)
+    w_sel = torch.where(mask, w, zero_w)
+    finite_ok = torch.isfinite(w_sel).all(-1)
+    nonneg_ok = ~(w_sel < 0).any(-1)
+    max_w = torch.where(mask, w, neg_inf).amax(-1)
+    min_w = torch.where(mask, w, pos_inf).amin(-1)
+
+    # Guard order mirrors the CPU loop: count floor, finite/negative,
+    # zero max weight, then flatness. Only rows passing the earlier guards
+    # count as flatness bypasses.
+    base_ok = (selected_count > min_k) & finite_ok & nonneg_ok & (max_w > 0)
+    ratio = min_w.double() / max_w.double()
+    flat_bypass = base_ok & (ratio > flatness_floor)
+    eligible = base_ok & ~flat_bypass
+
+    candidates = mask & ~resident_dev.unsqueeze(0)
+
+    # Drop order: ascending weight, ties broken by higher expert id first.
+    # Reversing the expert axis makes a stable ascending argsort resolve
+    # ties toward higher original ids; non-candidates sort last via +inf.
+    sort_key = torch.where(
+        candidates,
+        w.double(),
+        torch.full((), float("inf"), dtype=torch.float64, device=device),
+    )
+    order_rev = torch.argsort(sort_key.flip(-1), dim=-1, stable=True)
+    sorted_ids = (num_experts - 1) - order_rev
+    sorted_is_cand = torch.gather(candidates, -1, sorted_ids)
+    sorted_w = torch.where(
+        sorted_is_cand,
+        torch.gather(w.double(), -1, sorted_ids),
+        torch.zeros((), dtype=torch.float64, device=device),
+    )
+    cumulative = torch.cumsum(sorted_w, dim=-1)
+    budget_count = (sorted_is_cand & (cumulative <= mass_budget)).sum(-1)
+
+    allowed = (selected_count - min_k).clamp_min(0)
+    dropped_here = torch.minimum(budget_count, allowed)
+    dropped_here = torch.where(
+        eligible, dropped_here, torch.zeros_like(dropped_here)
+    )
+
+    position = torch.arange(num_experts, device=device).unsqueeze(0)
+    drop_sorted = position < dropped_here.unsqueeze(-1)
+    drop_mask = torch.zeros_like(mask)
+    drop_mask.scatter_(-1, sorted_ids, drop_sorted)
+
+    changed = dropped_here > 0
+    new_mask = mask & ~drop_mask
+    stripped_w = torch.where(drop_mask, zero_w, w)
+    surviving_sum = torch.where(new_mask, stripped_w, zero_w).sum(
+        -1, keepdim=True
+    )
+    safe_sum = torch.where(
+        surviving_sum == 0, torch.ones_like(surviving_sum), surviving_sum
+    )
+    renormed = torch.where(
+        new_mask & (surviving_sum != 0), stripped_w / safe_sum, stripped_w
+    )
+
+    changed_col = changed.unsqueeze(-1)
+    out_mask = torch.where(changed_col, new_mask, mask)
+    out_w = torch.where(changed_col, renormed, w)
+
+    counts = ExpertDropCountTensors(
+        tokens_seen=torch.full((), num_rows, dtype=torch.int64, device=device),
+        tokens_changed=changed.sum(),
+        experts_dropped=dropped_here.sum(),
+        flatness_bypasses=flat_bypass.sum(),
+    )
+    return out_mask, out_w, counts
