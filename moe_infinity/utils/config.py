@@ -165,7 +165,7 @@ class ArcherConfig:
     expert_drop_flatness_floor: float = field(
         default=0.5,
         metadata={
-            "help": "Flatness floor in [0, 1] below which drops are suppressed. Default is off overall; only active when policy is 'on_miss'."
+            "help": "Flatness floor in [0, 1] above which drops are suppressed because the distribution is too flat. Default is off overall; only active when policy is 'on_miss'."
         },
     )
     adaptive_hbm_budget_bytes: int = field(
@@ -622,9 +622,13 @@ class ArcherConfig:
             raise ValueError(
                 f"expert_drop_policy must be 'off' or 'on_miss', got {self.expert_drop_policy!r}"
             )
-        if self.expert_drop_min_k < 1:
+        if (
+            type(self.expert_drop_min_k) is not int
+            or self.expert_drop_min_k < 1
+        ):
             raise ValueError(
-                f"expert_drop_min_k must be >= 1, got {self.expert_drop_min_k}"
+                "expert_drop_min_k must be an integer >= 1, "
+                f"got {self.expert_drop_min_k}"
             )
         if (
             not math.isfinite(self.expert_drop_mass_budget)

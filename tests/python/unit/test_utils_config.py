@@ -392,6 +392,14 @@ def test_expert_drop_on_miss_accepts_budget(monkeypatch):
     assert config.expert_drop_mass_budget == 0.10
 
 
+@pytest.mark.parametrize("min_k", [1.5, True])
+def test_expert_drop_min_k_rejects_non_integer_values(monkeypatch, min_k):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.raises(ValueError, match="must be an integer"):
+        with pytest.warns(UserWarning):
+            ArcherConfig(offload_path="/tmp", expert_drop_min_k=min_k)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
