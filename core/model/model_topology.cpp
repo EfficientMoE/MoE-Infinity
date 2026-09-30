@@ -231,6 +231,7 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
     }
   }
   device = target_device;
+  resident_on_gpu.store(target_device.is_cuda(), std::memory_order_release);
 }
 
 ArcherTopologyHandle::ArcherTopologyHandle(std::shared_ptr<TensorStore> store)

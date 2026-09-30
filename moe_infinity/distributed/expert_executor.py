@@ -15,6 +15,7 @@ from moe_infinity.memory.expert_policy import (
     ExpertPhase,
     current_expert_phase,
 )
+from moe_infinity.runtime.expert_drop import select_expert_drops
 from moe_infinity.utils import ArcherConfig
 
 try:
@@ -135,6 +136,16 @@ class DistributedExpertExecutor:
         self._gpu_route_fallback_count = 0
         self._pending_prefetch = None
         self._pending_prefetch_failure_safe = False
+        self._expert_drop_stats = {
+            "tokens_seen": 0,
+            "tokens_changed": 0,
+            "experts_dropped": 0,
+            "flatness_bypasses": 0,
+            "budget_disabled": 0,
+            "residency_unknown": 0,
+            "shape_bypasses": 0,
+            "drops_by_layer": {},
+        }
         self.precision_policy = None
         self.last_executor_evidence = _executor_evidence(
             wiring_reachable=True,
@@ -399,6 +410,93 @@ class DistributedExpertExecutor:
         stats["fallback_count"] = int(self._gpu_route_fallback_count)
         return stats
 
+    def get_expert_drop_stats(self):
+        stats = {
+            key: int(value)
+            for key, value in self._expert_drop_stats.items()
+            if key != "drops_by_layer"
+        }
+        stats["drops_by_layer"] = dict(
+            self._expert_drop_stats["drops_by_layer"]
+        )
+        return stats
+
+    def reset_expert_drop_stats(self):
+        for key in self._expert_drop_stats:
+            if key != "drops_by_layer":
+                self._expert_drop_stats[key] = 0
+        self._expert_drop_stats["drops_by_layer"] = {}
+
+    def _apply_expert_drop(self, layer_id, router_mask, router_weights):
+        policy = getattr(self.archer_config, "expert_drop_policy", "off")
+        if policy != "on_miss":
+            return router_mask, router_weights, None
+
+        mass_budget = getattr(
+            self.archer_config, "expert_drop_mass_budget", 0.0
+        )
+        if mass_budget == 0:
+            self._expert_drop_stats["budget_disabled"] += 1
+            return router_mask, router_weights, None
+
+        if (
+            not torch.is_tensor(router_mask)
+            or router_mask.dim() != 2
+            or not torch.is_tensor(router_weights)
+            or router_weights.shape != router_mask.shape
+        ):
+            self._expert_drop_stats["shape_bypasses"] += 1
+            return router_mask, router_weights, None
+
+        num_experts = router_mask.shape[-1]
+        resident_probe = getattr(
+            self.expert_dispatcher, "resident_on_gpu", None
+        )
+        try:
+            if not callable(resident_probe):
+                raise RuntimeError("resident_on_gpu is unavailable")
+            resident_values = resident_probe(layer_id)
+            if len(resident_values) != num_experts:
+                raise RuntimeError("resident_on_gpu returned wrong length")
+            resident = torch.tensor(resident_values, dtype=torch.bool)
+        except Exception:
+            self._expert_drop_stats["residency_unknown"] += 1
+            resident = torch.ones(num_experts, dtype=torch.bool)
+
+        try:
+            mask, weights, counts = select_expert_drops(
+                router_mask,
+                router_weights,
+                resident,
+                min_k=getattr(self.archer_config, "expert_drop_min_k", 1),
+                mass_budget=mass_budget,
+                flatness_floor=getattr(
+                    self.archer_config, "expert_drop_flatness_floor", 0.5
+                ),
+            )
+        except (ValueError, RuntimeError):
+            self._expert_drop_stats["shape_bypasses"] += 1
+            return router_mask, router_weights, None
+
+        for key in (
+            "tokens_seen",
+            "tokens_changed",
+            "experts_dropped",
+            "flatness_bypasses",
+        ):
+            self._expert_drop_stats[key] += int(getattr(counts, key))
+
+        if counts.experts_dropped == 0:
+            return mask, weights, None
+
+        drops_by_layer = self._expert_drop_stats["drops_by_layer"]
+        drops_by_layer[layer_id] = (
+            drops_by_layer.get(layer_id, 0) + counts.experts_dropped
+        )
+        _, union_experts_from_mask = _load_route_ahead_impl()
+        trace_ids = union_experts_from_mask(router_mask)
+        return mask, weights, trace_ids
+
     def dispatch_local(
         self,
         layer_id,
@@ -468,6 +566,10 @@ class DistributedExpertExecutor:
                     self.precision_policy.as_native_targets(plan), plan.epoch
                 ):
                     self.precision_policy.commit(plan)
+
+        router_mask, router_weights, trace_ids = self._apply_expert_drop(
+            layer_id, router_mask, router_weights
+        )
 
         phase = current_expert_phase()
 
@@ -574,6 +676,7 @@ class DistributedExpertExecutor:
             phase,
             generations,
             invocation_id,
+            trace_ids,
         )
         self._pending_prefetch_failure_safe = route_ahead_attempted
 
@@ -598,19 +701,32 @@ class DistributedExpertExecutor:
             return None
 
         def finalize_policy(wait_succeeded: bool) -> None:
-            (
-                prefetcher,
-                layer_id,
-                expert_list,
-                router_logits,
-                phase,
-                generations,
-                invocation_id,
-            ) = (
-                pending
-                if pending is not None
-                else (None, -1, [], None, None, [], None)
-            )
+            if pending is None:
+                prefetcher, layer_id, expert_list = None, -1, []
+                router_logits, phase, generations = None, None, []
+                invocation_id, trace_ids = None, None
+            elif len(pending) == 7:
+                (
+                    prefetcher,
+                    layer_id,
+                    expert_list,
+                    router_logits,
+                    phase,
+                    generations,
+                    invocation_id,
+                ) = pending
+                trace_ids = None
+            else:
+                (
+                    prefetcher,
+                    layer_id,
+                    expert_list,
+                    router_logits,
+                    phase,
+                    generations,
+                    invocation_id,
+                    trace_ids,
+                ) = pending
             if expert_list is None and self._last_dispatch_used_native_routing:
                 expert_list = list(
                     self.expert_dispatcher.take_last_active_experts()
@@ -646,16 +762,19 @@ class DistributedExpertExecutor:
                         prefetcher, "observe_compute_samples", compute_samples
                     )
                 if wait_succeeded:
+                    correction_ids = (
+                        trace_ids if trace_ids is not None else expert_list
+                    )
                     if failure_safe:
                         try:
                             prefetcher.correct_prefetch(
-                                layer_id + 1, expert_list, phase=phase
+                                layer_id + 1, correction_ids, phase=phase
                             )
                         except Exception:
                             pass
                     else:
                         prefetcher.correct_prefetch(
-                            layer_id + 1, expert_list, phase=phase
+                            layer_id + 1, correction_ids, phase=phase
                         )
                     if router_logits is not None:
                         if failure_safe:
