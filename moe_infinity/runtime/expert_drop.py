@@ -57,8 +57,32 @@ def select_expert_drops(
     if mass_budget == 0:
         return router_mask, router_weights, ExpertDropCounts(0, 0, 0, 0)
 
-    out_mask = router_mask.to(dtype=torch.bool, copy=True)
-    out_w = router_weights.clone()
+    original_mask_device = router_mask.device
+    original_weight_device = router_weights.device
+    if router_mask.is_cuda:
+        packed_parts = (
+            router_weights.reshape(-1),
+            router_mask.reshape(-1).to(dtype=router_weights.dtype),
+        )
+        resident_is_packed = resident.is_cuda
+        if resident_is_packed:
+            packed_parts += (resident.to(dtype=router_weights.dtype),)
+        packed = torch.cat(packed_parts).cpu()
+        weights_end = router_weights.numel()
+        mask_end = weights_end + router_mask.numel()
+        out_w = packed[:weights_end].reshape(router_weights.shape)
+        out_mask = (
+            packed[weights_end:mask_end].reshape(router_mask.shape).bool()
+        )
+        resident_cpu = (
+            packed[mask_end:].bool()
+            if resident_is_packed
+            else resident.to(device="cpu", dtype=torch.bool)
+        )
+    else:
+        out_mask = router_mask.to(device="cpu", dtype=torch.bool, copy=True)
+        out_w = router_weights.to(device="cpu", copy=True)
+        resident_cpu = resident.to(device="cpu", dtype=torch.bool)
 
     tokens_seen = 0
     tokens_changed = 0
@@ -85,27 +109,24 @@ def select_expert_drops(
             flatness_bypasses += 1
             continue
 
-        candidates = [i for i in selected if not bool(resident[i])]
-        # Sort weight asc, expert id desc: higher id is dropped first on ties.
-        candidates.sort(key=lambda i: (float(w_row[i].item()), -i))
-
-        remaining = len(selected)
-        dropped_mass = 0.0
-        dropped_here = 0
-        for i in candidates:
-            if remaining <= min_k:
-                break
-            weight = float(w_row[i].item())
-            if dropped_mass + weight > mass_budget:
-                break
-            out_mask[r, i] = False
-            out_w[r, i] = 0
-            dropped_mass += weight
-            remaining -= 1
-            dropped_here += 1
+        candidate_ids = (
+            torch.nonzero(mask_row & ~resident_cpu, as_tuple=False)
+            .flatten()
+            .flip(0)
+        )
+        candidate_order = torch.argsort(w_row[candidate_ids], stable=True)
+        candidate_ids = candidate_ids[candidate_order]
+        cumulative_mass = torch.cumsum(
+            w_row[candidate_ids], dim=0, dtype=torch.float64
+        )
+        budget_count = int((cumulative_mass <= mass_budget).sum().item())
+        dropped_here = min(budget_count, len(selected) - min_k)
 
         if dropped_here == 0:
             continue
+        dropped_ids = candidate_ids[:dropped_here]
+        out_mask[r, dropped_ids] = False
+        out_w[r, dropped_ids] = 0
         tokens_changed += 1
         experts_dropped += dropped_here
 
@@ -114,9 +135,23 @@ def select_expert_drops(
         if float(surviving_sum.item()) != 0.0:
             out_w[r][surviving] = out_w[r][surviving] / surviving_sum
 
+    if (
+        original_mask_device.type == "cuda"
+        and original_mask_device == original_weight_device
+    ):
+        packed_output = torch.cat(
+            (out_w.reshape(-1), out_mask.reshape(-1).to(dtype=out_w.dtype))
+        ).to(device=original_weight_device)
+        weights_end = out_w.numel()
+        device_w = packed_output[:weights_end].reshape(out_w.shape)
+        device_mask = packed_output[weights_end:].reshape(out_mask.shape).bool()
+    else:
+        device_mask = out_mask.to(device=original_mask_device)
+        device_w = out_w.to(device=original_weight_device)
+
     return (
-        out_mask,
-        out_w,
+        device_mask,
+        device_w,
         ExpertDropCounts(
             tokens_seen, tokens_changed, experts_dropped, flatness_bypasses
         ),
