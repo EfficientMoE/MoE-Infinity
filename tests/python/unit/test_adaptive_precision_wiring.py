@@ -130,3 +130,41 @@ def test_protected_paths_short_circuit_general_resolution(
     assert result.enabled is False
     assert result.fallback_reason == reason
     assert not (tmp_path / "adaptive_derivatives").exists()
+
+
+def test_uniform_fp8_mode_does_not_approve_an_unreleased_manifest(
+    tmp_path, monkeypatch
+):
+    entry = ReleasedAdaptiveEntry(
+        "a" * 64, ExpertFormat.FP8_E4M3_BLOCK128, "adaptive-expert-v1", "b" * 64
+    )
+    manifest = SimpleNamespace(release_entries=frozenset({entry}))
+    monkeypatch.setattr(
+        expert_variant_manifest.ExpertVariantManifest,
+        "load_current",
+        lambda *args, **kwargs: manifest,
+    )
+    result = _resolve_adaptive_precision(
+        SimpleNamespace(model_type="qwen3_moe", quantization_config=None),
+        _archer(
+            adaptive_expert_precision=True,
+            adaptive_variant_build=False,
+            adaptive_hbm_budget_bytes=1024,
+            adaptive_resident_mode="uniform_fp8",
+        ),
+        str(tmp_path),
+        extension_names=set(),
+        purpose="serve",
+        checkpoint_fingerprint="a" * 64,
+        released_entries=frozenset(),
+    )
+    assert result.enabled is False
+    assert result.fallback_reason == "manifest_unapproved"
+
+
+def test_production_allowlist_stays_empty():
+    from moe_infinity.runtime.adaptive_precision_allowlist import (
+        RELEASED_ADAPTIVE_ENTRIES,
+    )
+
+    assert RELEASED_ADAPTIVE_ENTRIES == frozenset()

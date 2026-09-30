@@ -98,6 +98,7 @@ from moe_infinity.runtime.expert_variant_manifest import (
     load_derivative_overlay,
 )
 from moe_infinity.runtime.hooks import *
+from moe_infinity.runtime.resident_precision import maybe_apply_uniform_fp8
 from moe_infinity.utils import (
     ArcherConfig,
     moe_text_config,
@@ -1469,27 +1470,39 @@ class OffloadEngine(object):
                             variant.aligned_bytes,
                             variant.workspace_bytes,
                         )
-                    catalog = {}
-                    generations = {}
                     native_generation = int(resolution.manifest.generation[1:])
-                    for variant in resolution.manifest.variants:
-                        key = ExpertKey(variant.layer_id, variant.expert_id)
-                        catalog.setdefault(key, {})[variant.format] = (
-                            variant.aligned_bytes
+                    if not maybe_apply_uniform_fp8(
+                        self.expert_dispatcher,
+                        resolution.manifest.variants,
+                        mode=getattr(
+                            self.archer_config,
+                            "adaptive_resident_mode",
+                            "legacy",
+                        ),
+                        generation=native_generation,
+                    ):
+                        catalog = {}
+                        generations = {}
+                        for variant in resolution.manifest.variants:
+                            key = ExpertKey(variant.layer_id, variant.expert_id)
+                            catalog.setdefault(key, {})[variant.format] = (
+                                variant.aligned_bytes
+                            )
+                            generations[(key, variant.format)] = (
+                                native_generation
+                            )
+                        policy = AdaptivePrecisionPolicy(
+                            self.archer_config.adaptive_hbm_budget_bytes,
+                            self.archer_config.adaptive_hotness_decay,
+                            self.archer_config.adaptive_promotion_threshold,
+                            self.archer_config.adaptive_demotion_threshold,
+                            self.archer_config.adaptive_min_residency_epochs,
+                            self.archer_config.adaptive_transition_cooldown_epochs,
+                            catalog,
+                            generations=generations,
+                            epoch_tokens=self.archer_config.adaptive_policy_epoch_tokens,
                         )
-                        generations[(key, variant.format)] = native_generation
-                    policy = AdaptivePrecisionPolicy(
-                        self.archer_config.adaptive_hbm_budget_bytes,
-                        self.archer_config.adaptive_hotness_decay,
-                        self.archer_config.adaptive_promotion_threshold,
-                        self.archer_config.adaptive_demotion_threshold,
-                        self.archer_config.adaptive_min_residency_epochs,
-                        self.archer_config.adaptive_transition_cooldown_epochs,
-                        catalog,
-                        generations=generations,
-                        epoch_tokens=self.archer_config.adaptive_policy_epoch_tokens,
-                    )
-                    self.expert_executor.set_precision_policy(policy)
+                        self.expert_executor.set_precision_policy(policy)
                 self.expert_precision_resolution = resolution
                 return model
 

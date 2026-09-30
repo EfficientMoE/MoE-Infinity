@@ -109,3 +109,57 @@ def test_empty_variants_raise():
 def test_negative_generation_raises():
     with pytest.raises(ValueError):
         load_time_fp8_plan((_variant(0, 1),), generation=-1)
+
+
+from moe_infinity.runtime.resident_precision import maybe_apply_uniform_fp8
+
+
+class _Dispatcher:
+    def __init__(self):
+        self.targets = None
+        self.epoch = None
+
+    def set_precision_targets(self, targets, epoch):
+        self.targets = list(targets)
+        self.epoch = epoch
+        return True
+
+
+def test_legacy_mode_does_not_set_targets():
+    dispatcher = _Dispatcher()
+    applied = maybe_apply_uniform_fp8(
+        dispatcher, (_variant(0, 1),), mode="legacy", generation=3
+    )
+    assert applied is False
+    assert dispatcher.targets is None
+
+
+def test_uniform_mode_sets_fp8_targets_once():
+    dispatcher = _Dispatcher()
+    applied = maybe_apply_uniform_fp8(
+        dispatcher,
+        (_variant(0, 1), _variant(0, 2)),
+        mode="uniform_fp8",
+        generation=3,
+    )
+    assert applied is True
+    assert dispatcher.epoch == 3
+    assert {(row[0], row[1], row[2], row[3]) for row in dispatcher.targets} == {
+        (0, 1, "fp8_e4m3_block128", 3),
+        (0, 2, "fp8_e4m3_block128", 3),
+    }
+
+
+def test_mixed_manifest_does_not_call_the_dispatcher():
+    dispatcher = _Dispatcher()
+    mixed = (
+        _variant(0, 1),
+        _variant(
+            0, 2, fmt=ExpertFormat.BF16, execution=ExecutionKind.BF16_GEMM
+        ),
+    )
+    with pytest.raises(ValueError, match="uniform"):
+        maybe_apply_uniform_fp8(
+            dispatcher, mixed, mode="uniform_fp8", generation=1
+        )
+    assert dispatcher.targets is None

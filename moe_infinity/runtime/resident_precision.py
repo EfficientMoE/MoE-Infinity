@@ -78,3 +78,29 @@ def load_time_fp8_plan(
         evictions=(),
         accounted_bytes=accounted_bytes,
     )
+
+
+def maybe_apply_uniform_fp8(
+    dispatcher,
+    variants: Sequence[CandidateVariantSpec],
+    *,
+    mode: str,
+    generation: int,
+) -> bool:
+    if mode != "uniform_fp8":
+        return False
+    # Build the plan first: on a non-uniform manifest this raises before the
+    # dispatcher is touched, so the caller must not fall through to the online
+    # adaptive policy. The exception is intentionally left uncaught.
+    plan = load_time_fp8_plan(variants, generation=generation)
+    generations = {
+        (
+            ExpertKey(variant.layer_id, variant.expert_id),
+            variant.format,
+        ): generation
+        for variant in variants
+    }
+    dispatcher.set_precision_targets(
+        plan.as_native_targets(generations), plan.epoch
+    )
+    return True
