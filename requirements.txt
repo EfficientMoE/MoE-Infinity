@@ -14,7 +14,7 @@ pillow
 protobuf
 py-cpuinfo
 pyarrow
-pydantic>=1.10.19,<2
+pydantic>=2,<3
 scipy
 sentencepiece
 # 0.4.7 declares torch==2.13.0 (cu13), which clobbers the cu12 torch build and breaks nvcc-matched compiles (#231)
