@@ -482,7 +482,6 @@ class DistributedExpertExecutor:
         if self._drop_select_compiled is None:
             self._drop_select_compiled = torch.compile(
                 select_expert_drops_device,
-                mode="reduce-overhead",
                 dynamic=False,
             )
         mask, weights, counts = self._drop_select_compiled(
@@ -508,12 +507,12 @@ class DistributedExpertExecutor:
             "experts_dropped",
             "flatness_bypasses",
         ):
-            value = getattr(counts, key).detach()
+            value = getattr(counts, key).detach().clone()
             dev_stats[key] = (
                 value if key not in dev_stats else dev_stats[key] + value
             )
         by_layer = self._drop_dev_stats_by_layer
-        dropped = counts.experts_dropped.detach()
+        dropped = counts.experts_dropped.detach().clone()
         by_layer[layer_id] = (
             dropped
             if layer_id not in by_layer
@@ -554,6 +553,12 @@ class DistributedExpertExecutor:
                     layer_id, router_mask, router_weights
                 )
             except (ValueError, RuntimeError):
+                import os
+
+                if os.environ.get("MOE_EXPERT_DROP_DEBUG") == "1":
+                    import traceback
+
+                    traceback.print_exc()
                 self._expert_drop_stats["shape_bypasses"] += 1
                 return router_mask, router_weights, None
 
