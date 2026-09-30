@@ -47,6 +47,23 @@ def test_min_k_blocks_a_drop_the_budget_would_allow():
     assert counts.experts_dropped == 0
 
 
+@pytest.mark.parametrize("min_k", [1.5, True])
+def test_min_k_rejects_non_integer_values(min_k):
+    mask = torch.tensor([[True, True]])
+    weights = torch.tensor([[0.75, 0.25]])
+    resident = torch.tensor([True, False])
+
+    with pytest.raises(ValueError, match="min_k must be an integer"):
+        select_expert_drops(
+            mask,
+            weights,
+            resident,
+            min_k=min_k,
+            mass_budget=1.0,
+            flatness_floor=1.0,
+        )
+
+
 def test_flatness_equal_to_floor_still_drops():
     mask = torch.tensor([[True, True]])
     weights = torch.tensor([[0.5, 0.25]])
