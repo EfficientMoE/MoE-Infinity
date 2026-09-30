@@ -45,8 +45,8 @@ def select_expert_drops(
         raise ValueError("router_weights must match router_mask shape")
     if resident.shape != (router_mask.shape[-1],):
         raise ValueError("resident must have shape (num_experts,)")
-    if min_k < 1:
-        raise ValueError("min_k must be >= 1")
+    if type(min_k) is not int or min_k < 1:
+        raise ValueError("min_k must be an integer >= 1")
     _validate_fraction(
         mass_budget, "mass_budget must be a finite float in [0, 1]"
     )
