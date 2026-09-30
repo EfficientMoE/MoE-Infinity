@@ -1,40 +1,35 @@
-# Issue 234 Phase 3 — quantized-resident experts
+# Issue 234 Phase 3 — uniform FP8 residency
 
-Draft for review. This does not add kernels, allowlist entries, or a serving path. #234 says this phase starts only after its own decision checkpoint, and the checkpoint is not done.
+This is the spec for the first patch. The task list is `docs/superpowers/plans/2026-09-30-uniform-fp8-residency.md`. Mixed hot/warm/cold precision and INT4 are follow-ons, not this patch.
 
-**Goal:** Keep experts quantized in GPU cache and execute them with a fused dequant-matmul kernel, so a fixed HBM budget holds more experts than bf16 residency. Importance-aware mixed precision (hot bf16 / warm FP8 / cold INT4) is a follow-on inside the same phase, not part of the first patch.
+**Goal:** When adaptive precision is on and a released manifest is uniformly FP8, every routed expert that resides in GPU cache stays `fp8_e4m3_block128` for the life of the process. A fixed HBM budget therefore holds more experts than bf16 residency. Default serving stays bf16.
 
 **Relationship to merged work:**
 
-- Phase 1 (#235, moe-store#13) quantizes the *store and the H2D copy*, then dequantizes to bf16 at onboarding. GPU-resident experts are still bf16.
-- #184 shipped `ExpertResidencyManager` variant keys `(format, generation)`, converters, and an empty `RELEASED_ADAPTIVE_ENTRIES` allowlist. Serving stays on the canonical format until a reviewed entry is added. This phase is "enable and extend #184", not a second residency system.
+- Phase 1 (#235, moe-store#13) quantizes the store and the H2D copy. Routed FP8 weights already stay FP8 in the host store and dequantize on device through `fp8_dequant_bf16_gemm`. This patch does not add a kernel.
+- #184 shipped variant keys, converters, and an empty `RELEASED_ADAPTIVE_ENTRIES` allowlist. This patch does not add a second cache and does not insert an allowlist row.
 
-## Decision checkpoint (not yet accepted)
+## Pinned checkpoint
 
-Do not write kernel or allowlist code until these are answered in a comment on this PR:
+1. **Kernel.** `ExpertFormat.FP8_E4M3_BLOCK128`, execution `fp8_dequant_bf16_gemm`, block size 128, output bfloat16, no new architecture floor, no `requires_extension`. One format per dispatch. This patch does not split a dispatch by precision.
+2. **When precision changes.** Load time only. `uniform_fp8` sets targets once and creates no transitions and no evictions. It does not call `AdaptivePrecisionPolicy`.
+3. **First tier.** FP8, not INT4. The capacity gate is `resident_fp8 >= 1.8 * resident_bf16` at the same HBM budget, the same bar as Phase 1. The 4–8× INT4 target is out of scope.
+4. **Policy inputs.** Tracer frequency and router-norm sensitivity are not read. HOBBIT is not ported.
 
-1. **Kernel.** One uniform precision per grouped dispatch. Mixed tiers mean split dispatches. Measure that split before choosing per-expert versus per-layer granularity.
-2. **Where precision changes.** Time one-expert FP8 and INT4 quantization on GPU and on CPU. If that cost exceeds a cache-miss fetch, tier changes happen at load time only.
-3. **First tier.** FP8 resident experts via the existing blockwise path, or INT4/HQQ. The issue's capacity target is 4–8× versus bf16. FP8 alone is about 2× and is the smaller step; INT4 is the step that can hit 4×.
-4. **Policy inputs.** Tracer activation frequency plus router-norm sensitivity. HOBBIT is a reference, not code to port.
+## Config
 
-Recommended first patch, if the checkpoint agrees: load-time FP8 residency for one allowlisted checkpoint, uniform precision per dispatch, no online tier changes, no INT4. Hot/warm/cold mixed precision waits on the split-dispatch measurement.
+- `adaptive_expert_precision` stays default `False`. Unset means residency stays bf16.
+- `adaptive_resident_mode` is `"legacy"` (default) or `"uniform_fp8"`.
+- `"legacy"` keeps today's online policy once a manifest is approved.
+- `"uniform_fp8"` is not an approval bypass. An unreleased manifest still resolves as `manifest_unapproved`.
+- `RELEASED_ADAPTIVE_ENTRIES` stays empty. A row requires a later reviewed change that carries a measured fingerprint, converter version, and attestation digest.
 
-## File map (after the checkpoint)
+## Quality gate
 
-| File | Change |
-|---|---|
-| `moe_infinity/runtime/adaptive_precision_allowlist.py` | One `ReleasedAdaptiveEntry` only, with fingerprint, format, converter version, and attestation digest from a measured run. |
-| `moe_infinity/runtime/expert_precision.py` | Reuse format selection. No second converter stack. |
-| Grouped-GEMM dispatch | Split by precision tier only if the measurement says the split is cheaper than uniform precision. |
-| `benchmarks/adaptive_precision/` | Release-gate numbers that justify the allowlist row. |
-
-## QA gate before any allowlist row
-
-- Default off: empty allowlist still refuses unlisted checkpoints, and adaptive precision unset leaves residency bf16.
-- One recorded model: resident-expert count at a fixed HBM budget versus the bf16 store, plus perplexity delta versus bf16.
-- Kernel matrix note in the PR: bit-width, group size, and architecture floor for the chosen kernel. MXFP8 and the MiniMax-M3 MXFP8 store stay deferred (the rest of #221).
+- Relative NLL `(nll_fp8 - nll_bf16) / nll_bf16 <= 0.01`.
+- Resident-expert count at a fixed budget satisfies `resident_fp8 >= 1.8 * resident_bf16`.
+- The harness records both and does not download weights in CI.
 
 ## Non-goals
 
-Activation quantization, KV-cache quantization, permanent pruning, expert dropping (Phase 2), and adding an allowlist row without the attestation digest.
+Activation quantization, KV-cache quantization, permanent pruning, expert dropping, Marlin INT4, MXFP8, the MiniMax-M3 MXFP8 store, split dispatch, online tier changes, and any allowlist row.
