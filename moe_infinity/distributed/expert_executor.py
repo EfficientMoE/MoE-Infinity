@@ -136,6 +136,7 @@ class DistributedExpertExecutor:
             getattr(archer_config, "gpu_only_expert_routing", False)
         )
         self._last_dispatch_used_native_routing = False
+        self._fused_expert_drop = False
         self._gpu_route_fallback_count = 0
         self._pending_prefetch = None
         self._pending_prefetch_failure_safe = False
@@ -179,6 +180,9 @@ class DistributedExpertExecutor:
 
     def set_prefetcher(self, prefetcher):
         self.prefetcher = prefetcher
+
+    def set_fused_expert_drop(self, enabled):
+        self._fused_expert_drop = bool(enabled)
 
     def trigger_speculative_prefetch(
         self, layer_id, router_logits, phase=ExpertPhase.MIXED
@@ -434,6 +438,31 @@ class DistributedExpertExecutor:
         stats["drops_by_layer"] = dict(
             self._expert_drop_stats["drops_by_layer"]
         )
+        native_getter = getattr(
+            self.expert_dispatcher, "get_fused_drop_stats", None
+        )
+        if callable(native_getter):
+            try:
+                native = dict(native_getter())
+            except Exception:
+                native = {}
+            for key in (
+                "tokens_seen",
+                "tokens_changed",
+                "experts_dropped",
+                "flatness_bypasses",
+                "residency_unknown",
+            ):
+                stats[key] = stats.get(key, 0) + int(native.get(key, 0))
+            for layer_id, dropped in (
+                native.get("drops_by_layer") or {}
+            ).items():
+                dropped = int(dropped)
+                if dropped:
+                    layer_id = int(layer_id)
+                    stats["drops_by_layer"][layer_id] = (
+                        stats["drops_by_layer"].get(layer_id, 0) + dropped
+                    )
         return stats
 
     def reset_expert_drop_stats(self):
@@ -523,6 +552,12 @@ class DistributedExpertExecutor:
         return mask, weights, router_mask
 
     def _apply_expert_drop(self, layer_id, router_mask, router_weights):
+        if self._fused_expert_drop and self._can_use_gpu_only_routing(
+            router_mask
+        ):
+            # Fused mode: the native route worker runs the drop selector in
+            # C++ (RouteFunc); Python must not double-drop or probe residency.
+            return router_mask, router_weights, None
         policy = getattr(self.archer_config, "expert_drop_policy", "off")
         if policy != "on_miss":
             return router_mask, router_weights, None
@@ -850,6 +885,19 @@ class DistributedExpertExecutor:
                 )
                 if self._overlap_policy_active(prefetcher):
                     prefetcher.correct_to_native_route(layer_id, expert_list)
+                if trace_ids is None and self._fused_expert_drop:
+                    # Tracing contract: correct_prefetch(layer+1) keeps the
+                    # PRE-drop routed union; take_last_active_experts stays
+                    # the post-drop survivor set dispatched above.
+                    routed_getter = getattr(
+                        self.expert_dispatcher,
+                        "take_last_routed_experts",
+                        None,
+                    )
+                    if callable(routed_getter):
+                        routed_ids = list(routed_getter())
+                        if routed_ids:
+                            trace_ids = routed_ids
             compute_samples = []
             try:
                 if prefetcher is not None and not wait_succeeded:
