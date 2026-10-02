@@ -11,8 +11,10 @@ class FakeDispatcher:
     def __init__(self):
         self.calls = []
         self.active = []
+        self.routed = []
         self.resident = [1]
         self.resident_calls = []
+        self.fused_stats = {}
 
     def __getattribute__(self, name):
         if name == "resident_on_gpu":
@@ -52,6 +54,12 @@ class FakeDispatcher:
 
     def take_last_active_experts(self):
         return list(self.active)
+
+    def take_last_routed_experts(self):
+        return list(self.routed)
+
+    def get_fused_drop_stats(self):
+        return dict(self.fused_stats)
 
 
 class FakePrefetcher:
@@ -199,6 +207,81 @@ def test_native_wait_splits_executed_ids_from_trace_ids():
     executor.wait_dispatch_local()
     assert prefetcher.native_route == [(7, [0, 1])]
     assert prefetcher.corrected == [(8, [0, 1, 2])]
+
+
+def test_fused_mode_skips_python_interception():
+    executor, dispatcher = make_executor(policy="on_miss", budget=0.25)
+    executor.set_fused_expert_drop(True)
+    mask = torch.tensor([[True, True, True]])
+    weights = torch.tensor([[0.5, 0.25, 0.25]])
+    with patch.object(executor, "_can_use_gpu_only_routing", return_value=True):
+        out_mask, out_weights, trace_ids = executor._apply_expert_drop(
+            1, mask, weights
+        )
+    assert out_mask is mask
+    assert out_weights is weights
+    assert trace_ids is None
+    assert dispatcher.resident_calls == []
+    assert executor.get_expert_drop_stats()["experts_dropped"] == 0
+
+
+def test_fused_mode_eager_fallback_keeps_host_selection():
+    executor, dispatcher = make_executor(policy="on_miss", budget=0.25)
+    executor.set_fused_expert_drop(True)
+    dispatcher.resident = [1, 0, 0, 1]
+    mask = torch.tensor([[True, True, True, False]])
+    weights = torch.tensor([[0.5, 0.25, 0.125, 0.0]])
+    # CPU mask => native routing unavailable => eager fallback keeps the
+    # Python host-loop selection unchanged.
+    out_mask, _, _ = executor._apply_expert_drop(4, mask, weights)
+    assert out_mask.tolist() == [[True, True, False, False]]
+    assert dispatcher.resident_calls == [4]
+
+
+def test_fused_wait_uses_pre_drop_ids_for_prefetch_correction():
+    executor, dispatcher = make_executor(policy="off")
+    executor.set_fused_expert_drop(True)
+    dispatcher.active = [0, 1]
+    dispatcher.routed = [0, 1, 2]
+    prefetcher = FakePrefetcher()
+    prefetcher._overlap_active = lambda: True
+    executor.set_prefetcher(prefetcher)
+    executor._last_dispatch_used_native_routing = True
+    executor._pending_prefetch = (
+        prefetcher,
+        7,
+        None,
+        None,
+        None,
+        [],
+        None,
+        None,
+    )
+    executor.wait_dispatch_local()
+    # correct_to_native_route (exact-route cancel) gets the POST-drop
+    # survivors; correct_prefetch(layer+1) gets the PRE-drop routed union.
+    assert prefetcher.native_route == [(7, [0, 1])]
+    assert prefetcher.corrected == [(8, [0, 1, 2])]
+
+
+def test_fused_stats_merge_native_counters():
+    executor, dispatcher = make_executor(policy="on_miss", budget=0.25)
+    executor.set_fused_expert_drop(True)
+    dispatcher.fused_stats = {
+        "tokens_seen": 5,
+        "tokens_changed": 2,
+        "experts_dropped": 3,
+        "flatness_bypasses": 1,
+        "residency_unknown": 1,
+        "drops_by_layer": {4: 3},
+    }
+    stats = executor.get_expert_drop_stats()
+    assert stats["tokens_seen"] == 5
+    assert stats["tokens_changed"] == 2
+    assert stats["experts_dropped"] == 3
+    assert stats["flatness_bypasses"] == 1
+    assert stats["residency_unknown"] == 1
+    assert stats["drops_by_layer"] == {4: 3}
 
 
 def test_reset_clears_drop_stats():

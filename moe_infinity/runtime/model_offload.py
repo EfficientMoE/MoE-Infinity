@@ -1308,6 +1308,36 @@ class OffloadEngine(object):
                 self.expert_executor.set_expert_dispatcher(
                     self.expert_dispatcher
                 )
+                fused_expert_drop = (
+                    getattr(self.archer_config, "expert_drop_policy", "off")
+                    == "on_miss"
+                    and os.environ.get("MOE_EXPERT_DROP_FUSED", "0") == "1"
+                    and hasattr(
+                        self.expert_dispatcher, "set_expert_drop_policy"
+                    )
+                )
+                if fused_expert_drop:
+                    self.expert_dispatcher.set_expert_drop_policy(
+                        True,
+                        int(
+                            getattr(self.archer_config, "expert_drop_min_k", 1)
+                        ),
+                        float(
+                            getattr(
+                                self.archer_config,
+                                "expert_drop_mass_budget",
+                                0.0,
+                            )
+                        ),
+                        float(
+                            getattr(
+                                self.archer_config,
+                                "expert_drop_flatness_floor",
+                                0.5,
+                            )
+                        ),
+                    )
+                self.expert_executor.set_fused_expert_drop(fused_expert_drop)
                 if self.archer_config.speculative_prefetch:
                     self.expert_executor.set_prefetcher(self.expert_prefetcher)
 
