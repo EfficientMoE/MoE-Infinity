@@ -201,6 +201,7 @@ _STORE_SOURCES = [
     "core/memory/device_caching_allocator.cpp",
     # parallel
     "core/parallel/expert_dispatcher.cpp",
+    "core/parallel/expert_drop_select.cc",
     "core/parallel/expert_module.cpp",
     # store
     "core/store/tensor_store.cpp",

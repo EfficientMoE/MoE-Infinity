@@ -27,6 +27,7 @@
 #include "base/thread.h"
 #include "utils/threadsafe_queue.h"
 #include "memory/event_pool.h"
+#include "expert_drop_select.h"
 #include "expert_module.h"
 #include "prefetch/expert_residency.h"
 
@@ -100,6 +101,11 @@ class ExpertDispatcher : public base::noncopyable {
   typedef struct {
     int layer_idx = -1;
     torch::Tensor active_flags_host;
+    // Staged only when the fused expert-drop policy is enabled: pinned host
+    // copies of router_mask_ (bool [tokens, E]) and router_weight_ (float32
+    // [tokens, E]) landed by the same stream as active_flags_host.
+    torch::Tensor router_mask_host;
+    torch::Tensor router_weight_host;
     std::uint64_t generation = 0;
   } RouteArgs;
 
@@ -325,6 +331,11 @@ class ExpertDispatcher : public base::noncopyable {
 
   void DispatchExperts(int layer_idx);
   std::vector<int> TakeLastActiveExperts();
+  std::vector<int> TakeLastRoutedExperts();
+  void SetExpertDropPolicy(bool enabled, int min_k, double mass_budget,
+                           double flatness_floor);
+  std::map<std::string, std::int64_t> GetFusedDropStats() const;
+  std::map<int, std::int64_t> GetFusedDropStatsByLayer() const;
   std::map<std::string, std::int64_t> GetRoutingStats() const;
   void SetDispatchFaultForTest(const std::string& stage);
   void FailDispatchForTest(std::uint64_t generation,
@@ -350,6 +361,12 @@ class ExpertDispatcher : public base::noncopyable {
   ExpertNodePtr FindExpertEvict(int gpu_id);
 
   void RouteFunc() noexcept;
+  // RouteFunc-thread only. Runs the fused drop selector on the staged pinned
+  // buffers, synchronously writes corrected weights back into router_weight_
+  // (Task 1 ordering note), and shrinks dispatch_experts to the post-drop
+  // survivors. Any failure leaves dispatch_experts at the PRE-drop set.
+  void ApplyFusedExpertDrop(const RouteArgs& args,
+                            std::vector<int>& dispatch_experts) noexcept;
   static void CUDART_CB RouteReadyCallback(void* opaque);
   void FailDispatch(const std::uint64_t failing_generation,
                     std::exception_ptr error,
@@ -499,6 +516,18 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::uint64_t> failed_generation_{0};
   std::atomic<int> dispatch_fault_for_test_{0};
   std::vector<int> last_active_experts_;
+  std::vector<int> last_routed_experts_;
+  std::atomic<bool> expert_drop_enabled_{false};
+  moe::ExpertDropParams expert_drop_params_;
+  moe::ExpertDropScratch expert_drop_scratch_;
+  std::vector<std::uint8_t> expert_drop_resident_;
+  std::atomic<std::int64_t> drop_tokens_seen_{0};
+  std::atomic<std::int64_t> drop_tokens_changed_{0};
+  std::atomic<std::int64_t> drop_experts_dropped_{0};
+  std::atomic<std::int64_t> drop_flatness_bypasses_{0};
+  std::atomic<std::int64_t> drop_residency_unknown_{0};
+  std::atomic<std::int64_t> drop_failures_{0};
+  std::map<int, std::int64_t> drop_by_layer_;
   std::vector<CompletionEventRecord> completion_events_;
   std::vector<CompletionEventRecord> destructor_fallback_events_;
   ThreadSafeQueue<std::vector<CompletionRetireItem>>
