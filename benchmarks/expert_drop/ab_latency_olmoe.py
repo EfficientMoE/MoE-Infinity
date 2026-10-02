@@ -8,6 +8,7 @@ and compare p99 with benchmarks/expert_drop/gates.py.
 
 import argparse
 import json
+import os
 import time
 
 import torch
@@ -79,8 +80,13 @@ def main():
         "device_memory_ratio": args.device_memory_ratio,
         "expert_drop_policy": args.policy,
     }
+    fused = os.environ.get("MOE_EXPERT_DROP_FUSED", "0") == "1"
     if args.policy == "on_miss":
         config["expert_drop_mass_budget"] = args.mass_budget
+        if fused:
+            # The fused drop selector lives in the native route worker, so
+            # the fused arm must dispatch through native GPU-only routing.
+            config["gpu_only_expert_routing"] = True
     model = MoE(args.checkpoint, config)
     _install_token_timer()
 
@@ -102,16 +108,23 @@ def main():
         outputs.append(tokenizer.decode(out[0][-16:], skip_special_tokens=True))
 
     drop_stats = None
+    fused_drop_stats = None
     engine = getattr(model, "engine", None) or getattr(model, "_engine", None)
     for holder in (model, engine, getattr(model, "archer_engine", None)):
         executor = getattr(holder, "expert_executor", None)
         if executor is not None and hasattr(executor, "get_expert_drop_stats"):
             drop_stats = executor.get_expert_drop_stats()
+            dispatcher = getattr(executor, "expert_dispatcher", None)
+            if dispatcher is not None and hasattr(
+                dispatcher, "get_fused_drop_stats"
+            ):
+                fused_drop_stats = dispatcher.get_fused_drop_stats()
             break
 
     t = torch.tensor(itl_ms, dtype=torch.float64)
     result = {
         "drop_stats": drop_stats,
+        "fused_drop_stats": fused_drop_stats,
         "policy": args.policy,
         "mass_budget": args.mass_budget,
         "samples": len(itl_ms),
