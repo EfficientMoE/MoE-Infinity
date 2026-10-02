@@ -188,6 +188,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("phase") = static_cast<int>(ExpertPhase::MIXED))
       .def("resident_on_gpu", &ExpertDispatcher::ResidentOnGpu,
            py::arg("layer_idx"))
+      .def("set_expert_drop_policy", &ExpertDispatcher::SetExpertDropPolicy,
+           py::arg("enabled"), py::arg("min_k"), py::arg("mass_budget"),
+           py::arg("flatness_floor"))
+      .def("get_fused_drop_stats",
+           [](const ExpertDispatcher& dispatcher) {
+             py::dict result;
+             for (const auto& stat : dispatcher.GetFusedDropStats())
+               result[py::str(stat.first)] = stat.second;
+             py::dict by_layer;
+             for (const auto& stat : dispatcher.GetFusedDropStatsByLayer())
+               by_layer[py::int_(stat.first)] = stat.second;
+             result["drops_by_layer"] = by_layer;
+             return result;
+           })
+      .def("take_last_routed_experts", &ExpertDispatcher::TakeLastRoutedExperts)
       .def("set_inputs", &ExpertDispatcher::SetInputs)
       .def("set_inputs_with_invocation",
            &ExpertDispatcher::SetInputsWithInvocation)
