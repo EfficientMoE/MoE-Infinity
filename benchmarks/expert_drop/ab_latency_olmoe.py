@@ -87,6 +87,11 @@ def main():
             # The fused drop selector lives in the native route worker, so
             # the fused arm must dispatch through native GPU-only routing.
             config["gpu_only_expert_routing"] = True
+    # Force native routing on every arm (incl. off) so the gate isolates the
+    # drop effect alone; required for models whose eager path is not
+    # device-consistent (e.g. GPT-OSS MXFP4).
+    if os.environ.get("MOE_FORCE_GPU_ONLY_ROUTING", "0") == "1":
+        config["gpu_only_expert_routing"] = True
     model = MoE(args.checkpoint, config)
     _install_token_timer()
 
