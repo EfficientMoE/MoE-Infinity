@@ -203,6 +203,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              return result;
            })
       .def("take_last_routed_experts", &ExpertDispatcher::TakeLastRoutedExperts)
+      .def("dump_expert_drop_trace", &ExpertDispatcher::DumpExpertDropTrace,
+           py::arg("path") = std::string())
       .def("set_inputs", &ExpertDispatcher::SetInputs)
       .def("set_inputs_with_invocation",
            &ExpertDispatcher::SetInputsWithInvocation)

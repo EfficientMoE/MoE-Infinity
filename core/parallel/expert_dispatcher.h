@@ -9,7 +9,9 @@
 #include <torch/extension.h>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -195,6 +197,7 @@ class ExpertDispatcher : public base::noncopyable {
                0;
       });
     }
+    FlushExpertDropTrace();
     main_thread_stop_flag_.store(true, std::memory_order_release);
     for (auto& expert_list : experts_) {
       for (auto& expert_node : expert_list) {
@@ -334,6 +337,10 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<int> TakeLastRoutedExperts();
   void SetExpertDropPolicy(bool enabled, int min_k, double mass_budget,
                            double flatness_floor);
+  // Expert-drop trace tap (enabled by MOE_EXPERT_DROP_TRACE). Writes the
+  // buffered pre-drop routing/residency records to `path` (or the env path
+  // when empty). No-op when tracing was never enabled.
+  void DumpExpertDropTrace(const std::string& path = std::string());
   std::map<std::string, std::int64_t> GetFusedDropStats() const;
   std::map<int, std::int64_t> GetFusedDropStatsByLayer() const;
   std::map<std::string, std::int64_t> GetRoutingStats() const;
@@ -528,6 +535,19 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::int64_t> drop_residency_unknown_{0};
   std::atomic<std::int64_t> drop_failures_{0};
   std::map<int, std::int64_t> drop_by_layer_;
+  // Expert-drop trace tap state (enabled by MOE_EXPERT_DROP_TRACE). The
+  // record callback runs on the off-critical-path route worker and only
+  // appends to an in-memory buffer, so it never issues file I/O or CUDA
+  // calls on the dispatch path. The buffer is serialized to disk by
+  // DumpExpertDropTrace (explicitly from Python, or best-effort at teardown).
+  std::atomic<bool> expert_drop_trace_enabled_{false};
+  std::string expert_drop_trace_path_;
+  mutable std::mutex expert_drop_trace_mutex_;
+  std::string expert_drop_trace_buffer_;
+  std::int64_t expert_drop_trace_seq_{0};
+  bool expert_drop_trace_dumped_{false};
+  void RecordExpertDropTrace(const RouteArgs& args);
+  void FlushExpertDropTrace() noexcept;
   std::vector<CompletionEventRecord> completion_events_;
   std::vector<CompletionEventRecord> destructor_fallback_events_;
   ThreadSafeQueue<std::vector<CompletionRetireItem>>
