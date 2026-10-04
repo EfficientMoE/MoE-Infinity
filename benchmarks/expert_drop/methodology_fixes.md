@@ -38,10 +38,34 @@ OLMoE off decode p99 across independent runs: **36.7, 40.0, 41.6 (Phase-0),
 33.2. The policy effect (~0.6–0.8× for mass) is comparable to or below this
 noise on a single 24×128 run. Qwen off similarly spans 218.5↔237.8.
 
-Consequence: **single-run p99 ratios cannot rank policies.** Report median over
-≥3 runs (the full bands land in `results/nextsteps_summary.json` from the
-repeat-run job; OLMoE ×3, Qwen ×2). D's earlier "no benefit / 1.2× worse" single
-points are within this noise and are not evidence against D.
+Consequence: **single-run p99 ratios cannot rank policies.** Median over repeat
+runs (`results/nextsteps_summary.json`, OLMoE ×3 / Qwen ×2):
+
+| model | off | mass-0.20 | D (base0.05, slope0.05) |
+|---|---|---|---|
+| OLMoE median p99 ms | 40.0 | 35.2 (0.88×) | 35.2 (0.88×) |
+| Qwen3-30B median p99 ms | 181.4 | 171.2 (0.94×) | 205.2 (1.13×) |
+
+With stable medians, on Qwen **mass-0.20 modestly helps p99 (0.94×) while D does
+not (1.13×, tight 2.2% spread — a real non-improvement, not noise)**: D's
+base-0.05 budget barely drops on most tokens and the extra cache churn offsets
+the rest.
+
+## Overall verdict (both methodology fixes applied)
+
+No tail-drop policy tested meets the #257 target `p99 ≤ 0.8×off` at acceptable
+fidelity under stable measurement:
+
+- **OLMoE**: mass/D reach ~0.88× p99 but teacher-forced fidelity is 0.09 —
+  unacceptable (small model, too little redundancy).
+- **Qwen3-30B**: fidelity is fine (mass 0.934) but p99 only reaches 0.94× (mass)
+  or 1.13× (D) — misses the 0.8 target.
+
+Drop-on-miss, measured properly, trims p50/p90 and gives a *modest* p99 help on
+large models at good fidelity, but does **not** hit the aggressive p99 tail
+target. This matches #257's own gate result and the menu doc's "moving p99 is
+hard"; the remaining lever is a larger-expert-model re-test (checkpoint option
+(c)), not more drop-policy tuning.
 
 ## Policy-C crash + D teacher-forced stall — hypothesis falsified; likely a race
 
