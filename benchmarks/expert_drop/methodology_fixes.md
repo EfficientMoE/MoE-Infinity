@@ -43,18 +43,36 @@ Consequence: **single-run p99 ratios cannot rank policies.** Report median over
 repeat-run job; OLMoE ×3, Qwen ×2). D's earlier "no benefit / 1.2× worse" single
 points are within this noise and are not evidence against D.
 
-## Unified root cause for the Policy-C crash and the D teacher-forced stall
+## Policy-C crash + D teacher-forced stall — hypothesis falsified; likely a race
 
-Both aggressive levers hit the **same zero-fetch edge case**: when a drop leaves
-a token with *only resident* experts (zero non-resident to fetch), the fused
-dispatch path misbehaves — **C crashes** (`pointer resides on host memory ...`,
-C targets exactly the sole non-resident) and **D stalls** under teacher forcing
-(route-wait never satisfied because zero fetches were enqueued). The shipped
-mass drop rarely empties the non-resident set (it trims the low-mass tail), so
-it does not trip this. This is the concrete bug to fix before C or aggressive-D:
-handle the zero-non-resident-survivor case in `ApplyFusedExpertDrop` / the
-route-wait + combine path (skip the fetch-wait and the host→device weight
-write-back when no survivor needs a fetch).
+The first guess was a "zero-fetch edge case" (a drop empties a token's
+non-resident set). **Data falsifies it.** On the OLMoE trace the shipped
+mass-0.20 empties the non-resident set for **60.9% of tokens (28901/47466) and
+never crashes**; C empties 61.6% (≈ mass), D-0.05 23%. Emptying the
+non-resident set is the normal, safe case — not the cause. (A blind
+"preserve ≥1 non-resident" guard was therefore *not* shipped; it would not
+address the real bug and would needlessly perturb the working mass path.)
+
+The real signature is **intermittent and input/timing-dependent**: D runs clean
+free-running (the gate arm) but **stalls under teacher forcing** — same policy,
+same build, only the token stream differs — and C aborts with
+`pointer resides on host memory and is not registered with any CUDA device`.
+That points to a **race in the fused async pipeline**: the route-callback weight
+write-back (`router_weight_.copy_(args.router_weight_host, non_blocking=false)`)
+versus the exec/combine read of `router_weight_` (OutputFunc line ~1613), or a
+pinned staging buffer reused/freed while a survivor kernel still references it.
+C/D's different drop volume/timing expose it more often than the shipped mass
+drop does.
+
+Proper fix path (a concurrency bug, not a selector guard): reproduce the C arm
+under `compute-sanitizer --tool=racecheck` (and `--tool=memcheck`), confirm the
+offending op + the event-ordering gap, then tighten the write-back↔exec
+synchronization per the Task-1 mechanism in
+`2026-09-30-dispatcher-fused-expert-drop.md` (e.g. an explicit event the exec
+streams `cudaStreamWaitEvent` on before the first `router_weight_` read, or the
+ExecArgs scalar-correction alternative that avoids the tensor write-back). Until
+then C and aggressive-D stay gated off; the shipped mass drop and free-running
+D are unaffected.
 
 ## Revised recommendation
 

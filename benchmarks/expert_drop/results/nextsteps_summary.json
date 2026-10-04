@@ -1,0 +1,89 @@
+{
+  "teacher_forced": {
+    "olmoe_mass": {
+      "tf_agreement": 0.0915,
+      "tf_nll_per_tok": 7.3017,
+      "positions": 3072
+    },
+    "olmoe_off": {
+      "tf_agreement": 0.9801,
+      "tf_nll_per_tok": 0.3024,
+      "positions": 3072
+    },
+    "qwen_mass": {
+      "tf_agreement": 0.9336,
+      "tf_nll_per_tok": 0.2534,
+      "positions": 3072
+    },
+    "qwen_off": {
+      "tf_agreement": 0.9932,
+      "tf_nll_per_tok": 0.2006,
+      "positions": 3072
+    }
+  },
+  "p99_repeats": {
+    "olmoe_D": {
+      "p99_runs": [
+        35.2,
+        36.1,
+        32.0
+      ],
+      "median": 35.2,
+      "min": 32.0,
+      "max": 36.1,
+      "spread_pct": 11.6
+    },
+    "olmoe_mass": {
+      "p99_runs": [
+        32.1,
+        35.2,
+        45.0
+      ],
+      "median": 35.2,
+      "min": 32.1,
+      "max": 45.0,
+      "spread_pct": 36.6
+    },
+    "olmoe_off": {
+      "p99_runs": [
+        36.7,
+        40.0,
+        42.1
+      ],
+      "median": 40.0,
+      "min": 36.7,
+      "max": 42.1,
+      "spread_pct": 13.5
+    },
+    "qwen_D": {
+      "p99_runs": [
+        207.4,
+        202.9
+      ],
+      "median": 205.2,
+      "min": 202.9,
+      "max": 207.4,
+      "spread_pct": 2.2
+    },
+    "qwen_mass": {
+      "p99_runs": [
+        188.9,
+        153.6
+      ],
+      "median": 171.2,
+      "min": 153.6,
+      "max": 188.9,
+      "spread_pct": 20.6
+    },
+    "qwen_off": {
+      "p99_runs": [
+        186.0,
+        176.8
+      ],
+      "median": 181.4,
+      "min": 176.8,
+      "max": 186.0,
+      "spread_pct": 5.1
+    }
+  }
+}
