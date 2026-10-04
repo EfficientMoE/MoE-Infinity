@@ -1,0 +1,38 @@
+{
+  "model": "olmoe",
+  "npz": "/mnt/raid0nvme0/leyang/MoE-Infinity/.worktrees/tail-eval/benchmarks/expert_drop/traces/olmoe_r005.npz",
+  "num_steps": 3048,
+  "theta_base_ms": 22.0,
+  "theta_t_fetch_ms": 0.0,
+  "theta_q_ms": 0.2,
+  "fit_score": 0.013941987998176733,
+  "rows": [
+    {
+      "arm": "off",
+      "pred_p50_ms": 29.6,
+      "meas_p50_ms": 24.75673658773303,
+      "err_p50_ms_pct": 19.56,
+      "pred_p90_ms": 34.2,
+      "meas_p90_ms": 34.12384390830996,
+      "err_p90_ms_pct": 0.22,
+      "pred_p99_ms": 38.6,
+      "meas_p99_ms": 41.59439178183675,
+      "err_p99_ms_pct": -7.2
+    },
+    {
+      "arm": "fused",
+      "pred_p50_ms": 22.6,
+      "meas_p50_ms": 22.768250666558743,
+      "err_p50_ms_pct": -0.74,
+      "pred_p90_ms": 24.6,
+      "meas_p90_ms": 26.583360321819782,
+      "err_p90_ms_pct": -7.46,
+      "pred_p99_ms": 27.0,
+      "meas_p99_ms": 33.16673940047622,
+      "err_p99_ms_pct": -18.59
+    }
+  ],
+  "p99_off_within_10pct": true,
+  "p99_fused_within_10pct": false,
+  "PASS": false
+}

@@ -1,0 +1,38 @@
+{
+  "model": "qwen3_30b",
+  "npz": "/mnt/raid0nvme0/leyang/MoE-Infinity/.worktrees/tail-eval/benchmarks/expert_drop/traces/qwen3_30b_r005.npz",
+  "num_steps": 3048,
+  "theta_base_ms": 25.0,
+  "theta_t_fetch_ms": 0.1,
+  "theta_q_ms": 0.525,
+  "fit_score": 0.06279020019097292,
+  "rows": [
+    {
+      "arm": "off",
+      "pred_p50_ms": 162.625,
+      "meas_p50_ms": 126.98018597438931,
+      "err_p50_ms_pct": 28.07,
+      "pred_p90_ms": 182.575,
+      "meas_p90_ms": 193.12608307227492,
+      "err_p90_ms_pct": -5.46,
+      "pred_p99_ms": 199.375,
+      "meas_p99_ms": 218.50114122964442,
+      "err_p99_ms_pct": -8.75
+    },
+    {
+      "arm": "fused",
+      "pred_p50_ms": 111.175,
+      "meas_p50_ms": 105.62584269791842,
+      "err_p50_ms_pct": 5.25,
+      "pred_p90_ms": 130.6,
+      "meas_p90_ms": 136.38579249382025,
+      "err_p90_ms_pct": -4.24,
+      "pred_p99_ms": 145.578,
+      "meas_p99_ms": 310.884559629485,
+      "err_p99_ms_pct": -53.17
+    }
+  ],
+  "p99_off_within_10pct": true,
+  "p99_fused_within_10pct": false,
+  "PASS": false
+}

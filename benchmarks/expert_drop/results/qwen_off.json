@@ -1,0 +1,20 @@
+{
+  "checkpoint": "Qwen/Qwen3-30B-A3B",
+  "policy": "off",
+  "mass_budget": 0.05,
+  "device_memory_ratio": 0.05,
+  "samples": 3024,
+  "mean_ms": 141.1034137339494,
+  "p50_ms": 126.98018597438931,
+  "p90_ms": 193.12608307227492,
+  "p99_ms": 218.50114122964442,
+  "fused_drop_stats": {
+    "drop_failures": 0,
+    "experts_dropped": 0,
+    "flatness_bypasses": 0,
+    "residency_unknown": 0,
+    "tokens_changed": 0,
+    "tokens_seen": 0,
+    "drops_by_layer": {}
+  }
+}

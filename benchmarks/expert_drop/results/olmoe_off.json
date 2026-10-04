@@ -1,0 +1,20 @@
+{
+  "checkpoint": "allenai/OLMoE-1B-7B-0924-Instruct",
+  "policy": "off",
+  "mass_budget": 0.05,
+  "device_memory_ratio": 0.05,
+  "samples": 3024,
+  "mean_ms": 26.429916207220348,
+  "p50_ms": 24.75673658773303,
+  "p90_ms": 34.12384390830996,
+  "p99_ms": 41.59439178183675,
+  "fused_drop_stats": {
+    "drop_failures": 0,
+    "experts_dropped": 0,
+    "flatness_bypasses": 0,
+    "residency_unknown": 0,
+    "tokens_changed": 0,
+    "tokens_seen": 0,
+    "drops_by_layer": {}
+  }
+}
