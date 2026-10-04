@@ -29,7 +29,8 @@ keeping the cost-model-independent offline fidelity replay for all six policies.
 | OLMoE-1B-7B | off | 3024 | 24.76 | 34.12 | 41.59 |
 | OLMoE-1B-7B | fused-0.20 | 2655 | 22.77 | 26.58 | 33.17 |
 | Qwen3-30B-A3B | off | 3024 | 126.98 | 193.13 | 218.50 |
-| Qwen3-30B-A3B | fused-0.20 | 3024 | 105.63 | 136.39 | 310.88 |
+| Qwen3-30B-A3B | fused-0.20 (run 1) | 3024 | 105.63 | 136.39 | 310.88* |
+| Qwen3-30B-A3B | fused-0.20 (re-measured) | 3024 | 117.26 | 185.17 | 203.55 |
 
 Note: these fresh numbers diverge from the plan's cited Qwen `off 114.2` /
 `fused-0.20 107.8`. They were re-measured on this host (SSD/page-cache and
@@ -37,32 +38,41 @@ GPU-sharing state differ from the original run); calibration here uses the
 fresh ground truth rather than the plan's cited values. No numbers are
 back-fit to the plan.
 
+*The Qwen fused run-1 p99 (310.88) was a confirmed heavy-tail outlier: a clean
+re-measurement gives p99=203.55 (=0.93×off), consistent with the menu doc's
+~0.94×off. The calibration below uses the re-measured fused value
+(`results/qwen_fused_rerun.json`, `results/qwen_calib_rerun.json`).
+
 ## Calibration result — PASS/FAIL (±10% p99 gate)
 
 | model | arm | pred p99 | meas p99 | p99 err | within ±10%? |
 |---|---|---|---|---|---|
 | OLMoE | off | 38.60 | 41.59 | −7.2% | **PASS** |
 | OLMoE | fused-0.20 | 27.00 | 33.17 | −18.6% | **FAIL** |
-| Qwen3-30B | off | 199.38 | 218.50 | −8.75% | **PASS** |
-| Qwen3-30B | fused-0.20 | 145.58 | 310.88 | −53.2% | **FAIL** |
+| Qwen3-30B | off | 192.33 | 218.50 | −12.0% | **FAIL** |
+| Qwen3-30B | fused-0.20 | 153.90 | 203.55 | −24.4% | **FAIL** |
 
-Fitted θ: OLMoE `(base=22.0, t_fetch=0.0, q=0.2)` ms; Qwen3-30B
-`(base=25.0, t_fetch=0.1, q=0.525)` ms. Full rows in
-`results/olmoe_calib.json`, `results/qwen_calib.json`.
+Fitted θ: OLMoE `(base=22.0, t_fetch=0.0, q=0.2)` ms; Qwen3-30B (re-measured
+anchor) `(base=10.0, t_fetch=1.275, q=0.375)` ms. Full rows in
+`results/olmoe_calib.json`, `results/qwen_calib_rerun.json`.
 
-**Gate verdict: FAIL.** The off-policy p99 calibrates within ±10% on both
-models (the baseline critical-path structure — latency driven by per-layer
-non-resident fetch count — is sound), but the fused-arm p99 does not.
+**Gate verdict: FAIL.** No single θ reproduces both the off and fused p99 within
+±10%: the fused (tail-acting) arm is under-predicted on both models (OLMoE
+−18.6%, Qwen −24.4%), and the joint fit leaves Qwen's off arm at −12.0% too.
+OLMoE's off arm does calibrate (−7.2%), so the baseline critical-path structure
+(latency ∝ per-layer non-resident fetch count) is directionally sound, but the
+model is not a ±10% oracle for the arms that act on the tail.
 
 ## Why the fused p99 cannot be validated offline
 
-1. **Structural ceiling.** The model predicts the fused arm by *removing*
+1. **Tail under-prediction.** The model predicts the fused arm by *removing*
    non-resident fetches from the off trace, so predicted fused p99 ≤ predicted
-   off p99 by construction. Qwen's **measured** fused p99 (310.88) is *higher*
-   than its off p99 (218.50), while its p50/p90/mean all *improve*
-   (127→106, 193→136, 141→112 ms). The tail is dominated by a few multi-hundred-
-   ms stalls in that single fused run — behaviour no monotone drop-only
-   fetch-cost model can reproduce.
+   off p99 by construction. With clean data the fused arm *is* below off (Qwen
+   re-measured 203.55 < 218.50; OLMoE 33.17 < 41.59) so the direction is right,
+   but the model under-predicts the realized tail by 18–24%: a static per-step
+   fetch-count model misses the queue/overlap interaction that sets the drop's
+   true tail effect. (Run-1's Qwen fused p99 of 310.88 > off was a heavy-tail
+   measurement outlier — p50/p90/mean all improved — removed by the re-measure.)
 2. **Tail underprediction even when direction is right.** OLMoE's fused p99
    moves the correct way (33.17 < 41.59) but the model underpredicts it by
    18.6%, outside the ±10% band. A static per-step fetch-count model misses the
