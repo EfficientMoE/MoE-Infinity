@@ -6,6 +6,12 @@ gate: off vs shipped mass-0.20 vs C vs D, measuring decode p99 and greedy
 next-token agreement vs the off baseline on the frozen 24×128 set, ratio 0.05,
 `CUDA_VISIBLE_DEVICES=2`.
 
+> **Update (next-steps):** the two methodological problems below are now fixed in
+> `methodology_fixes.md`. Key correction: with a drift-free (teacher-forced)
+> metric, **Qwen3-30B keeps 0.934 per-step fidelity under mass-0.20** (drop-on-miss
+> is viable on the large model); the free-running ~0 agreement here was drift.
+> OLMoE (0.091) is the wrong model to judge the policy on. Read that doc first.
+
 ## Headline: the gate does not certify a winner, for two methodological reasons
 
 1. **p99 is run-to-run noise-limited at ratio 0.05.** The OLMoE off p99 measured
