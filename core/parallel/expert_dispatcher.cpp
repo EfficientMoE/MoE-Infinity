@@ -1609,6 +1609,12 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
               args.generation) {
         return true;
       }
+      if (output_tensor.device() != final_hidden_states_.device()) {
+        // Host-staging / overflow fallback can land an expert output on CPU
+        // (out_gpu_id < 0) or on another GPU; co-locate with the accumulator
+        // before combining, else add_ faults on a host/cross-device pointer.
+        output_tensor = output_tensor.to(final_hidden_states_.device());
+      }
       if (batch_size == 1) {
         final_hidden_states_.add_(
             output_tensor *

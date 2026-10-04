@@ -67,36 +67,40 @@ target. This matches #257's own gate result and the menu doc's "moving p99 is
 hard"; the remaining lever is a larger-expert-model re-test (checkpoint option
 (c)), not more drop-policy tuning.
 
-## Policy-C crash + D teacher-forced stall — hypothesis falsified; likely a race
+## Policy-C crash + D teacher-forced stall — root-caused and FIXED
 
-The first guess was a "zero-fetch edge case" (a drop empties a token's
-non-resident set). **Data falsifies it.** On the OLMoE trace the shipped
-mass-0.20 empties the non-resident set for **60.9% of tokens (28901/47466) and
-never crashes**; C empties 61.6% (≈ mass), D-0.05 23%. Emptying the
-non-resident set is the normal, safe case — not the cause. (A blind
-"preserve ≥1 non-resident" guard was therefore *not* shipped; it would not
-address the real bug and would needlessly perturb the working mass path.)
+Two guesses were wrong before the real cause was traced. (1) "Zero-fetch edge
+case" — **falsified by data**: the shipped mass-0.20 empties a token's
+non-resident set for **60.9% of OLMoE tokens (28901/47466) and never crashes**
+(C 61.6%, D 23%), so emptying it is the normal, safe case. (2) "Async race" —
+also wrong.
 
-The real signature is **intermittent and input/timing-dependent**: D runs clean
-free-running (the gate arm) but **stalls under teacher forcing** — same policy,
-same build, only the token stream differs — and C aborts with
-`pointer resides on host memory and is not registered with any CUDA device`.
-That points to a **race in the fused async pipeline**: the route-callback weight
-write-back (`router_weight_.copy_(args.router_weight_host, non_blocking=false)`)
-versus the exec/combine read of `router_weight_` (OutputFunc line ~1613), or a
-pinned staging buffer reused/freed while a survivor kernel still references it.
-C/D's different drop volume/timing expose it more often than the shipped mass
-drop does.
+**Actual root cause (traced).** The fault surfaces at `wait_expert()` as a
+worker-thread exception (`pointer resides on host memory and is not registered
+with any CUDA device`) rethrown from the combine. When an expert is taken by the
+**host-staging / overflow fallback** it executes on CPU, so `OutputFunc` sets
+`out_gpu_id < 0` and puts the output tensor on CPU (line ~1594) — but the combine
+`final_hidden_states_.add_(output * router_weight_[...])` never co-located it
+with the CUDA accumulator. Aggressive drops (C targets the sole non-resident;
+D's adaptive budget) change cache/overflow dynamics enough to push experts onto
+the host-staging path and trip this latent bug; the shipped mass drop hits it
+rarely. It is a **missing device co-location, not a race**.
 
-Proper fix path (a concurrency bug, not a selector guard): reproduce the C arm
-under `compute-sanitizer --tool=racecheck` (and `--tool=memcheck`), confirm the
-offending op + the event-ordering gap, then tighten the write-back↔exec
-synchronization per the Task-1 mechanism in
-`2026-09-30-dispatcher-fused-expert-drop.md` (e.g. an explicit event the exec
-streams `cudaStreamWaitEvent` on before the first `router_weight_` read, or the
-ExecArgs scalar-correction alternative that avoids the tensor write-back). Until
-then C and aggressive-D stay gated off; the shipped mass drop and free-running
-D are unaffected.
+**Fix (shipped, rebuilt `dev43`).** In `OutputFunc`, move the expert output to
+`final_hidden_states_.device()` before the combine when they differ (strict
+no-op on the common same-device path, so the working off/mass paths are
+unaffected by construction). Verified:
+
+- **C free-running: no longer crashes** (OLMoE C ran clean, p99 33.2, dropped 2781).
+- **D teacher-forced: no longer stalls** (exit 0; OLMoE tf_agreement 0.075, nll
+  7.8 — low, as expected for an aggressive drop on the small model, in line with
+  mass 0.091). This confirms the C crash and the D-TF stall were the *same* bug.
+
+**Residual:** C *teacher-forced* still stalls on the off-token stream (a
+separate, slower hang). C is a non-lever (≈zero offline p99 benefit over the base
+mass drop), so it stays deprioritized; the combine fix is the substantive
+correctness improvement and also hardens any `out_gpu_id < 0` / cross-device
+output path for the shipped runtime.
 
 ## Revised recommendation
 
