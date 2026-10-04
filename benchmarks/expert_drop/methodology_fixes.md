@@ -102,6 +102,14 @@ mass drop), so it stays deprioritized; the combine fix is the substantive
 correctness improvement and also hardens any `out_gpu_id < 0` / cross-device
 output path for the shipped runtime.
 
+**D lower-slope re-eval (large model).** Re-ran D at slope 0.02 on Qwen3-30B; it
+does not beat mass, and post-fix an aggressive drop is host-staging-heavy, so the
+combine's CPU→GPU co-location adds H2D overhead — a plausible contributor to D's
+measured non-improvement (D-0.05 p99 1.13×). A *lower* slope drops even less and
+cannot beat mass-0.20 (0.94×) on p99, so D is not pursued further. Verdict
+unchanged: no tail-drop policy meets `p99 ≤ 0.8×off` at acceptable fidelity;
+mass-0.20 on the large model is the best point (0.94× p99 @ 0.934 fidelity).
+
 ## Revised recommendation
 
 1. **Target large MoE models.** On Qwen3-30B, mass-0.20 keeps 0.934 teacher-forced
