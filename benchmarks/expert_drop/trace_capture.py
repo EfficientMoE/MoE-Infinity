@@ -60,6 +60,9 @@ def main():
     parser.add_argument("--offload-dir", required=True)
     parser.add_argument("--policy", choices=["off", "on_miss"], default="off")
     parser.add_argument("--mass-budget", type=float, default=0.05)
+    parser.add_argument("--head-budget", type=float, default=0.0)
+    parser.add_argument("--adaptive-slope", type=float, default=0.0)
+    parser.add_argument("--adaptive-miss0", type=int, default=0)
     parser.add_argument("--device-memory-ratio", type=float, default=0.05)
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--num-prompts", type=int, default=24)
@@ -87,6 +90,9 @@ def main():
     }
     if args.policy == "on_miss":
         config["expert_drop_mass_budget"] = args.mass_budget
+        config["expert_drop_head_budget"] = args.head_budget
+        config["expert_drop_adaptive_slope"] = args.adaptive_slope
+        config["expert_drop_adaptive_miss0"] = args.adaptive_miss0
         config["gpu_only_expert_routing"] = True
     if os.environ.get("MOE_FORCE_GPU_ONLY_ROUTING", "0") == "1":
         config["gpu_only_expert_routing"] = True
@@ -106,10 +112,11 @@ def main():
     GenerationEngine._sample = timed_sample
 
     itl_ms = []
+    gen_tokens = []
     for prompt in PROMPTS[: args.num_prompts]:
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda:0")
         token_times.clear()
-        model.generate(
+        out = model.generate(
             input_ids,
             max_new_tokens=args.max_new_tokens,
             min_new_tokens=args.max_new_tokens,
@@ -117,6 +124,7 @@ def main():
         )
         ts = list(token_times)
         itl_ms.extend((b - a) * 1e3 for a, b in zip(ts[1:], ts[2:]))
+        gen_tokens.append([int(t) for t in out[0][-args.max_new_tokens :].tolist()])
 
     dispatcher = _find_dispatcher(model)
     fused_drop_stats = None
@@ -138,11 +146,20 @@ def main():
         "p50_ms": float(t.quantile(0.5)),
         "p90_ms": float(t.quantile(0.9)),
         "p99_ms": float(t.quantile(0.99)),
+        "head_budget": args.head_budget,
+        "adaptive_slope": args.adaptive_slope,
+        "adaptive_miss0": args.adaptive_miss0,
         "fused_drop_stats": fused_drop_stats,
+        "gen_tokens": gen_tokens,
     }
     with open(args.latency_out, "w") as fh:
         json.dump(latency, fh, indent=2)
-    print(json.dumps({k: v for k, v in latency.items() if k != "fused_drop_stats"}))
+    print(
+        json.dumps(
+            {k: v for k, v in latency.items()
+             if k not in ("fused_drop_stats", "gen_tokens")}
+        )
+    )
 
     if args.trace_out and args.npz_out:
         try:

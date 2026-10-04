@@ -336,7 +336,8 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<int> TakeLastActiveExperts();
   std::vector<int> TakeLastRoutedExperts();
   void SetExpertDropPolicy(bool enabled, int min_k, double mass_budget,
-                           double flatness_floor);
+                           double flatness_floor, double head_budget = 0.0,
+                           double adaptive_slope = 0.0, int adaptive_miss0 = 0);
   // Expert-drop trace tap (enabled by MOE_EXPERT_DROP_TRACE). Writes the
   // buffered pre-drop routing/residency records to `path` (or the env path
   // when empty). No-op when tracing was never enabled.

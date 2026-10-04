@@ -190,7 +190,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("layer_idx"))
       .def("set_expert_drop_policy", &ExpertDispatcher::SetExpertDropPolicy,
            py::arg("enabled"), py::arg("min_k"), py::arg("mass_budget"),
-           py::arg("flatness_floor"))
+           py::arg("flatness_floor"), py::arg("head_budget") = 0.0,
+           py::arg("adaptive_slope") = 0.0, py::arg("adaptive_miss0") = 0)
       .def("get_fused_drop_stats",
            [](const ExpertDispatcher& dispatcher) {
              py::dict result;

@@ -1403,6 +1403,27 @@ class OffloadEngine(object):
                                 0.5,
                             )
                         ),
+                        float(
+                            getattr(
+                                self.archer_config,
+                                "expert_drop_head_budget",
+                                0.0,
+                            )
+                        ),
+                        float(
+                            getattr(
+                                self.archer_config,
+                                "expert_drop_adaptive_slope",
+                                0.0,
+                            )
+                        ),
+                        int(
+                            getattr(
+                                self.archer_config,
+                                "expert_drop_adaptive_miss0",
+                                0,
+                            )
+                        ),
                     )
                 self.expert_executor.set_fused_expert_drop(fused_expert_drop)
                 if self.archer_config.speculative_prefetch:

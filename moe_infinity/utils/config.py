@@ -168,6 +168,24 @@ class ArcherConfig:
             "help": "Flatness floor in [0, 1] above which drops are suppressed because the distribution is too flat. Default is off overall; only active when policy is 'on_miss'."
         },
     )
+    expert_drop_head_budget: float = field(
+        default=0.0,
+        metadata={
+            "help": "Policy C head-budget in [0, 1]: additionally drop one sole-non-resident high-mass expert whose post-base mass is within this budget. 0 disables (default)."
+        },
+    )
+    expert_drop_adaptive_slope: float = field(
+        default=0.0,
+        metadata={
+            "help": "Policy D slope >= 0: per-token mass budget grows by slope*(miss_count - miss0). 0 disables (default)."
+        },
+    )
+    expert_drop_adaptive_miss0: int = field(
+        default=0,
+        metadata={
+            "help": "Policy D miss-count threshold (>= 0) below which the base budget is unchanged."
+        },
+    )
     adaptive_hbm_budget_bytes: int = field(
         default=0,
         metadata={

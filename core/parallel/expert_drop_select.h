@@ -14,6 +14,9 @@ struct ExpertDropParams {
   int min_k = 1;
   double mass_budget = 0.0;
   double flatness_floor = 0.5;
+  double head_budget = 0.0;
+  double adaptive_slope = 0.0;
+  int adaptive_miss0 = 0;
 };
 
 struct ExpertDropCounts {

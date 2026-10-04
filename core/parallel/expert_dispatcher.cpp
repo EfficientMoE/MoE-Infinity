@@ -2088,12 +2088,18 @@ std::vector<int> ExpertDispatcher::TakeLastRoutedExperts() {
 
 void ExpertDispatcher::SetExpertDropPolicy(bool enabled, int min_k,
                                            double mass_budget,
-                                           double flatness_floor) {
+                                           double flatness_floor,
+                                           double head_budget,
+                                           double adaptive_slope,
+                                           int adaptive_miss0) {
   {
     std::lock_guard<std::mutex> lock(route_state_mutex_);
     expert_drop_params_.min_k = min_k;
     expert_drop_params_.mass_budget = mass_budget;
     expert_drop_params_.flatness_floor = flatness_floor;
+    expert_drop_params_.head_budget = head_budget;
+    expert_drop_params_.adaptive_slope = adaptive_slope;
+    expert_drop_params_.adaptive_miss0 = adaptive_miss0;
   }
   expert_drop_enabled_.store(enabled, std::memory_order_release);
 }
