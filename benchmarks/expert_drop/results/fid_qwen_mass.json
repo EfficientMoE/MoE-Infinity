@@ -1,0 +1,13 @@
+{
+  "label": "qwen_mass",
+  "off": "/mnt/raid0nvme0/leyang/MoE-Infinity/.worktrees/tail-eval/benchmarks/expert_drop/results/gate_qwen_off.json",
+  "policy": "/mnt/raid0nvme0/leyang/MoE-Infinity/.worktrees/tail-eval/benchmarks/expert_drop/results/gate_qwen_mass.json",
+  "greedy_agreement": 0.1865,
+  "mean_first_divergence_pos": 15.3,
+  "p99_off_ms": 237.75,
+  "p99_policy_ms": 140.6,
+  "p99_ratio": 0.591,
+  "p50_policy_ms": 82.97,
+  "experts_dropped": 330251,
+  "tokens_changed": 146890
+}

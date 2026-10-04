@@ -27,6 +27,21 @@ next-token agreement vs the off baseline on the frozen 24×128 set, ratio 0.05,
 | C (base 0.20, head 0.15) | — (crash) | — | — | — | — |
 | D (base 0.05, slope 0.05, miss0 2) | 56.28 | 1.011 | 0.013 | 66678 | 27477 |
 
+## Measured (Qwen3-30B-A3B, same gate run) — same pattern
+
+| arm | p99 ms | p99 ratio | greedy agreement | experts_dropped |
+|---|---|---|---|---|
+| off | 237.8 | 1.000 | — | 0 |
+| mass-0.20 (shipped) | 140.6 | 0.591 | 0.187 | 330251 |
+| D (base 0.05, slope 0.05, miss0 2) | 289.1 | 1.216 | 0.095 | 435156 |
+
+Qwen confirms both pathologies: greedy agreement stays low for the drop arms,
+and p99 is noise-dominated — D dropped *more* experts than mass (435k vs 330k)
+yet its single-run p99 came out *above* off (ratio 1.216), which is run-to-run
+variance, not a drop effect (off itself was 218.5 ms in Phase 0 vs 237.8 ms
+here). Only the shipped mass arm shows a consistent p99 reduction (~0.58–0.59 on
+both models), but at ~0.01–0.19 greedy agreement.
+
 ## The fused drop path is correct; fidelity loss is budget-driven, not a bug
 
 Decoded prompt-0 completions (greedy):
