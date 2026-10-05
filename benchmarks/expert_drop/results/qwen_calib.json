@@ -1,6 +1,7 @@
 {
   "model": "qwen3_30b",
-  "npz": "/mnt/raid0nvme0/leyang/MoE-Infinity/.worktrees/tail-eval/benchmarks/expert_drop/traces/qwen3_30b_r005.npz",
+  "npz":
+      "/mnt/raid0nvme0/leyang/MoE-Infinity/.worktrees/tail-eval/benchmarks/expert_drop/traces/qwen3_30b_r005.npz",
   "num_steps": 3048,
   "theta_base_ms": 25.0,
   "theta_t_fetch_ms": 0.1,

@@ -163,7 +163,9 @@ def main():
     a_off, b_off = step_features(steps, counts_off)
 
     meas_off = json.load(open(args.measured_off))
-    meas_fused = json.load(open(args.measured_fused)) if args.measured_fused else None
+    meas_fused = (
+        json.load(open(args.measured_fused)) if args.measured_fused else None
+    )
 
     a_fused = b_fused = None
     if meas_fused is not None:
@@ -177,9 +179,13 @@ def main():
         )
         a_fused, b_fused = step_features(steps, counts_fused)
 
-    theta, score = calibrate(a_off, b_off, a_fused, b_fused, meas_off, meas_fused)
+    theta, score = calibrate(
+        a_off, b_off, a_fused, b_fused, meas_off, meas_fused
+    )
     pred_off = predict(a_off, b_off, theta)
-    pred_fused = predict(a_fused, b_fused, theta) if a_fused is not None else None
+    pred_fused = (
+        predict(a_fused, b_fused, theta) if a_fused is not None else None
+    )
 
     def _row(label, pred, meas):
         out = {"arm": label}

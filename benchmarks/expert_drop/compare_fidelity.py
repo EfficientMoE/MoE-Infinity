@@ -46,7 +46,9 @@ def main():
         "mean_first_divergence_pos": round(statistics.mean(fd), 1),
         "p99_off_ms": round(off.get("p99_ms", 0.0), 2),
         "p99_policy_ms": round(pol.get("p99_ms", 0.0), 2),
-        "p99_ratio": round(pol.get("p99_ms", 0.0) / max(off.get("p99_ms", 1e-9), 1e-9), 3),
+        "p99_ratio": round(
+            pol.get("p99_ms", 0.0) / max(off.get("p99_ms", 1e-9), 1e-9), 3
+        ),
         "p50_policy_ms": round(pol.get("p50_ms", 0.0), 2),
         "experts_dropped": stats.get("experts_dropped"),
         "tokens_changed": stats.get("tokens_changed"),

@@ -2092,12 +2092,9 @@ std::vector<int> ExpertDispatcher::TakeLastRoutedExperts() {
   return last_routed_experts_;
 }
 
-void ExpertDispatcher::SetExpertDropPolicy(bool enabled, int min_k,
-                                           double mass_budget,
-                                           double flatness_floor,
-                                           double head_budget,
-                                           double adaptive_slope,
-                                           int adaptive_miss0) {
+void ExpertDispatcher::SetExpertDropPolicy(
+    bool enabled, int min_k, double mass_budget, double flatness_floor,
+    double head_budget, double adaptive_slope, int adaptive_miss0) {
   {
     std::lock_guard<std::mutex> lock(route_state_mutex_);
     expert_drop_params_.min_k = min_k;
@@ -2247,8 +2244,8 @@ void ExpertDispatcher::RecordExpertDropTrace(const RouteArgs& args) {
     const auto* weights = args.router_weight_host.data_ptr<float>();
     const auto* mask =
         static_cast<const std::uint8_t*>(args.router_mask_host.data_ptr());
-    const std::size_t cells = static_cast<std::size_t>(rows) *
-                              static_cast<std::size_t>(num_experts_);
+    const std::size_t cells =
+        static_cast<std::size_t>(rows) * static_cast<std::size_t>(num_experts_);
     std::lock_guard<std::mutex> lock(expert_drop_trace_mutex_);
     std::string& buf = expert_drop_trace_buffer_;
     const std::int64_t seq = expert_drop_trace_seq_++;

@@ -117,7 +117,13 @@ def main():
         m = sum(r[0] for r in recs)
         n = len(recs)
         nll = -sum(r[1] for r in recs)
-        per_prompt.append({"agree": round(m / max(n, 1), 4), "nll": round(nll / max(n, 1), 4), "n": n})
+        per_prompt.append(
+            {
+                "agree": round(m / max(n, 1), 4),
+                "nll": round(nll / max(n, 1), 4),
+                "n": n,
+            }
+        )
         tot_match += m
         tot_n += n
         tot_nll += nll

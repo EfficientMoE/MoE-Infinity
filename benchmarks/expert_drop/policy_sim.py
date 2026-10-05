@@ -100,14 +100,26 @@ def policy_off(W, M, R, byte, **_):
 
 def policy_mass(W, M, R, byte, *, min_k, mass_budget, flatness_floor, **_):
     km, kw, _ = base_drop_np(
-        W, M, R, min_k=min_k, mass_budget=mass_budget, flatness_floor=flatness_floor
+        W,
+        M,
+        R,
+        min_k=min_k,
+        mass_budget=mass_budget,
+        flatness_floor=flatness_floor,
     )
     return km, kw
 
 
-def policy_C(W, M, R, byte, *, min_k, mass_budget, flatness_floor, head_budget, **_):
+def policy_C(
+    W, M, R, byte, *, min_k, mass_budget, flatness_floor, head_budget, **_
+):
     km, kw, _ = base_drop_np(
-        W, M, R, min_k=min_k, mass_budget=mass_budget, flatness_floor=flatness_floor
+        W,
+        M,
+        R,
+        min_k=min_k,
+        mass_budget=mass_budget,
+        flatness_floor=flatness_floor,
     )
     if head_budget <= 0:
         return km, kw
@@ -127,7 +139,9 @@ def policy_C(W, M, R, byte, *, min_k, mass_budget, flatness_floor, head_budget, 
     return km, kw
 
 
-def policy_D(W, M, R, byte, *, min_k, mass_budget, flatness_floor, slope, miss0, **_):
+def policy_D(
+    W, M, R, byte, *, min_k, mass_budget, flatness_floor, slope, miss0, **_
+):
     miss = (M.astype(bool) & ~R.astype(bool)).sum(1)
     eff = np.clip(mass_budget + slope * np.maximum(miss - miss0, 0), 0.0, 1.0)
     km = M.astype(bool).copy()
@@ -135,25 +149,50 @@ def policy_D(W, M, R, byte, *, min_k, mass_budget, flatness_floor, slope, miss0,
     for b in np.unique(eff):
         rows = np.where(eff == b)[0]
         m2, w2, _ = base_drop_np(
-            W[rows], M[rows], R[rows],
-            min_k=min_k, mass_budget=float(b), flatness_floor=flatness_floor,
+            W[rows],
+            M[rows],
+            R[rows],
+            min_k=min_k,
+            mass_budget=float(b),
+            flatness_floor=flatness_floor,
         )
         km[rows] = m2
         kw[rows] = w2
     return km, kw
 
 
-def policy_A(W, M, R, byte, *, min_k, mass_budget, flatness_floor, l_us, t_fetch_ms,
-            q_ms, **_):
+def policy_A(
+    W,
+    M,
+    R,
+    byte,
+    *,
+    min_k,
+    mass_budget,
+    flatness_floor,
+    l_us,
+    t_fetch_ms,
+    q_ms,
+    **_,
+):
     km, kw, _ = base_drop_np(
-        W, M, R, min_k=min_k, mass_budget=mass_budget, flatness_floor=flatness_floor
+        W,
+        M,
+        R,
+        min_k=min_k,
+        mass_budget=mass_budget,
+        flatness_floor=flatness_floor,
     )
     km = km.copy()
     kw = kw.copy()
     budget_ms = l_us / 1000.0
     R = R.astype(bool)
     nonres = km & ~R
-    cost = byte.astype(np.float64)[None, :] if byte.ndim == 1 else byte.astype(np.float64)
+    cost = (
+        byte.astype(np.float64)[None, :]
+        if byte.ndim == 1
+        else byte.astype(np.float64)
+    )
     for _ in range(int(M.shape[1])):
         k = nonres.sum(1)
         proj = np.where(k > 0, t_fetch_ms + q_ms * np.maximum(k - 1, 0), 0.0)
@@ -171,9 +210,16 @@ def policy_A(W, M, R, byte, *, min_k, mass_budget, flatness_floor, l_us, t_fetch
     return km, kw
 
 
-def policy_B(W, M, R, byte, *, min_k, mass_budget, flatness_floor, redirect_min, **_):
+def policy_B(
+    W, M, R, byte, *, min_k, mass_budget, flatness_floor, redirect_min, **_
+):
     km, kw, _ = base_drop_np(
-        W, M, R, min_k=min_k, mass_budget=mass_budget, flatness_floor=flatness_floor
+        W,
+        M,
+        R,
+        min_k=min_k,
+        mass_budget=mass_budget,
+        flatness_floor=flatness_floor,
     )
     R = R.astype(bool)
     km = km.copy()
@@ -203,13 +249,17 @@ def policy_E(W, M, R, byte, *, min_k, l_us, t_fetch_ms, **_):
     nonres = M & ~R
     order = np.argsort(-np.where(nonres, W, -np.inf), axis=1, kind="stable")
     rank = np.empty_like(order)
-    np.put_along_axis(rank, order, np.broadcast_to(np.arange(ne), (n, ne)).copy(), 1)
+    np.put_along_axis(
+        rank, order, np.broadcast_to(np.arange(ne), (n, ne)).copy(), 1
+    )
     arrived = nonres & (rank < n_arr)
     km = (M & R) | arrived
     deficit = np.maximum(min_k - km.sum(1), 0)
     if deficit.any():
         avail = M & ~km
-        av_order = np.argsort(-np.where(avail, W, -np.inf), axis=1, kind="stable")
+        av_order = np.argsort(
+            -np.where(avail, W, -np.inf), axis=1, kind="stable"
+        )
         for r in np.where(deficit > 0)[0]:
             add = av_order[r, : deficit[r]]
             km[r, add] = True
@@ -232,7 +282,9 @@ def tv_distance(P_w, P_m, Q_w, Q_m):
     P = _renorm(P_w, P_m).astype(np.float64)
     Q = Q_w.astype(np.float64)
     qs = np.where(Q_m, Q, 0.0).sum(1, keepdims=True)
-    Q = np.where(Q_m & (qs != 0), np.where(Q_m, Q, 0.0) / np.where(qs == 0, 1, qs), 0.0)
+    Q = np.where(
+        Q_m & (qs != 0), np.where(Q_m, Q, 0.0) / np.where(qs == 0, 1, qs), 0.0
+    )
     return 0.5 * np.abs(P - Q).sum(1)
 
 
@@ -251,9 +303,11 @@ def aggregate(trace, steps, theta, name, policy, params, pred_off):
     orig_routed = M.astype(bool).sum()
     return {
         "policy": name,
-        "params": {k: (round(v, 4) if isinstance(v, float) else v)
-                   for k, v in params.items()
-                   if k not in ("t_fetch_ms", "q_ms")},
+        "params": {
+            k: (round(v, 4) if isinstance(v, float) else v)
+            for k, v in params.items()
+            if k not in ("t_fetch_ms", "q_ms")
+        },
         "pred_p99_ms": round(pred[0.99], 2),
         "pred_p99_ratio_off": round(pred[0.99] / pred_off[0.99], 3),
         "pred_p50_ms": round(pred[0.5], 2),
@@ -276,30 +330,66 @@ def verify_parity(trace, min_k, flatness_floor, sample=4000, seed=0):
     idx = rng.choice(n, size=min(sample, n), replace=False)
     for budget in (0.05, 0.1, 0.2):
         km, kw, _ = base_drop_np(
-            W[idx], M[idx], R[idx],
-            min_k=min_k, mass_budget=budget, flatness_floor=flatness_floor,
+            W[idx],
+            M[idx],
+            R[idx],
+            min_k=min_k,
+            mass_budget=budget,
+            flatness_floor=flatness_floor,
         )
         mt = torch.from_numpy(M[idx].astype(np.uint8)).bool()
         wt = torch.from_numpy(W[idx].astype(np.float32))
         rt = torch.from_numpy(R[idx].astype(np.uint8)).bool()
         for j in range(len(idx)):
             rm, rw, _ = select_expert_drops(
-                mt[j : j + 1], wt[j : j + 1], rt[j],
-                min_k=min_k, mass_budget=budget, flatness_floor=flatness_floor,
+                mt[j : j + 1],
+                wt[j : j + 1],
+                rt[j],
+                min_k=min_k,
+                mass_budget=budget,
+                flatness_floor=flatness_floor,
             )
             ref_m = rm[0].numpy().astype(bool)
             if not np.array_equal(ref_m, km[j]):
-                raise AssertionError(f"base_drop parity mask mismatch budget={budget} row={j}")
+                raise AssertionError(
+                    f"base_drop parity mask mismatch budget={budget} row={j}"
+                )
             ref_w = rw[0].numpy()
             if not np.allclose(ref_w[ref_m], kw[j][km[j]], atol=1e-5):
-                raise AssertionError(f"base_drop parity weight mismatch budget={budget} row={j}")
+                raise AssertionError(
+                    f"base_drop parity weight mismatch budget={budget} row={j}"
+                )
     byte = np.zeros(W.shape[1])
-    base = policy_mass(W, M, R, byte, min_k=min_k, mass_budget=0.2,
-                       flatness_floor=flatness_floor)
-    c0 = policy_C(W, M, R, byte, min_k=min_k, mass_budget=0.2,
-                  flatness_floor=flatness_floor, head_budget=0.0)
-    d0 = policy_D(W, M, R, byte, min_k=min_k, mass_budget=0.2,
-                  flatness_floor=flatness_floor, slope=0.0, miss0=0)
+    base = policy_mass(
+        W,
+        M,
+        R,
+        byte,
+        min_k=min_k,
+        mass_budget=0.2,
+        flatness_floor=flatness_floor,
+    )
+    c0 = policy_C(
+        W,
+        M,
+        R,
+        byte,
+        min_k=min_k,
+        mass_budget=0.2,
+        flatness_floor=flatness_floor,
+        head_budget=0.0,
+    )
+    d0 = policy_D(
+        W,
+        M,
+        R,
+        byte,
+        min_k=min_k,
+        mass_budget=0.2,
+        flatness_floor=flatness_floor,
+        slope=0.0,
+        miss0=0,
+    )
     assert np.array_equal(base[0], c0[0]), "C(head_budget=0) != base"
     assert np.array_equal(base[0], d0[0]), "D(slope=0) != base"
     return len(idx)
@@ -316,8 +406,12 @@ def build_configs(theta):
     for sl in (0.0, 0.01, 0.02, 0.05):
         cfgs.append(("D", {"mass_budget": 0.05, "slope": sl, "miss0": 2}))
     for lus in (1e9, 2000.0, 1000.0, 500.0):
-        cfgs.append(("A", {"mass_budget": 0.20, "l_us": lus,
-                           "t_fetch_ms": tf, "q_ms": q}))
+        cfgs.append(
+            (
+                "A",
+                {"mass_budget": 0.20, "l_us": lus, "t_fetch_ms": tf, "q_ms": q},
+            )
+        )
     for rm in (0.05, 0.10, 0.20):
         cfgs.append(("B", {"mass_budget": 0.20, "redirect_min": rm}))
     for lus in (1e9, 600.0, 300.0, 150.0):
@@ -337,11 +431,17 @@ def main():
 
     trace = cm.load_npz(args.npz)
     calib = json.load(open(args.calib))
-    theta = (calib["theta_base_ms"], calib["theta_t_fetch_ms"], calib["theta_q_ms"])
+    theta = (
+        calib["theta_base_ms"],
+        calib["theta_t_fetch_ms"],
+        calib["theta_q_ms"],
+    )
     steps = cm.group_steps(trace["layer"], trace["seq"])
 
     checked = verify_parity(trace, args.min_k, args.flatness_floor)
-    print(f"parity OK on {checked} sampled rows (base==select_expert_drops; C0,D0==base)")
+    print(
+        f"parity OK on {checked} sampled rows (base==select_expert_drops; C0,D0==base)"
+    )
 
     W, M, R = trace["weights"], trace["mask"], trace["resident"]
     off_nonres = (M.astype(bool) & ~R.astype(bool)).sum(1).astype(np.int64)
@@ -353,18 +453,24 @@ def main():
         params = dict(min_k=args.min_k, flatness_floor=args.flatness_floor)
         params.update(extra)
         rows.append(
-            aggregate(trace, steps, theta, name, POLICIES[name], params, pred_off)
+            aggregate(
+                trace, steps, theta, name, POLICIES[name], params, pred_off
+            )
         )
 
     report = {
         "model": args.model,
         "npz": args.npz,
-        "theta": {"base_ms": theta[0], "t_fetch_ms": theta[1], "q_ms": theta[2]},
+        "theta": {
+            "base_ms": theta[0],
+            "t_fetch_ms": theta[1],
+            "q_ms": theta[2],
+        },
         "pred_p99_off_ms": round(pred_off[0.99], 2),
         "note": "pred_p99 is the off-calibrated cost model; REFERENCE ONLY per "
-                "the Phase-1 fork (not a +/-10% oracle for tail-acting arms). "
-                "Fidelity = routing total-variation proxy; true greedy-agreement "
-                "comes from the real C+D A/B gate.",
+        "the Phase-1 fork (not a +/-10% oracle for tail-acting arms). "
+        "Fidelity = routing total-variation proxy; true greedy-agreement "
+        "comes from the real C+D A/B gate.",
         "rows": rows,
     }
     print(json.dumps(report, indent=2))

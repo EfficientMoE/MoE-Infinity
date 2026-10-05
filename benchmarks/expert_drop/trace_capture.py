@@ -114,7 +114,9 @@ def main():
     itl_ms = []
     gen_tokens = []
     for prompt in PROMPTS[: args.num_prompts]:
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda:0")
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(
+            "cuda:0"
+        )
         token_times.clear()
         out = model.generate(
             input_ids,
@@ -124,14 +126,18 @@ def main():
         )
         ts = list(token_times)
         itl_ms.extend((b - a) * 1e3 for a, b in zip(ts[1:], ts[2:]))
-        gen_tokens.append([int(t) for t in out[0][-args.max_new_tokens :].tolist()])
+        gen_tokens.append(
+            [int(t) for t in out[0][-args.max_new_tokens :].tolist()]
+        )
 
     dispatcher = _find_dispatcher(model)
     fused_drop_stats = None
     if dispatcher is not None and hasattr(dispatcher, "get_fused_drop_stats"):
         fused_drop_stats = dispatcher.get_fused_drop_stats()
-    if args.trace_out and dispatcher is not None and hasattr(
-        dispatcher, "dump_expert_drop_trace"
+    if (
+        args.trace_out
+        and dispatcher is not None
+        and hasattr(dispatcher, "dump_expert_drop_trace")
     ):
         dispatcher.dump_expert_drop_trace(args.trace_out)
 
@@ -156,8 +162,11 @@ def main():
         json.dump(latency, fh, indent=2)
     print(
         json.dumps(
-            {k: v for k, v in latency.items()
-             if k not in ("fused_drop_stats", "gen_tokens")}
+            {
+                k: v
+                for k, v in latency.items()
+                if k not in ("fused_drop_stats", "gen_tokens")
+            }
         )
     )
 

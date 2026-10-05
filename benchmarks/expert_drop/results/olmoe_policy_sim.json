@@ -7,7 +7,8 @@
     "q_ms": 0.2
   },
   "pred_p99_off_ms": 38.6,
-  "note": "pred_p99 is the off-calibrated cost model; REFERENCE ONLY per the Phase-1 fork (not a +/-10% oracle for tail-acting arms). Fidelity = routing total-variation proxy; true greedy-agreement comes from the real C+D A/B gate.",
+  "note":
+      "pred_p99 is the off-calibrated cost model; REFERENCE ONLY per the Phase-1 fork (not a +/-10% oracle for tail-acting arms). Fidelity = routing total-variation proxy; true greedy-agreement comes from the real C+D A/B gate.",
   "rows": [
     {
       "policy": "off",

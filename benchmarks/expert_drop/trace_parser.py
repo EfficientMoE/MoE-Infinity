@@ -54,16 +54,20 @@ def parse_trace(path: str) -> dict:
     mask: list[np.ndarray] = []
     resident: list[np.ndarray] = []
     for i in range(nrec):
-        s, = struct.unpack_from("<q", buf, off)
+        (s,) = struct.unpack_from("<q", buf, off)
         off += 8
         ly, rw = struct.unpack_from("<ii", buf, off)
         off += 8
         rk = buf[off]
         off += 1
         cells = rw * ne
-        w = np.frombuffer(buf, dtype="<f4", count=cells, offset=off).reshape(rw, ne)
+        w = np.frombuffer(buf, dtype="<f4", count=cells, offset=off).reshape(
+            rw, ne
+        )
         off += cells * 4
-        m = np.frombuffer(buf, dtype=np.uint8, count=cells, offset=off).reshape(rw, ne)
+        m = np.frombuffer(buf, dtype=np.uint8, count=cells, offset=off).reshape(
+            rw, ne
+        )
         off += cells
         r = np.frombuffer(buf, dtype=np.uint8, count=ne, offset=off)
         off += ne
@@ -89,14 +93,17 @@ def parse_trace(path: str) -> dict:
     }
 
 
-def parse_trace_to_npz(path: str, npz_out: str, decode_only: bool = True) -> dict:
+def parse_trace_to_npz(
+    path: str, npz_out: str, decode_only: bool = True
+) -> dict:
     """Flatten decode (rows==1, residency-known) records into dense arrays."""
     d = parse_trace(path)
     n = len(d["rows"])
     idx = [
         i
         for i in range(n)
-        if (not decode_only or d["rows"][i] == 1) and d["residency_known"][i] == 1
+        if (not decode_only or d["rows"][i] == 1)
+        and d["residency_known"][i] == 1
     ]
     ne = d["num_experts"]
     if idx:
