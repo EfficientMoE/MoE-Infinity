@@ -112,5 +112,3 @@ Choose one of: {C, D, C+D, A, B, E}. On selection, write the per-task
 implementation plan (TDD against the Python reference first, then the C++
 fused path, then the two-model gate) as a follow-up to
 `2026-09-30-dispatcher-fused-expert-drop.md`.
-EOF
-cd /mnt/raid0nvme0/leyang/MoE-Infinity/.worktrees/fused-drop && export CI=true GIT_TERMINAL_PROMPT=0 GIT_EDITOR=: GIT_PAGER=cat PAGER=cat && git add docs/superpowers/plans/2026-10-02-tail-targeting-drop-policies.md && git commit -q -m "docs(plan): tail-targeting drop policy decision menu (#234)" && git push -q origin feat/expert-drop-dispatcher-fused && git log --oneline -1

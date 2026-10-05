@@ -123,5 +123,3 @@ model from the trace, abandon offline p99 prediction and instead measure p99
 by implementing C and D only (cheapest two) for real, keeping the offline
 *fidelity* replay (which does not depend on the cost model) for all six. State
 this fork explicitly at the Phase-1 gate.
-EOF
-cd /mnt/raid0nvme0/leyang/MoE-Infinity/.worktrees/fused-drop && export CI=true GIT_TERMINAL_PROMPT=0 GIT_EDITOR=: GIT_PAGER=cat PAGER=cat && git add -f docs/superpowers/plans/2026-10-02-tail-policy-evaluation.md && git commit --no-verify -m "docs(plan): tail-policy evaluation (offline p99 + fidelity for all candidates) (#234)" 2>&1 | tail -2 && git push origin feat/expert-drop-dispatcher-fused 2>&1 | tail -1 && git log --oneline -1
