@@ -187,7 +187,7 @@ def test_prefetch_exceptions_cannot_change_waited_expert_output(
     ("with_context", "mask", "reason"),
     [
         (False, torch.tensor([[1, 0]], dtype=torch.bool), "context_inactive"),
-        (True, torch.tensor([[1, 0]], dtype=torch.bool), "prefetcher_absent"),
+        (True, torch.tensor([[1, 0]], dtype=torch.bool), "prefetcher_missing"),
         (True, torch.zeros(1, 2, dtype=torch.bool), "empty_actual_union"),
     ],
 )
