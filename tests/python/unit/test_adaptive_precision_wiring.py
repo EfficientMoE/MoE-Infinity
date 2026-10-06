@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -6,7 +7,11 @@ from moe_infinity.runtime import expert_variant_manifest, model_offload
 from moe_infinity.runtime.adaptive_precision_allowlist import (
     ReleasedAdaptiveEntry,
 )
-from moe_infinity.runtime.expert_precision import ExpertFormat
+from moe_infinity.runtime.expert_precision import (
+    CandidateVariantSpec,
+    ExecutionKind,
+    ExpertFormat,
+)
 from moe_infinity.runtime.model_offload import _resolve_adaptive_precision
 
 
@@ -130,3 +135,90 @@ def test_protected_paths_short_circuit_general_resolution(
     assert result.enabled is False
     assert result.fallback_reason == reason
     assert not (tmp_path / "adaptive_derivatives").exists()
+
+
+def test_uniform_fp8_mode_does_not_approve_an_unreleased_manifest(
+    tmp_path, monkeypatch
+):
+    entry = ReleasedAdaptiveEntry(
+        "a" * 64, ExpertFormat.FP8_E4M3_BLOCK128, "adaptive-expert-v1", "b" * 64
+    )
+    manifest = SimpleNamespace(release_entries=frozenset({entry}))
+    monkeypatch.setattr(
+        expert_variant_manifest.ExpertVariantManifest,
+        "load_current",
+        lambda *args, **kwargs: manifest,
+    )
+    result = _resolve_adaptive_precision(
+        SimpleNamespace(model_type="qwen3_moe", quantization_config=None),
+        _archer(
+            adaptive_expert_precision=True,
+            adaptive_variant_build=False,
+            adaptive_hbm_budget_bytes=1024,
+            adaptive_resident_mode="uniform_fp8",
+        ),
+        str(tmp_path),
+        extension_names=set(),
+        purpose="serve",
+        checkpoint_fingerprint="a" * 64,
+        released_entries=frozenset(),
+    )
+    assert result.enabled is False
+    assert result.fallback_reason == "manifest_unapproved"
+
+
+def test_production_allowlist_stays_empty():
+    from moe_infinity.runtime.adaptive_precision_allowlist import (
+        RELEASED_ADAPTIVE_ENTRIES,
+    )
+
+    assert RELEASED_ADAPTIVE_ENTRIES == frozenset()
+
+
+def test_mixed_uniform_manifest_raises_before_dispatcher_mutation():
+    configure = getattr(
+        model_offload, "_configure_adaptive_precision_dispatcher", None
+    )
+    assert configure is not None
+    dispatcher = Mock()
+    variants = (
+        CandidateVariantSpec(
+            0,
+            0,
+            ExpertFormat.FP8_E4M3_BLOCK128,
+            ExecutionKind.FP8_DEQUANT_BF16_GEMM,
+            (1,),
+            ("gate.weight",),
+            100,
+            100,
+            0,
+            ExpertFormat.BF16,
+            "adaptive-expert-v1",
+        ),
+        CandidateVariantSpec(
+            0,
+            1,
+            ExpertFormat.BF16,
+            ExecutionKind.BF16_GEMM,
+            (2,),
+            ("gate.weight",),
+            100,
+            100,
+            0,
+            ExpertFormat.BF16,
+            "adaptive-expert-v1",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="uniform FP8 residency"):
+        configure(
+            dispatcher,
+            Mock(),
+            _archer(
+                adaptive_hbm_budget_bytes=1024,
+                adaptive_resident_mode="uniform_fp8",
+            ),
+            SimpleNamespace(generation="g1", variants=variants),
+        )
+
+    assert dispatcher.mock_calls == []
