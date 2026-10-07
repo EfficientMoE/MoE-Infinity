@@ -1,0 +1,13 @@
+{
+  "label": "olmoe_D_slope0.05",
+  "off": "results/gate_olmoe_off.json",
+  "policy": "results/gate_olmoe_D.json",
+  "greedy_agreement": 0.0132,
+  "mean_first_divergence_pos": 0.5,
+  "p99_off_ms": 55.68,
+  "p99_policy_ms": 56.28,
+  "p99_ratio": 1.011,
+  "p50_policy_ms": 30.97,
+  "experts_dropped": 66678,
+  "tokens_changed": 27477
+}
