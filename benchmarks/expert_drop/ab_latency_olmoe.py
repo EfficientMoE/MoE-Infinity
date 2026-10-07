@@ -1,0 +1,148 @@
+"""Single-arm OLMoE decode-latency run for the expert-drop A/B gate.
+
+Runs one policy arm per process (fresh runtime state), streams greedy
+decode, and records inter-token latencies via streamer callbacks. The
+first token of each prompt (prefill) is excluded. Drive it once per arm
+and compare p99 with benchmarks/expert_drop/gates.py.
+"""
+
+import argparse
+import json
+import os
+import time
+
+import torch
+from transformers import AutoTokenizer
+
+PROMPTS = [
+    "Explain why the sky is blue in simple terms.",
+    "Summarize the plot of Romeo and Juliet.",
+    "What are the main causes of the French Revolution?",
+    "Describe how photosynthesis works.",
+    "Write a short story about a lost dog finding its way home.",
+    "What is the difference between speed and velocity?",
+    "Explain the water cycle step by step.",
+    "How does a refrigerator keep food cold?",
+    "Describe the rules of chess for a beginner.",
+    "What happened during the Apollo 11 mission?",
+    "Explain supply and demand with an example.",
+    "How do vaccines protect the human body?",
+    "Describe the life cycle of a butterfly.",
+    "What makes the Roman Empire historically important?",
+    "Explain how tides are caused by the moon.",
+    "What is the role of DNA in living organisms?",
+    "Describe how earthquakes happen.",
+    "Explain the difference between weather and climate.",
+    "How does the human heart pump blood?",
+    "What are black holes and how do they form?",
+    "Explain how bees make honey.",
+    "Describe the invention of the printing press.",
+    "What causes rainbows to appear?",
+    "Explain how sound travels through air.",
+]
+
+
+_TOKEN_TIMES = []
+
+
+def _install_token_timer():
+    from moe_infinity.engine.generation_loop import GenerationEngine
+
+    original = GenerationEngine._sample
+
+    def timed_sample(self, logits, params):
+        token = original(self, logits, params)
+        _TOKEN_TIMES.append(time.perf_counter())
+        return token
+
+    GenerationEngine._sample = timed_sample
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--checkpoint", default="allenai/OLMoE-1B-7B-0924-Instruct"
+    )
+    parser.add_argument("--offload-dir", required=True)
+    parser.add_argument("--policy", choices=["off", "on_miss"], required=True)
+    parser.add_argument("--mass-budget", type=float, default=0.05)
+    parser.add_argument("--device-memory-ratio", type=float, default=0.05)
+    parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument("--num-prompts", type=int, default=24)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+
+    from moe_infinity import MoE
+
+    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint)
+    config = {
+        "offload_path": args.offload_dir,
+        "device_memory_ratio": args.device_memory_ratio,
+        "expert_drop_policy": args.policy,
+    }
+    fused = os.environ.get("MOE_EXPERT_DROP_FUSED", "0") == "1"
+    if args.policy == "on_miss":
+        config["expert_drop_mass_budget"] = args.mass_budget
+        if fused:
+            # The fused drop selector lives in the native route worker, so
+            # the fused arm must dispatch through native GPU-only routing.
+            config["gpu_only_expert_routing"] = True
+    # Force native routing on every arm (incl. off) so the gate isolates the
+    # drop effect alone; required for models whose eager path is not
+    # device-consistent (e.g. GPT-OSS MXFP4).
+    if os.environ.get("MOE_FORCE_GPU_ONLY_ROUTING", "0") == "1":
+        config["gpu_only_expert_routing"] = True
+    model = MoE(args.checkpoint, config)
+    _install_token_timer()
+
+    itl_ms = []
+    outputs = []
+    for prompt in PROMPTS[: args.num_prompts]:
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(
+            "cuda:0"
+        )
+        _TOKEN_TIMES.clear()
+        out = model.generate(
+            input_ids,
+            max_new_tokens=args.max_new_tokens,
+            min_new_tokens=args.max_new_tokens,
+            do_sample=False,
+        )
+        ts = list(_TOKEN_TIMES)
+        itl_ms.extend((b - a) * 1e3 for a, b in zip(ts[1:], ts[2:]))
+        outputs.append(tokenizer.decode(out[0][-16:], skip_special_tokens=True))
+
+    drop_stats = None
+    fused_drop_stats = None
+    engine = getattr(model, "engine", None) or getattr(model, "_engine", None)
+    for holder in (model, engine, getattr(model, "archer_engine", None)):
+        executor = getattr(holder, "expert_executor", None)
+        if executor is not None and hasattr(executor, "get_expert_drop_stats"):
+            drop_stats = executor.get_expert_drop_stats()
+            dispatcher = getattr(executor, "expert_dispatcher", None)
+            if dispatcher is not None and hasattr(
+                dispatcher, "get_fused_drop_stats"
+            ):
+                fused_drop_stats = dispatcher.get_fused_drop_stats()
+            break
+
+    t = torch.tensor(itl_ms, dtype=torch.float64)
+    result = {
+        "drop_stats": drop_stats,
+        "fused_drop_stats": fused_drop_stats,
+        "policy": args.policy,
+        "mass_budget": args.mass_budget,
+        "samples": len(itl_ms),
+        "mean_ms": float(t.mean()),
+        "p50_ms": float(t.quantile(0.5)),
+        "p90_ms": float(t.quantile(0.9)),
+        "p99_ms": float(t.quantile(0.99)),
+        "tail_outputs": outputs[:3],
+    }
+    with open(args.output, "w") as fh:
+        json.dump(result, fh, indent=2)
+    print(json.dumps({k: v for k, v in result.items() if k != "tail_outputs"}))
+
+
+if __name__ == "__main__":
+    main()
