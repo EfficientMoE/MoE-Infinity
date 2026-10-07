@@ -22,6 +22,18 @@ from moe_infinity.serving.sequence import (
     SequenceData,
     SequenceGroup,
 )
+from tests.python.serving.prefix_cache_test_utils import (
+    SHARED,
+    make_group,
+    make_prefix_capable_engine,
+    make_seeded_scheduler,
+)
+from tests.python.serving.prefix_cache_test_utils import (
+    SamplingParams as _PrefixSamplingParams,
+)
+from tests.python.serving.prefix_cache_test_utils import (
+    SequenceStatus as _PrefixSequenceStatus,
+)
 
 
 def _tiny_png_data_url() -> str:
@@ -274,3 +286,207 @@ def test_processor_resolution_uses_multimodal_processor(
 
     assert resolved_tokenizer is tokenizer
     assert resolved_processor is loaded_processor
+
+
+_EXPANDED_TOKENS_PER_IMAGE = 5
+
+
+def _two_image_vision_payload() -> dict[str, Any]:
+    return {
+        "model": "test-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Compare these two images."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _tiny_png_data_url()},
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _tiny_png_data_url()},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 1,
+    }
+
+
+def _video_payload() -> dict[str, Any]:
+    return {
+        "model": "test-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video."},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": "https://example.com/clip.mp4"},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 1,
+    }
+
+
+class _TwoImageStubProcessor(_TextTokenizer):
+    def __init__(self) -> None:
+        self.received_images: list[Image.Image] = []
+
+    def apply_chat_template(self, conversation: Any, **kwargs: object) -> Any:
+        content = conversation[0]["content"]
+        self.received_images = [
+            part["image"]
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "image"
+        ]
+        assert len(self.received_images) == 2
+        for image in self.received_images:
+            assert isinstance(image, Image.Image)
+            assert image.size == (64, 64)
+        assert kwargs == {
+            "add_generation_prompt": True,
+            "tokenize": True,
+            "return_dict": True,
+            "return_tensors": "pt",
+        }
+        num_images = len(self.received_images)
+        total_tokens = _EXPANDED_TOKENS_PER_IMAGE * num_images
+        return {
+            "input_ids": torch.arange(total_tokens).unsqueeze(0),
+            "attention_mask": torch.ones((1, total_tokens), dtype=torch.long),
+            "pixel_values": torch.ones((num_images, 3, 64, 64)),
+            "image_grid_thw": torch.tensor([[1, 8, 8]] * num_images),
+        }
+
+
+class _RecordingTemplate(_TextTokenizer):
+    def __init__(self) -> None:
+        self.apply_chat_template_calls = 0
+
+    def apply_chat_template(self, **kwargs: object) -> Any:
+        self.apply_chat_template_calls += 1
+        return super().apply_chat_template(**kwargs)
+
+
+def test_vl_request_admits_two_images_and_sums_expanded_tokens(
+    server_state: TestClient,
+) -> None:
+    processor = _TwoImageStubProcessor()
+    admission_engine = _AdmissionEngine()
+    srv.processor = processor
+    srv.engine = admission_engine
+
+    response = server_state.post(
+        "/v1/chat/completions", json=_two_image_vision_payload()
+    )
+
+    assert response.status_code == 200
+    assert len(processor.received_images) == 2
+    assert admission_engine.batch is not None
+    assert admission_engine.batch.multimodal_inputs is not None
+    assert admission_engine.batch.multimodal_inputs["pixel_values"].shape == (
+        2,
+        3,
+        64,
+        64,
+    )
+    expected_tokens = _EXPANDED_TOKENS_PER_IMAGE * 2
+    assert (
+        admission_engine.scheduler_output.num_prefill_tokens == expected_tokens
+    )
+
+
+def test_video_url_returns_400_without_processor_call(
+    server_state: TestClient,
+) -> None:
+    recording_tokenizer = _RecordingTemplate()
+    recording_processor = _RecordingTemplate()
+    srv.tokenizer = recording_tokenizer
+    srv.processor = recording_processor
+    srv.engine = SimpleNamespace(
+        scheduler=SimpleNamespace(num_waiting=0),
+        has_pending_requests=lambda: False,
+        shutdown=lambda: None,
+    )
+
+    response = server_state.post("/v1/chat/completions", json=_video_payload())
+
+    assert response.status_code == 400
+    assert "video input is not supported" in response.json()["error"]["message"]
+    assert recording_tokenizer.apply_chat_template_calls == 0
+    assert recording_processor.apply_chat_template_calls == 0
+
+
+def _register_prefill_sequence(
+    engine: Any,
+    *,
+    prompt: list[int],
+    committed: int,
+    multimodal_inputs: dict[str, Any] | None,
+) -> tuple[int, SequenceData]:
+    request_id = f"seq-{len(engine._request_to_seq_ids)}"
+    engine.add_request(
+        request_id,
+        prompt,
+        _PrefixSamplingParams(temperature=0.0, max_tokens=1),
+        multimodal_inputs=multimodal_inputs,
+    )
+    seq_id = engine._request_to_seq_ids[request_id][0]
+    sequence = engine._sequences[seq_id]
+    sequence.set_status(_PrefixSequenceStatus.PREFILL)
+    sequence.num_computed_tokens = committed
+    sequence.committed_kv_tokens = committed
+    engine.kv_cache.allocate_sequence(seq_id, len(prompt))
+    return seq_id, sequence
+
+
+def test_multimodal_request_bypasses_prefix_lookup_and_publication(
+    cb_engine_factory: Any,
+) -> None:
+    scheduler, _cache, prefix, _namespace = make_seeded_scheduler(
+        num_blocks=8, max_batch_size=1
+    )
+    group = make_group("mm-lookup", [(1, SHARED + [10])])
+    group.sequences[0].multimodal_inputs = {
+        "pixel_values": torch.ones((1, 3, 64, 64))
+    }
+    scheduler.add_request(group)
+    output = scheduler.schedule()
+    assert output.prefill_seq_ids == [1]
+    assert [event for event in prefix.events if event.startswith("pin:")] == []
+
+    # Control: identical text-only prompt must still pin, proving the bypass
+    # above is caused by multimodal_inputs and the assertion is not vacuous.
+    text_scheduler, _c2, text_prefix, _n2 = make_seeded_scheduler(
+        num_blocks=8, max_batch_size=1
+    )
+    text_scheduler.add_request(make_group("txt-lookup", [(2, SHARED + [10])]))
+    text_scheduler.schedule()
+    assert [
+        event for event in text_prefix.events if event.startswith("pin:")
+    ] == ["pin:10"]
+
+    engine = make_prefix_capable_engine(cb_engine_factory)
+    prompt = list(range(20))
+    entries_before = engine.prefix_cache.num_entries
+    mm_seq_id, mm_sequence = _register_prefill_sequence(
+        engine,
+        prompt=prompt,
+        committed=8,
+        multimodal_inputs={"pixel_values": torch.ones((1, 3, 64, 64))},
+    )
+    engine._publish_committed_prefix(mm_seq_id, mm_sequence)
+    assert engine.prefix_cache.num_entries == entries_before
+
+    # Control: identical text-only prefill must insert entries, proving the
+    # publication bypass above is caused by multimodal_inputs.
+    text_seq_id, text_sequence = _register_prefill_sequence(
+        engine, prompt=prompt, committed=8, multimodal_inputs=None
+    )
+    engine._publish_committed_prefix(text_seq_id, text_sequence)
+    assert engine.prefix_cache.num_entries > entries_before
