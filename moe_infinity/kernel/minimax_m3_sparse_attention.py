@@ -34,55 +34,28 @@ def minimax_m3_sparse_attention(
     value_states: torch.Tensor,
     block_indices: torch.Tensor,
     position_ids: torch.Tensor,
-    block_size: int,
     scaling: float,
     attention_mask: torch.Tensor | None = None,
     dropout: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Block-sparse attention over the selected key blocks.
+    """Block-sparse attention over the indexer-selected key blocks.
 
-    ``block_indices`` is the indexer contract: valid key-block ids are
-    left-packed per query and ``-1`` right-pads future/empty slots. The kept
-    blocks are expanded back to a per-key additive mask (0 keep, ``min_dtype``
-    drop), composed with the padding/causal visibility, then fed through the
-    standard scaled-dot-product math. This mirrors the eager reference, so a
-    repeated or ``-1`` slot can never widen visibility.
+    ``block_indices`` is the indexer contract (left-packed valid key-block ids,
+    ``-1`` right-padding). It is composed into the additive attention mask by
+    the installed ``MiniMaxM3VLIndexer.build_block_mask`` -- the exact function
+    the eager path calls -- so the kernel matches eager and stays robust across
+    transformers versions that change the indexer selection layout (the
+    per-query ``[B, S_q, topk]`` of 5.12 vs the per-head ``[B, H, S_q, topk]``
+    of 5.19). The composed mask then feeds the standard scaled-dot-product math.
     """
     hf = _hf_minimax_module()
     dtype = query_states.dtype
     device = query_states.device
     key_length = key_states.shape[2]
-    num_key_blocks = -(-key_length // block_size)
 
-    safe = block_indices.masked_fill(block_indices < 0, num_key_blocks)
-    bias = block_indices.new_full(
-        (block_indices.shape[0], block_indices.shape[1], num_key_blocks + 1),
-        float("-inf"),
-        dtype=dtype,
+    additive_mask = module.indexer.build_block_mask(
+        block_indices, attention_mask, key_length, dtype, device, position_ids
     )
-    bias.scatter_(-1, safe, 0.0)
-    bias = bias[..., :num_key_blocks]
-    block_keep = (bias == 0.0).repeat_interleave(block_size, dim=-1)
-    block_keep = block_keep[..., :key_length].unsqueeze(1)
-
-    if attention_mask is not None:
-        padding_mask = (
-            attention_mask
-            if attention_mask.dtype == torch.bool
-            else attention_mask == 0
-        )
-        keep = block_keep & padding_mask
-    else:
-        k_positions = torch.arange(key_length, device=device)
-        token_future = (
-            k_positions[None, None, None, :] > position_ids[:, None, :, None]
-        )
-        keep = block_keep & ~token_future
-
-    min_dtype = torch.finfo(dtype).min
-    additive_mask = torch.zeros(
-        keep.shape, dtype=dtype, device=device
-    ).masked_fill(~keep, min_dtype)
 
     key = hf.repeat_kv(key_states, module.num_key_value_groups)
     value = hf.repeat_kv(value_states, module.num_key_value_groups)
@@ -156,7 +129,6 @@ def indexer_attention_forward(
         value_states,
         block_indices,
         position_ids,
-        block_size=self.indexer.block_size,
         scaling=self.scaling,
         attention_mask=attention_mask,
         dropout=0.0 if not self.training else self.attention_dropout,

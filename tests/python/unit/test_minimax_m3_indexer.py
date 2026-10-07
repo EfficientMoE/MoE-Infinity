@@ -54,7 +54,7 @@ def _build_tiny_fixture():
     return config, module, hidden_states, (cos, sin), position_ids
 
 
-def _unmasked_block_argmax(module, hidden_states, position_embeddings):
+def _unmasked_block_scores(module, hidden_states, position_embeddings):
     indexer = module.indexer
     batch, q_len, _ = hidden_states.shape
     idx_q = indexer.q_proj(hidden_states).view(
@@ -78,8 +78,7 @@ def _unmasked_block_argmax(module, hidden_states, position_embeddings):
     scores = scores.view(
         batch, indexer.num_heads, q_len, num_key_blocks, BLOCK_SIZE
     )
-    block_scores = scores.amax(dim=-1).amax(dim=1)
-    return block_scores.argmax(dim=-1)[0]
+    return scores.amax(dim=-1)
 
 
 def test_tiny_kernel_matches_hf_eager():
@@ -109,23 +108,22 @@ def test_tiny_kernel_matches_hf_eager():
     assert bool((block_indices == -1).any())
 
     q_block = position_ids[0] // BLOCK_SIZE
-    for query in range(SEQ_LEN):
-        selected = block_indices[0, query]
-        selected = selected[selected >= 0]
-        assert bool((selected <= q_block[query]).all())
+    valid = block_indices >= 0
+    q_block_rows = q_block.reshape(
+        (1,) * (block_indices.ndim - 2) + (SEQ_LEN, 1)
+    )
+    assert bool((~valid | (block_indices <= q_block_rows)).all())
 
-    unmasked_best = _unmasked_block_argmax(
+    unmasked = _unmasked_block_scores(
         module, hidden_states, position_embeddings
     )
-    future_queries = [
-        query
-        for query in range(SEQ_LEN)
-        if int(unmasked_best[query]) > int(q_block[query])
-    ]
-    assert future_queries
-    for query in future_queries:
-        selected = block_indices[0, query].tolist()
-        assert int(unmasked_best[query]) not in selected
+    if block_indices.ndim == 3:
+        unmasked = unmasked.amax(dim=1)
+    unmasked_best = unmasked.argmax(dim=-1)
+    q_block_future = q_block.reshape(
+        (1,) * (unmasked_best.ndim - 1) + (SEQ_LEN,)
+    )
+    assert bool((unmasked_best > q_block_future).any())
 
 
 def test_kernel_flag_defaults_off_and_is_noop(monkeypatch):
