@@ -41,6 +41,8 @@ TORCH_LIB_DIR = (
 RED_START = "\033[31m"
 RED_END = "\033[0m"
 ERROR = f"{RED_START} [ERROR] {RED_END}"
+YELLOW_START = "\033[33m"
+YELLOW_END = "\033[0m"
 
 
 def fetch_requirements(path):
@@ -55,6 +57,26 @@ def get_path(*filepath) -> str:
 def abort(msg):
     print(f"{ERROR} {msg}")
     assert False, msg
+
+
+def _warn_if_sm120_torch_untested() -> None:
+    if not torch_available:
+        return
+    base_version = (getattr(torch, "__version__", "") or "").split("+", 1)[0]
+    parts = base_version.split(".")
+    try:
+        major_minor = (int(parts[0]), int(parts[1]))
+    except (IndexError, ValueError):
+        return
+    if major_minor >= (2, 13):
+        print(
+            f"{YELLOW_START}[WARNING]{YELLOW_END} Building the SM120 (Blackwell) "
+            f"path against torch {torch.__version__}. The fused MoE FFN kernel is "
+            f"validated only on torch 2.12.x for sm_120; torch >= 2.13 can raise "
+            f"'fused_moe_ffn_into GEMM0: Error Internal' at runtime (issue #245). "
+            f"Pin torch==2.12.* for sm_120 source builds until the fused path is "
+            f"validated on newer torch."
+        )
 
 
 def read_readme() -> str:
@@ -349,6 +371,7 @@ if cuda_available:
         _cuda_arch_flags.append("-gencode=arch=compute_90,code=sm_90")
     if os.environ.get("MOE_ENABLE_SM120", "0") == "1":
         _cuda_arch_flags.append("-gencode=arch=compute_120,code=sm_120")
+        _warn_if_sm120_torch_untested()
 
     # _store extension: IO and prefetch
     ext_modules.append(
