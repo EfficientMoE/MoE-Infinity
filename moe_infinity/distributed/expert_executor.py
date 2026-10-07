@@ -676,9 +676,22 @@ class DistributedExpertExecutor:
         if self.precision_policy is not None:
             from moe_infinity.memory.adaptive_precision_policy import ExpertKey
 
+            precision_expert_count = (
+                torch.sum(router_mask.view((-1, num_expert)), dim=0)
+                .cpu()
+                .numpy()
+                .flatten()
+            )
+            precision_expert_list = (
+                np.arange(num_expert)
+                .astype(int)[precision_expert_count > 0]
+                .tolist()
+            )
             observations = {
-                ExpertKey(layer_id, expert_id): int(expert_count[expert_id])
-                for expert_id in expert_list
+                ExpertKey(layer_id, expert_id): int(
+                    precision_expert_count[expert_id]
+                )
+                for expert_id in precision_expert_list
             }
             self.precision_policy.observe(
                 observations, tokens=int(router_mask.shape[0])
