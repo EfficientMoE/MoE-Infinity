@@ -47,6 +47,12 @@ parser.add_argument(
     default=None,
     help="Fail unless this substring appears in the answer (case-insensitive)",
 )
+parser.add_argument(
+    "--enable-minimax-m3-indexer-kernel",
+    dest="enable_minimax_m3_indexer_kernel",
+    action="store_true",
+    help="Enable the MiniMax-M3 Lightning Indexer block-sparse attention kernel (default off; eager is the reference)",
+)
 args = parser.parse_args()
 
 processor = AutoProcessor.from_pretrained(
@@ -58,6 +64,7 @@ model = MoE(
     {
         "offload_path": args.offload_dir,
         "device_memory_ratio": args.device_memory_ratio,
+        "enable_minimax_m3_indexer_kernel": args.enable_minimax_m3_indexer_kernel,
     },
 )
 

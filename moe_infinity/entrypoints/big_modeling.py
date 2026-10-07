@@ -245,6 +245,18 @@ class MoE:
             "minimax_m3_vl",
         ):
             self.use_native_engine = False
+        if getattr(model_config, "model_type", "") == "minimax_m3_vl":
+            indexer_kernel = bool(
+                getattr(
+                    engine_config,
+                    "enable_minimax_m3_indexer_kernel",
+                    False,
+                )
+            )
+            model_config.enable_minimax_m3_indexer_kernel = indexer_kernel
+            text_config = getattr(model_config, "text_config", None)
+            if text_config is not None:
+                text_config.enable_minimax_m3_indexer_kernel = indexer_kernel
         default_max_seq_length = getattr(
             model_config, "max_position_embeddings", None
         )
