@@ -977,11 +977,17 @@ ArcherTopologyHandle::GetNumLayersAndExperts() {
 // CPU, GPU -> DISK
 // Moves tensors from CPU/GPU to disk.
 void SetModuleDisk(std::vector<TensorID>& tensor_ids) {
+  auto store = GetTensorStoreShared();
+  if (!store) {
+    throw std::runtime_error(
+        "SetModuleDisk: tensor store unavailable (prefetch handle torn down "
+        "with a dispatch in flight)");
+  }
   // DLOG_TRACE("SetModuleDisk {} tensors", tensor_ids.size());
   for (const auto& tensor_id : tensor_ids) {
     // void* old_ptr =
     // GetTensorStore()->index().find(tensor_id)->second.tensor.data_ptr();
-    auto it = GetTensorStore()->index().find(tensor_id);
+    auto it = store->index().find(tensor_id);
 
     at::TensorOptions options;
     options = options.device(torch::kCPU);
@@ -997,18 +1003,24 @@ std::mutex kReadMutex;
 void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
                              bool on_demand) {
   if (tensor_ids.empty()) return;
+  auto store = GetTensorStoreShared();
+  if (!store) {
+    throw std::runtime_error(
+        "SetModuleMemoryFromDisk: tensor store unavailable (prefetch handle "
+        "torn down with a dispatch in flight)");
+  }
 
   // Check whether all tensors sit contiguously in the same partition file.
   // If so, read the whole region in one I/O call instead of per-tensor.
   bool contiguous = true;
-  auto first_it = GetTensorStore()->index().find(tensor_ids[0]);
+  auto first_it = store->index().find(tensor_ids[0]);
   std::uint32_t file_id = first_it->second.file_id;
   std::int64_t start_offset = first_it->second.offset;
   std::int64_t expected_offset = start_offset;
   std::int64_t total_aligned = 0;
 
   for (const auto& tensor_id : tensor_ids) {
-    auto it = GetTensorStore()->index().find(tensor_id);
+    auto it = store->index().find(tensor_id);
     std::int64_t sz =
         (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
     if (it->second.file_id != file_id || it->second.offset != expected_offset) {
@@ -1020,15 +1032,14 @@ void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
   }
 
   if (contiguous && total_aligned > 0) {
-    auto filename = GetTensorStore()->GetIndexFileName(file_id);
-    GetTensorStore()->ReadBulk(filename, host_ptr, on_demand, total_aligned,
-                               start_offset);
+    auto filename = store->GetIndexFileName(file_id);
+    store->ReadBulk(filename, host_ptr, on_demand, total_aligned, start_offset);
   } else {
     std::int64_t offset = 0;
     for (const auto& tensor_id : tensor_ids) {
-      GetTensorStore()->ReadTensor(
-          tensor_id, static_cast<char*>(host_ptr) + offset, on_demand);
-      auto it = GetTensorStore()->index().find(tensor_id);
+      store->ReadTensor(tensor_id, static_cast<char*>(host_ptr) + offset,
+                        on_demand);
+      auto it = store->index().find(tensor_id);
       std::int64_t sz =
           (it->second.size + kAioAlignment - 1) & ~(kAioAlignment - 1);
       offset += sz;
@@ -1037,7 +1048,7 @@ void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
 
   std::int64_t param_size = 0;
   for (const auto& tensor_id : tensor_ids) {
-    auto it = GetTensorStore()->index().find(tensor_id);
+    auto it = store->index().find(tensor_id);
     auto options = torch::TensorOptions()
                        .dtype(it->second.options.dtype())
                        .layout(it->second.options.layout())
@@ -1062,9 +1073,15 @@ void SetModuleMemoryFromDisk(std::vector<TensorID>& tensor_ids, void* host_ptr,
 // DISK (already read) -> CPU views only (no disk read; buffer pre-filled)
 void SetModuleMemoryFromDisk_Views(std::vector<TensorID>& tensor_ids,
                                    void* host_ptr) {
+  auto store = GetTensorStoreShared();
+  if (!store) {
+    throw std::runtime_error(
+        "SetModuleMemoryFromDisk_Views: tensor store unavailable (prefetch "
+        "handle torn down with a dispatch in flight)");
+  }
   std::int64_t param_size = 0;
   for (const auto& tensor_id : tensor_ids) {
-    auto it = GetTensorStore()->index().find(tensor_id);
+    auto it = store->index().find(tensor_id);
     auto options = torch::TensorOptions()
                        .dtype(it->second.options.dtype())
                        .layout(it->second.options.layout())
@@ -1090,10 +1107,15 @@ void SetModuleMemoryFromDisk_Views(std::vector<TensorID>& tensor_ids,
 // CPU -> GPU
 void SetModuleCudaMemoryFromCPU(std::vector<TensorID>& tensor_ids,
                                 void* device_ptr, const torch::Device& device) {
-  // DLOG_TRACE("SetModuleCudaMemoryFromCPU {} tensors", tensor_ids.size());
+  auto store = GetTensorStoreShared();
+  if (!store) {
+    throw std::runtime_error(
+        "SetModuleCudaMemoryFromCPU: tensor store unavailable (prefetch handle "
+        "torn down with a dispatch in flight)");
+  }
   std::int64_t param_size = 0;
   for (const auto& tensor_id : tensor_ids) {
-    auto it = GetTensorStore()->index().find(tensor_id);
+    auto it = store->index().find(tensor_id);
     DLOG_TRACE("SetModuleCudaMemoryFromCPU tensor {} -> {}",
                it->second.DebugString(), device.str());
     auto tensor_options = torch::TensorOptions()
@@ -1116,12 +1138,18 @@ void SetModuleCudaMemoryFromCPU(std::vector<TensorID>& tensor_ids,
 // GPU -> CPU
 void SetModuleMemoryFromCuda(std::vector<TensorID>& tensor_ids,
                              void* host_ptr) {
+  auto store = GetTensorStoreShared();
+  if (!store) {
+    throw std::runtime_error(
+        "SetModuleMemoryFromCuda: tensor store unavailable (prefetch handle "
+        "torn down with a dispatch in flight)");
+  }
   std::int64_t param_size = 0;
   for (const auto& tensor_id : tensor_ids) {
     // void* old_ptr =
     // GetTensorStore()->index().find(tensor_id)->second.tensor.data_ptr();
 
-    auto it = GetTensorStore()->index().find(tensor_id);
+    auto it = store->index().find(tensor_id);
     DLOG_TRACE("SetModuleMemoryFromCuda tensor {}", it->second.DebugString());
     it->second.tensor.set_data(
         torch::from_blob((char*)host_ptr + param_size, it->second.shape,
