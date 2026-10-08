@@ -8,6 +8,31 @@ import pytest
 from moe_infinity.utils.config import ArcherConfig
 
 
+def test_adaptive_resident_mode_defaults_to_legacy(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.warns(UserWarning):
+        config = ArcherConfig(offload_path="/tmp")
+    assert config.adaptive_expert_precision is False
+    assert config.adaptive_resident_mode == "legacy"
+
+
+def test_uniform_fp8_mode_is_accepted(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.warns(UserWarning):
+        config = ArcherConfig(
+            offload_path="/tmp", adaptive_resident_mode="uniform_fp8"
+        )
+    assert config.adaptive_resident_mode == "uniform_fp8"
+    assert config.adaptive_expert_precision is False
+
+
+def test_unknown_resident_mode_is_rejected(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.raises(ValueError, match="adaptive_resident_mode"):
+        with pytest.warns(UserWarning):
+            ArcherConfig(offload_path="/tmp", adaptive_resident_mode="int4")
+
+
 def test_load_from_json_sets_paths_and_threads(monkeypatch):
     monkeypatch.setattr("torch.cuda.device_count", lambda: 2)
     config = ArcherConfig.load_from_json(
@@ -343,3 +368,52 @@ def test_adaptive_bounds_are_validated(monkeypatch, field, value) -> None:
             use_native_engine=False,
             **{field: value},
         )
+
+
+def test_expert_drop_defaults(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.warns(UserWarning):
+        config = ArcherConfig(offload_path="/tmp")
+    assert config.expert_drop_policy == "off"
+    assert config.expert_drop_min_k == 1
+    assert config.expert_drop_mass_budget == 0.0
+    assert config.expert_drop_flatness_floor == 0.5
+
+
+def test_expert_drop_on_miss_accepts_budget(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.warns(UserWarning):
+        config = ArcherConfig(
+            offload_path="/tmp",
+            expert_drop_policy="on_miss",
+            expert_drop_mass_budget=0.10,
+        )
+    assert config.expert_drop_policy == "on_miss"
+    assert config.expert_drop_mass_budget == 0.10
+
+
+@pytest.mark.parametrize("min_k", [1.5, True])
+def test_expert_drop_min_k_rejects_non_integer_values(monkeypatch, min_k):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.raises(ValueError, match="must be an integer"):
+        with pytest.warns(UserWarning):
+            ArcherConfig(offload_path="/tmp", expert_drop_min_k=min_k)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"expert_drop_policy": "threshold"},
+        {"expert_drop_min_k": 0},
+        {"expert_drop_mass_budget": -0.1},
+        {"expert_drop_mass_budget": 1.1},
+        {"expert_drop_mass_budget": float("nan")},
+        {"expert_drop_flatness_floor": -0.01},
+        {"expert_drop_flatness_floor": 1.01},
+    ],
+)
+def test_expert_drop_rejects_illegal_values(monkeypatch, kwargs):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.raises(ValueError):
+        with pytest.warns(UserWarning):
+            ArcherConfig(offload_path="/tmp", **kwargs)

@@ -90,6 +90,12 @@ class ArcherConfig:
             "help": "Enable experimental batch-one DeepSeek V2/V3 MLA paging. Default False."
         },
     )
+    enable_minimax_m3_indexer_kernel: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable MiniMax-M3 Lightning Indexer block-sparse attention kernel on the HuggingFace path. Default False; the eager path is the correctness reference."
+        },
+    )
     max_resident_paged_speculative_sessions: int = field(
         default=1,
         metadata={
@@ -134,6 +140,56 @@ class ArcherConfig:
         default=False,
         metadata={
             "help": "Opt-in adaptive mixed-precision expert policy. Default False. Never enabled by default; validated only when True."
+        },
+    )
+    adaptive_resident_mode: str = field(
+        default="legacy",
+        metadata={
+            "help": (
+                "'legacy' keeps the online adaptive policy; 'uniform_fp8' pins every released expert to load-time FP8 and does not change format online."
+            )
+        },
+    )
+    expert_drop_policy: str = field(
+        default="off",
+        metadata={
+            "help": "Opt-in expert drop policy. Default 'off' (no experts dropped). 'on_miss' drops only non-resident routed experts."
+        },
+    )
+    expert_drop_min_k: int = field(
+        default=1,
+        metadata={
+            "help": "Minimum number of routed experts to keep when dropping. Must be >= 1."
+        },
+    )
+    expert_drop_mass_budget: float = field(
+        default=0.0,
+        metadata={
+            "help": "Fraction of router probability mass in [0, 1] eligible for dropping. Budget 0 rewrites nothing (default)."
+        },
+    )
+    expert_drop_flatness_floor: float = field(
+        default=0.5,
+        metadata={
+            "help": "Flatness floor in [0, 1] above which drops are suppressed because the distribution is too flat. Default is off overall; only active when policy is 'on_miss'."
+        },
+    )
+    expert_drop_head_budget: float = field(
+        default=0.0,
+        metadata={
+            "help": "Policy C head-budget in [0, 1]: additionally drop one sole-non-resident high-mass expert whose post-base mass is within this budget. 0 disables (default)."
+        },
+    )
+    expert_drop_adaptive_slope: float = field(
+        default=0.0,
+        metadata={
+            "help": "Policy D slope >= 0: per-token mass budget grows by slope*(miss_count - miss0). 0 disables (default)."
+        },
+    )
+    expert_drop_adaptive_miss0: int = field(
+        default=0,
+        metadata={
+            "help": "Policy D miss-count threshold (>= 0) below which the base budget is unchanged."
         },
     )
     adaptive_hbm_budget_bytes: int = field(
@@ -580,4 +636,35 @@ class ArcherConfig:
         ):
             raise ValueError(
                 "min_free_mla_blocks_after_admission must be an integer >= 1"
+            )
+        if self.adaptive_resident_mode not in ("legacy", "uniform_fp8"):
+            raise ValueError(
+                "adaptive_resident_mode must be 'legacy' or 'uniform_fp8', "
+                f"got {self.adaptive_resident_mode!r}"
+            )
+        if self.expert_drop_policy not in ("off", "on_miss"):
+            raise ValueError(
+                f"expert_drop_policy must be 'off' or 'on_miss', got {self.expert_drop_policy!r}"
+            )
+        if (
+            type(self.expert_drop_min_k) is not int
+            or self.expert_drop_min_k < 1
+        ):
+            raise ValueError(
+                "expert_drop_min_k must be an integer >= 1, "
+                f"got {self.expert_drop_min_k}"
+            )
+        if (
+            not math.isfinite(self.expert_drop_mass_budget)
+            or not 0.0 <= self.expert_drop_mass_budget <= 1.0
+        ):
+            raise ValueError(
+                f"expert_drop_mass_budget must be in [0, 1], got {self.expert_drop_mass_budget}"
+            )
+        if (
+            not math.isfinite(self.expert_drop_flatness_floor)
+            or not 0.0 <= self.expert_drop_flatness_floor <= 1.0
+        ):
+            raise ValueError(
+                f"expert_drop_flatness_floor must be in [0, 1], got {self.expert_drop_flatness_floor}"
             )

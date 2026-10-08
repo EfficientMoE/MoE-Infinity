@@ -25,7 +25,7 @@ import uuid
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 def random_uuid():
@@ -44,7 +44,8 @@ class ErrorResponse(BaseModel):
     request_id: Optional[str] = None
     debug: Optional[Any] = None
 
-    @root_validator(pre=True)
+    @model_validator(mode="before")
+    @classmethod
     def _normalize_legacy_error_fields(cls, values):
         if isinstance(values, dict) and "error" not in values:
             legacy_keys = {
@@ -60,7 +61,7 @@ class ErrorResponse(BaseModel):
         return values
 
     def dict(self, *args, **kwargs):
-        data = super().dict(*args, **kwargs)
+        data = super().model_dump(*args, **kwargs)
         if not kwargs.get("exclude_none"):
             if self.request_id is None:
                 data.pop("request_id", None)

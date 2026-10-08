@@ -193,7 +193,9 @@ def test_active_context_prefetches_exact_union_for_current_layer():
         LAYER_ID,
         UNION,
         None,
+        ExpertPhase.MIXED,
         [],
+        None,
         None,
     )
 
@@ -218,7 +220,9 @@ def test_active_context_falls_back_to_executor_prefetcher():
         LAYER_ID,
         UNION,
         None,
+        ExpertPhase.MIXED,
         [],
+        None,
         None,
     )
 
@@ -295,16 +299,18 @@ def test_inactive_context_overlap_path_byte_identical():
 
     prefetcher.fetch_experts_lock_cache.assert_not_called()
     assert prefetcher.speculative_prefetch.call_count == 1
-    args, kwargs = prefetcher.speculative_prefetch.call_args
-    assert args[0] == LAYER_ID and kwargs.get("phase") == ExpertPhase.MIXED
-    assert args[1] is LOGITS
-    trigger_spy.assert_called_once()
+    for call in prefetcher.speculative_prefetch.call_args_list:
+        assert call.args == (LAYER_ID, LOGITS)
+        assert call.kwargs == {"phase": ExpertPhase.MIXED}
+    assert trigger_spy.call_count == 1
     assert executor._pending_prefetch == (
         prefetcher,
         LAYER_ID,
         UNION,
         None,
+        ExpertPhase.MIXED,
         [],
+        None,
         None,
     )
 
@@ -514,8 +520,8 @@ def _make_gpt_oss_mlp():
     return module
 
 
-def test_gpt_oss_resident_loop_observes_route_ahead_metrics():
-    """A2: resident gpt-oss reports its exact routed union as already covered."""
+def test_gpt_oss_resident_loop_does_not_claim_route_ahead_metrics():
+    """Resident gpt-oss has no expert executor and cannot report route-ahead."""
     from moe_infinity.spec_decode._route_ahead_stats import RouteAheadStats
 
     module = _make_gpt_oss_mlp()
@@ -532,10 +538,8 @@ def test_gpt_oss_resident_loop_observes_route_ahead_metrics():
     prefetcher.fetch_experts_lock_cache.assert_not_called()
     prefetcher.speculative_prefetch.assert_not_called()
     summary = stats.commit_step(kept_rows=1)
-    assert summary.layers == 1
-    assert stats.steps > 0
-    assert stats.layers_observed > 0
-    assert stats.coverage == 1.0
+    assert summary.layers == 0
+    assert stats.as_dict() == RouteAheadStats().as_dict()
 
 
 def test_gpt_oss_resident_loop_does_not_observe_when_context_inactive(
@@ -609,6 +613,7 @@ def test_wait_error_cancels_owned_generations_drains_and_reraises():
         LAYER_ID,
         UNION,
         None,
+        ExpertPhase.MIXED,
         [41, 42],
         None,
     )
@@ -635,6 +640,7 @@ def test_cleanup_error_does_not_mask_wait_error():
         LAYER_ID,
         UNION,
         None,
+        ExpertPhase.MIXED,
         [41],
         None,
     )
@@ -654,6 +660,7 @@ def test_delayed_compute_sample_from_prior_invocation_is_not_calibration():
         LAYER_ID,
         UNION,
         None,
+        ExpertPhase.MIXED,
         [],
         102,
     )
@@ -676,6 +683,7 @@ def test_same_layer_sample_without_matching_invocation_is_rejected():
         LAYER_ID,
         UNION,
         None,
+        ExpertPhase.MIXED,
         [],
         202,
     )

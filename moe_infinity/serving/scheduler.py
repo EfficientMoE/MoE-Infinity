@@ -1612,6 +1612,11 @@ class Scheduler:
         namespace = self.cache_namespace
         if provider is None or namespace is None or sequence.has_prefix_lease:
             return PrefixLease.empty()
+        # The prefix cache keys on prompt token ids only. Vision placeholder
+        # tokens repeat across different images, so reusing a leased prefix
+        # would bind KV from the wrong pixels. Bypass lookup for multimodal.
+        if sequence.multimodal_inputs is not None:
+            return PrefixLease.empty()
         return provider.acquire_prefix_lease(
             namespace,
             sequence.prompt_token_ids,

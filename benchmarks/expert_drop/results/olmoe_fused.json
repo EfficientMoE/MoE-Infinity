@@ -1,0 +1,37 @@
+{
+  "checkpoint": "allenai/OLMoE-1B-7B-0924-Instruct",
+  "policy": "on_miss",
+  "mass_budget": 0.2,
+  "device_memory_ratio": 0.05,
+  "samples": 2655,
+  "mean_ms": 23.366139056389052,
+  "p50_ms": 22.768250666558743,
+  "p90_ms": 26.583360321819782,
+  "p99_ms": 33.16673940047622,
+  "fused_drop_stats": {
+    "drop_failures": 0,
+    "experts_dropped": 83349,
+    "flatness_bypasses": 11834,
+    "residency_unknown": 0,
+    "tokens_changed": 31428,
+    "tokens_seen": 46304,
+    "drops_by_layer": {
+      "0": 11375,
+      "1": 7670,
+      "2": 5456,
+      "3": 3891,
+      "4": 2629,
+      "5": 3573,
+      "6": 4461,
+      "7": 2792,
+      "8": 3491,
+      "9": 3833,
+      "10": 4969,
+      "11": 6437,
+      "12": 6700,
+      "13": 6098,
+      "14": 5604,
+      "15": 4370
+    }
+  }
+}

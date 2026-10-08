@@ -40,6 +40,7 @@ from fixtures_tiny import (  # noqa: E402
 from moe_infinity.distributed.expert_executor import (  # noqa: E402
     DistributedExpertExecutor,
 )
+from moe_infinity.memory.expert_policy import ExpertPhase  # noqa: E402
 from moe_infinity.memory.expert_prefetcher import ExpertPrefetcher  # noqa: E402
 from moe_infinity.spec_decode import (  # noqa: E402
     DFlashSpeculator,
@@ -362,8 +363,9 @@ def test_inactive_context_records_and_changes_nothing():
     # Legacy overlap path byte-identical (A3 gate): pooled prefetch fired...
     prefetcher.fetch_experts_lock_cache.assert_not_called()
     assert prefetcher.speculative_prefetch.call_count == 1
-    args, kwargs = prefetcher.speculative_prefetch.call_args
-    assert args[0] == LAYER_ID and args[1] is LOGITS and not kwargs
+    for call in prefetcher.speculative_prefetch.call_args_list:
+        assert call.args == (LAYER_ID, LOGITS)
+        assert call.kwargs == {"phase": ExpertPhase.MIXED}
     # ...and the stats handle was never consulted.
     assert stats.as_dict() == RouteAheadStats().as_dict()
     assert stats.commit_step(kept_rows=3).layers == 0

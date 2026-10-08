@@ -324,6 +324,13 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       modules_(kNumDevices() * num_threads, nullptr) {
   main_thread_stop_flag_.store(false);
 
+  if (const char* trace_path = std::getenv("MOE_EXPERT_DROP_TRACE")) {
+    if (trace_path[0] != '\0') {
+      expert_drop_trace_path_ = trace_path;
+      expert_drop_trace_enabled_.store(true, std::memory_order_release);
+    }
+  }
+
   admissions_paused_.assign(kNumDevices(), 0);
   pending_by_device_.assign(kNumDevices(), 0);
   active_fetch_workers_.assign(kNumDevices(), 0);
@@ -921,6 +928,31 @@ double ExpertDispatcher::GetCacheHitRate() const {
   }
   std::uint64_t hits = cache_hit_count_.load(std::memory_order_relaxed);
   return static_cast<double>(hits) / static_cast<double>(access);
+}
+
+std::vector<std::uint8_t> ExpertDispatcher::ResidentOnGpu(int layer_idx) const {
+  std::vector<std::uint8_t> residency;
+  if (layer_idx < 0 || experts_.empty()) {
+    return residency;
+  }
+  residency.reserve(static_cast<std::size_t>(num_experts_));
+  for (int expert_idx = 0; expert_idx < num_experts_; ++expert_idx) {
+    if (expert_idx >= static_cast<int>(experts_.size())) {
+      return {};
+    }
+    const auto& expert_list = experts_[expert_idx];
+    if (layer_idx >= static_cast<int>(expert_list.size())) {
+      return {};
+    }
+    const auto& expert_node = expert_list[layer_idx];
+    if (!expert_node || !expert_node->node) {
+      return {};
+    }
+    residency.push_back(
+        expert_node->node->resident_on_gpu.load(std::memory_order_acquire) ? 1
+                                                                           : 0);
+  }
+  return residency;
 }
 
 // void ExpertDispatcher::GPUThreadFunc(int gpu_id) {
@@ -1577,6 +1609,12 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
               args.generation) {
         return true;
       }
+      if (output_tensor.device() != final_hidden_states_.device()) {
+        // Host-staging / overflow fallback can land an expert output on CPU
+        // (out_gpu_id < 0) or on another GPU; co-locate with the accumulator
+        // before combining, else add_ faults on a host/cross-device pointer.
+        output_tensor = output_tensor.to(final_hidden_states_.device());
+      }
       if (batch_size == 1) {
         final_hidden_states_.add_(
             output_tensor *
@@ -1823,6 +1861,20 @@ void ExpertDispatcher::DispatchExperts(int layer_idx) {
     args.layer_idx = layer_idx;
     args.active_flags_host = active_flags_host;
     args.generation = generation;
+    if ((expert_drop_enabled_.load(std::memory_order_acquire) ||
+         expert_drop_trace_enabled_.load(std::memory_order_acquire)) &&
+        router_weight_.defined()) {
+      auto mask_src = router_mask_.to(torch::kBool).contiguous();
+      auto weight_src = router_weight_.to(torch::kFloat32).contiguous();
+      auto router_mask_host =
+          torch::empty(mask_src.sizes(), host_options.dtype(torch::kBool));
+      auto router_weight_host =
+          torch::empty(weight_src.sizes(), host_options.dtype(torch::kFloat32));
+      router_mask_host.copy_(mask_src, true);
+      router_weight_host.copy_(weight_src, true);
+      args.router_mask_host = router_mask_host;
+      args.router_weight_host = router_weight_host;
+    }
     auto callback_args = std::make_unique<RouteCallbackArgs>(
         RouteCallbackArgs{this, std::move(args)});
     pending_route_callbacks_.fetch_add(1, std::memory_order_acq_rel);
@@ -1952,6 +2004,8 @@ void ExpertDispatcher::RouteFunc() noexcept {
     if (failed_generation_.load(std::memory_order_acquire) == args.generation &&
         args.generation != 0) {
       args.active_flags_host = torch::Tensor();
+      args.router_mask_host = torch::Tensor();
+      args.router_weight_host = torch::Tensor();
       continue;
     }
     std::vector<FailureContext> routed_contexts;
@@ -1970,12 +2024,25 @@ void ExpertDispatcher::RouteFunc() noexcept {
       for (int expert_idx = 0; expert_idx < num_experts_; ++expert_idx) {
         if (flags[expert_idx]) active_experts.push_back(expert_idx);
       }
-      pending_.store(active_experts.size(), std::memory_order_release);
+      std::vector<int> dispatch_experts = active_experts;
+      if (expert_drop_trace_enabled_.load(std::memory_order_acquire)) {
+        RecordExpertDropTrace(args);
+      }
+      if (expert_drop_enabled_.load(std::memory_order_acquire) &&
+          args.router_mask_host.defined() &&
+          args.router_weight_host.defined()) {
+        {
+          std::lock_guard<std::mutex> lock(route_state_mutex_);
+          last_routed_experts_ = active_experts;
+        }
+        ApplyFusedExpertDrop(args, dispatch_experts);
+      }
+      pending_.store(dispatch_experts.size(), std::memory_order_release);
       {
         std::lock_guard<std::mutex> lock(route_state_mutex_);
-        last_active_experts_ = active_experts;
+        last_active_experts_ = dispatch_experts;
       }
-      for (int expert_idx : active_experts) {
+      for (int expert_idx : dispatch_experts) {
         int gpu_id = expert_idx % kNumDevices();
         routed_contexts.push_back(FailureContext{
             experts_[expert_idx][args.layer_idx], gpu_id, false, false, false});
@@ -1984,7 +2051,7 @@ void ExpertDispatcher::RouteFunc() noexcept {
       }
       NotifyFetchStart();
       route_batches_.fetch_add(1, std::memory_order_relaxed);
-      last_active_experts_count_.store(active_experts.size(),
+      last_active_experts_count_.store(dispatch_experts.size(),
                                        std::memory_order_relaxed);
       const auto elapsed =
           std::chrono::duration_cast<std::chrono::microseconds>(
@@ -2018,6 +2085,237 @@ void ExpertDispatcher::SetDispatchFaultForTest(const std::string& stage) {
 std::vector<int> ExpertDispatcher::TakeLastActiveExperts() {
   std::lock_guard<std::mutex> lock(route_state_mutex_);
   return last_active_experts_;
+}
+
+std::vector<int> ExpertDispatcher::TakeLastRoutedExperts() {
+  std::lock_guard<std::mutex> lock(route_state_mutex_);
+  return last_routed_experts_;
+}
+
+void ExpertDispatcher::SetExpertDropPolicy(
+    bool enabled, int min_k, double mass_budget, double flatness_floor,
+    double head_budget, double adaptive_slope, int adaptive_miss0) {
+  {
+    std::lock_guard<std::mutex> lock(route_state_mutex_);
+    expert_drop_params_.min_k = min_k;
+    expert_drop_params_.mass_budget = mass_budget;
+    expert_drop_params_.flatness_floor = flatness_floor;
+    expert_drop_params_.head_budget = head_budget;
+    expert_drop_params_.adaptive_slope = adaptive_slope;
+    expert_drop_params_.adaptive_miss0 = adaptive_miss0;
+  }
+  expert_drop_enabled_.store(enabled, std::memory_order_release);
+}
+
+std::map<std::string, std::int64_t> ExpertDispatcher::GetFusedDropStats()
+    const {
+  return {
+      {"tokens_seen", drop_tokens_seen_.load(std::memory_order_relaxed)},
+      {"tokens_changed", drop_tokens_changed_.load(std::memory_order_relaxed)},
+      {"experts_dropped",
+       drop_experts_dropped_.load(std::memory_order_relaxed)},
+      {"flatness_bypasses",
+       drop_flatness_bypasses_.load(std::memory_order_relaxed)},
+      {"residency_unknown",
+       drop_residency_unknown_.load(std::memory_order_relaxed)},
+      {"drop_failures", drop_failures_.load(std::memory_order_relaxed)},
+  };
+}
+
+std::map<int, std::int64_t> ExpertDispatcher::GetFusedDropStatsByLayer() const {
+  std::lock_guard<std::mutex> lock(route_state_mutex_);
+  return drop_by_layer_;
+}
+
+void ExpertDispatcher::ApplyFusedExpertDrop(
+    const RouteArgs& args, std::vector<int>& dispatch_experts) noexcept {
+  try {
+    moe::ExpertDropParams params;
+    {
+      std::lock_guard<std::mutex> lock(route_state_mutex_);
+      params = expert_drop_params_;
+    }
+    const int layer_idx = args.layer_idx;
+    expert_drop_resident_.assign(static_cast<std::size_t>(num_experts_), 0);
+    bool residency_known = !experts_.empty() && layer_idx >= 0;
+    for (int e = 0; residency_known && e < num_experts_; ++e) {
+      if (e >= static_cast<int>(experts_.size()) ||
+          layer_idx >= static_cast<int>(experts_[e].size()) ||
+          !experts_[e][layer_idx] || !experts_[e][layer_idx]->node) {
+        residency_known = false;
+        break;
+      }
+      expert_drop_resident_[e] =
+          experts_[e][layer_idx]->node->resident_on_gpu.load(
+              std::memory_order_acquire)
+              ? 1
+              : 0;
+    }
+    if (!residency_known) {
+      // Fail open: without a residency snapshot the selector could drop a
+      // cache-hit expert, so keep the PRE-drop set untouched.
+      drop_residency_unknown_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    TORCH_CHECK(
+        args.router_mask_host.dim() == 2 &&
+            args.router_mask_host.size(1) == num_experts_ &&
+            args.router_weight_host.sizes() == args.router_mask_host.sizes(),
+        "fused expert drop: staged routing tensors have unexpected shape");
+    const int rows = static_cast<int>(args.router_mask_host.size(0));
+    // torch kBool is one byte per element, so the pinned staging buffers are
+    // reused directly as the selector's in-place uint8 mask/float32 weights.
+    auto* mask = static_cast<std::uint8_t*>(args.router_mask_host.data_ptr());
+    auto* weights = args.router_weight_host.data_ptr<float>();
+    const moe::ExpertDropCounts counts = moe::SelectExpertDrops(
+        rows, num_experts_, weights, mask, expert_drop_resident_.data(), params,
+        &expert_drop_scratch_);
+    drop_tokens_seen_.fetch_add(counts.tokens_seen, std::memory_order_relaxed);
+    drop_flatness_bypasses_.fetch_add(counts.flatness_bypasses,
+                                      std::memory_order_relaxed);
+    if (counts.experts_dropped == 0) return;
+    {
+      // Task 1 decision note (a'): one synchronous tiny H2D. When copy_
+      // returns, the corrected weights are globally visible, and every
+      // survivor kernel is launched by exec work enqueued strictly after
+      // this point on this thread, so no event ordering is needed.
+      c10::cuda::CUDAGuard device_guard(router_weight_.device());
+      router_weight_.copy_(args.router_weight_host, /*non_blocking=*/false);
+    }
+    std::vector<int> survivors;
+    survivors.reserve(dispatch_experts.size());
+    for (int expert_idx : dispatch_experts) {
+      bool active = false;
+      for (int r = 0; r < rows; ++r) {
+        if (mask[static_cast<std::size_t>(r) * num_experts_ + expert_idx]) {
+          active = true;
+          break;
+        }
+      }
+      if (active) survivors.push_back(expert_idx);
+    }
+    drop_tokens_changed_.fetch_add(counts.tokens_changed,
+                                   std::memory_order_relaxed);
+    drop_experts_dropped_.fetch_add(counts.experts_dropped,
+                                    std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lock(route_state_mutex_);
+      drop_by_layer_[layer_idx] += counts.experts_dropped;
+    }
+    dispatch_experts = std::move(survivors);
+  } catch (...) {
+    // Fail open: enqueue the PRE-drop set, exactly today's behavior. A
+    // partially applied write-back is still correct because dropped experts
+    // then execute with weight zero and survivors stay renormalized.
+    drop_failures_.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void ExpertDispatcher::RecordExpertDropTrace(const RouteArgs& args) {
+  if (!expert_drop_trace_enabled_.load(std::memory_order_acquire)) return;
+  try {
+    if (!args.router_mask_host.defined() || !args.router_weight_host.defined())
+      return;
+    const int layer_idx = args.layer_idx;
+    if (layer_idx < 0) return;
+    if (args.router_mask_host.dim() != 2 ||
+        args.router_mask_host.size(1) != num_experts_ ||
+        args.router_weight_host.sizes() != args.router_mask_host.sizes())
+      return;
+    const int rows = static_cast<int>(args.router_mask_host.size(0));
+    // Residency snapshot at dispatch (same lock-free atomic reads as the
+    // fused selector). residency_known == 0 marks records the offline parser
+    // must discard, since a zeroed bitmap would look like an all-miss layer.
+    std::vector<std::uint8_t> resident(static_cast<std::size_t>(num_experts_),
+                                       0);
+    bool residency_known = !experts_.empty();
+    for (int e = 0; residency_known && e < num_experts_; ++e) {
+      if (e >= static_cast<int>(experts_.size()) ||
+          layer_idx >= static_cast<int>(experts_[e].size()) ||
+          !experts_[e][layer_idx] || !experts_[e][layer_idx]->node) {
+        residency_known = false;
+        break;
+      }
+      resident[e] = experts_[e][layer_idx]->node->resident_on_gpu.load(
+                        std::memory_order_acquire)
+                        ? 1
+                        : 0;
+    }
+    const auto* weights = args.router_weight_host.data_ptr<float>();
+    const auto* mask =
+        static_cast<const std::uint8_t*>(args.router_mask_host.data_ptr());
+    const std::size_t cells =
+        static_cast<std::size_t>(rows) * static_cast<std::size_t>(num_experts_);
+    std::lock_guard<std::mutex> lock(expert_drop_trace_mutex_);
+    std::string& buf = expert_drop_trace_buffer_;
+    const std::int64_t seq = expert_drop_trace_seq_++;
+    const std::int32_t layer32 = layer_idx;
+    const std::int32_t rows32 = rows;
+    const std::uint8_t residency_flag = residency_known ? 1 : 0;
+    buf.append(reinterpret_cast<const char*>(&seq), sizeof(seq));
+    buf.append(reinterpret_cast<const char*>(&layer32), sizeof(layer32));
+    buf.append(reinterpret_cast<const char*>(&rows32), sizeof(rows32));
+    buf.append(reinterpret_cast<const char*>(&residency_flag),
+               sizeof(residency_flag));
+    buf.append(reinterpret_cast<const char*>(weights), sizeof(float) * cells);
+    buf.append(reinterpret_cast<const char*>(mask),
+               sizeof(std::uint8_t) * cells);
+    buf.append(reinterpret_cast<const char*>(resident.data()),
+               sizeof(std::uint8_t) * static_cast<std::size_t>(num_experts_));
+  } catch (...) {
+    // Tracing must never perturb dispatch correctness.
+  }
+}
+
+void ExpertDispatcher::DumpExpertDropTrace(const std::string& path) {
+  const std::string out_path = path.empty() ? expert_drop_trace_path_ : path;
+  if (out_path.empty()) return;
+  int num_layers = 0;
+  if (!experts_.empty() && !experts_.front().empty())
+    num_layers = static_cast<int>(experts_.front().size());
+  std::lock_guard<std::mutex> lock(expert_drop_trace_mutex_);
+  std::ofstream os(out_path, std::ios::binary | std::ios::trunc);
+  if (!os) return;
+  const char magic[8] = {'M', 'O', 'E', 'D', 'R', 'O', 'P', 'T'};
+  const std::int32_t version = 1;
+  const std::int32_t ne = num_experts_;
+  const std::int32_t nl = num_layers;
+  const std::int32_t reserved = 0;
+  const std::int64_t nrec = expert_drop_trace_seq_;
+  os.write(magic, sizeof(magic));
+  os.write(reinterpret_cast<const char*>(&version), sizeof(version));
+  os.write(reinterpret_cast<const char*>(&ne), sizeof(ne));
+  os.write(reinterpret_cast<const char*>(&nl), sizeof(nl));
+  os.write(reinterpret_cast<const char*>(&reserved), sizeof(reserved));
+  os.write(reinterpret_cast<const char*>(&nrec), sizeof(nrec));
+  // Per-(layer, expert) fetch size in bytes, written once (static per node).
+  for (int l = 0; l < num_layers; ++l) {
+    for (int e = 0; e < num_experts_; ++e) {
+      std::int64_t bytes = 0;
+      if (e < static_cast<int>(experts_.size()) &&
+          l < static_cast<int>(experts_[e].size()) && experts_[e][l] &&
+          experts_[e][l]->node)
+        bytes = experts_[e][l]->node->byte_size;
+      os.write(reinterpret_cast<const char*>(&bytes), sizeof(bytes));
+    }
+  }
+  os.write(expert_drop_trace_buffer_.data(),
+           static_cast<std::streamsize>(expert_drop_trace_buffer_.size()));
+  os.flush();
+  expert_drop_trace_dumped_ = true;
+}
+
+void ExpertDispatcher::FlushExpertDropTrace() noexcept {
+  try {
+    if (!expert_drop_trace_enabled_.load(std::memory_order_acquire)) return;
+    bool already = false;
+    {
+      std::lock_guard<std::mutex> lock(expert_drop_trace_mutex_);
+      already = expert_drop_trace_dumped_;
+    }
+    if (!already) DumpExpertDropTrace(std::string());
+  } catch (...) {
+  }
 }
 
 std::map<std::string, std::int64_t> ExpertDispatcher::GetRoutingStats() const {

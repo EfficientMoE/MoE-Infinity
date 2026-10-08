@@ -31,6 +31,10 @@ from moe_store.wrappers import (
     SyncQwen3_5MoeSparseMoeBlock,
 )
 
+from moe_infinity.kernel.minimax_m3_sparse_attention import (
+    make_minimax_m3_indexer_forward,
+)
+
 try:
     from moe_store.wrappers import OlmoePagedAttention
 except ImportError:
@@ -119,6 +123,14 @@ def install_transformers_model_overrides() -> None:
         minimax_m3 = _model_module("minimax_m3_vl")
         minimax_m3._old_minimax_m3_vl_moe = minimax_m3.MiniMaxM3VLSparseMoeBlock
         minimax_m3.MiniMaxM3VLSparseMoeBlock = SyncMiniMaxM3VLSparseMoeBlock
+        minimax_m3._old_minimax_m3_vl_attention_forward = (
+            minimax_m3.MiniMaxM3VLAttention.forward
+        )
+        minimax_m3.MiniMaxM3VLAttention.forward = (
+            make_minimax_m3_indexer_forward(
+                minimax_m3._old_minimax_m3_vl_attention_forward
+            )
+        )
     except (ImportError, AttributeError):
         pass
 
@@ -205,3 +217,12 @@ def restore_runtime_transformers_model_overrides() -> None:
     qwen3_5 = _model_module("qwen3_5_moe")
     if hasattr(qwen3_5, "_old_qwen3_5_sparse_moe"):
         qwen3_5.Qwen3_5MoeSparseMoeBlock = qwen3_5._old_qwen3_5_sparse_moe
+
+    try:
+        minimax_m3 = _model_module("minimax_m3_vl")
+        if hasattr(minimax_m3, "_old_minimax_m3_vl_attention_forward"):
+            minimax_m3.MiniMaxM3VLAttention.forward = (
+                minimax_m3._old_minimax_m3_vl_attention_forward
+            )
+    except (ImportError, AttributeError):
+        pass

@@ -2255,6 +2255,11 @@ class ContinuousBatchingEngine:
     ) -> None:
         if self.prefix_cache is None or self.cache_namespace is None:
             return
+        # Mirror the scheduler lookup bypass: the cache keys on prompt token
+        # ids only, so publishing a multimodal prefix would let a later text
+        # request reuse KV computed from pixels. Skip insert for multimodal.
+        if sequence.multimodal_inputs is not None:
+            return
         committed = sequence.committed_kv_tokens
         if committed <= 0 or committed > sequence.prompt_length:
             committed = min(committed, sequence.prompt_length)
