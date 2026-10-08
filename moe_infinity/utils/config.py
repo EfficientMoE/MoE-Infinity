@@ -90,6 +90,12 @@ class ArcherConfig:
             "help": "Enable experimental batch-one DeepSeek V2/V3 MLA paging. Default False."
         },
     )
+    enable_minimax_m3_indexer_kernel: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable MiniMax-M3 Lightning Indexer block-sparse attention kernel on the HuggingFace path. Default False; the eager path is the correctness reference."
+        },
+    )
     max_resident_paged_speculative_sessions: int = field(
         default=1,
         metadata={
