@@ -1156,6 +1156,11 @@ def _normalize_multimodal_messages(messages: Any) -> tuple[Any, bool]:
         normalized_content: list[Any] = []
         for raw_part in content:
             if (
+                isinstance(raw_part, dict)
+                and raw_part.get("type") == "video_url"
+            ):
+                raise _MultimodalInputError("video input is not supported")
+            if (
                 not isinstance(raw_part, dict)
                 or raw_part.get("type") != "image_url"
             ):
