@@ -25,7 +25,8 @@ a claim that any particular DeepSeek DFlash pair has been validated.
 | DeepSeek-V3 (`DeepseekV3ForCausalLM`) | implemented/experimental | implemented/experimental | Routing and paged-attention parity evidence. |
 | DeepSeek-V4 (`DeepseekV4ForCausalLM`) | validated official mp4 path | not validated | DFlash unsupported; mp1 not covered. |
 | Mixtral (`MixtralForCausalLM`) | implemented/experimental | implemented/experimental | No real-model serving harness recorded. |
-| Qwen3 / Qwen3.5 MoE | Qwen3 validated; Qwen3.5 tiny-fixture validated | implemented/experimental | Qwen3.5 is text-only and requires newer Transformers. |
+| Qwen3 / Qwen3.5 MoE | Qwen3 validated; Qwen3.5 tiny-fixture validated | implemented/experimental | Qwen3.5 keeps the `visual.*` vision tower resident; MTP unused; requires newer Transformers. |
+| MiniMax-M3 (`minimax_m3_vl`) | implemented/experimental | not recorded | BF16, eager attention, native engine off; 128 routed experts offloaded; MiniMax Community License; no real-checkpoint evidence yet. |
 | GLM-5.2 (`GlmMoeDsaForCausalLM`) | validated | tiny serving harness | Built-in MTP, not DFlash. |
 | GLM-5.3 (`GlmMoeDsaForCausalLM`) | implemented/experimental | not recorded | Same base and FP8 path as GLM-5.2 (post-training only); config resolution pinned by `tests/python/unit/test_glm53_registry.py`. |
 | GLM-5.3-Flash (`Glm5NextForConditionalGeneration`) | implemented/experimental | not recorded | New glm5_next family (transformers >= 5.16, guarded); routed experts offloaded, KDA/DSA/mHC/vision resident; no real-checkpoint harness yet. |
@@ -83,12 +84,26 @@ sampling, rich batching, or paged-cache support from an adjacent capability.
 ### Qwen3.5-MoE
 
 `Qwen3_5MoeForConditionalGeneration` (requires `transformers` >= 5.12) is a
-vision-language checkpoint served text-only. Its 256 routed experts are
-offloaded while the text backbone, token embeddings, hybrid linear and full
-attention layers, shared expert, and `lm_head` stay resident on GPU. The v5
-packed expert tensors expand to per-expert on load; vision and MTP weights are
-present but unused for text generation. A `device_memory_ratio` near `0.5` is a
+vision-language checkpoint. Its 256 routed experts are offloaded while the
+text backbone, token embeddings, hybrid linear and full attention layers,
+shared expert, vision tower (`visual.*`), and `lm_head` stay resident on GPU.
+The v5 packed expert tensors expand to per-expert on load; the `visual.*`
+weights stay resident so image prompts are supported, while MTP weights remain
+present but unused for generation. A `device_memory_ratio` near `0.5` is a
 reasonable starting point.
+
+### MiniMax-M3
+
+MiniMax-M3 (`minimax_m3_vl`) is a vision-language MoE served in BF16 with
+eager attention and the native engine off (`use_native_engine=False`): its
+block-sparse Lightning Indexer attention has no native paged backend yet, so
+it runs through HuggingFace's eager path. The 128 routed experts per MoE layer
+are offloaded, while the text backbone, shared expert, vision tower
+(`model.vision_tower.*`), and multimodal projector stay resident. The
+checkpoint is distributed under the MiniMax Community License. This is initial
+support with no real-checkpoint evidence yet; there is no MXFP8 store and no
+Lightning Indexer kernel claim. Record `torch.cuda.max_memory_allocated()` per
+visible GPU on the first successful load to pick a memory ceiling.
 
 ## Synthetic FP8 expert stores
 

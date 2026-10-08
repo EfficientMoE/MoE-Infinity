@@ -1,0 +1,122 @@
+[
+  {
+    "id": "m3-001",
+    "image": "tests/fixtures/vl/images/m3-001.jpg",
+    "prompt": "What animal is shown?",
+    "keyword": "cat"
+  },
+  {
+    "id": "m3-002",
+    "image": "tests/fixtures/vl/images/m3-002.jpg",
+    "prompt": "What animal is shown?",
+    "keyword": "dog"
+  },
+  {
+    "id": "m3-003",
+    "image": "tests/fixtures/vl/images/m3-003.jpg",
+    "prompt": "What color is the car?",
+    "keyword": "red"
+  },
+  {
+    "id": "m3-004",
+    "image": "tests/fixtures/vl/images/m3-004.jpg",
+    "prompt": "How many people are visible?",
+    "keyword": "three"
+  },
+  {
+    "id": "m3-005",
+    "image": "tests/fixtures/vl/images/m3-005.jpg",
+    "prompt": "What fruit is on the table?",
+    "keyword": "apple"
+  },
+  {
+    "id": "m3-006",
+    "image": "tests/fixtures/vl/images/m3-006.jpg",
+    "prompt": "What is the weather like?",
+    "keyword": "rain"
+  },
+  {
+    "id": "m3-007",
+    "image": "tests/fixtures/vl/images/m3-007.jpg",
+    "prompt": "What vehicle is in the image?",
+    "keyword": "bus"
+  },
+  {
+    "id": "m3-008",
+    "image": "tests/fixtures/vl/images/m3-008.jpg",
+    "prompt": "What is the person holding?",
+    "keyword": "umbrella"
+  },
+  {
+    "id": "m3-009",
+    "image": "tests/fixtures/vl/images/m3-009.jpg",
+    "prompt": "What time of day is it?",
+    "keyword": "night"
+  },
+  {
+    "id": "m3-010",
+    "image": "tests/fixtures/vl/images/m3-010.jpg",
+    "prompt": "What sport is being played?",
+    "keyword": "soccer"
+  },
+  {
+    "id": "m3-011",
+    "image": "tests/fixtures/vl/images/m3-011.jpg",
+    "prompt": "What is written on the sign?",
+    "keyword": "stop"
+  },
+  {
+    "id": "m3-012",
+    "image": "tests/fixtures/vl/images/m3-012.jpg",
+    "prompt": "What kind of building is shown?",
+    "keyword": "church"
+  },
+  {
+    "id": "m3-013",
+    "image": "tests/fixtures/vl/images/m3-013.jpg",
+    "prompt": "What is the main object?",
+    "keyword": "clock"
+  },
+  {
+    "id": "m3-014",
+    "image": "tests/fixtures/vl/images/m3-014.jpg",
+    "prompt": "What musical instrument is shown?",
+    "keyword": "piano"
+  },
+  {
+    "id": "m3-015",
+    "image": "tests/fixtures/vl/images/m3-015.jpg",
+    "prompt": "What is flying in the sky?",
+    "keyword": "kite"
+  },
+  {
+    "id": "m3-016",
+    "image": "tests/fixtures/vl/images/m3-016.jpg",
+    "prompt": "What is on the plate?",
+    "keyword": "pizza"
+  },
+  {
+    "id": "m3-017",
+    "image": "tests/fixtures/vl/images/m3-017.jpg",
+    "prompt": "What is the dominant color?",
+    "keyword": "blue"
+  },
+  {
+    "id": "m3-018",
+    "image": "tests/fixtures/vl/images/m3-018.jpg",
+    "prompt": "What animal is in the water?",
+    "keyword": "fish"
+  },
+  {
+    "id": "m3-019",
+    "image": "tests/fixtures/vl/images/m3-019.jpg",
+    "prompt": "How many wheels does it have?",
+    "keyword": "two"
+  },
+  {
+    "id": "m3-020",
+    "image": "tests/fixtures/vl/images/m3-020.jpg",
+    "prompt": "What is the child riding?",
+    "keyword": "bike"
+  }
+]
