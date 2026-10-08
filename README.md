@@ -158,6 +158,8 @@ conda install -c conda-forge libstdcxx-ng=12 # with conda; otherwise install lib
 MOE_ENABLE_SM120=1 MOE_ENABLE_SM90=0 CUTLASS_DIR=~/cutlass pip install --no-build-isolation -e .
 ```
 
+> **SM120 + PyTorch version:** pin **`torch==2.12.*`** for Blackwell / `sm_120` source builds. Building the fused MoE FFN path against torch >= 2.13 can raise `fused_moe_ffn_into GEMM0: Error Internal` at runtime on `sm_120` (see [#245](https://github.com/EfficientMoE/MoE-Infinity/issues/245)). This is an interim pin until the fused path is validated on newer torch; `setup.py` prints a warning when it detects an SM120 build against torch >= 2.13.
+
 ### Enable FlashAttention (Optional)
 
 FlashAttention is **not** installed by default. Install it (>=2.5.2) if you want the FlashAttention path:
