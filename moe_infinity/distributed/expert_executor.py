@@ -794,25 +794,25 @@ class DistributedExpertExecutor:
             and prefetcher is not None
             and router_logits is not None
         ):
-            generation = self.trigger_speculative_prefetch(
-                layer_id, router_logits
-            )
+            # Single phase-aware issuance (#253). The generation is tracked
+            # only while an overlap policy is active; the failure-safe variant
+            # guards the route-ahead-attempted path.
+            if route_ahead_attempted:
+                try:
+                    generation = self.trigger_speculative_prefetch(
+                        layer_id, router_logits, phase
+                    )
+                except Exception:
+                    generation = None
+            else:
+                generation = self.trigger_speculative_prefetch(
+                    layer_id, router_logits, phase
+                )
             if (
                 self._overlap_policy_active(prefetcher)
                 and generation is not None
             ):
                 generations.append(generation)
-            if route_ahead_attempted:
-                try:
-                    self.trigger_speculative_prefetch(
-                        layer_id, router_logits, phase
-                    )
-                except Exception:
-                    pass
-            else:
-                self.trigger_speculative_prefetch(
-                    layer_id, router_logits, phase
-                )
             pending_router_logits = None
         else:
             pending_router_logits = router_logits

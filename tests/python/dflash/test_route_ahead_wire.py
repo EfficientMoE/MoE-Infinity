@@ -196,6 +196,7 @@ def test_active_context_prefetches_exact_union_for_current_layer():
         ExpertPhase.MIXED,
         [],
         None,
+        None,
     )
 
 
@@ -221,6 +222,7 @@ def test_active_context_falls_back_to_executor_prefetcher():
         None,
         ExpertPhase.MIXED,
         [],
+        None,
         None,
     )
 
@@ -296,11 +298,11 @@ def test_inactive_context_overlap_path_byte_identical():
     _dispatch(executor, router_logits=LOGITS)
 
     prefetcher.fetch_experts_lock_cache.assert_not_called()
-    assert prefetcher.speculative_prefetch.call_count == 2
+    assert prefetcher.speculative_prefetch.call_count == 1
     for call in prefetcher.speculative_prefetch.call_args_list:
         assert call.args == (LAYER_ID, LOGITS)
         assert call.kwargs == {"phase": ExpertPhase.MIXED}
-    assert trigger_spy.call_count == 2
+    assert trigger_spy.call_count == 1
     assert executor._pending_prefetch == (
         prefetcher,
         LAYER_ID,
@@ -308,6 +310,7 @@ def test_inactive_context_overlap_path_byte_identical():
         None,
         ExpertPhase.MIXED,
         [],
+        None,
         None,
     )
 
