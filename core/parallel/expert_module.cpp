@@ -199,8 +199,8 @@ void MoEMLP::DequantMxfp4Params(cudaStream_t stream) {
   int device = at::cuda::current_device();
   gpt_oss_param_.clear();
   for (auto pair : {std::pair<int, int>{0, 1}, {3, 4}}) {
-    auto packed = param_[pair.first].contiguous();
-    auto scales = param_[pair.second].contiguous();
+    auto packed = param_[pair.first].to(CUDA_DEVICE(device)).contiguous();
+    auto scales = param_[pair.second].to(CUDA_DEVICE(device)).contiguous();
     DLOG_FATAL_IF(packed.scalar_type() != torch::kUInt8 ||
                       scales.scalar_type() != torch::kUInt8,
                   "GPT-OSS MXFP4 blocks/scales must be uint8");
@@ -216,8 +216,9 @@ void MoEMLP::DequantMxfp4Params(cudaStream_t stream) {
                        rows, packed_cols, scale_cols, block_size, stream);
     gpt_oss_param_.push_back(output);
   }
-  gpt_oss_param_.insert(gpt_oss_param_.begin() + 1, param_[2]);
-  gpt_oss_param_.push_back(param_[5]);
+  gpt_oss_param_.insert(gpt_oss_param_.begin() + 1,
+                        param_[2].to(CUDA_DEVICE(device)));
+  gpt_oss_param_.push_back(param_[5].to(CUDA_DEVICE(device)));
 }
 
 torch::Tensor MoEMLP::forward(torch::Tensor hidden_states, cudaStream_t stream,
