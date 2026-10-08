@@ -2,6 +2,11 @@
 
 from .batch import BatchBuilder, BatchMetadata, SchedulerOutput
 from .engine import ContinuousBatchingEngine, RequestOutput
+from .factory import (
+    build_serving_config,
+    create_serving_engine,
+    generate_tokens,
+)
 from .kv_cache import BlockAllocator, BlockTable, PagedKVCache
 from .mla_cache import MLAPagedKVCache
 from .sampler import Sampler
@@ -24,6 +29,9 @@ __all__ = [
     "BlockAllocator",
     "BlockTable",
     "ContinuousBatchingEngine",
+    "build_serving_config",
+    "create_serving_engine",
+    "generate_tokens",
     "PagedKVCache",
     "MLAPagedKVCache",
     "RequestOutput",
