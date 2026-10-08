@@ -563,7 +563,12 @@ def _has_fp8_blockwise(config: object) -> bool:
         method = qcfg.get("quant_method", "") or qcfg.get("fmt", "")
     else:
         method = getattr(qcfg, "quant_method", "") or getattr(qcfg, "fmt", "")
-    return "fp8" in str(method).lower()
+    method = str(method).lower()
+    # MXFP8 ([1,32] E8M0 microscaling, #221 phase 5) is not 128x128 blockwise
+    # FP8; exclude it explicitly since "mxfp8" contains the substring "fp8".
+    if "mxfp8" in method:
+        return False
+    return "fp8" in method
 
 
 def _compute_config_fingerprint(config: object) -> str:
