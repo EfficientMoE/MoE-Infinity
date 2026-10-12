@@ -437,7 +437,9 @@ if cuda_available:
             _v4fp4_arch_flags = ["-gencode=arch=compute_120a,code=sm_120a"]
         else:
             _v4fp4_arch_flags = [
-                f.replace("compute_120,code=sm_120", "compute_120a,code=sm_120a")
+                f.replace(
+                    "compute_120,code=sm_120", "compute_120a,code=sm_120a"
+                )
                 for f in _v4fp4_arch_flags
             ]
         ext_modules.append(
