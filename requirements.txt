@@ -3,6 +3,7 @@ chardet
 datasets>=2.12.0
 fastapi
 hjson
+httpx
 moe-store~=0.2.2
 ninja
 numpy
