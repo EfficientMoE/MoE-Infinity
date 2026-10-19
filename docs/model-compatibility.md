@@ -98,8 +98,14 @@ full-attention layers, so the paged KV cache holds one plane per
 full-attention layer (`layer_types == "full_attention"`) instead of one per
 decoder layer. The Gated DeltaNet linear-attention layers and the vision tower
 keep their HuggingFace classes. Their conv and recurrent state is kept per
-sequence by the serving runner (`serving/linear_attention_state.py`), at about
-two state snapshots per running sequence. A cached KV prefix carries no
+sequence by the serving runner (`serving/linear_attention_state.py`): at most
+two snapshots per running sequence stay on the GPU, reserved from the serving
+memory budget for `max_batch_size` sequences. State moves to host memory while
+a sequence's KV is swapped out, and is released when the sequence finishes,
+is aborted, or is reset for recompute. Image and video prompts get
+HuggingFace's M-RoPE positions (`get_rope_index`) at prefill, and every later
+decode step applies the per-sequence rope delta, matching `generate`
+(`boundary/qwen3_5_moe_mrope.py`). A cached KV prefix carries no
 linear-attention state, so prefix reuse
 (`hybrid-linear-attention-state-unsupported`) and chunked prefill
 (`hybrid_linear_attention_state_unsupported`) stay disabled for this family.

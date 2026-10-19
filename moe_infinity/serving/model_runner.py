@@ -7,13 +7,25 @@ import math
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Optional,
+    Protocol,
+    cast,
+    runtime_checkable,
+)
 
 import torch
 
 from moe_infinity.boundary.hybrid_attention_layout import (
     linear_attention_layer_indices,
     paged_kv_layer_indices,
+)
+from moe_infinity.boundary.qwen3_5_moe_mrope import (
+    has_vision_grid,
+    mrope_prompt_positions,
+    supports_mrope_positions,
 )
 from moe_infinity.memory.expert_policy import (
     ExpertPhase,
@@ -131,6 +143,8 @@ class ModelRunner:
         self._warned_no_paged_shim = False
         self._linear_attention_state: LinearAttentionStateCache | None = None
         self._linear_attention_state_resolved = False
+        # Per-sequence M-RoPE offset of decode positions (VL Qwen3.5 only).
+        self._mrope_deltas: dict[int, int] = {}
         if kv_store is not None or attention_backend is not None:
             self._validate_store_identity(kv_store, attention_backend, owner_id)
 
@@ -470,13 +484,45 @@ class ModelRunner:
             and self._get_attention_backend() is not None
         )
 
-    def retain_linear_attention_state(
-        self, live_seq_ids: Iterable[int]
-    ) -> None:
-        """Drop linear-attention state of sequences that are no longer live."""
+    def sequence_state_ids(self) -> set[int]:
+        """Sequences holding runner-side state (recurrent state, M-RoPE)."""
+        state = self._linear_attention_state
+        ids = set(self._mrope_deltas)
+        if state is not None:
+            ids |= state.seq_ids()
+        return ids
+
+    def release_sequence_state(self, seq_ids: Iterable[int]) -> None:
+        """Drop runner-side state of finished, aborted or reset sequences."""
+        seq_ids = list(seq_ids)
         state = self._linear_attention_state
         if state is not None:
-            state.retain(live_seq_ids)
+            state.release(seq_ids)
+        for seq_id in seq_ids:
+            self._mrope_deltas.pop(seq_id, None)
+
+    def offload_sequence_state(self, seq_ids: Iterable[int]) -> None:
+        """Move recurrent state to host memory while KV is swapped out."""
+        state = self._linear_attention_state
+        if state is not None:
+            state.offload(seq_ids)
+
+    def clear_sequence_state(self) -> None:
+        state = self._linear_attention_state
+        if state is not None:
+            state.clear()
+        self._mrope_deltas.clear()
+
+    def sequence_state_reserve_bytes(self, max_sequences: int) -> int:
+        """Device bytes to reserve for ``max_sequences`` running sequences."""
+        config = getattr(self.model, "config", None)
+        dtype = getattr(self.model, "dtype", torch.float32)
+        if not isinstance(dtype, torch.dtype):
+            dtype = torch.float32
+        per_sequence = LinearAttentionStateCache.bytes_per_sequence(
+            config, dtype
+        )
+        return max(0, int(max_sequences)) * per_sequence
 
     @staticmethod
     def _linear_attention_row_groups(batch: BatchMetadata) -> list[list[int]]:
@@ -521,13 +567,22 @@ class ModelRunner:
         self, batch: BatchMetadata, state: LinearAttentionStateCache
     ) -> torch.Tensor:
         fresh = all(context == 0 for context in batch.context_lengths)
-        cache = state.build_cache(batch.seq_ids, batch.context_lengths)
+        cache = state.build_cache(
+            batch.seq_ids, batch.context_lengths, device=self.device
+        )
         model_inputs = self.prepare_inputs(batch, left_pad=fresh)
+        mrope_positions, mrope_deltas = self._mrope_position_ids(
+            batch, model_inputs
+        )
         forward_kwargs: dict[str, object] = {
             **model_inputs,
             "use_cache": True,
             "past_key_values": cache,
         }
+        if mrope_positions is not None:
+            # The token types only feed HF's own position derivation.
+            forward_kwargs["position_ids"] = mrope_positions
+            forward_kwargs.pop("mm_token_type_ids", None)
         with expert_phase_scope(self._expert_phase(batch)):
             outputs = self._forward_with_optional_paged_context(
                 forward_kwargs,
@@ -538,7 +593,58 @@ class ModelRunner:
         state.commit(
             batch.seq_ids, batch.context_lengths, batch.query_lengths, cache
         )
+        for seq_id, delta in mrope_deltas.items():
+            if delta:
+                self._mrope_deltas[seq_id] = delta
+            else:
+                self._mrope_deltas.pop(seq_id, None)
         return logits
+
+    def _mrope_position_ids(
+        self, batch: BatchMetadata, model_inputs: dict[str, Any]
+    ) -> tuple[torch.Tensor | None, dict[int, int]]:
+        """Build HF's ``[4, batch, seq]`` M-RoPE positions for VL Qwen3.5.
+
+        Row 0 is the text position (as ``prepare_inputs`` laid it out, with
+        either padding side); rows 1-3 are the temporal/height/width rotary
+        positions. Image/video prompts get ``get_rope_index`` positions and
+        a per-sequence delta that offsets every later decode position, the
+        same way ``generate`` applies ``rope_deltas``. Returns ``None`` when
+        no row needs M-RoPE, leaving text-only batches unchanged.
+        """
+        deltas: dict[int, int] = {}
+        if not supports_mrope_positions(self.model):
+            return None, deltas
+        text_positions = model_inputs["position_ids"]
+        token_mask = model_inputs["attention_mask"].to(torch.bool)
+        rotary = text_positions.unsqueeze(0).repeat(3, 1, 1)
+        row_inputs = batch.row_multimodal_inputs
+        needs_mrope = False
+        for row, seq_id in enumerate(batch.seq_ids):
+            if batch.context_lengths[row] == 0:
+                inputs = row_inputs[row] if row_inputs else None
+                deltas[seq_id] = 0
+                if not has_vision_grid(inputs):
+                    continue
+                start = batch.query_offsets[row]
+                end = batch.query_offsets[row + 1]
+                positions, delta = mrope_prompt_positions(
+                    self.model,
+                    batch.input_token_ids[start:end],
+                    cast(dict[str, Any], inputs),
+                    device=text_positions.device,
+                )
+                rotary[:, row, token_mask[row]] = positions.to(rotary.dtype)
+                deltas[seq_id] = delta
+                needs_mrope = True
+            else:
+                delta = self._mrope_deltas.get(seq_id, 0)
+                if delta:
+                    rotary[:, row, token_mask[row]] += delta
+                    needs_mrope = True
+        if not needs_mrope:
+            return None, deltas
+        return torch.cat([text_positions.unsqueeze(0), rotary], dim=0), deltas
 
     def _forward_with_optional_paged_context(
         self,

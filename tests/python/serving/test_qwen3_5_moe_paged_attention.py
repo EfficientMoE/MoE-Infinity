@@ -32,7 +32,11 @@ from moe_infinity.boundary.qwen3_5_moe_paged_attention import (
 )
 from moe_infinity.runtime.attention_backend import PagedAttentionBackend
 from moe_infinity.runtime.attention_types import KVCacheSpec
-from moe_infinity.serving.batch import BatchMetadata
+from moe_infinity.serving.batch import (
+    BatchBuilder,
+    BatchMetadata,
+    _slice_batch,
+)
 from moe_infinity.serving.engine import ContinuousBatchingEngine
 from moe_infinity.serving.linear_attention_state import (
     LinearAttentionStateCache,
@@ -46,6 +50,8 @@ from moe_infinity.serving.model_runner import (
 from moe_infinity.serving.sequence import SamplingParams, SequenceStatus
 
 BLOCK_SIZE = 4
+# Vision special tokens of the tiny VL config (kept out of PROMPTS).
+IMAGE_TOKEN, VISION_START, VISION_END = 56, 58, 59
 LAYER_TYPES = [
     "linear_attention",
     "full_attention",
@@ -97,6 +103,10 @@ def _vl_config() -> Qwen3_5MoeConfig:
             "deepstack_visual_indexes": [],
         },
     )
+    config.image_token_id = IMAGE_TOKEN
+    config.video_token_id = IMAGE_TOKEN + 1
+    config.vision_start_token_id = VISION_START
+    config.vision_end_token_id = VISION_END
     config._attn_implementation = "eager"
     config.get_text_config()._attn_implementation = "eager"
     return config
@@ -160,15 +170,23 @@ class _Sequences:
         self.tokens: dict[int, list[int]] = {}
         self.computed: dict[int, int] = {}
         self.blocks: dict[int, list[int]] = {}
+        self.multimodal: dict[int, dict[str, object]] = {}
         self._next_block = 0
 
-    def add(self, seq_id: int, prompt: list[int]) -> None:
+    def add(
+        self,
+        seq_id: int,
+        prompt: list[int],
+        multimodal: dict[str, object] | None = None,
+    ) -> None:
         self.tokens[seq_id] = list(prompt)
         self.computed[seq_id] = 0
         self.blocks[seq_id] = list(
             range(self._next_block, self._next_block + 8)
         )
         self._next_block += 8
+        if multimodal is not None:
+            self.multimodal[seq_id] = multimodal
 
     def batch(self, seq_ids: list[int]) -> BatchMetadata:
         input_ids: list[int] = []
@@ -180,6 +198,12 @@ class _Sequences:
             input_ids.extend(query)
             seq_lengths.append(len(query))
             context_lengths.append(context)
+        # Mirrors BatchBuilder: multimodal inputs ride on prefill rows only.
+        row_inputs = [
+            self.multimodal.get(seq_id) if context == 0 else None
+            for seq_id, context in zip(seq_ids, context_lengths)
+        ]
+        has_multimodal = any(inputs is not None for inputs in row_inputs)
         return BatchMetadata(
             seq_ids=list(seq_ids),
             input_token_ids=input_ids,
@@ -188,6 +212,10 @@ class _Sequences:
             is_prefill=[context == 0 for context in context_lengths],
             block_tables=[self.blocks[seq_id] for seq_id in seq_ids],
             sampling_params=[SamplingParams() for _ in seq_ids],
+            multimodal_inputs=BatchBuilder._merge_multimodal_dicts(
+                [inputs for inputs in row_inputs if inputs is not None]
+            ),
+            row_multimodal_inputs=row_inputs if has_multimodal else None,
         )
 
     def advance(self, batch: BatchMetadata, logits: torch.Tensor) -> None:
@@ -198,7 +226,10 @@ class _Sequences:
 
 
 def _hf_greedy(
-    model: torch.nn.Module, prompt: list[int], steps: int
+    model: torch.nn.Module,
+    prompt: list[int],
+    steps: int,
+    multimodal: dict[str, object] | None = None,
 ) -> tuple[list[int], torch.Tensor]:
     input_ids = torch.tensor([prompt])
     with torch.no_grad(), warnings.catch_warnings():
@@ -210,6 +241,7 @@ def _hf_greedy(
             output_logits=True,
             return_dict_in_generate=True,
             pad_token_id=0,
+            **(multimodal or {}),
         )
     tokens = out.sequences[0, len(prompt) :].tolist()
     return tokens, torch.stack([step[0] for step in out.logits])
@@ -440,10 +472,19 @@ def test_linear_attention_state_cache_lifecycle() -> None:
 
     state.commit([1], [5], [1], restored_single(state, 1, 5))
     assert state.has_state(1, 5) and state.has_state(1, 6)
-    state.retain([1])
+    assert state.seq_ids() == {1, 2}
+
+    # Swapped-out sequences keep host copies that restore unchanged.
+    before = restored_single(state, 1, 6).layers[2].recurrent_states.clone()
+    state.offload([1])
+    assert state.nbytes() == state.nbytes(device_type="cpu")
+    after = state.build_cache([1], [6], device=torch.device("cpu"))
+    torch.testing.assert_close(after.layers[2].recurrent_states, before)
+
+    state.release([2])
     assert 2 not in state and 1 in state
-    state.release([1])
-    assert len(state) == 0
+    state.clear()
+    assert len(state) == 0 and state.nbytes() == 0
 
 
 def restored_single(
@@ -581,15 +622,11 @@ def test_engine_greedy_decode_matches_hf_and_releases_state(
         expected, _ = _hf_greedy(model, prompt, steps)
         assert engine.get_request_n_outputs(f"req-{seq_id}") == [expected]
 
+    # Released on completion, without waiting for another step.
     state = engine.model_runner._get_linear_attention_state()
     assert state is not None
-    engine.model_runner.retain_linear_attention_state(
-        seq_id
-        for seq_id, sequence in engine._sequences.items()
-        if sequence.status
-        not in (SequenceStatus.FINISHED, SequenceStatus.CANCELLED)
-    )
     assert len(state) == 0
+    assert engine.model_runner.sequence_state_ids() == set()
 
 
 def test_serving_configs_size_kv_by_full_attention_layers(
@@ -615,3 +652,313 @@ def test_serving_configs_size_kv_by_full_attention_layers(
         model=model, engine=object(), engine_config=SimpleNamespace()
     )
     assert build_serving_config(moe)["num_layers"] == 2
+
+
+def _image_inputs(seed: int, grid: tuple[int, int, int]) -> dict[str, object]:
+    generator = torch.Generator().manual_seed(seed)
+    num_patches = grid[0] * grid[1] * grid[2]
+    # channels * temporal_patch_size * patch_size**2 of the tiny vision tower
+    pixel_values = torch.randn(num_patches, 3 * 2 * 4 * 4, generator=generator)
+    return {
+        "pixel_values": pixel_values,
+        "image_grid_thw": torch.tensor([list(grid)]),
+    }
+
+
+def _image_prompt(
+    prefix: list[int], suffix: list[int], grid: tuple[int, int, int]
+) -> list[int]:
+    num_image_tokens = grid[0] * grid[1] * grid[2] // 4
+    return (
+        prefix
+        + [VISION_START]
+        + [IMAGE_TOKEN] * num_image_tokens
+        + [VISION_END]
+        + suffix
+    )
+
+
+def _token_types(prompt: list[int]) -> torch.Tensor:
+    return (torch.tensor([prompt]) == IMAGE_TOKEN).long()
+
+
+# (prompt, serving multimodal inputs). The second image prompt omits
+# ``mm_token_type_ids`` so the runner derives them from the image token id.
+VL_GRIDS = {21: (1, 4, 4), 23: (1, 4, 8)}
+VL_PROMPTS = {
+    21: _image_prompt([3, 9], [27, 4, 15], VL_GRIDS[21]),
+    22: [8, 2, 44, 19, 7, 31],
+    23: _image_prompt([5], [12, 30], VL_GRIDS[23]),
+}
+
+
+def _vl_serving_inputs(seq_id: int) -> dict[str, object] | None:
+    if seq_id not in VL_GRIDS:
+        return None
+    inputs = _image_inputs(seq_id, VL_GRIDS[seq_id])
+    if seq_id == 21:
+        inputs["mm_token_type_ids"] = _token_types(VL_PROMPTS[seq_id])
+    return inputs
+
+
+def _vl_hf_inputs(seq_id: int) -> dict[str, object] | None:
+    if seq_id not in VL_GRIDS:
+        return None
+    inputs = _image_inputs(seq_id, VL_GRIDS[seq_id])
+    inputs["mm_token_type_ids"] = _token_types(VL_PROMPTS[seq_id])
+    return inputs
+
+
+def test_vl_image_prompts_match_hf_generate() -> None:
+    model = _build_model("vl", seed=2)
+    runner = _runner(model)
+    seqs = _Sequences()
+    for seq_id, prompt in VL_PROMPTS.items():
+        seqs.add(seq_id, prompt, _vl_serving_inputs(seq_id))
+
+    steps = 5
+    step_logits: dict[int, list[torch.Tensor]] = {}
+    order = list(VL_PROMPTS)
+    for step in range(steps):
+        # Decode rows arrive in a different order than at prefill.
+        rows = order if step % 2 == 0 else order[::-1]
+        batch = seqs.batch(rows)
+        logits = runner.execute(batch)
+        _record(step_logits, batch, logits)
+        seqs.advance(batch, logits)
+
+    assert runner._mrope_deltas.keys() == VL_GRIDS.keys()
+    for seq_id, prompt in VL_PROMPTS.items():
+        tokens, logits = _hf_greedy(model, prompt, steps, _vl_hf_inputs(seq_id))
+        assert seqs.tokens[seq_id][len(prompt) :] == tokens
+        torch.testing.assert_close(
+            torch.stack(step_logits[seq_id]), logits, rtol=1e-4, atol=1e-4
+        )
+
+
+def test_mrope_positions_match_get_rope_index() -> None:
+    model = _build_model("vl")
+    runner = _runner(model)
+    seqs = _Sequences()
+    for seq_id, prompt in VL_PROMPTS.items():
+        seqs.add(seq_id, prompt, _vl_serving_inputs(seq_id))
+    batch = seqs.batch(list(VL_PROMPTS))
+    model_inputs = runner.prepare_inputs(batch, left_pad=True)
+    positions, deltas = runner._mrope_position_ids(batch, model_inputs)
+    assert positions is not None
+    assert positions.shape == (4, 3, model_inputs["input_ids"].shape[1])
+    torch.testing.assert_close(positions[0], model_inputs["position_ids"])
+
+    mask = model_inputs["attention_mask"].bool()
+    for row, (seq_id, prompt) in enumerate(VL_PROMPTS.items()):
+        expected, expected_delta = model.model.get_rope_index(
+            torch.tensor([prompt]),
+            mm_token_type_ids=_token_types(prompt),
+            image_grid_thw=(
+                torch.tensor([list(VL_GRIDS[seq_id])])
+                if seq_id in VL_GRIDS
+                else None
+            ),
+        )
+        torch.testing.assert_close(
+            positions[1:, row, mask[row]], expected[:, 0]
+        )
+        assert deltas[seq_id] == int(expected_delta)
+    assert deltas[22] == 0 and deltas[21] != 0
+
+    text_only = _Sequences()
+    text_only.add(22, VL_PROMPTS[22])
+    text_batch = text_only.batch([22])
+    text_inputs = runner.prepare_inputs(text_batch, left_pad=True)
+    assert runner._mrope_position_ids(text_batch, text_inputs)[0] is None
+
+
+def test_slice_batch_keeps_only_its_rows_multimodal_inputs() -> None:
+    seqs = _Sequences()
+    for seq_id, prompt in VL_PROMPTS.items():
+        seqs.add(seq_id, prompt, _vl_serving_inputs(seq_id))
+    batch = seqs.batch(list(VL_PROMPTS))
+    assert batch.multimodal_inputs is not None
+    # mm_token_type_ids only exists on one row; grids concatenate per image.
+    assert batch.multimodal_inputs["image_grid_thw"].shape == (2, 3)
+
+    sliced = _slice_batch(batch, [2])
+    assert sliced.row_multimodal_inputs == [batch.row_multimodal_inputs[2]]
+    assert sliced.multimodal_inputs is not None
+    assert sliced.multimodal_inputs["image_grid_thw"].tolist() == [
+        list(VL_GRIDS[23])
+    ]
+    text = _slice_batch(batch, [1])
+    assert text.multimodal_inputs is None and text.row_multimodal_inputs == []
+
+
+def _run_engine(engine: ContinuousBatchingEngine, max_steps: int = 200) -> None:
+    for _ in range(max_steps):
+        engine.step()
+        if not engine.has_pending_requests():
+            return
+    raise AssertionError("engine did not drain")
+
+
+def test_engine_vl_image_requests_match_hf_and_release_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _hybrid_engine(monkeypatch)
+    steps = 4
+    for seq_id, prompt in VL_PROMPTS.items():
+        engine.add_request(
+            f"req-{seq_id}",
+            list(prompt),
+            SamplingParams(temperature=0.0, max_tokens=steps),
+            multimodal_inputs=_vl_serving_inputs(seq_id),
+        )
+    _run_engine(engine)
+    for seq_id, prompt in VL_PROMPTS.items():
+        expected, _ = _hf_greedy(
+            engine.model, prompt, steps, _vl_hf_inputs(seq_id)
+        )
+        assert engine.get_request_n_outputs(f"req-{seq_id}") == [expected]
+    assert engine.model_runner.sequence_state_ids() == set()
+    assert engine.model_runner._mrope_deltas == {}
+
+
+def _add_prompts(engine: ContinuousBatchingEngine, steps: int) -> None:
+    for seq_id, prompt in PROMPTS.items():
+        engine.add_request(
+            f"req-{seq_id}",
+            list(prompt),
+            SamplingParams(temperature=0.0, max_tokens=steps),
+        )
+
+
+def _engine_seq_id(engine: ContinuousBatchingEngine, request_id: str) -> int:
+    return engine._request_to_seq_ids[request_id][0]
+
+
+def test_engine_abort_and_shutdown_release_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _hybrid_engine(monkeypatch)
+    _add_prompts(engine, steps=8)
+    for _ in range(3):
+        engine.step()
+    first = _engine_seq_id(engine, "req-11")
+    second = _engine_seq_id(engine, "req-12")
+    runner = engine.model_runner
+    assert runner.sequence_state_ids() == {first, second}
+
+    engine.abort_request("req-11")
+    assert runner.sequence_state_ids() == {second}
+
+    engine.shutdown()
+    assert runner.sequence_state_ids() == set()
+
+
+class _StateEvents:
+    def __init__(self, runner: ModelRunner) -> None:
+        self.events: list[tuple[str, list[int]]] = []
+        offload = runner.offload_sequence_state
+        release = runner.release_sequence_state
+
+        def record_offload(seq_ids) -> None:
+            seq_ids = sorted(seq_ids)
+            self.events.append(("offload", seq_ids))
+            offload(seq_ids)
+
+        def record_release(seq_ids) -> None:
+            seq_ids = sorted(seq_ids)
+            self.events.append(("release", seq_ids))
+            release(seq_ids)
+
+        runner.offload_sequence_state = record_offload
+        runner.release_sequence_state = record_release
+
+
+def test_engine_swap_preemption_offloads_and_resumes_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Too few KV blocks for both sequences to grow: one is swapped out.
+    engine = _hybrid_engine(monkeypatch, num_kv_blocks=7)
+    events = _StateEvents(engine.model_runner)
+    steps = 8
+    _add_prompts(engine, steps)
+    _run_engine(engine)
+
+    first = _engine_seq_id(engine, "req-11")
+    assert ("offload", [first]) in events.events
+    for seq_id, prompt in PROMPTS.items():
+        expected, _ = _hf_greedy(engine.model, prompt, steps)
+        assert engine.get_request_n_outputs(f"req-{seq_id}") == [expected]
+    assert engine.model_runner.sequence_state_ids() == set()
+
+
+def test_engine_recompute_preemption_drops_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _hybrid_engine(monkeypatch, num_kv_blocks=7)
+    events = _StateEvents(engine.model_runner)
+    scheduler = engine.scheduler
+    # Every swap-in attempt degrades to the scheduler's recompute path.
+    monkeypatch.setattr(
+        scheduler, "_try_start_swap_in", scheduler._evict_group_to_waiting
+    )
+    steps = 8
+    _add_prompts(engine, steps)
+    first = _engine_seq_id(engine, "req-11")
+    sequence = engine._sequences[first]
+    _run_engine(engine)
+
+    offloaded = events.events.index(("offload", [first]))
+    released = events.events.index(("release", [first]))
+    assert offloaded < released
+    # The recomputed sequence regenerates exactly what HF generates.
+    expected, _ = _hf_greedy(engine.model, PROMPTS[11], steps)
+    assert sequence.output_token_ids == expected
+    assert engine.model_runner.sequence_state_ids() == set()
+
+
+def test_memory_budget_reserves_recurrent_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _vl_config()
+    per_sequence = LinearAttentionStateCache.bytes_per_sequence(
+        config, torch.float32
+    )
+    assert per_sequence > 0
+    assert (
+        LinearAttentionStateCache.bytes_per_sequence(
+            Qwen3MoeConfig(num_hidden_layers=2), torch.float32
+        )
+        == 0
+    )
+
+    engine = _hybrid_engine(monkeypatch, max_batch_size=3)
+    budget = engine._memory_budget
+    assert budget.free_memory_reserve_bytes == 3 * per_sequence
+
+    # The estimate covers what one running sequence actually holds.
+    _add_prompts(engine, steps=8)
+    for _ in range(3):
+        engine.step()
+    state = engine.model_runner._get_linear_attention_state()
+    assert state is not None and len(state) == 2
+    assert state.nbytes() <= 2 * per_sequence
+
+
+@pytest.mark.parametrize("repeats", [1, 3])
+def test_reexecution_count_does_not_change_decode(repeats: int) -> None:
+    model = _build_model("causal", seed=3)
+    runner = _runner(model)
+    seqs = _Sequences()
+    for seq_id, prompt in PROMPTS.items():
+        seqs.add(seq_id, prompt)
+    steps = 5
+    for _ in range(steps):
+        batch = seqs.batch(list(PROMPTS))
+        results = [runner.execute(batch) for _ in range(repeats)]
+        for result in results[1:]:
+            torch.testing.assert_close(result, results[0], rtol=0, atol=0)
+        seqs.advance(batch, results[-1])
+    for seq_id, prompt in PROMPTS.items():
+        tokens, _ = _hf_greedy(model, prompt, steps)
+        assert seqs.tokens[seq_id][len(prompt) :] == tokens

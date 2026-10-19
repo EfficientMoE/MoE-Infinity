@@ -32,6 +32,7 @@ from .batch import (
 )
 from .cuda_graph import CudaGraphRunner
 from .kv_cache import PagedKVCache
+from .linear_attention_state import LinearAttentionStateCache
 from .memory_manager import MemoryManager
 from .memory_resize import TransactionalServingMemoryResizer
 from .model_runner import ModelRunner, paged_layer_index
@@ -229,7 +230,8 @@ class ContinuousBatchingEngine:
             kv_cache_ratio=self._get_float_config("kv_cache_ratio", 0.25),
         )
         self._memory_budget = self.memory_manager.compute_budget(
-            model_memory_bytes=self._resolve_model_memory_bytes(model)
+            model_memory_bytes=self._resolve_model_memory_bytes(model),
+            free_memory_reserve_bytes=self._sequence_state_reserve_bytes(model),
         )
 
         block_size = self._get_int_config("block_size")
@@ -529,6 +531,14 @@ class ContinuousBatchingEngine:
             )
         self._is_shutdown = False
 
+    def _sequence_state_reserve_bytes(self, model: object) -> int:
+        # Hybrid linear-attention models keep recurrent state per running
+        # sequence outside the paged KV cache; reserve it for a full batch.
+        per_sequence = LinearAttentionStateCache.bytes_per_sequence(
+            getattr(model, "config", None), self.dtype
+        )
+        return per_sequence * self._get_int_config("max_batch_size", 32)
+
     def _resolve_kv_swap_settings(self) -> KVSwapConfig:
         return _EngineKVSwapSettings(
             kv_swap_mode=self._get_str_config("kv_swap_mode", "sync"),
@@ -599,6 +609,7 @@ class ContinuousBatchingEngine:
             self._tick_adaptive_memory()
         self._prepare_speculative_rounds()
         scheduler_output = self.scheduler.schedule()
+        self._sync_sequence_state()
         outputs = self._verify_speculative_rounds(
             scheduler_output.verify_seq_ids
         )
@@ -703,6 +714,56 @@ class ContinuousBatchingEngine:
             self._num_steps += 1
         return outputs
 
+    def _update_after_step(
+        self,
+        *,
+        completed_seq_ids: list[int],
+        new_decode_seq_ids: list[int],
+        committed_counts: dict[int, int] | None = None,
+    ) -> None:
+        if committed_counts is None:
+            self.scheduler.update_after_step(
+                completed_seq_ids=completed_seq_ids,
+                new_decode_seq_ids=new_decode_seq_ids,
+            )
+        else:
+            self.scheduler.update_after_step(
+                completed_seq_ids=completed_seq_ids,
+                new_decode_seq_ids=new_decode_seq_ids,
+                committed_counts=committed_counts,
+            )
+        if completed_seq_ids:
+            self.model_runner.release_sequence_state(completed_seq_ids)
+
+    def _sync_sequence_state(self) -> None:
+        """Keep runner-side per-sequence state in step with the scheduler.
+
+        Runs right after scheduling, where preemption happens: a sequence
+        reset for recompute restarts from token 0 and drops its state, and a
+        swapped-out sequence keeps its state on the host like its KV.
+        """
+        held = self.model_runner.sequence_state_ids()
+        if not held:
+            return
+        release: list[int] = []
+        offload: list[int] = []
+        for seq_id in held:
+            sequence = self._sequences.get(seq_id)
+            status = sequence.status if sequence is not None else None
+            if status is SequenceStatus.SWAPPED:
+                offload.append(seq_id)
+            elif status not in (
+                SequenceStatus.PREFILL,
+                SequenceStatus.DECODE,
+                SequenceStatus.DRAFT,
+                SequenceStatus.VERIFY,
+            ):
+                release.append(seq_id)
+        if release:
+            self.model_runner.release_sequence_state(release)
+        if offload:
+            self.model_runner.offload_sequence_state(offload)
+
     def _step_standard(self, batch: BatchMetadata) -> list[RequestOutput]:
         """Execute the ordinary serving path for a scheduler-selected subset."""
 
@@ -764,7 +825,7 @@ class ContinuousBatchingEngine:
                 )
             )
 
-        self.scheduler.update_after_step(
+        self._update_after_step(
             completed_seq_ids=completed_seq_ids,
             new_decode_seq_ids=new_decode_seq_ids,
         )
@@ -1067,7 +1128,7 @@ class ContinuousBatchingEngine:
         if finished:
             if sequence.status in (SequenceStatus.DRAFT, SequenceStatus.VERIFY):
                 sequence.set_status(SequenceStatus.FINISHED)
-            self.scheduler.update_after_step(
+            self._update_after_step(
                 completed_seq_ids=[record.seq_id],
                 new_decode_seq_ids=[],
                 committed_counts={record.seq_id: committed_count},
@@ -1083,7 +1144,7 @@ class ContinuousBatchingEngine:
         else:
             if sequence.status is SequenceStatus.VERIFY:
                 sequence.set_status(SequenceStatus.DRAFT)
-            self.scheduler.update_after_step(
+            self._update_after_step(
                 completed_seq_ids=[],
                 new_decode_seq_ids=[],
                 committed_counts={record.seq_id: committed_count},
@@ -1221,7 +1282,7 @@ class ContinuousBatchingEngine:
             if finished:
                 break
 
-        self.scheduler.update_after_step(
+        self._update_after_step(
             completed_seq_ids=[seq_id],
             new_decode_seq_ids=[],
             committed_counts={seq_id: len(outputs)},
@@ -1344,7 +1405,7 @@ class ContinuousBatchingEngine:
         ):
             sequence.set_status(SequenceStatus.FINISHED)
 
-        self.scheduler.update_after_step(
+        self._update_after_step(
             completed_seq_ids=[seq_id],
             new_decode_seq_ids=[],
             committed_counts={seq_id: len(outputs)},
@@ -1460,6 +1521,7 @@ class ContinuousBatchingEngine:
 
         for request_id in list(self._request_to_seq_ids.keys()):
             self.abort_request(request_id)
+        self.model_runner.clear_sequence_state()
 
         if self.kv_cache.has_pending_transfers():
             _logger.warning(
@@ -1500,6 +1562,7 @@ class ContinuousBatchingEngine:
                 driver.cancel(seq_id)
                 self.scheduler.clear_verify_demand(seq_id)
         self.scheduler.abort_request(request_id)
+        self.model_runner.release_sequence_state(seq_ids)
         _ = self._callbacks.pop(request_id, None)
 
         if not was_pending:
@@ -2187,12 +2250,6 @@ class ContinuousBatchingEngine:
             return
 
     def _execute_batch(self, batch: BatchMetadata) -> torch.Tensor:
-        self.model_runner.retain_linear_attention_state(
-            seq_id
-            for seq_id, sequence in self._sequences.items()
-            if sequence.status
-            not in (SequenceStatus.FINISHED, SequenceStatus.CANCELLED)
-        )
         has_prefill = any(batch.is_prefill)
         has_decode = any(not p for p in batch.is_prefill)
         # The layer registry is only populated when the KV cache has a bound

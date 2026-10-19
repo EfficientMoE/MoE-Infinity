@@ -55,8 +55,10 @@ moe_infinity/
 │   ├── transformers_model_overrides.py  Install/restore of HF class swaps
 │   ├── hybrid_attention_layout.py       Paged (full-attention) layer layout
 │   │                                    of hybrid models
-│   └── qwen3_5_moe_paged_attention.py   Qwen3.5-MoE full-attention paged
-│                                        shim (until moe-store ships one)
+│   ├── qwen3_5_moe_paged_attention.py   Qwen3.5-MoE full-attention paged
+│   │                                    shim (until moe-store ships one)
+│   └── qwen3_5_moe_mrope.py             Qwen3.5-MoE VL M-RoPE serving
+│                                        positions
 │
 ├── models/              Model wrappers
 │   ├── mixtral.py, deepseek_v2_wrapper.py, ...

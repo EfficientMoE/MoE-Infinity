@@ -17,9 +17,15 @@ Snapshots are keyed by the number of tokens they have consumed. A forward over
 one at ``context_len + query_len``; the snapshot it read is kept until the
 sequence moves past it, so re-executing the same batch (the engine re-runs a
 step's batch, relying on paged KV writes being idempotent) restores the same
-input state instead of advancing it twice. A missing snapshot fails loudly:
-paths that skip tokens (prefix KV reuse, rolled-back speculative tokens)
-cannot be served correctly for a hybrid model.
+input state instead of advancing it twice, however many times it runs. A
+missing snapshot fails loudly: paths that skip tokens (prefix KV reuse,
+rolled-back speculative tokens) cannot be served correctly for a hybrid model.
+
+Lifetime follows the sequence's KV: snapshots are released when the sequence
+finishes, is aborted, or is reset for recompute, and moved to host memory
+while its KV is swapped out (restored lazily on the next forward). At most
+two snapshots per running sequence stay on the device, which the engine
+reserves from its memory budget (``bytes_per_sequence``).
 """
 
 from __future__ import annotations
@@ -29,6 +35,11 @@ from typing import Any
 
 import torch
 from transformers.cache_utils import Cache, DynamicCache
+
+from moe_infinity.boundary.hybrid_attention_layout import (
+    linear_attention_layer_indices,
+    text_config_of,
+)
 
 # Per linear layer: (conv_states, recurrent_states), each with batch dim 1.
 _Snapshot = tuple[tuple[torch.Tensor, torch.Tensor], ...]
@@ -50,11 +61,56 @@ class LinearAttentionStateCache:
     def __len__(self) -> int:
         return len(self._states)
 
+    @staticmethod
+    def bytes_per_sequence(config: Any, dtype: torch.dtype) -> int:
+        """Device bytes of one sequence's state (two snapshots).
+
+        Conv state is kept in the model dtype; the recurrent state is costed
+        at float32, the precision the delta-rule kernels accumulate in.
+        """
+        layers = linear_attention_layer_indices(config)
+        if not layers:
+            return 0
+        text = text_config_of(config)
+        key_dim = int(text.linear_key_head_dim) * int(text.linear_num_key_heads)
+        value_dim = int(text.linear_value_head_dim) * int(
+            text.linear_num_value_heads
+        )
+        conv_bytes = (
+            (2 * key_dim + value_dim)
+            * int(text.linear_conv_kernel_dim)
+            * torch.tensor([], dtype=dtype).element_size()
+        )
+        recurrent_bytes = (
+            int(text.linear_num_value_heads)
+            * int(text.linear_key_head_dim)
+            * int(text.linear_value_head_dim)
+            * 4
+        )
+        return 2 * len(layers) * (conv_bytes + recurrent_bytes)
+
+    def seq_ids(self) -> set[int]:
+        return set(self._states)
+
     def has_state(self, seq_id: int, num_tokens: int) -> bool:
         return num_tokens in self._states.get(seq_id, {})
 
+    def nbytes(self, device_type: str | None = None) -> int:
+        """Bytes held by snapshots, optionally only on one device type."""
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for entries in self._states.values()
+            for snapshot in entries.values()
+            for layer in snapshot
+            for tensor in layer
+            if device_type is None or tensor.device.type == device_type
+        )
+
     def build_cache(
-        self, seq_ids: Sequence[int], context_lengths: Sequence[int]
+        self,
+        seq_ids: Sequence[int],
+        context_lengths: Sequence[int],
+        device: torch.device | None = None,
     ) -> Cache:
         """Return the HF hybrid cache for one homogeneous row group.
 
@@ -84,12 +140,16 @@ class LinearAttentionStateCache:
                 )
             snapshots.append(snapshot)
 
+        # Swapped-out sequences hold host copies; bring them back here.
+        def on_device(tensor: torch.Tensor) -> torch.Tensor:
+            return tensor if device is None else tensor.to(device)
+
         for slot, layer_idx in enumerate(self.linear_layer_indices):
             conv_states = torch.cat(
-                [snapshot[slot][0] for snapshot in snapshots], dim=0
+                [on_device(snapshot[slot][0]) for snapshot in snapshots], dim=0
             )
             recurrent_states = torch.cat(
-                [snapshot[slot][1] for snapshot in snapshots], dim=0
+                [on_device(snapshot[slot][1]) for snapshot in snapshots], dim=0
             )
             # The first update copies into fresh layer storage and marks the
             # layer as having previous state; snapshots are never aliased.
@@ -139,10 +199,20 @@ class LinearAttentionStateCache:
         for seq_id in seq_ids:
             self._states.pop(seq_id, None)
 
-    def retain(self, live_seq_ids: Iterable[int]) -> None:
-        live = set(live_seq_ids)
-        for seq_id in [seq_id for seq_id in self._states if seq_id not in live]:
-            del self._states[seq_id]
+    def clear(self) -> None:
+        self._states.clear()
+
+    def offload(self, seq_ids: Iterable[int]) -> None:
+        """Move snapshots to host memory while a sequence is swapped out."""
+        for seq_id in seq_ids:
+            entries = self._states.get(seq_id)
+            if not entries:
+                continue
+            for num_tokens, snapshot in list(entries.items()):
+                entries[num_tokens] = tuple(
+                    (conv.to("cpu"), recurrent.to("cpu"))
+                    for conv, recurrent in snapshot
+                )
 
 
 __all__ = ["LinearAttentionStateCache"]
