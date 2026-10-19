@@ -12,6 +12,7 @@ All notable changes to MoE-Infinity will be documented in this file.
 
 ### Added
 
+- Qwen3.5-MoE (`Qwen3_5MoeForConditionalGeneration`, `Qwen3_5MoeForCausalLM`) paged-attention serving (#270): a `Qwen3_5MoePagedAttention` shim routes the gated full-attention layers through the paged KV cache. The cache is sized and keyed by full-attention layer only. The serving runner carries the Gated DeltaNet conv and recurrent state per sequence. Before this, multi-token decode output for this family was degenerate. Prefix reuse, chunked prefill, and speculative serving execution stay disabled for hybrid linear-attention models with stable reasons.
 - Opt-in phase-specific expert admission, prefetch, eviction, and telemetry over one shared residency manager, with the legacy policy retained by default and one-flag rollback requiring no offload-store migration.
 - Opt-in `int8_sym` KV-cache storage format (`kv_cache_format`, default `native`): symmetric INT8 payload plus one FP16 scale per `(layer, page, KV head, token)`, with a native CUDA decode kernel, a validated FP32 dequantized SDPA fallback, single-owner `LayeredPagedKVStore` lifecycle, capability-gated selection with visible native/MLA fallback, numerical/logit/storage quality gates, a long-context A/B benchmark matrix, and a one-setting (`--kv-cache-format native`) rollback. No universal low-bit KV support is claimed.
 - Documentation hub at `docs/README.md` for users, operators, contributors, and project-history readers.

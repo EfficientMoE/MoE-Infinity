@@ -51,6 +51,13 @@ moe_infinity/
 │   ├── hooks.py               Forward-pass hooks for tracing and prefetching
 │   └── compile.py             Optional torch.jit compilation of expert MLPs
 │
+├── boundary/            moe-store integration seam
+│   ├── transformers_model_overrides.py  Install/restore of HF class swaps
+│   ├── hybrid_attention_layout.py       Paged (full-attention) layer layout
+│   │                                    of hybrid models
+│   └── qwen3_5_moe_paged_attention.py   Qwen3.5-MoE full-attention paged
+│                                        shim (until moe-store ships one)
+│
 ├── models/              Model wrappers
 │   ├── mixtral.py, deepseek_v2_wrapper.py, ...
 │   │                          Each wrapper defines a Sync<Model>MoeBlock that
@@ -73,6 +80,8 @@ moe_infinity/
 │   ├── model_runner.py        Runs a prefill/decode step for a batch
 │   ├── batch.py               BatchBuilder + SchedulerOutput
 │   ├── kv_cache.py            PagedKVCache, BlockAllocator, BlockTable
+│   ├── linear_attention_state.py  Per-sequence recurrent state for hybrid
+│   │                              linear-attention layers
 │   ├── spec_session_driver.py Persistent DFlash session lifecycle; Stage 4a/4b selection
 │   ├── spec_cache_adapter.py  Per-sequence adapter over engine-owned MLA pages
 │   ├── mla_cache.py           Packed DeepSeek latent/rope page storage

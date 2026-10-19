@@ -25,7 +25,7 @@ a claim that any particular DeepSeek DFlash pair has been validated.
 | DeepSeek-V3 (`DeepseekV3ForCausalLM`) | implemented/experimental | implemented/experimental | Routing and paged-attention parity evidence. |
 | DeepSeek-V4 (`DeepseekV4ForCausalLM`) | validated official mp4 path | not validated | DFlash unsupported; mp1 not covered. |
 | Mixtral (`MixtralForCausalLM`) | implemented/experimental | implemented/experimental | No real-model serving harness recorded. |
-| Qwen3 / Qwen3.5 MoE | Qwen3 validated; Qwen3.5 tiny-fixture validated | implemented/experimental | Qwen3.5 keeps the `visual.*` vision tower resident; MTP unused; requires newer Transformers. |
+| Qwen3 / Qwen3.5 MoE | Qwen3 validated; Qwen3.5 tiny-fixture validated | implemented/experimental; Qwen3.5 paged serving tiny-checkpoint validated (CPU) | Qwen3.5 keeps the `visual.*` vision tower resident; MTP unused; requires newer Transformers. Qwen3.5 serving disables prefix reuse and chunked prefill. |
 | MiniMax-M3 (`minimax_m3_vl`) | implemented/experimental | not recorded | BF16, eager attention, native engine off; 128 routed experts offloaded; MiniMax Community License; no real-checkpoint evidence yet. |
 | GLM-5.2 (`GlmMoeDsaForCausalLM`) | validated | tiny serving harness | Built-in MTP, not DFlash. |
 | GLM-5.3 (`GlmMoeDsaForCausalLM`) | implemented/experimental | not recorded | Same base and FP8 path as GLM-5.2 (post-training only); config resolution pinned by `tests/python/unit/test_glm53_registry.py`. |
@@ -91,6 +91,20 @@ The v5 packed expert tensors expand to per-expert on load; the `visual.*`
 weights stay resident so image prompts are supported, while MTP weights remain
 present but unused for generation. A `device_memory_ratio` near `0.5` is a
 reasonable starting point.
+
+In the OpenAI server, `Qwen3_5MoePagedAttention`
+(`moe_infinity/boundary/qwen3_5_moe_paged_attention.py`) replaces only the gated
+full-attention layers, so the paged KV cache holds one plane per
+full-attention layer (`layer_types == "full_attention"`) instead of one per
+decoder layer. The Gated DeltaNet linear-attention layers and the vision tower
+keep their HuggingFace classes. Their conv and recurrent state is kept per
+sequence by the serving runner (`serving/linear_attention_state.py`), at about
+two state snapshots per running sequence. A cached KV prefix carries no
+linear-attention state, so prefix reuse
+(`hybrid-linear-attention-state-unsupported`) and chunked prefill
+(`hybrid_linear_attention_state_unsupported`) stay disabled for this family.
+Speculative (rich) serving execution is rejected for the same reason. Decode
+CUDA graphs are not eligible.
 
 ### MiniMax-M3
 

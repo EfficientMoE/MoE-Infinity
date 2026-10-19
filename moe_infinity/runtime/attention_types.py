@@ -152,6 +152,9 @@ class AttentionMetadata:
     lengths: PagedBatchLengths | None = field(default=None)
     kv_storage_owner_id: str | None = None
     seq_id: int | None = None
+    # Side the runner padded each row's query tokens on. Always "right"
+    # except fresh prefill groups of hybrid linear-attention models.
+    query_padding: str = "right"
 
     def __post_init__(self) -> None:
         if self.lengths is not None and self.seq_lens is None:

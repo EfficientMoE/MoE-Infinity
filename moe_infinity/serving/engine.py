@@ -34,7 +34,7 @@ from .cuda_graph import CudaGraphRunner
 from .kv_cache import PagedKVCache
 from .memory_manager import MemoryManager
 from .memory_resize import TransactionalServingMemoryResizer
-from .model_runner import ModelRunner
+from .model_runner import ModelRunner, paged_layer_index
 from .prefix_cache import CacheNamespace, PrefixCache
 from .sampler import Sampler
 from .scheduler import Scheduler
@@ -2153,7 +2153,7 @@ class ContinuousBatchingEngine:
             modules = self.model_runner._get_qwen3_paged_attention_modules()
             backend.register_layers(
                 [
-                    LayerRegistration(int(module.layer_idx), id(module))
+                    LayerRegistration(paged_layer_index(module), id(module))
                     for module in modules
                 ]
             )
@@ -2187,6 +2187,12 @@ class ContinuousBatchingEngine:
             return
 
     def _execute_batch(self, batch: BatchMetadata) -> torch.Tensor:
+        self.model_runner.retain_linear_attention_state(
+            seq_id
+            for seq_id, sequence in self._sequences.items()
+            if sequence.status
+            not in (SequenceStatus.FINISHED, SequenceStatus.CANCELLED)
+        )
         has_prefill = any(batch.is_prefill)
         has_decode = any(not p for p in batch.is_prefill)
         # The layer registry is only populated when the KV cache has a bound
