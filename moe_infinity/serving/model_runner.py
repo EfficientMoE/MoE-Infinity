@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -143,8 +143,8 @@ class ModelRunner:
         self._warned_no_paged_shim = False
         self._linear_attention_state: LinearAttentionStateCache | None = None
         self._linear_attention_state_resolved = False
-        # Per-sequence M-RoPE offset of decode positions (VL Qwen3.5 only).
-        self._mrope_deltas: dict[int, int] = {}
+        self._sequence_state_limit: int | None = None
+        self._sequence_liveness: Callable[[int], bool] | None = None
         if kv_store is not None or attention_backend is not None:
             self._validate_store_identity(kv_store, attention_backend, owner_id)
 
@@ -474,8 +474,11 @@ class ModelRunner:
             linear_layers = linear_attention_layer_indices(config)
             if linear_layers:
                 self._linear_attention_state = LinearAttentionStateCache(
-                    config, linear_layers
+                    config,
+                    linear_layers,
+                    max_resident=self._sequence_state_limit,
                 )
+                self._linear_attention_state.is_live = self._sequence_liveness
         return self._linear_attention_state
 
     def _uses_paged_context(self) -> bool:
@@ -484,22 +487,34 @@ class ModelRunner:
             and self._get_attention_backend() is not None
         )
 
+    def set_sequence_state_limit(self, max_sequences: int) -> None:
+        """Bound how many sequences keep recurrent state on the device.
+
+        The engine passes ``max_batch_size``, the most rows one forward can
+        hold, matching what ``sequence_state_reserve_bytes`` reserves.
+        """
+        self._sequence_state_limit = int(max_sequences)
+        state = self._linear_attention_state
+        if state is not None:
+            state.max_resident = self._sequence_state_limit
+
+    def set_sequence_liveness(self, is_live: Callable[[int], bool]) -> None:
+        """Commit state only for sequences ``is_live`` still reports live."""
+        self._sequence_liveness = is_live
+        state = self._linear_attention_state
+        if state is not None:
+            state.is_live = is_live
+
     def sequence_state_ids(self) -> set[int]:
         """Sequences holding runner-side state (recurrent state, M-RoPE)."""
         state = self._linear_attention_state
-        ids = set(self._mrope_deltas)
-        if state is not None:
-            ids |= state.seq_ids()
-        return ids
+        return set() if state is None else state.seq_ids()
 
     def release_sequence_state(self, seq_ids: Iterable[int]) -> None:
         """Drop runner-side state of finished, aborted or reset sequences."""
-        seq_ids = list(seq_ids)
         state = self._linear_attention_state
         if state is not None:
             state.release(seq_ids)
-        for seq_id in seq_ids:
-            self._mrope_deltas.pop(seq_id, None)
 
     def offload_sequence_state(self, seq_ids: Iterable[int]) -> None:
         """Move recurrent state to host memory while KV is swapped out."""
@@ -511,7 +526,6 @@ class ModelRunner:
         state = self._linear_attention_state
         if state is not None:
             state.clear()
-        self._mrope_deltas.clear()
 
     def sequence_state_reserve_bytes(self, max_sequences: int) -> int:
         """Device bytes to reserve for ``max_sequences`` running sequences."""
@@ -567,12 +581,13 @@ class ModelRunner:
         self, batch: BatchMetadata, state: LinearAttentionStateCache
     ) -> torch.Tensor:
         fresh = all(context == 0 for context in batch.context_lengths)
+        ticket = state.begin(batch.seq_ids)
         cache = state.build_cache(
             batch.seq_ids, batch.context_lengths, device=self.device
         )
         model_inputs = self.prepare_inputs(batch, left_pad=fresh)
         mrope_positions, mrope_deltas = self._mrope_position_ids(
-            batch, model_inputs
+            batch, model_inputs, state
         )
         forward_kwargs: dict[str, object] = {
             **model_inputs,
@@ -590,18 +605,22 @@ class ModelRunner:
                 query_padding="left" if fresh else "right",
             )
         logits = self._pack_logits(outputs, model_inputs, batch)
+        # Rows released while the forward ran (aborted requests) are skipped.
         state.commit(
-            batch.seq_ids, batch.context_lengths, batch.query_lengths, cache
+            batch.seq_ids,
+            batch.context_lengths,
+            batch.query_lengths,
+            cache,
+            ticket=ticket,
+            rope_deltas=mrope_deltas,
         )
-        for seq_id, delta in mrope_deltas.items():
-            if delta:
-                self._mrope_deltas[seq_id] = delta
-            else:
-                self._mrope_deltas.pop(seq_id, None)
         return logits
 
     def _mrope_position_ids(
-        self, batch: BatchMetadata, model_inputs: dict[str, Any]
+        self,
+        batch: BatchMetadata,
+        model_inputs: dict[str, Any],
+        state: LinearAttentionStateCache,
     ) -> tuple[torch.Tensor | None, dict[int, int]]:
         """Build HF's ``[4, batch, seq]`` M-RoPE positions for VL Qwen3.5.
 
@@ -638,7 +657,7 @@ class ModelRunner:
                 deltas[seq_id] = delta
                 needs_mrope = True
             else:
-                delta = self._mrope_deltas.get(seq_id, 0)
+                delta = state.rope_delta(seq_id)
                 if delta:
                     rotary[:, row, token_mask[row]] += delta
                     needs_mrope = True

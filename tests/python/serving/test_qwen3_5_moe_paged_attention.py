@@ -727,7 +727,9 @@ def test_vl_image_prompts_match_hf_generate() -> None:
         _record(step_logits, batch, logits)
         seqs.advance(batch, logits)
 
-    assert runner._mrope_deltas.keys() == VL_GRIDS.keys()
+    state = runner._get_linear_attention_state()
+    assert state is not None
+    assert state.rope_deltas().keys() == VL_GRIDS.keys()
     for seq_id, prompt in VL_PROMPTS.items():
         tokens, logits = _hf_greedy(model, prompt, steps, _vl_hf_inputs(seq_id))
         assert seqs.tokens[seq_id][len(prompt) :] == tokens
@@ -744,7 +746,9 @@ def test_mrope_positions_match_get_rope_index() -> None:
         seqs.add(seq_id, prompt, _vl_serving_inputs(seq_id))
     batch = seqs.batch(list(VL_PROMPTS))
     model_inputs = runner.prepare_inputs(batch, left_pad=True)
-    positions, deltas = runner._mrope_position_ids(batch, model_inputs)
+    positions, deltas = runner._mrope_position_ids(
+        batch, model_inputs, runner._get_linear_attention_state()
+    )
     assert positions is not None
     assert positions.shape == (4, 3, model_inputs["input_ids"].shape[1])
     torch.testing.assert_close(positions[0], model_inputs["position_ids"])
@@ -770,7 +774,12 @@ def test_mrope_positions_match_get_rope_index() -> None:
     text_only.add(22, VL_PROMPTS[22])
     text_batch = text_only.batch([22])
     text_inputs = runner.prepare_inputs(text_batch, left_pad=True)
-    assert runner._mrope_position_ids(text_batch, text_inputs)[0] is None
+    assert (
+        runner._mrope_position_ids(
+            text_batch, text_inputs, runner._get_linear_attention_state()
+        )[0]
+        is None
+    )
 
 
 def test_slice_batch_keeps_only_its_rows_multimodal_inputs() -> None:
@@ -819,7 +828,8 @@ def test_engine_vl_image_requests_match_hf_and_release_state(
         )
         assert engine.get_request_n_outputs(f"req-{seq_id}") == [expected]
     assert engine.model_runner.sequence_state_ids() == set()
-    assert engine.model_runner._mrope_deltas == {}
+    state = engine.model_runner._get_linear_attention_state()
+    assert state is not None and state.rope_deltas() == {}
 
 
 def _add_prompts(engine: ContinuousBatchingEngine, steps: int) -> None:
@@ -962,3 +972,179 @@ def test_reexecution_count_does_not_change_decode(repeats: int) -> None:
     for seq_id, prompt in PROMPTS.items():
         tokens, _ = _hf_greedy(model, prompt, steps)
         assert seqs.tokens[seq_id][len(prompt) :] == tokens
+
+
+class _ResidencyProbe:
+    """Tracks the peak device-resident state, including inside each step."""
+
+    def __init__(self, state: LinearAttentionStateCache) -> None:
+        self.state = state
+        self.peak = 0
+        self.offloads = 0
+        commit = state.commit
+        offload = state._offload_locked
+
+        def tracked_commit(*args, **kwargs):
+            committed = commit(*args, **kwargs)
+            self.observe()
+            return committed
+
+        def tracked_offload(seq_id: int) -> None:
+            self.offloads += 1
+            offload(seq_id)
+
+        state.commit = tracked_commit
+        state._offload_locked = tracked_offload
+
+    def observe(self) -> None:
+        self.peak = max(self.peak, self.state.device_bytes())
+
+
+MORE_PROMPTS = {**PROMPTS, 13: [4, 4, 9, 33, 21, 2, 1], 14: [17, 6]}
+
+
+def test_resident_state_stays_within_reserve_with_more_live_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Whole-prefill admission keeps four requests live with one row per step.
+    engine = _hybrid_engine(monkeypatch, max_batch_size=1)
+    reserve = engine._memory_budget.free_memory_reserve_bytes
+    state = engine.model_runner._get_linear_attention_state()
+    assert state is not None and state.max_resident == 1
+    probe = _ResidencyProbe(state)
+    steps = 6
+    for seq_id, prompt in MORE_PROMPTS.items():
+        engine.add_request(
+            f"req-{seq_id}",
+            list(prompt),
+            SamplingParams(temperature=0.0, max_tokens=steps),
+        )
+    for _ in range(300):
+        engine.step()
+        probe.observe()
+        assert len(state.resident_seq_ids()) <= 1
+        if not engine.has_pending_requests():
+            break
+    assert not engine.has_pending_requests()
+
+    assert probe.offloads > 0
+    assert 0 < probe.peak <= reserve
+    for seq_id, prompt in MORE_PROMPTS.items():
+        expected, _ = _hf_greedy(engine.model, prompt, steps)
+        assert engine.get_request_n_outputs(f"req-{seq_id}") == [expected]
+    assert engine.model_runner.sequence_state_ids() == set()
+
+
+def test_resident_state_is_not_moved_when_all_sequences_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _hybrid_engine(monkeypatch, max_batch_size=4)
+    state = engine.model_runner._get_linear_attention_state()
+    assert state is not None
+    probe = _ResidencyProbe(state)
+    _add_prompts(engine, steps=5)
+    _run_engine(engine)
+    assert probe.offloads == 0
+    assert probe.peak <= engine._memory_budget.free_memory_reserve_bytes
+
+
+def test_release_during_forward_does_not_recreate_state() -> None:
+    model = _build_model("vl")
+    runner = _runner(model)
+    seqs = _Sequences()
+    seqs.add(21, VL_PROMPTS[21], _vl_serving_inputs(21))
+    seqs.add(22, VL_PROMPTS[22])
+    batch = seqs.batch([21, 22])
+
+    forward = runner._forward_with_optional_paged_context
+
+    def cancel_after_forward(*args, **kwargs):
+        outputs = forward(*args, **kwargs)
+        # The request is aborted after the forward, before its commit.
+        runner.release_sequence_state([21])
+        return outputs
+
+    runner._forward_with_optional_paged_context = cancel_after_forward
+    runner.execute(batch)
+    state = runner._get_linear_attention_state()
+    assert state is not None
+    assert state.seq_ids() == {22}
+    assert state.rope_deltas() == {}
+
+
+def test_stale_batch_after_abort_does_not_recreate_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _hybrid_engine(monkeypatch)
+    prompt = list(VL_PROMPTS[21])
+    inputs = _vl_serving_inputs(21)
+    engine.add_request(
+        "req-image",
+        prompt,
+        SamplingParams(temperature=0.0, max_tokens=4),
+        multimodal_inputs=inputs,
+    )
+    engine.step()
+    seq_id = _engine_seq_id(engine, "req-image")
+    sequence = engine._sequences[seq_id]
+    runner = engine.model_runner
+    state = runner._get_linear_attention_state()
+    assert state is not None and state.rope_delta(seq_id) != 0
+    # The prefill batch of that step: the engine re-runs a step's batch, so
+    # a later forward of it can start after the request was aborted.
+    stale = BatchMetadata(
+        seq_ids=[seq_id],
+        input_token_ids=prompt,
+        seq_lengths=[len(prompt)],
+        context_lengths=[0],
+        is_prefill=[True],
+        block_tables=[engine.kv_cache.get_block_table(seq_id)],
+        sampling_params=[sequence.sampling_params],
+        multimodal_inputs=dict(inputs or {}),
+        row_multimodal_inputs=[inputs],
+    )
+
+    engine.abort_request("req-image")
+    assert runner.sequence_state_ids() == set()
+    runner.execute(stale)
+    assert runner.sequence_state_ids() == set()
+    assert state.rope_deltas() == {}
+
+
+def test_state_cache_tickets_and_lru_residency() -> None:
+    config = _text_config()
+    state = LinearAttentionStateCache(config, (0, 2), max_resident=2)
+
+    def cache_for(rows: int) -> DynamicCache:
+        cache = DynamicCache(config=config)
+        for layer_idx in (0, 2):
+            cache.update_conv_state(torch.randn(rows, 6, 4), layer_idx)
+            cache.update_recurrent_state(torch.randn(rows, 4, 8, 8), layer_idx)
+        return cache
+
+    for seq_id in (1, 2):
+        ticket = state.begin([seq_id])
+        assert state.commit(
+            [seq_id], [0], [3], cache_for(1), ticket=ticket
+        ) == [seq_id]
+    assert state.resident_seq_ids() == {1, 2}
+
+    # A third sequence pushes out the least recently used one.
+    ticket = state.begin([3])
+    assert state.resident_seq_ids() == {2}
+    state.commit([3], [0], [3], cache_for(1), ticket=ticket)
+    assert state.resident_seq_ids() == {2, 3}
+    assert state.has_state(1, 3)  # kept on the host, not dropped
+
+    # A released row is skipped by the forward that claimed it.
+    ticket = state.begin([2, 3])
+    state.release([2])
+    assert state.commit(
+        [2, 3], [3, 3], [1, 1], cache_for(2), ticket=ticket
+    ) == [3]
+    assert 2 not in state
+
+    # Rows the owner no longer reports live are skipped too.
+    state.is_live = lambda seq_id: seq_id != 3
+    ticket = state.begin([3])
+    assert state.commit([3], [4], [1], cache_for(1), ticket=ticket) == []

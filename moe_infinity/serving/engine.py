@@ -285,6 +285,11 @@ class ContinuousBatchingEngine:
         if fallback_reason is not None:
             _logger.warning("%s", fallback_reason)
         self.model_runner = ModelRunner(model, engine, device=self.device)
+        # Bounds device-resident recurrent state to what the budget reserves.
+        self.model_runner.set_sequence_state_limit(
+            self._get_int_config("max_batch_size", 32)
+        )
+        self.model_runner.set_sequence_liveness(self._sequence_is_live)
 
         self.prefix_cache: PrefixCache | None = None
         self.cache_namespace: CacheNamespace | None = None
@@ -734,6 +739,15 @@ class ContinuousBatchingEngine:
             )
         if completed_seq_ids:
             self.model_runner.release_sequence_state(completed_seq_ids)
+
+    def _sequence_is_live(self, seq_id: int) -> bool:
+        sequence = self._sequences.get(seq_id)
+        return sequence is not None and sequence.status in (
+            SequenceStatus.PREFILL,
+            SequenceStatus.DECODE,
+            SequenceStatus.DRAFT,
+            SequenceStatus.VERIFY,
+        )
 
     def _sync_sequence_state(self) -> None:
         """Keep runner-side per-sequence state in step with the scheduler.
