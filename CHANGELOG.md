@@ -46,6 +46,7 @@ All notable changes to MoE-Infinity will be documented in this file.
 - GPT-OSS resident-load path now materializes MXFP4 blocks, scales, router, biases, and attention sinks instead of leaving placeholder tensors in place.
 - GLM FP8 store and reload parity now stays stable across fresh stores and reloads.
 - `MOE_DISABLE_FUSED_KERNELS=1` no longer raises `TypeError` on decode: `fused_decode_attention` now has its own eager fallback instead of delegating to `paged_attention_fwd`, which takes a different KV cache layout and a required `num_kv_heads` argument.
+- The ordinary non-speculative continuous-batching step now runs the model once per scheduler step instead of three times. `step()` reuses the logits and `SamplerOutput` it already computed for KV/prefix metadata commit and sequence update, removing ~3x redundant forward compute and the repeated expert-tracing, KV, and prefix-cache side effects that inflated serving-path expert-access traces (#276).
 
 ### Known Limitations
 
