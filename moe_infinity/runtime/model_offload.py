@@ -1781,6 +1781,39 @@ class OffloadEngine(object):
                 )
             return weight.to(dtype=param.dtype, device="cpu").contiguous()
 
+        # Resident params that must be assembled from several on-disk tensors
+        # (e.g. glm5_next fuses q/k/v_conv1d.weight into one conv1d.weight).
+        # The source shards are not guaranteed to co-locate, so the fusion
+        # sources are buffered across the shard scan and concatenated once all
+        # are seen (per-shard matching would miss cross-shard sources).
+        fusion_plan = {}
+        for name in remaining:
+            for target_sfx, source_sfxs, dim in fusions:
+                if name.endswith(target_sfx):
+                    prefix = name[: -len(target_sfx)]
+                    fusion_plan[name] = (
+                        [prefix + s for s in source_sfxs],
+                        dim,
+                    )
+                    break
+        fusion_buffers = {}
+
+        def _collect_fusions(name, getter, available):
+            src_keys, dim = fusion_plan[name]
+            buf = fusion_buffers.setdefault(name, {})
+            for sk in src_keys:
+                if sk not in buf and sk in available:
+                    buf[sk] = getter(sk)
+            if len(buf) != len(src_keys):
+                return False
+            param = wanted[name]
+            fused = torch.cat([buf[sk] for sk in src_keys], dim=dim)
+            param.data = _resolve(param, name, fused, None)
+            param.requires_grad_(False)
+            param._moe_infinity_resident = True
+            del fusion_buffers[name]
+            return True
+
         for ckpt in self.ckpt_files:
             if not remaining:
                 break
@@ -1805,22 +1838,10 @@ class OffloadEngine(object):
                         param._moe_infinity_resident = True
                         remaining.remove(name)
                     for name in list(remaining):
-                        for target_sfx, source_sfxs, dim in fusions:
-                            if not name.endswith(target_sfx):
-                                continue
-                            prefix = name[: -len(target_sfx)]
-                            src_names = [prefix + s for s in source_sfxs]
-                            if not all(k in raw_keys for k in src_names):
-                                continue
-                            param = wanted[name]
-                            fused = torch.cat(
-                                [f.get_tensor(k) for k in src_names], dim=dim
-                            )
-                            param.data = _resolve(param, name, fused, None)
-                            param.requires_grad_(False)
-                            param._moe_infinity_resident = True
+                        if name not in fusion_plan:
+                            continue
+                        if _collect_fusions(name, f.get_tensor, raw_keys):
                             remaining.remove(name)
-                            break
             else:
                 state = torch.load(ckpt, map_location="cpu")
                 state = {rename(k): v for k, v in state.items()}
@@ -1834,6 +1855,11 @@ class OffloadEngine(object):
                     param.requires_grad_(False)
                     param._moe_infinity_resident = True
                     remaining.remove(name)
+                for name in list(remaining):
+                    if name not in fusion_plan:
+                        continue
+                    if _collect_fusions(name, state.__getitem__, set(state)):
+                        remaining.remove(name)
                 del state
 
         if remaining:

@@ -16,6 +16,8 @@ import os
 import re
 
 import pytest
+import torch
+from safetensors.torch import save_file
 from transformers import PretrainedConfig
 
 pytest.importorskip(
@@ -122,3 +124,49 @@ def test_fusions_cover_kda_conv1d_only(config, weight_map):
 
     for _target, sources, _dim in fusions:
         assert all("experts" not in s for s in sources)
+
+
+class _Conv(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+
+
+class _SelfAttn(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1d = _Conv()
+
+
+class _Root(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.self_attn = _SelfAttn()
+
+
+def test_conv1d_fusion_accumulates_across_shards(config, tmp_path):
+    q = torch.tensor([1.0, 2.0])
+    k = torch.tensor([3.0, 4.0])
+    v = torch.tensor([5.0, 6.0])
+
+    shard_a = str(tmp_path / "model-00001-of-00002.safetensors")
+    shard_b = str(tmp_path / "model-00002-of-00002.safetensors")
+    save_file({"self_attn.k_conv1d.weight": k}, shard_a)
+    save_file(
+        {
+            "self_attn.q_conv1d.weight": q,
+            "self_attn.v_conv1d.weight": v,
+        },
+        shard_b,
+    )
+
+    engine = _engine(config)
+    engine.ckpt_files = [shard_a, shard_b]
+    model = _Root()
+
+    assert engine._is_shared_expert_param("self_attn.conv1d.weight")
+    engine._load_resident_shared_experts(model)
+
+    fused = model.self_attn.conv1d.weight.data
+    assert torch.equal(fused, torch.cat([q, k, v], dim=0))
+    assert getattr(model.self_attn.conv1d.weight, "_moe_infinity_resident")
