@@ -36,7 +36,7 @@ from .memory_manager import MemoryManager
 from .memory_resize import TransactionalServingMemoryResizer
 from .model_runner import ModelRunner
 from .prefix_cache import CacheNamespace, PrefixCache
-from .sampler import Sampler
+from .sampler import Sampler, SamplerOutput
 from .scheduler import Scheduler
 from .sequence import (
     SamplingParams,
@@ -660,7 +660,9 @@ class ContinuousBatchingEngine:
             self._num_steps += 1
             return []
 
-        logits = self._execute_and_commit(batch)
+        # Issue #276: commit KV/prefix metadata for the batch we already
+        # executed and sampled above instead of running the model again.
+        self._commit_executed_batch(batch)
         # Compatibility limit: pre-Stage4a session doubles do not accept a
         # request-scoped generator and retain the original singleton,
         # whole-request Step-5 behavior. Canonical SpecSession implementations
@@ -697,26 +699,51 @@ class ContinuousBatchingEngine:
                 if len(fallback_indices) == len(batch.seq_ids)
                 else _slice_batch(batch, fallback_indices)
             )
-            outputs.extend(self._step_standard(fallback_batch))
+            if fallback_batch is batch:
+                outputs.extend(
+                    self._step_standard(
+                        fallback_batch,
+                        logits=logits,
+                        sampler_output=sampler_output,
+                    )
+                )
+            else:
+                outputs.extend(self._step_standard(fallback_batch))
 
         if speculative_indices and not fallback_indices:
             self._num_steps += 1
         return outputs
 
-    def _step_standard(self, batch: BatchMetadata) -> list[RequestOutput]:
-        """Execute the ordinary serving path for a scheduler-selected subset."""
+    def _step_standard(
+        self,
+        batch: BatchMetadata,
+        *,
+        logits: torch.Tensor | None = None,
+        sampler_output: SamplerOutput | None = None,
+    ) -> list[RequestOutput]:
+        """Execute the ordinary serving path for a scheduler-selected subset.
+
+        When ``step()`` has already executed and sampled this exact batch for
+        the non-speculative path, it passes ``logits`` and ``sampler_output``
+        here so the model is not run again (issue #276). When they are omitted
+        the batch is executed and sampled locally as before.
+        """
 
         sampled_indices = self._sampled_row_indices(batch)
-        logits = self._execute_batch(batch)
+        if logits is None:
+            logits = self._execute_batch(batch)
         next_token_ids = None
         if sampled_indices:
-            sampled_logits = self._extract_last_token_logits(
-                logits, batch, sampled_indices
-            )
-            sampled_params = [
-                batch.sampling_params[index] for index in sampled_indices
-            ]
-            sampler_output = self.sampler.sample(sampled_logits, sampled_params)
+            if sampler_output is None:
+                sampled_logits = self._extract_last_token_logits(
+                    logits, batch, sampled_indices
+                )
+                sampled_params = [
+                    batch.sampling_params[index] for index in sampled_indices
+                ]
+                sampler_output = self.sampler.sample(
+                    sampled_logits, sampled_params
+                )
             next_token_ids = sampler_output.token_ids
 
         outputs: list[RequestOutput] = []
@@ -2238,6 +2265,10 @@ class ContinuousBatchingEngine:
 
     def _execute_and_commit(self, batch: BatchMetadata) -> torch.Tensor:
         logits = self._execute_batch(batch)
+        self._commit_executed_batch(batch)
+        return logits
+
+    def _commit_executed_batch(self, batch: BatchMetadata) -> None:
         query_lengths = batch.query_lengths
         is_prefill = batch.is_prefill
         for index, seq_id in enumerate(batch.seq_ids):
@@ -2248,7 +2279,6 @@ class ContinuousBatchingEngine:
                 continue
             sequence.committed_kv_tokens += query_lengths[index]
             self._publish_committed_prefix(seq_id, sequence)
-        return logits
 
     def _publish_committed_prefix(
         self, seq_id: int, sequence: SequenceData
