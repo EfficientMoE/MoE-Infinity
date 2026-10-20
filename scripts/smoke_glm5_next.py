@@ -43,9 +43,13 @@ def main() -> None:
     )
 
     messages = [{"role": "user", "content": args.prompt}]
-    ids = tok.apply_chat_template(
-        messages, add_generation_prompt=True, return_tensors="pt"
-    ).to("cuda:0")
+    enc = tok.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        return_tensors="pt",
+        return_dict=True,
+    )
+    ids = enc["input_ids"].to("cuda:0")
 
     start = time.monotonic()
     out = model.generate(ids, max_new_tokens=args.max_new_tokens)
