@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from moe_infinity.distributed.expert_executor import DistributedExpertExecutor
+from moe_infinity.memory.adaptive_precision_policy import ExpertKey
 
 
 class FakeDispatcher:
@@ -87,6 +88,41 @@ def make_executor(policy="off", budget=0.0):
     dispatcher = FakeDispatcher()
     executor.set_expert_dispatcher(dispatcher)
     return executor, dispatcher
+
+
+class RecordingPrecisionPolicy:
+    epoch_due = False
+
+    def __init__(self):
+        self.observations = None
+        self.tokens = None
+
+    def observe(self, observations, tokens):
+        self.observations = observations
+        self.tokens = tokens
+
+
+def test_precision_policy_observes_active_expert_counts():
+    executor, _ = make_executor()
+    policy = RecordingPrecisionPolicy()
+    executor.set_precision_policy(policy)
+    hidden = torch.ones(2, 3)
+    mask = torch.tensor(
+        [
+            [True, False, True],
+            [True, True, False],
+        ]
+    )
+
+    with patch("torch.cuda.device_count", return_value=1):
+        executor.dispatch_local(5, hidden, mask, mask.float())
+
+    assert policy.observations == {
+        ExpertKey(5, 0): 2,
+        ExpertKey(5, 1): 1,
+        ExpertKey(5, 2): 1,
+    }
+    assert policy.tokens == 2
 
 
 def test_policy_off_passes_original_tensors():

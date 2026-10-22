@@ -1619,9 +1619,6 @@ async def _initialize_model() -> None:
                 min_free_mla_blocks_after_admission
             ),
         }
-        if args.enable_prefix_caching:
-            moe_config["enable_prefix_caching"] = True
-
         moe_module = importlib.import_module("moe_infinity")
         moe_ctor = getattr(moe_module, "MoE", None)
         if moe_ctor is None:
