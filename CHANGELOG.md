@@ -22,8 +22,13 @@ All notable changes to MoE-Infinity will be documented in this file.
 - Direct bare-HF batch-1/batch>1 greedy, sampled, and mixed-row execution with dense reconstruction, right-padded output, and `last_generated_lengths`.
 - Stage 4a persistent serving sessions and default-off Stage 4b engine-owned DeepSeek V2/V3 MLA pages for eligible greedy batch-1 requests.
 - No-download unified-execution benchmark/validator and compatibility assertions that fail closed on sampling, ordering, cache invariant, or ownership failures.
-- Documented GLM-5.3 (`zai-org/GLM-5.3`) as running through the existing GlmMoeDsa path (same base as GLM-5.2), with a config-resolution regression test (`tests/python/unit/test_glm53_registry.py`).
-- GLM-5.3-Flash (`zai-org/GLM-5.3-Flash`) glm5_next family support: guarded registry entry, nested text_config parsing, `SyncGlm5NextMoEBlock`, and offload runtime wiring (routed FP8 experts offloaded; KDA/DSA/mHC/vision resident, text-only).
+- Documented GLM-5.3 (`zai-org/GLM-5.3`) as running through the existing GlmMoeDsa path (same base as GLM-5.2), with a config-resolution regression test (`tests/python/unit/test_glm53_registry.py`) and a chat-template contract test for `reasoning_effort`/`clear_thinking` (`tests/python/unit/test_glm53_chat_template.py`). Validated by a real-checkpoint generate smoke (`MOE_GLM_SMOKE_MODEL=zai-org/GLM-5.3`).
+- GLM-5.3-Flash (`zai-org/GLM-5.3-Flash`) glm5_next family support: guarded registry entry, nested text_config parsing, `SyncGlm5NextMoEBlock`, and offload runtime wiring (routed FP8 experts offloaded; KDA/DSA/mHC/vision resident, text-only). Validated by a tiny GPU harness (generate + determinism, serving completions, FP8 store/reload parity) and a real-checkpoint generate smoke (`scripts/smoke_glm5_next.py`).
+
+### Fixed
+
+- `_load_resident_shared_experts` now buffers resident weight fusions across safetensors shards. GLM-5.3-Flash splits a KDA layer's `q/k/v_conv1d.weight` across shards, which the previous per-shard fusion match never assembled, raising "Missing shared_experts weights" on the real checkpoint.
+- glm5_next is excluded from the native engine path (like `glm_moe_dsa`/`minimax_m3_vl`); its hybrid KDA + DSA attention is not representable in the native paged backend, which previously crashed `MoE` init deriving an MLA kv-cache head_dim from the composite config.
 
 ### Changed
 

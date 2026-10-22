@@ -194,6 +194,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv-tf516/
 env/
 venv/
 venv_build_env/

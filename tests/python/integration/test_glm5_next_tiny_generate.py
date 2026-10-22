@@ -40,3 +40,8 @@ def test_tiny_glm5_next_generates(tmp_path):
     ids = torch.tensor([[1, 2, 3, 4]], device="cuda")
     out = model.generate(ids, max_new_tokens=8)
     assert out.shape[1] >= ids.shape[1] + 1
+
+    rerun = model.generate(ids, max_new_tokens=8)
+    assert (
+        out.tolist() == rerun.tolist()
+    ), "greedy generate is not deterministic across runs"
