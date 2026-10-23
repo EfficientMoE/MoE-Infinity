@@ -40,6 +40,7 @@ from moe_infinity.serving.batch import (
 from moe_infinity.serving.engine import ContinuousBatchingEngine
 from moe_infinity.serving.linear_attention_state import (
     LinearAttentionStateCache,
+    _state_tensor,
 )
 from moe_infinity.serving.model_runner import (
     HYBRID_CHUNKED_PREFILL_DISABLED_REASON,
@@ -464,8 +465,8 @@ def test_linear_attention_state_cache_lifecycle() -> None:
     restored = state.build_cache([2, 1], [3, 5])
     assert restored.has_previous_state(0)
     torch.testing.assert_close(
-        restored.layers[2].recurrent_states[0],
-        cache.layers[2].recurrent_states[1],
+        _state_tensor(restored.layers[2].recurrent_states)[0],
+        _state_tensor(cache.layers[2].recurrent_states)[1],
     )
     with pytest.raises(ValueError, match="mix new and continuing"):
         state.build_cache([1, 3], [5, 0])
@@ -475,11 +476,11 @@ def test_linear_attention_state_cache_lifecycle() -> None:
     assert state.seq_ids() == {1, 2}
 
     # Swapped-out sequences keep host copies that restore unchanged.
-    before = restored_single(state, 1, 6).layers[2].recurrent_states.clone()
+    before = _state_tensor(restored_single(state, 1, 6).layers[2].recurrent_states).clone()
     state.offload([1])
     assert state.nbytes() == state.nbytes(device_type="cpu")
     after = state.build_cache([1], [6], device=torch.device("cpu"))
-    torch.testing.assert_close(after.layers[2].recurrent_states, before)
+    torch.testing.assert_close(_state_tensor(after.layers[2].recurrent_states), before)
 
     state.release([2])
     assert 2 not in state and 1 in state

@@ -58,6 +58,17 @@ from moe_infinity.boundary.hybrid_attention_layout import (
 _Snapshot = tuple[tuple[torch.Tensor, torch.Tensor], ...]
 
 
+def _state_tensor(state: Any) -> Optional[torch.Tensor]:
+    """Return a layer's state tensor from either cache layout.
+
+    Older transformers store a bare tensor; newer ones store a dict keyed by
+    state index. Qwen3.5 has one state per layer, so take the first one set.
+    """
+    if isinstance(state, dict):
+        return next((t for t in state.values() if t is not None), None)
+    return state
+
+
 class ForwardTicket:
     """Identity of one forward's claim on its rows' state."""
 
@@ -244,10 +255,13 @@ class LinearAttentionStateCache:
         With a ``ticket``, rows released since ``begin`` are skipped, along
         with their ``rope_deltas``. Returns the committed sequences.
         """
-        layers = [cache.layers[idx] for idx in self.linear_layer_indices]
-        for layer_idx, layer in zip(self.linear_layer_indices, layers):
-            conv_states = getattr(layer, "conv_states", None)
-            recurrent_states = getattr(layer, "recurrent_states", None)
+        states: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer_idx in self.linear_layer_indices:
+            layer = cache.layers[layer_idx]
+            conv_states = _state_tensor(getattr(layer, "conv_states", None))
+            recurrent_states = _state_tensor(
+                getattr(layer, "recurrent_states", None)
+            )
             if conv_states is None or recurrent_states is None:
                 raise RuntimeError(
                     f"linear-attention layer {layer_idx} produced no state"
@@ -256,6 +270,7 @@ class LinearAttentionStateCache:
                 raise RuntimeError(
                     "linear-attention state batch does not match the rows"
                 )
+            states.append((conv_states, recurrent_states))
         committed: list[int] = []
         with self._lock:
             for row, (seq_id, context_len, query_len) in enumerate(
@@ -276,10 +291,10 @@ class LinearAttentionStateCache:
                         del entries[num_tokens]
                 entries[end] = tuple(
                     (
-                        layer.conv_states[row : row + 1].clone(),
-                        layer.recurrent_states[row : row + 1].clone(),
+                        conv_states[row : row + 1].clone(),
+                        recurrent_states[row : row + 1].clone(),
                     )
-                    for layer in layers
+                    for conv_states, recurrent_states in states
                 )
                 self._resident.add(seq_id)
                 if rope_deltas is not None and seq_id in rope_deltas:
