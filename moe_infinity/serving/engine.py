@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import weakref
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from math import ceil
@@ -289,7 +290,14 @@ class ContinuousBatchingEngine:
         self.model_runner.set_sequence_state_limit(
             self._get_int_config("max_batch_size", 32)
         )
-        self.model_runner.set_sequence_liveness(self._sequence_is_live)
+        # A weak reference keeps the runner from pinning this engine (and its
+        # device KV store) in a cycle that only the cyclic GC can collect.
+        is_live_ref = weakref.WeakMethod(self._sequence_is_live)
+        self.model_runner.set_sequence_liveness(
+            lambda seq_id: (
+                (is_live := is_live_ref()) is not None and is_live(seq_id)
+            )
+        )
 
         self.prefix_cache: PrefixCache | None = None
         self.cache_namespace: CacheNamespace | None = None
