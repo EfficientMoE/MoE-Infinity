@@ -136,8 +136,11 @@ class TestGPTQTensorHandling:
         original_import_module = importlib.import_module
 
         def _fake_import(name, package=None):
-            if name == "optimum.gptq":
-                return SimpleNamespace(GPTQQuantizer=FakeGPTQQuantizer)
+            if name == "optimum.gptq.quantizer":
+                return SimpleNamespace(
+                    GPTQQuantizer=FakeGPTQQuantizer,
+                    is_gptqmodel_available=lambda: True,
+                )
             return original_import_module(name, package)
 
         monkeypatch.setattr(importlib, "import_module", _fake_import)
@@ -167,8 +170,11 @@ class TestGPTQTensorHandling:
         original_import_module = importlib.import_module
 
         def _fake_import(name, package=None):
-            if name == "optimum.gptq":
-                return SimpleNamespace(GPTQQuantizer=FakeGPTQQuantizer)
+            if name == "optimum.gptq.quantizer":
+                return SimpleNamespace(
+                    GPTQQuantizer=FakeGPTQQuantizer,
+                    is_gptqmodel_available=lambda: True,
+                )
             return original_import_module(name, package)
 
         monkeypatch.setattr(importlib, "import_module", _fake_import)
@@ -193,8 +199,11 @@ class TestGPTQTensorHandling:
         original_import_module = importlib.import_module
 
         def _fake_import(name, package=None):
-            if name == "optimum.gptq":
-                return SimpleNamespace(GPTQQuantizer=FakeGPTQQuantizer)
+            if name == "optimum.gptq.quantizer":
+                return SimpleNamespace(
+                    GPTQQuantizer=FakeGPTQQuantizer,
+                    is_gptqmodel_available=lambda: True,
+                )
             return original_import_module(name, package)
 
         monkeypatch.setattr(importlib, "import_module", _fake_import)
@@ -210,16 +219,91 @@ class TestGPTQTensorHandling:
         original_import_module = importlib.import_module
 
         def _fake_import(name, package=None):
-            if name == "optimum.gptq":
+            if name == "optimum.gptq.quantizer":
                 raise ImportError("optimum missing")
             return original_import_module(name, package)
 
         monkeypatch.setattr(importlib, "import_module", _fake_import)
 
         with pytest.raises(
-            ImportError, match="optimum.*pip install optimum\\[gptq\\]"
+            ImportError, match="optimum.*pip install optimum gptqmodel"
         ):
             OffloadEngine._apply_quantized_model_conversion(engine, object())
+
+    @pytest.mark.parametrize("legacy_optimum", [False, True])
+    def test_gptq_missing_backend_fails_before_from_dict(
+        self, monkeypatch, legacy_optimum
+    ):
+        def from_dict(cfg):
+            pytest.fail("from_dict must not run without a backend")
+
+        module = SimpleNamespace(
+            GPTQQuantizer=SimpleNamespace(from_dict=from_dict),
+            is_gptqmodel_available=lambda: False,
+        )
+        if legacy_optimum:
+            module.is_auto_gptq_available = lambda: False
+
+        original_import_module = importlib.import_module
+
+        def _fake_import(name, package=None):
+            if name == "optimum.gptq.quantizer":
+                return module
+            return original_import_module(name, package)
+
+        monkeypatch.setattr(importlib, "import_module", _fake_import)
+
+        with pytest.raises(
+            ImportError, match="pip install optimum gptqmodel"
+        ) as exc:
+            OffloadEngine._apply_quantized_model_conversion(
+                _engine_for_gptq(), object()
+            )
+
+        assert "No GPTQ backend" in str(exc.value.__cause__)
+
+    def test_gptq_legacy_auto_gptq_backend_still_converts(self, monkeypatch):
+        model = object()
+        module = SimpleNamespace(
+            GPTQQuantizer=SimpleNamespace(
+                from_dict=lambda cfg: SimpleNamespace(convert_model=lambda m: m)
+            ),
+            is_gptqmodel_available=lambda: False,
+            is_auto_gptq_available=lambda: True,
+        )
+        original_import_module = importlib.import_module
+
+        def _fake_import(name, package=None):
+            if name == "optimum.gptq.quantizer":
+                return module
+            return original_import_module(name, package)
+
+        monkeypatch.setattr(importlib, "import_module", _fake_import)
+
+        assert (
+            OffloadEngine._apply_quantized_model_conversion(
+                _engine_for_gptq(), model
+            )
+            is model
+        )
+
+    def test_gptq_incompatible_backend_keeps_original_cause(self, monkeypatch):
+        incompatible = ImportError("gptqmodel version is too old")
+        original_import_module = importlib.import_module
+
+        def _fake_import(name, package=None):
+            if name == "optimum.gptq.quantizer":
+                raise incompatible
+            return original_import_module(name, package)
+
+        monkeypatch.setattr(importlib, "import_module", _fake_import)
+
+        with pytest.raises(ImportError, match="compatible GPTQ backend") as exc:
+            OffloadEngine._apply_quantized_model_conversion(
+                _engine_for_gptq(), object()
+            )
+
+        assert exc.value.__cause__ is incompatible
 
 
 class TestGPTQExpertKeyMapping:

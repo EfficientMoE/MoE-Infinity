@@ -2369,12 +2369,28 @@ class OffloadEngine(object):
             quantization_config["disable_exllama"] = True
 
             try:
-                gptq_module = importlib.import_module("optimum.gptq")
+                gptq_module = importlib.import_module("optimum.gptq.quantizer")
                 GPTQQuantizer = getattr(gptq_module, "GPTQQuantizer")
+                # Use the same version-aware checks as the quantizer's
+                # conditional backend imports. Newer optimum releases no
+                # longer support auto-gptq and can import without gptqmodel,
+                # then fail with an undefined QuantizeConfig in from_dict.
+                if not any(
+                    getattr(gptq_module, check, lambda: False)()
+                    for check in (
+                        "is_gptqmodel_available",
+                        "is_auto_gptq_available",
+                    )
+                ):
+                    raise ImportError(
+                        "No GPTQ backend supported by this optimum is available."
+                    )
             except ImportError as e:
                 raise ImportError(
-                    "GPTQ model detected but 'optimum' is not installed. "
-                    "Install with: pip install optimum[gptq]"
+                    "GPTQ conversion requires 'optimum' and a compatible "
+                    "GPTQ backend. Install with: pip install optimum gptqmodel. "
+                    "Match gptqmodel and torch versions to your optimum "
+                    "release; older optimum may also support auto-gptq."
                 ) from e
 
             optimum_quantizer = GPTQQuantizer.from_dict(quantization_config)
