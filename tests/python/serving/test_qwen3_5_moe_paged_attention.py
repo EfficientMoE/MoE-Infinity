@@ -476,11 +476,15 @@ def test_linear_attention_state_cache_lifecycle() -> None:
     assert state.seq_ids() == {1, 2}
 
     # Swapped-out sequences keep host copies that restore unchanged.
-    before = _state_tensor(restored_single(state, 1, 6).layers[2].recurrent_states).clone()
+    before = _state_tensor(
+        restored_single(state, 1, 6).layers[2].recurrent_states
+    ).clone()
     state.offload([1])
     assert state.nbytes() == state.nbytes(device_type="cpu")
     after = state.build_cache([1], [6], device=torch.device("cpu"))
-    torch.testing.assert_close(_state_tensor(after.layers[2].recurrent_states), before)
+    torch.testing.assert_close(
+        _state_tensor(after.layers[2].recurrent_states), before
+    )
 
     state.release([2])
     assert 2 not in state and 1 in state
@@ -558,6 +562,13 @@ def _hybrid_engine(
 ) -> ContinuousBatchingEngine:
     model = _build_model("vl")
     backend = _cpu_backend(num_blocks=32)
+    # Keep the CPU fixture on CPU when CUDA is visible: the engine otherwise
+    # maps a CPU-resident model to the last GPU (the OffloadEngine path).
+    monkeypatch.setattr(
+        ContinuousBatchingEngine,
+        "_resolve_device",
+        staticmethod(lambda model: torch.device("cpu")),
+    )
     # Exercise the FlashInfer-only layered store creation while the
     # engine binds it, then execute on the CPU SDPA path.
     monkeypatch.setattr(backend, "_flashinfer_enabled", lambda: True)
