@@ -122,6 +122,52 @@ from moe_infinity.utils.async_transfer import (
 from moe_infinity.utils.device import get_default_device, get_device
 
 
+class _GPTQLinear(torch.nn.Module):
+    """Packed GPTQ inference using only torch; buffers are hydrated by Archer."""
+
+    def __init__(self, layer, bits, checkpoint_format, bias):
+        super().__init__()
+        self.in_features = layer.in_features
+        self.out_features = layer.out_features
+        self.bits = bits
+        self.checkpoint_format = checkpoint_format
+        # Match empty-init: do not allocate full weights for every MoE expert.
+        for name in ("qweight", "qzeros", "scales", "g_idx", "bias"):
+            if name == "bias" and not bias:
+                self.register_buffer(name, None)
+                continue
+            dtype = (
+                torch.int32
+                if name in {"qweight", "qzeros", "g_idx"}
+                else layer.weight.dtype
+            )
+            self.register_buffer(
+                name, torch.zeros(1, dtype=dtype, device=layer.weight.device)
+            )
+        self.train(layer.training)
+
+    def forward(self, x):
+        pack = 32 // self.bits
+        shifts = torch.arange(
+            0, 32, self.bits, dtype=torch.int32, device=self.qweight.device
+        )
+        mask = (1 << self.bits) - 1
+        weight = (self.qweight.unsqueeze(1) >> shifts.view(1, pack, 1)) & mask
+        weight = weight.reshape(-1, self.out_features)[: self.in_features]
+        zeros = (self.qzeros.unsqueeze(-1) >> shifts) & mask
+        zeros = zeros.reshape(self.qzeros.shape[0], -1)[:, : self.out_features]
+        # Original GPTQ stores zero_point - 1; GPTQ v2 stores zero_point.
+        if self.checkpoint_format == "gptq":
+            zeros = zeros + 1
+        groups = self.g_idx.long()
+        weight = (weight - zeros[groups]).to(x.dtype)
+        weight = weight * self.scales[groups].to(x.dtype)
+        out = torch.matmul(x, weight)
+        if self.bias is not None:
+            out = out + self.bias.to(x.dtype)
+        return out
+
+
 @dataclass(frozen=True)
 class AdaptivePrecisionResolution:
     enabled: bool
@@ -2368,6 +2414,10 @@ class OffloadEngine(object):
             quantization_config["use_exllama"] = False
             quantization_config["disable_exllama"] = True
 
+            converted = self._convert_model_for_gptq(model, quantization_config)
+            if converted is not None:
+                return converted
+
             try:
                 gptq_module = importlib.import_module("optimum.gptq.quantizer")
                 GPTQQuantizer = getattr(gptq_module, "GPTQQuantizer")
@@ -2400,6 +2450,69 @@ class OffloadEngine(object):
             self.quant_method = "awq"
             return self._convert_model_for_awq(model)
 
+        return model
+
+    def _convert_model_for_gptq(self, model, quantization_config):
+        """Convert standard int32 GPTQ Linear weights listed in the store.
+
+        Checkpoint keys select layers exactly, including dynamic exclusions
+        (routers, shared experts, vision, MTP). Unsupported formats retain the
+        guarded optimum path, without partially converting the model.
+        """
+        bits = quantization_config.get("bits", 4)
+        checkpoint_format = quantization_config.get(
+            "checkpoint_format", quantization_config.get("format", "gptq")
+        )
+        if (
+            bits not in (2, 4, 8)
+            or checkpoint_format not in ("gptq", "gptq_v2")
+            or quantization_config.get("pack_dtype", "int32")
+            not in ("int32", "torch.int32", torch.int32)
+            or any((quantization_config.get("dynamic") or {}).values())
+        ):
+            return None
+
+        names = getattr(self, "name_id_map", {})
+        packed = [
+            name[: -len(".qweight")]
+            for name in names
+            if name.endswith(".qweight")
+        ]
+        if not packed:
+            return None
+
+        replacements = []
+        for name in packed:
+            # Checkpoints may omit the base-model prefix, as in the legacy
+            # parameter mapping below model creation.
+            target = name
+            try:
+                layer = model.get_submodule(target)
+            except AttributeError:
+                target = f"{model.base_model_prefix}.{name}"
+                layer = model.get_submodule(target)
+            if not isinstance(layer, torch.nn.Linear):
+                return None
+            required = ("qweight", "qzeros", "scales", "g_idx")
+            missing = [key for key in required if f"{name}.{key}" not in names]
+            if missing:
+                raise ValueError(
+                    f"Incomplete GPTQ layer {name}: missing {missing}"
+                )
+            replacements.append((name, target, layer))
+
+        for name, target, layer in replacements:
+            parent_name, _, attr = target.rpartition(".")
+            parent = model.get_submodule(parent_name)
+            bias = f"{name}.bias" in names
+            setattr(
+                parent, attr, _GPTQLinear(layer, bits, checkpoint_format, bias)
+            )
+            if target != name:
+                for key in ("qweight", "qzeros", "scales", "g_idx", "bias"):
+                    old_key = f"{name}.{key}"
+                    if old_key in names:
+                        names[f"{target}.{key}"] = names.pop(old_key)
         return model
 
     def _convert_model_for_awq(self, model):
