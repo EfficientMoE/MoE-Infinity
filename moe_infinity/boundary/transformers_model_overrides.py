@@ -40,6 +40,13 @@ try:
 except ImportError:
     OlmoePagedAttention = None
 
+try:
+    from moe_infinity.boundary.qwen3_5_moe_paged_attention import (
+        Qwen3_5MoePagedAttention,
+    )
+except ImportError:
+    Qwen3_5MoePagedAttention = None
+
 
 def _model_module(name: str):
     return importlib.import_module(
@@ -104,6 +111,11 @@ def install_transformers_model_overrides() -> None:
     qwen3_5 = _model_module("qwen3_5_moe")
     qwen3_5._old_qwen3_5_sparse_moe = qwen3_5.Qwen3_5MoeSparseMoeBlock
     qwen3_5.Qwen3_5MoeSparseMoeBlock = SyncQwen3_5MoeSparseMoeBlock
+    if Qwen3_5MoePagedAttention is not None:
+        # Full-attention layers only; Qwen3_5MoeGatedDeltaNet and the vision
+        # attention keep their HuggingFace classes.
+        qwen3_5._old_qwen3_5_attention = qwen3_5.Qwen3_5MoeAttention
+        qwen3_5.Qwen3_5MoeAttention = Qwen3_5MoePagedAttention
 
     try:
         glm = _model_module("glm_moe_dsa")
@@ -142,6 +154,8 @@ def restore_context_transformers_model_overrides() -> None:
     qwen3_5 = _model_module("qwen3_5_moe")
     if hasattr(qwen3_5, "_old_qwen3_5_sparse_moe"):
         qwen3_5.Qwen3_5MoeSparseMoeBlock = qwen3_5._old_qwen3_5_sparse_moe
+    if hasattr(qwen3_5, "_old_qwen3_5_attention"):
+        qwen3_5.Qwen3_5MoeAttention = qwen3_5._old_qwen3_5_attention
 
     olmoe = _model_module("olmoe")
     if hasattr(olmoe, "_old_olmoe_attention"):
@@ -217,6 +231,8 @@ def restore_runtime_transformers_model_overrides() -> None:
     qwen3_5 = _model_module("qwen3_5_moe")
     if hasattr(qwen3_5, "_old_qwen3_5_sparse_moe"):
         qwen3_5.Qwen3_5MoeSparseMoeBlock = qwen3_5._old_qwen3_5_sparse_moe
+    if hasattr(qwen3_5, "_old_qwen3_5_attention"):
+        qwen3_5.Qwen3_5MoeAttention = qwen3_5._old_qwen3_5_attention
 
     try:
         minimax_m3 = _model_module("minimax_m3_vl")

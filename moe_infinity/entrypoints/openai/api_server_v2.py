@@ -94,6 +94,7 @@ except Exception:
     uvicorn = SimpleNamespace(run=lambda *args, **kwargs: None)
 
 import moe_infinity.serving.watchdog as watchdog_module
+from moe_infinity.boundary.hybrid_attention_layout import paged_kv_layer_count
 from moe_infinity.serving.cuda_graph import FALLBACK_REASONS
 from moe_infinity.serving.engine import (
     ContinuousBatchingEngine,
@@ -2398,6 +2399,8 @@ def _build_engine_config(
 
     if num_layers is None:
         raise RuntimeError("unable to resolve model num_layers")
+    # Hybrid models only page KV for their full-attention layers.
+    num_layers = paged_kv_layer_count(model_config, num_layers)
     if num_attention_heads is None:
         raise RuntimeError("unable to resolve model num_attention_heads")
     if num_kv_heads is None:
