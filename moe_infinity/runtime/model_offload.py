@@ -125,12 +125,13 @@ from moe_infinity.utils.device import get_default_device, get_device
 class _GPTQLinear(torch.nn.Module):
     """Packed GPTQ inference using only torch; buffers are hydrated by Archer."""
 
-    def __init__(self, layer, bits, checkpoint_format, bias):
+    def __init__(self, layer, bits, checkpoint_format, bias, sym=False):
         super().__init__()
         self.in_features = layer.in_features
         self.out_features = layer.out_features
         self.bits = bits
         self.checkpoint_format = checkpoint_format
+        self.sym = sym
         # Match empty-init: do not allocate full weights for every MoE expert.
         for name in ("qweight", "qzeros", "scales", "g_idx", "bias"):
             if name == "bias" and not bias:
@@ -154,13 +155,19 @@ class _GPTQLinear(torch.nn.Module):
         mask = (1 << self.bits) - 1
         weight = (self.qweight.unsqueeze(1) >> shifts.view(1, pack, 1)) & mask
         weight = weight.reshape(-1, self.out_features)[: self.in_features]
-        zeros = (self.qzeros.unsqueeze(-1) >> shifts) & mask
-        zeros = zeros.reshape(self.qzeros.shape[0], -1)[:, : self.out_features]
-        # Original GPTQ stores zero_point - 1; GPTQ v2 stores zero_point.
-        if self.checkpoint_format == "gptq":
-            zeros = zeros + 1
         groups = self.g_idx.long()
-        weight = (weight - zeros[groups]).to(x.dtype)
+        if self.sym:
+            # Symmetric GPTQ has a fixed midpoint zero; like the Marlin and
+            # ExLlama kernels, ignore qzeros, whose stored offset varies.
+            weight = (weight - (1 << (self.bits - 1))).to(x.dtype)
+        else:
+            zeros = (self.qzeros.unsqueeze(-1) >> shifts) & mask
+            zeros = zeros.reshape(self.qzeros.shape[0], -1)
+            zeros = zeros[:, : self.out_features]
+            # Original GPTQ stores zero_point - 1; GPTQ v2 stores zero_point.
+            if self.checkpoint_format == "gptq":
+                zeros = zeros + 1
+            weight = (weight - zeros[groups]).to(x.dtype)
         weight = weight * self.scales[groups].to(x.dtype)
         out = torch.matmul(x, weight)
         if self.bias is not None:
@@ -2460,6 +2467,7 @@ class OffloadEngine(object):
         guarded optimum path, without partially converting the model.
         """
         bits = quantization_config.get("bits", 4)
+        sym = bool(quantization_config.get("sym", False))
         checkpoint_format = quantization_config.get(
             "checkpoint_format", quantization_config.get("format", "gptq")
         )
@@ -2506,7 +2514,9 @@ class OffloadEngine(object):
             parent = model.get_submodule(parent_name)
             bias = f"{name}.bias" in names
             setattr(
-                parent, attr, _GPTQLinear(layer, bits, checkpoint_format, bias)
+                parent,
+                attr,
+                _GPTQLinear(layer, bits, checkpoint_format, bias, sym),
             )
             if target != name:
                 for key in ("qweight", "qzeros", "scales", "g_idx", "bias"):

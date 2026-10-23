@@ -416,6 +416,36 @@ class TestNativeGPTQConversion:
             "bias",
         }
 
+    @pytest.mark.parametrize("bits", [2, 4, 8])
+    def test_symmetric_uses_midpoint_zero_and_ignores_qzeros(self, bits):
+        # Published Qwen3.5 GPTQ-Int4: sym=True, no checkpoint_format, and
+        # qzeros hold the midpoint itself. Applying the v1 "+1" offset to
+        # them shifts every weight by one quantization step.
+        model, engine, name = _native_model_and_engine(bits)
+        engine.config.quantization_config.pop("checkpoint_format")
+        engine.config.quantization_config["sym"] = True
+        engine._apply_quantized_model_conversion(model)
+        layer = model.get_submodule(name)
+
+        mask = (1 << bits) - 1
+        midpoint = 1 << (bits - 1)
+        rng = torch.Generator().manual_seed(270)
+        integers = torch.randint(mask + 1, (32, 32), generator=rng)
+        groups = torch.arange(32, dtype=torch.int32) // 8
+        scales = torch.randint(1, 5, (4, 32), generator=rng).float() / 32
+        stored_zeros = torch.full((4, 32), midpoint)
+        for key, tensor in {
+            "qweight": _pack_rows(integers, bits),
+            "qzeros": _pack_rows(stored_zeros.T, bits).T.contiguous(),
+            "scales": scales,
+            "g_idx": groups,
+            "bias": torch.zeros(32),
+        }.items():
+            getattr(layer, key).data = tensor
+        x = (torch.arange(3 * 32).reshape(3, 32) % 5).float() / 4
+        dense = (integers - midpoint).float() * scales[groups.long()]
+        torch.testing.assert_close(layer(x), x @ dense)
+
     def test_topology_contains_all_packed_buffers(self):
         model, engine, name = _native_model_and_engine()
         second = torch.nn.Module()
