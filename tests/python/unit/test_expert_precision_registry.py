@@ -55,6 +55,7 @@ def test_converter_candidate_is_not_implicitly_released():
         ("gpt_oss", "protected:gpt_oss_mxfp4"),
         ("glm_moe_dsa", "protected:glm_fp8"),
         ("deepseek_v4", "protected:deepseek_v4_fp4"),
+        ("deepseek_v41", "protected:deepseek_v4_fp4"),
     ],
 )
 def test_model_specific_low_bit_paths_are_protected(model_type, reason):
@@ -65,6 +66,31 @@ def test_model_specific_low_bit_paths_are_protected(model_type, reason):
         model, extension_names={"_v4_fp4"}
     )
     assert caps.protected_reason == reason
+    assert all(cap.protected for cap in caps.formats.values())
+
+
+def test_deepseek_v41_never_resolves_to_glm_fp8_identity():
+    """model_type must win before the generic quant_method fp8 fallback.
+
+    The V4.1 checkpoint carries quantization_config.quant_method == "fp8"
+    (32x32 blocks, ue8m0 scales, fp4 experts); resolving it through the
+    GLM_FP8_BLOCK128 path would be a silent format mismatch.
+    """
+    config = SimpleNamespace(
+        model_type="deepseek_v41",
+        quantization_config={
+            "quant_method": "fp8",
+            "weight_block_size": [32, 32],
+            "scale_fmt": "ue8m0",
+            "expert_dtype": "fp4",
+        },
+    )
+    caps = resolve_model_precision_capabilities(
+        config, extension_names={"_v4_fp4"}
+    )
+    assert caps.protected_reason == "protected:deepseek_v4_fp4"
+    assert ExpertFormat.DEEPSEEK_V4_FP4 in caps.formats
+    assert ExpertFormat.GLM_FP8_BLOCK128 not in caps.formats
     assert all(cap.protected for cap in caps.formats.values())
 
 
