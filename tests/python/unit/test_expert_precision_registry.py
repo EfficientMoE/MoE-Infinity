@@ -55,6 +55,7 @@ def test_converter_candidate_is_not_implicitly_released():
         ("gpt_oss", "protected:gpt_oss_mxfp4"),
         ("glm_moe_dsa", "protected:glm_fp8"),
         ("deepseek_v4", "protected:deepseek_v4_fp4"),
+        ("hy_v3", "protected:hy3_fp8_pertensor"),
     ],
 )
 def test_model_specific_low_bit_paths_are_protected(model_type, reason):
@@ -65,6 +66,24 @@ def test_model_specific_low_bit_paths_are_protected(model_type, reason):
         model, extension_names={"_v4_fp4"}
     )
     assert caps.protected_reason == reason
+    assert all(cap.protected for cap in caps.formats.values())
+
+
+def test_hy3_resolves_pertensor_reason_not_generic_fp8():
+    # Hy3-FP8 carries quant_method "fp8" but per-tensor scalar scales, not
+    # 128x128 block scale_inv tensors. The generic protected:fp8 reason must
+    # never catch hy_v3: the loader keys per-tensor handling off the
+    # hy3-specific reason staying distinct.
+    config = SimpleNamespace(
+        model_type="hy_v3",
+        quantization_config={"quant_method": "fp8"},
+    )
+    caps = resolve_model_precision_capabilities(config, set())
+    assert caps.protected_reason == "protected:hy3_fp8_pertensor"
+    assert caps.protected_reason != "protected:fp8"
+    # After load-time scalar->block-grid expansion the store/dispatcher
+    # format identity is the existing glm_fp8_block128 path.
+    assert set(caps.formats) == {ExpertFormat.GLM_FP8_BLOCK128}
     assert all(cap.protected for cap in caps.formats.values())
 
 
