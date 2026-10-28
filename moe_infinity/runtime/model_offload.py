@@ -1302,6 +1302,10 @@ class OffloadEngine(object):
                                     )
                                 del state_dict[scale_key]
 
+                            _split_fp8_pertensor_state_dict(
+                                state_dict, self._blockwise_fp8_scales
+                            )
+
                         self._offload_state_dict(state_dict, empty_state_dict)
 
                         del state_dict
@@ -1833,12 +1837,18 @@ class OffloadEngine(object):
             if weight.dtype == torch.float8_e4m3fn:
                 if scale is None:
                     raise RuntimeError(
-                        f"FP8 shared-expert weight {name!r} is missing its "
-                        "_scale_inv; cannot dequantize resident shared experts."
+                        f"FP8 resident weight {name!r} is missing its scale "
+                        "(_scale_inv block tensor or per-tensor weight_scale); "
+                        "cannot dequantize."
                     )
-                weight = dequant_fp8_blockwise(
-                    weight, scale, dtype=param.dtype, block_size=128
-                )
+                if scale.numel() == 1:
+                    weight = _dequant_fp8_pertensor(
+                        weight, scale, dtype=param.dtype
+                    )
+                else:
+                    weight = dequant_fp8_blockwise(
+                        weight, scale, dtype=param.dtype, block_size=128
+                    )
             return weight.to(dtype=param.dtype, device="cpu").contiguous()
 
         for ckpt in self.ckpt_files:
@@ -1852,7 +1862,9 @@ class OffloadEngine(object):
                         if name not in keys:
                             continue
                         param = wanted[name]
-                        scale_key = keys.get(name + "_scale_inv")
+                        scale_key = keys.get(name + "_scale_inv") or keys.get(
+                            name + "_scale"
+                        )
                         scale = (
                             f.get_tensor(scale_key)
                             if scale_key is not None
@@ -1889,7 +1901,12 @@ class OffloadEngine(object):
                         continue
                     param = wanted[name]
                     param.data = _resolve(
-                        param, name, state[name], state.get(name + "_scale_inv")
+                        param,
+                        name,
+                        state[name],
+                        state.get(
+                            name + "_scale_inv", state.get(name + "_scale")
+                        ),
                     )
                     param.requires_grad_(False)
                     param._moe_infinity_resident = True
@@ -2078,6 +2095,21 @@ class OffloadEngine(object):
                     base = k[: -len("_scale_inv")]
                     if base in keys:
                         self._blockwise_fp8_scales[base] = f.get_tensor(k)
+                for k in keys:
+                    if not k.endswith(".weight_scale"):
+                        continue
+                    base = k[: -len("_scale")]
+                    if base not in keys:
+                        continue
+                    # Safe superset, same policy as the _scale_inv loop
+                    # above: the dispatcher only applies scales to routed
+                    # weights actually stored as FP8.
+                    shape = f.get_slice(base).get_shape()
+                    self._blockwise_fp8_scales[base] = (
+                        _expand_pertensor_scale_to_blocks(
+                            shape, f.get_tensor(k)
+                        )
+                    )
 
     def get_topology(self, model):
         name_lst = []
@@ -2374,7 +2406,9 @@ class OffloadEngine(object):
                     continue
 
                 if is_blockwise_fp8_ckpt and (
-                    k.endswith("_scale_inv") or v.dtype == torch.float8_e4m3fn
+                    k.endswith("_scale_inv")
+                    or k.endswith("_scale")
+                    or v.dtype == torch.float8_e4m3fn
                 ):
                     state_dict[k] = v.to("cpu")
                     continue
