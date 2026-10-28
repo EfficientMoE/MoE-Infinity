@@ -541,6 +541,66 @@ def _identify_fp8_blockwise_pairs(keys):
     return pairs
 
 
+def _identify_fp8_pertensor_pairs(keys):
+    # Hy3-FP8 style: scalar scales named "<weight key>_scale" (i.e.
+    # "...weight" + "_scale"), distinct from the GLM "..._scale_inv" block
+    # tensors handled by _identify_fp8_blockwise_pairs above.
+    key_set = set(keys)
+    pairs = []
+    for k in keys:
+        if k.endswith(".weight_scale"):
+            base = k[: -len("_scale")]
+            if base in key_set:
+                pairs.append((base, k))
+    return pairs
+
+
+def _expand_pertensor_scale_to_blocks(
+    weight_shape, scale: torch.Tensor, block_size: int = 128
+) -> torch.Tensor:
+    # Expand a per-tensor scalar scale to the uniform [ceil(N/b), ceil(K/b)]
+    # float32 grid the native glm_fp8_block128 dequant-on-copy path consumes.
+    # A uniform grid makes blockwise dequant numerically identical to
+    # per-tensor dequant, so no new native format is needed.
+    n, k = int(weight_shape[0]), int(weight_shape[1])
+    rows = (n + block_size - 1) // block_size
+    cols = (k + block_size - 1) // block_size
+    return torch.full((rows, cols), float(scale), dtype=torch.float32)
+
+
+def _dequant_fp8_pertensor(
+    weight: torch.Tensor, scale: torch.Tensor, *, dtype: torch.dtype
+) -> torch.Tensor:
+    return (weight.to(torch.float32) * float(scale)).to(dtype)
+
+
+def _split_fp8_pertensor_state_dict(state_dict, scales_out) -> None:
+    # Per-tensor sibling of the blockwise split at the _has_fp8_blockwise
+    # call site: routed experts stay FP8 with their scalar scale expanded
+    # into scales_out; everything else dequantizes to BF16 in place. All
+    # consumed scale keys and the activation input_scale keys (unused by
+    # BF16 execution) are removed from the state dict.
+    for base_key, scale_key in _identify_fp8_pertensor_pairs(
+        list(state_dict.keys())
+    ):
+        w = state_dict.get(base_key)
+        s = state_dict.get(scale_key)
+        if w is None or s is None:
+            continue
+        if w.dtype != torch.float8_e4m3fn:
+            del state_dict[scale_key]
+            continue
+        if _is_routed_expert_key(base_key):
+            scales_out[base_key] = _expand_pertensor_scale_to_blocks(w.shape, s)
+        else:
+            state_dict[base_key] = _dequant_fp8_pertensor(
+                w, s, dtype=torch.bfloat16
+            )
+        del state_dict[scale_key]
+    for k in [k for k in state_dict if k.endswith(".input_scale")]:
+        del state_dict[k]
+
+
 _ROUTED_EXPERT_RE = re.compile(r"\.mlp\.experts\.\d+\.")
 
 
