@@ -86,7 +86,25 @@ Recorded 2026-10-28 from `tests/python/v41/e2e_offload.py` (run log in PR
 | Peak resident VRAM (text-only, experts+engram offloaded, `max_resident_experts=16`) | 14.8 GiB |
 | Greedy determinism (16 tokens, 2 runs) | PASS — identical token ids |
 | Greedy sanity ("The capital of France is") | `' Paris. The Eiffel Tower is in Paris. The Louvre is in Paris'` |
-| Warm decode (16 greedy tokens, batch 1, eager sparse-attn fallback, python FP4 expert path) | 1.20 tok/s |
+| Warm decode (16 greedy tokens, batch 1, eager sparse-attn fallback, python FP4 expert path) | 1.20 tok/s shared GPU / 3.67 tok/s exclusive GPU |
+
+Additional exclusive-GPU datapoints (2026-10-29, same stack, warm 64-token
+greedy decode):
+
+| Config | Decode | Peak VRAM |
+| --- | --- | --- |
+| python FP4 path (tilelang `fp4_gemm`), `max_resident_experts=16` | 3.67 tok/s | 14.8 GiB |
+| python FP4 path, `max_resident_experts=3584` | 3.49 tok/s | 63.3 GiB |
+| native `_v4_fp4.v4_expert_forward`, `max_resident_experts=512` | 4.39 tok/s | 23.0 GiB |
+
+Enlarging the GPU expert cache does **not** raise throughput: decode is
+execution-bound (~240 sequential per-expert batch-1 forwards per token),
+not PCIe-bound, because the store's copy-stream prefetch already overlaps
+transfers. The native fused expert kernel (auto-selected on Blackwell when
+`moe_infinity.runtime.engine_ops.register_engine_ops()` has run) gives
++20%; the real lever is batched/fused expert execution, tracked as
+follow-up. Path A remains gated: transformers 5.21.0 (latest as of
+2026-10-29) still has no `deepseek_v41`.
 | A/B harness (`benchmarks/contextpilot/v41flash_ab.py`) | Executed 2026-10-28 (31 requests × 3 repeats, 64 new tokens): `results/v41flash_ab_20261028_044414.json`, verdict **NO-GO** — ContextPilot left prompt-token counts unchanged on every workload (e.g. 201→201), so the 2–9% TTFT deltas are cache warmth/noise, and no ContextPilot benefit is claimed for V4.1-Flash. TTFT p50 5.5–24.9 s, decode 1.2–2.6 tok/s at `max_resident_experts=16`. |
 
 The 1.2 tok/s decode reflects ~240 host→GPU expert fetches per token
