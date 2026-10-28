@@ -311,6 +311,9 @@ class MoE:
                 or arch == "qwen3"
                 or arch == "qwen3_5"
                 or arch == "minimaxm3"
+                # hy_v3 declares FA2 support upstream, but force eager for
+                # first bring-up, matching the GLM-5.2 validated path.
+                or arch == "hyv3"
             ):
                 is_flash_attn_available = False
         except ImportError:
