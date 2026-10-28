@@ -1431,7 +1431,11 @@ class OffloadEngine(object):
 
                 # for deepseek and glm, we need to set the expert_tensor_map for the model
                 first_k_dense_replace = 0
-                if "deepseek" in model_name or "glm" in model_name.lower():
+                if (
+                    "deepseek" in model_name
+                    or "glm" in model_name.lower()
+                    or getattr(self.config, "model_type", "") == "hy_v3"
+                ):
                     first_k_dense_replace = moe_text_config(
                         self.config
                     ).first_k_dense_replace
@@ -1556,6 +1560,7 @@ class OffloadEngine(object):
                     "qwen3_5_moe",
                     "glm5_next",
                     "minimax_m3_vl",
+                    "hy_v3",
                 ):
                     self._load_resident_shared_experts(model)
                     for _name in list(self.name_id_map.keys()):
@@ -1570,7 +1575,7 @@ class OffloadEngine(object):
                 # and are excluded via name_id_map membership).
                 if (
                     getattr(self.config, "model_type", "")
-                    in ("glm5_next", "minimax_m3_vl", "qwen3_5_moe")
+                    in ("glm5_next", "minimax_m3_vl", "qwen3_5_moe", "hy_v3")
                     and torch.cuda.is_available()
                 ):
                     _resident_device = torch.device("cuda", 0)
@@ -1719,6 +1724,14 @@ class OffloadEngine(object):
         # all stay resident (parse_expert_id returns None for every non-routed
         # key, including the shared_experts already caught above).
         if getattr(self.config, "model_type", "") == "minimax_m3_vl":
+            _, expert_id = parse_expert_id(name, self.config)
+            return expert_id is None
+        # hy_v3 (Hy3-FP8): same whole-namespace policy as glm5_next. Only the
+        # routed experts are offloaded; attention, dense layer-0 MLP, shared
+        # experts (module name "shared_experts" after the WeightRenaming from
+        # on-disk "shared_mlp"), router gate, expert bias, and lm_head stay
+        # resident (parse_expert_id returns None for every non-routed key).
+        if getattr(self.config, "model_type", "") == "hy_v3":
             _, expert_id = parse_expert_id(name, self.config)
             return expert_id is None
         return False
@@ -2321,7 +2334,11 @@ class OffloadEngine(object):
                 )
 
         expert_layer_id = 0
-        if "deepseek" in self.model_name or "glm" in self.model_name.lower():
+        if (
+            "deepseek" in self.model_name
+            or "glm" in self.model_name.lower()
+            or getattr(self.config, "model_type", "") == "hy_v3"
+        ):
             expert_layer_id = moe_text_config(self.config).first_k_dense_replace
 
         output_device_index = None
