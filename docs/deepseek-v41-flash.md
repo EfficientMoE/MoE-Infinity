@@ -87,7 +87,7 @@ Recorded 2026-10-28 from `tests/python/v41/e2e_offload.py` (run log in PR
 | Greedy determinism (16 tokens, 2 runs) | PASS — identical token ids |
 | Greedy sanity ("The capital of France is") | `' Paris. The Eiffel Tower is in Paris. The Louvre is in Paris'` |
 | Warm decode (16 greedy tokens, batch 1, eager sparse-attn fallback, python FP4 expert path) | 1.20 tok/s |
-| A/B harness (`benchmarks/contextpilot/v41flash_ab.py`) | not recorded (run in progress) |
+| A/B harness (`benchmarks/contextpilot/v41flash_ab.py`) | Executed 2026-10-28 (31 requests × 3 repeats, 64 new tokens): `results/v41flash_ab_20261028_044414.json`, verdict **NO-GO** — ContextPilot left prompt-token counts unchanged on every workload (e.g. 201→201), so the 2–9% TTFT deltas are cache warmth/noise, and no ContextPilot benefit is claimed for V4.1-Flash. TTFT p50 5.5–24.9 s, decode 1.2–2.6 tok/s at `max_resident_experts=16`. |
 
 The 1.2 tok/s decode reflects ~240 host→GPU expert fetches per token
 (6 active × 40 layers against a 16-expert LRU over 384 experts/layer); it
