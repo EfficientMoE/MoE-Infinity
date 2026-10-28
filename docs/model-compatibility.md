@@ -1,6 +1,6 @@
 # Model compatibility matrix
 
-Adaptive candidate evaluation is limited to unquantized Mixtral, Qwen3-MoE, and DeepSeek-V2. GPT-OSS MXFP4, GLM-5.2 FP8, DeepSeek-V4-Flash FP4, DeepSeek-V3 FP8, and GPTQ/AWQ remain protected.
+Adaptive candidate evaluation is limited to unquantized Mixtral, Qwen3-MoE, and DeepSeek-V2. GPT-OSS MXFP4, GLM-5.2 FP8, DeepSeek-V4-Flash FP4, DeepSeek-V3 FP8, Hy3-FP8 per-tensor FP8, and GPTQ/AWQ remain protected.
 
 This guide is the source of truth for the families registered in
 `moe_infinity/common/constants.py` and the runtime adapters wired in
@@ -30,6 +30,8 @@ a claim that any particular DeepSeek DFlash pair has been validated.
 | GLM-5.2 (`GlmMoeDsaForCausalLM`) | validated | tiny serving harness | Built-in MTP, not DFlash. |
 | GLM-5.3 (`GlmMoeDsaForCausalLM`) | implemented/experimental | not recorded | Same base and FP8 path as GLM-5.2 (post-training only); config resolution pinned by `tests/python/unit/test_glm53_registry.py`. |
 | GLM-5.3-Flash (`Glm5NextForConditionalGeneration`) | implemented/experimental | not recorded | New glm5_next family (transformers >= 5.16, guarded); routed experts offloaded, KDA/DSA/mHC/vision resident; no real-checkpoint harness yet. |
+| Hy3-FP8 (`hy_v3`, `HYV3ForCausalLM`) | implemented/experimental | not recorded | `tencent/Hy3-FP8`; per-tensor static FP8 experts offloaded via scalar-to-block-grid scale expansion over the GLM FP8-in-store path; whole non-expert namespace resident; MTP layer 80 excluded; HF eager serving path (`use_native_engine=False`); requires moe-store with hy_v3 support. Unit-tested (registry/parsing, precision protection, per-tensor FP8 split, wrapper routing parity); GPU-gated smoke `tests/python/hy3/test_e2e_offload.py` exists but has not been run against the real 299 GB checkpoint. |
+| Hy3 (`hy_v3`, `HYV3ForCausalLM`, BF16) | not recorded | not recorded | `tencent/Hy3`; expected to work via the same wrapper without FP8 handling; untested. |
 | GPT-OSS (`GptOssForCausalLM`) | 20B validated | 20B validated | Resident expert implementation. |
 | DBRX / Jamba / OLMoE / NLLB-MoE | implemented/experimental | not validated | Registry/adapter evidence only. |
 | OPT (`OPTForCausalLM`) | unsupported | unsupported | Registry entry only. |

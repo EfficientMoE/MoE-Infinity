@@ -18,9 +18,12 @@ import os
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires CUDA"
-)
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA"),
+    pytest.mark.gpu,
+    pytest.mark.slow,
+    pytest.mark.integration,
+]
 
 
 def test_offloaded_greedy_decode(hy3_ckpt_dir, tmp_path):
