@@ -30,14 +30,15 @@ pytestmark = pytest.mark.skipif(
 
 
 def _greedy_decode(model, prompt_ids: torch.Tensor, steps: int):
+    # Transformer.forward returns final-position logits only: [b, vocab].
     ids = prompt_ids.clone()
     _, logits, _ = model(ids, start_pos=0)
-    next_id = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+    next_id = logits.argmax(dim=-1, keepdim=True)
     out = [next_id]
     pos = ids.shape[1]
     for _ in range(steps - 1):
         _, logits, _ = model(next_id, start_pos=pos)
-        next_id = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        next_id = logits.argmax(dim=-1, keepdim=True)
         out.append(next_id)
         pos += 1
     return torch.cat(out, dim=-1)
@@ -50,6 +51,10 @@ def test_greedy_decode_produces_stable_tokens(
     from transformers import AutoTokenizer
 
     device = torch.device("cuda:0")
+    # Reference kernels allocate outputs with torch.get_default_dtype()
+    # (e.g. fp8_gemm's C buffer); the official generate.py runs the whole
+    # process under bf16, so the harness must too.
+    torch.set_default_dtype(torch.bfloat16)
     official_dir = os.environ["MOE_V41_OFFICIAL_DIR"]
     tokenizer = AutoTokenizer.from_pretrained(v41_ckpt_dir)
     model, store = load_offloaded_v41_flash(
@@ -61,13 +66,29 @@ def test_greedy_decode_produces_stable_tokens(
         text_only=True,
         tokenizer=tokenizer,
     )
+    # Reference helpers (e.g. get_window_topk_idxs) build cached index
+    # tensors on the default device; set it only AFTER load so the host
+    # stores keep allocating on CPU.
+    torch.set_default_device(device)
     prompt = "The capital of France is"
     prompt_ids = torch.tensor(
         [tokenizer.encode(prompt)], device=device, dtype=torch.long
     )
-    outs = [_greedy_decode(model, prompt_ids, steps=16) for _ in range(2)]
+    import time
+
+    outs = []
+    times = []
+    for _ in range(2):
+        torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
+        outs.append(_greedy_decode(model, prompt_ids, steps=16))
+        torch.cuda.synchronize(device)
+        times.append(time.perf_counter() - t0)
     assert torch.equal(outs[0], outs[1])
+    decoded = tokenizer.decode(outs[0][0].tolist())
+    assert "Paris" in decoded, f"degenerate greedy output: {decoded!r}"
     assert len(store.resident_experts()) <= 16
     peak = torch.cuda.max_memory_allocated(device) / 2**30
-    print(f"\ndecoded: {tokenizer.decode(outs[0][0].tolist())!r}")
+    print(f"\ndecoded: {decoded!r}")
     print(f"peak resident GiB: {peak:.1f}")
+    print(f"warm-run tok/s (16 greedy tokens): {16 / times[1]:.2f}")

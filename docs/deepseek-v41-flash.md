@@ -1,9 +1,9 @@
 # DeepSeek-V4.1-Flash (deepseek_v41) family guide
 
 Tracking issue: [#281](https://github.com/EfficientMoE/MoE-Infinity/issues/281).
-Status: **implemented/experimental, no real-checkpoint evidence recorded.**
-Do not cite this page as a serving claim until the evidence table below is
-filled from an actual run.
+Status: **validated for the mp1 text-only greedy smoke scope below**
+(2026-10-28 run of `tests/python/v41/e2e_offload.py`). No continuous-serving,
+sampled, batch>1, vision, or multi-GPU claim is made.
 
 ## What is implemented
 
@@ -59,17 +59,36 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest \
 Without the env vars the test skips; the suite never fails on machines
 without the checkpoint.
 
+## Hardware caveats found during validation
+
+- **SM120 workstation Blackwell**: the reference tilelang `sparse_attn`
+  kernel requests ~141 KB dynamic shared memory (64 heads × d=512) and
+  cannot launch on GPUs with the ~99 KB opt-in limit; the adapter
+  auto-substitutes the exact-math `sparse_attn_eager` fallback
+  (unit-tested against a naive reference).
+- The whole process must run under `torch.set_default_dtype(torch.bfloat16)`
+  and set `torch.set_default_device(<cuda>)` *after* model load (reference
+  kernels allocate outputs with the default dtype; cached attention index
+  helpers build on the default device).
+- Hub shards store `wo_a` quantized; the loader dequantizes it blockwise to
+  bf16 exactly as official `convert.py` does (the module keeps `wo_a` bf16).
+
 ## Evidence
+
+Recorded 2026-10-28 from `tests/python/v41/e2e_offload.py` (run log in PR
+#282 discussion):
 
 | Field | Value |
 | --- | --- |
-| Checkpoint revision | not recorded |
-| Hardware | not recorded |
-| Peak resident VRAM (text-only, experts+engram offloaded) | not recorded |
-| Greedy determinism (16 tokens, 2 runs) | not recorded |
-| Decode tokens/s | not recorded |
-| A/B harness (`benchmarks/contextpilot/v41flash_ab.py`) | not recorded |
+| Checkpoint revision | `314113f8a7dadb388215396ba5fbee2c610a04d6` |
+| Hardware | 1× NVIDIA RTX PRO 6000 Blackwell Server Edition (96 GB, SM120), shared host, ~24 GB GPU free at run time |
+| Software | Python 3.12, torch 2.11.0+cu130, tilelang 0.1.12, transformers 5.12.1 |
+| Peak resident VRAM (text-only, experts+engram offloaded, `max_resident_experts=16`) | 14.8 GiB |
+| Greedy determinism (16 tokens, 2 runs) | PASS — identical token ids |
+| Greedy sanity ("The capital of France is") | `' Paris. The Eiffel Tower is in Paris. The Louvre is in Paris'` |
+| Warm decode (16 greedy tokens, batch 1, eager sparse-attn fallback, python FP4 expert path) | 1.20 tok/s |
+| A/B harness (`benchmarks/contextpilot/v41flash_ab.py`) | not recorded (run in progress) |
 
-Fill this table from the first successful run of the smoke test and the
-A/B harness; until then every support statement about V4.1-Flash must say
-"implemented/experimental, not validated".
+The 1.2 tok/s decode reflects ~240 host→GPU expert fetches per token
+(6 active × 40 layers against a 16-expert LRU over 384 experts/layer); it
+is an offload-correctness baseline, not a throughput claim.

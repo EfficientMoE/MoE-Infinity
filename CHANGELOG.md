@@ -12,14 +12,18 @@ All notable changes to MoE-Infinity will be documented in this file.
 
 ### Added
 
-- DeepSeek-V4.1-Flash (`deepseek_v41`) groundwork: the model type is now
-  protected as `deepseek_v4_fp4` (previously the generic `quant_method: fp8`
-  fallback silently mis-mapped it to the GLM 128x128 FP8 identity), a
-  checkpoint-gated Path B e2e smoke lives at `tests/python/v41/`, and the
-  moe-store `wrappers/deepseek_v41` family provides the official-code mp1
-  offload loader with FP4 expert streaming and host-offloaded engram
-  tables. Implemented/experimental; no real-checkpoint run is recorded and
-  no serving claim is made (see `docs/deepseek-v41-flash.md`, #281).
+- DeepSeek-V4.1-Flash (`deepseek_v41`) Path B support: the model type is
+  protected as `deepseek_v4_fp4` (previously the generic `quant_method:
+  fp8` fallback silently mis-mapped it to the GLM 128x128 FP8 identity);
+  the moe-store `wrappers/deepseek_v41` family provides the official-code
+  mp1 offload loader with FP4 expert streaming, host-offloaded engram
+  tables, blockwise `wo_a` dequant, and an eager sparse-attn fallback for
+  smem-limited GPUs. Validated on the real checkpoint for the mp1
+  text-only greedy smoke (`tests/python/v41/e2e_offload.py`: deterministic
+  coherent output, 14.8 GiB peak resident on a 96 GB SM120 GPU); dspark
+  MTP and vision excluded; no continuous-serving, sampled, batch>1, or
+  multi-GPU claim. Path A (HF-native) remains guarded on transformers
+  shipping `DeepseekV41ForCausalLM`. (#281)
 - Opt-in phase-specific expert admission, prefetch, eviction, and telemetry over one shared residency manager, with the legacy policy retained by default and one-flag rollback requiring no offload-store migration.
 - Opt-in `int8_sym` KV-cache storage format (`kv_cache_format`, default `native`): symmetric INT8 payload plus one FP16 scale per `(layer, page, KV head, token)`, with a native CUDA decode kernel, a validated FP32 dequantized SDPA fallback, single-owner `LayeredPagedKVStore` lifecycle, capability-gated selection with visible native/MLA fallback, numerical/logit/storage quality gates, a long-context A/B benchmark matrix, and a one-setting (`--kv-cache-format native`) rollback. No universal low-bit KV support is claimed.
 - Documentation hub at `docs/README.md` for users, operators, contributors, and project-history readers.
