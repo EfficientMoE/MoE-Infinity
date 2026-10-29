@@ -53,6 +53,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ckpt", default=DEFAULT_CKPT)
     parser.add_argument("--offload-dir", default=DEFAULT_OFFLOAD)
     parser.add_argument("--device-memory-ratio", type=float, default=0.75)
+    parser.add_argument(
+        "--kv-cache-memory-ratio",
+        type=float,
+        default=None,
+        help="Override kv_cache_memory_ratio (useful when sharing a GPU).",
+    )
     parser.add_argument("--prompts", type=int, default=3)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--warmup-tokens", type=int, default=8)
@@ -89,14 +95,18 @@ def _scalar(value: Any) -> Any:
     return value
 
 
-def _timed_generate(model: Any, input_ids: Any, max_new_tokens: int) -> float:
+def _timed_generate(
+    model: Any, input_ids: Any, max_new_tokens: int
+) -> tuple[float, Any]:
     import torch
 
     torch.cuda.synchronize()
     start = time.perf_counter()
-    model.generate(input_ids, max_new_tokens=max_new_tokens, do_sample=False)
+    out = model.generate(
+        input_ids, max_new_tokens=max_new_tokens, do_sample=False
+    )
     torch.cuda.synchronize()
-    return time.perf_counter() - start
+    return time.perf_counter() - start, out
 
 
 def _p50(values: list[float]) -> float | None:
@@ -123,6 +133,7 @@ def main() -> int:
         "ckpt": args.ckpt,
         "offload_dir": args.offload_dir,
         "device_memory_ratio": args.device_memory_ratio,
+        "kv_cache_memory_ratio": args.kv_cache_memory_ratio,
         "max_new_tokens": args.max_new_tokens,
         "warmup_tokens": args.warmup_tokens,
     }
@@ -130,13 +141,13 @@ def main() -> int:
 
     tokenizer = AutoTokenizer.from_pretrained(args.ckpt)
     load_start = time.perf_counter()
-    model = MoE(
-        args.ckpt,
-        {
-            "offload_path": args.offload_dir,
-            "device_memory_ratio": args.device_memory_ratio,
-        },
-    )
+    moe_config = {
+        "offload_path": args.offload_dir,
+        "device_memory_ratio": args.device_memory_ratio,
+    }
+    if args.kv_cache_memory_ratio is not None:
+        moe_config["kv_cache_memory_ratio"] = args.kv_cache_memory_ratio
+    model = MoE(args.ckpt, moe_config)
     load_s = time.perf_counter() - load_start
     print(f"model load (incl. store build if cold): {load_s:.1f} s")
 
@@ -147,7 +158,7 @@ def main() -> int:
 
     # Warmup (outside measurement, per docs/benchmarking.md).
     warm_ids = tokenizer(PROMPTS[0], return_tensors="pt").input_ids.to("cuda:0")
-    warm_s = _timed_generate(model, warm_ids, args.warmup_tokens)
+    warm_s, _ = _timed_generate(model, warm_ids, args.warmup_tokens)
     print(f"warmup generate ({args.warmup_tokens} tokens): {warm_s:.1f} s")
 
     n = args.max_new_tokens
@@ -161,7 +172,7 @@ def main() -> int:
 
         if has_reset:
             _call(archer, "reset_expert_transfer_stats")
-        ttft = _timed_generate(model, input_ids, 1)
+        ttft, _ = _timed_generate(model, input_ids, 1)
         ttft_h2d = (
             _scalar(_call(archer, "get_expert_h2d_bytes_total"))
             if has_reset
@@ -170,7 +181,7 @@ def main() -> int:
 
         if has_reset:
             _call(archer, "reset_expert_transfer_stats")
-        e2e = _timed_generate(model, input_ids, n)
+        e2e, out_ids = _timed_generate(model, input_ids, n)
         e2e_h2d = (
             _scalar(_call(archer, "get_expert_h2d_bytes_total"))
             if has_reset
@@ -180,6 +191,8 @@ def main() -> int:
         decode_window = max(1e-6, e2e - ttft)
         decode_tok_s = (n - 1) / decode_window
         hit_rate = _scalar(getattr(model.engine, "expert_cache_hit_rate", None))
+        new_ids = out_ids[0][prompt_tokens:].tolist()
+        decoded_text = tokenizer.decode(new_ids, skip_special_tokens=True)
         row = {
             "prompt_tokens": prompt_tokens,
             "ttft_s": ttft,
@@ -191,6 +204,8 @@ def main() -> int:
                 e2e_h2d / n if isinstance(e2e_h2d, (int, float)) else None
             ),
             "expert_cache_hit_rate": hit_rate,
+            "output_token_ids": new_ids,
+            "output_text": decoded_text,
         }
         per_prompt.append(row)
         print(
