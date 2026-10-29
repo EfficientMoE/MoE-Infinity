@@ -1,0 +1,54 @@
+{
+  "environment": {
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "torch": "2.11.0+cu130",
+    "cuda": "13.0",
+    "ckpt":
+        "/mnt/raid0nvme0/public/huggingface/hub/models--tencent--Hy3-FP8/snapshots/ecc1d8e194e093f33177f2f0ef7ce8f397b2d68b",
+    "offload_dir": "/mnt/raid0nvme0/leyang/hy3-offload-bench",
+    "device_memory_ratio": 0.75,
+    "max_new_tokens": 64,
+    "warmup_tokens": 8
+  },
+  "model_load_s": 564.1263287588954,
+  "warmup_s": 6.765774881467223,
+  "per_prompt": [
+    {
+      "prompt_tokens": 16,
+      "ttft_s": 2.691700290888548,
+      "e2e_s": 38.40105135180056,
+      "decode_tok_s": 1.764243766080665,
+      "ttft_h2d_bytes": 16817061888,
+      "e2e_h2d_bytes": 238704132096,
+      "e2e_h2d_bytes_per_token": 3729752064.0,
+      "expert_cache_hit_rate": 0.6630448010291894
+    },
+    {
+      "prompt_tokens": 12,
+      "ttft_s": 3.2600551676005125,
+      "e2e_s": 34.07375528290868,
+      "decode_tok_s": 2.0445451135127315,
+      "ttft_h2d_bytes": 46091206656,
+      "e2e_h2d_bytes": 317240377344,
+      "e2e_h2d_bytes_per_token": 4956880896.0,
+      "expert_cache_hit_rate": 0.6323143107320973
+    },
+    {
+      "prompt_tokens": 13,
+      "ttft_s": 4.218329269438982,
+      "e2e_s": 28.5831450689584,
+      "decode_tok_s": 2.5856957228153,
+      "ttft_h2d_bytes": 46978301952,
+      "e2e_h2d_bytes": 304632299520,
+      "e2e_h2d_bytes_per_token": 4759879680.0,
+      "expert_cache_hit_rate": 0.6263946341654378
+    }
+  ],
+  "summary": {
+    "ttft_p50_s": 3.2600551676005125,
+    "e2e_p50_s": 34.07375528290868,
+    "decode_tok_s_p50": 2.0445451135127315,
+    "h2d_bytes_per_token_p50": 4759879680.0,
+    "hit_rate_last": 0.6263946341654378
+  }
+}
