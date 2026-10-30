@@ -653,3 +653,25 @@ reported as characterization without a hard latency threshold. Per-store
 results and a gate summary are written as JSON
 (`bench_store_parity.json`, `bench_store_parity_summary.json`) next to the
 stores.
+
+## Offline expert-cache simulator
+
+`benchmarks/cache_simulator/` replays recorded expert-activation traces through
+cache-replacement and prefetch policies to measure the GPU expert-cache **hit
+rate** offline, with no model and no GPU. Use it to establish the
+Belady-optimal hit-rate upper bound and to compare practical policies (LRU,
+LFU, LFU-K, streaming prefetch) before wiring them into the offloading runtime.
+
+```bash
+# Belady-optimal bound over .pt recorder traces
+python -m benchmarks.cache_simulator.belady_cache_simulator \
+    --files "data/expert_distribution_recorder_*.pt" --capacity 360
+
+# Belady-optimal cache over pickled prefill/decode activation traces
+python -m benchmarks.cache_simulator.cache_strategy \
+    --model DeepSeek-V2-Lite-Chat --data-dir data --max-samples 100
+```
+
+Trace files are large and git-ignored; see
+[`benchmarks/cache_simulator/README.md`](../benchmarks/cache_simulator/README.md)
+for trace formats and where to fetch the reference traces.
