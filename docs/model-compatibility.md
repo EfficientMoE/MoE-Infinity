@@ -1,6 +1,6 @@
 # Model compatibility matrix
 
-Adaptive candidate evaluation is limited to unquantized Mixtral, Qwen3-MoE, and DeepSeek-V2. GPT-OSS MXFP4, GLM-5.2 FP8, DeepSeek-V4-Flash FP4, DeepSeek-V3 FP8, Hy3-FP8 per-tensor FP8, and GPTQ/AWQ remain protected.
+Adaptive candidate evaluation is limited to unquantized Mixtral, Qwen3-MoE, and DeepSeek-V2. GPT-OSS MXFP4, GLM-5.2 FP8, DeepSeek-V4-Flash FP4, DeepSeek-V4.1-Flash FP4, DeepSeek-V3 FP8, Hy3-FP8 per-tensor FP8, and GPTQ/AWQ remain protected.
 
 This guide is the source of truth for the families registered in
 `moe_infinity/common/constants.py` and the runtime adapters wired in
@@ -24,6 +24,7 @@ a claim that any particular DeepSeek DFlash pair has been validated.
 | DeepSeek-V2 (`DeepseekV2ForCausalLM`) | validated | implemented/experimental | Eager consistency harness; Stage 4b details below. |
 | DeepSeek-V3 (`DeepseekV3ForCausalLM`) | implemented/experimental | implemented/experimental | Routing and paged-attention parity evidence. |
 | DeepSeek-V4 (`DeepseekV4ForCausalLM`) | validated official mp4 path | not validated | DFlash unsupported; mp1 not covered. |
+| DeepSeek-V4.1 (`DeepseekV41ForCausalLM`) | validated (manual) mp1 text-only greedy smoke | not recorded | Path B official mp1 loader (moe-store `wrappers/deepseek_v41`); FP4 experts reuse the V4 path; engram tables host-offloaded (14.8 GiB peak resident on the real checkpoint); MTP (dspark) unused; vision resident only in non-text-only mode; eager sparse-attn fallback on smem-limited GPUs; no transformers release ships the class yet (Path A guarded) — evidence in `docs/deepseek-v41-flash.md`. |
 | Mixtral (`MixtralForCausalLM`) | implemented/experimental | implemented/experimental | No real-model serving harness recorded. |
 | Qwen3 / Qwen3.5 MoE | Qwen3 validated; Qwen3.5 tiny-fixture validated | implemented/experimental; Qwen3.5 paged serving tiny-checkpoint validated (CPU) | Qwen3.5 keeps the `visual.*` vision tower resident; MTP unused; requires newer Transformers. Qwen3.5 serving disables prefix reuse and chunked prefill. |
 | MiniMax-M3 (`minimax_m3_vl`) | implemented/experimental | not recorded | BF16, eager attention, native engine off; 128 routed experts offloaded; MiniMax Community License; no real-checkpoint evidence yet. |

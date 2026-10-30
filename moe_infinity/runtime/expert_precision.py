@@ -98,6 +98,11 @@ PROTECTED_MODEL_PATHS = {
     "glm_moe_dsa": "protected:glm_fp8",
     "deepseek_v3": "protected:existing_fp8",
     "deepseek_v4": "protected:deepseek_v4_fp4",
+    # V4.1-Flash routed experts are byte-identical in format to V4-Flash
+    # (FP4 E2M1 packed + ue8m0 group-32 scales); non-expert FP8 uses 32x32
+    # ue8m0 blocks, so the generic protected:fp8 (GLM 128x128 e4m3) path
+    # must never catch this model_type.
+    "deepseek_v41": "protected:deepseek_v4_fp4",
     # Hy3-FP8 routed experts are FP8 E4M3 with *per-tensor* scalar
     # weight_scale/input_scale (activation_scheme static, no
     # weight_block_size). The loader expands each scalar to a uniform

@@ -12,6 +12,18 @@ All notable changes to MoE-Infinity will be documented in this file.
 
 ### Added
 
+- DeepSeek-V4.1-Flash (`deepseek_v41`) Path B support: the model type is
+  protected as `deepseek_v4_fp4` (previously the generic `quant_method:
+  fp8` fallback silently mis-mapped it to the GLM 128x128 FP8 identity);
+  the moe-store `wrappers/deepseek_v41` family provides the official-code
+  mp1 offload loader with FP4 expert streaming, host-offloaded engram
+  tables, blockwise `wo_a` dequant, and an eager sparse-attn fallback for
+  smem-limited GPUs. Validated on the real checkpoint for the mp1
+  text-only greedy smoke (`tests/python/v41/e2e_offload.py`: deterministic
+  coherent output, 14.8 GiB peak resident on a 96 GB SM120 GPU); dspark
+  MTP and vision excluded; no continuous-serving, sampled, batch>1, or
+  multi-GPU claim. Path A (HF-native) remains guarded on transformers
+  shipping `DeepseekV41ForCausalLM`. (#281)
 - Offline MoE expert-cache simulator under `benchmarks/cache_simulator/`: a Belady-optimal hit-rate bound over `.pt` expert-distribution recorder traces (`belady_cache_simulator.py`) and over pickled prefill/decode activation traces (`cache_strategy.py`), plus a prefetch/replacement policy library (`fetch_engines.py`: streaming FIFO, LRU, LFU, windowed LFU-K). Runs on CPU with no model or GPU; large trace data stays machine-local and git-ignored with fetch instructions in the tool README. Behavioral unit tests (`tests/python/unit/test_cache_simulator_*.py`) cover the simulation core, checking Belady optimality against an independent brute-force offline optimum and cross-checking all three cache implementations over fuzzed traces. A `convert_sglang_traces.py` helper turns SGLang `per_token` expert-distribution dumps into both simulator formats (physical→logical remap plus the `.pkl` export), with a SGLang capture-and-conversion runbook (`collect_traces_sglang.md`) and agent runbooks for researching cache/prefetch baselines and accelerating the simulator (`auto_research_policies.md` plus `prompts/`). Documented in `docs/benchmarking.md`.
 - Qwen3.5-MoE (`Qwen3_5MoeForConditionalGeneration`, `Qwen3_5MoeForCausalLM`) paged-attention serving (#270): a `Qwen3_5MoePagedAttention` shim routes the gated full-attention layers through the paged KV cache. The cache is sized and keyed by full-attention layer only. The serving runner carries the Gated DeltaNet conv and recurrent state per sequence (host-resident while swapped out, released on finish, abort, or recompute reset, and reserved in the memory budget), and applies M-RoPE positions and rope deltas for image and video prompts. Before this, multi-token decode output for this family was degenerate. Prefix reuse, chunked prefill, and speculative serving execution stay disabled for hybrid linear-attention models with stable reasons.
 - Opt-in phase-specific expert admission, prefetch, eviction, and telemetry over one shared residency manager, with the legacy policy retained by default and one-flag rollback requiring no offload-store migration.
