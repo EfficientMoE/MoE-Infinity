@@ -69,6 +69,31 @@ accesses = [(3, 0), (3, 1), (3, 0), (4, 2), (3, 0)]
 hits, misses, hit_rate = belady_simulate(accesses, capacity=2)
 ```
 
+## Converting SGLang traces
+
+If you capture routing with SGLang's `per_token` expert-distribution recorder
+(`--expert-distribution-recorder-mode per_token`), its `.pt` dumps already use
+the `records` schema below, so the Belady path is almost pass-through.
+`convert_sglang_traces.py` does the two adaptations that remain:
+
+- **physical → logical** expert-id remap via `last_physical_to_logical_map`
+  (needed when EP/EPLB added redundant experts; a no-op otherwise), and
+- the **`.pkl` export** for `cache_strategy.py` (one batch-size-1 dump per
+  request).
+
+```bash
+# Belady inputs (remap + trim; one .pt per dump, or --merge into one stream):
+python -m benchmarks.cache_simulator.convert_sglang_traces \
+    --inputs "traces_raw/*.pt" --to belady --out data/belady
+
+# cache_strategy inputs (capture with batch size 1; one dump == one request):
+python -m benchmarks.cache_simulator.convert_sglang_traces \
+    --inputs "traces_raw/req_*.pt" --to pkl --name qwen3-235b_mmlu --out data
+```
+
+See [`collect_traces_sglang.md`](./collect_traces_sglang.md) for the full
+SGLang capture + conversion runbook.
+
 ## Trace formats
 
 **`.pt` recorder trace** (`belady_cache_simulator.py`) — a dict with a
