@@ -11,6 +11,7 @@ Users are people who want to pick a model, check the compatibility matrix, and p
 - [Configuration and memory planning](./configuration.md)
 - [DFlash speculative decode](./dflash.md)
 - [GLM-5.2 guide](glm-5.2.md)
+- [GLM-5.3-Flash guide](glm-5.3-flash.md)
 - [DeepSeek-V4-Flash guide](../moe_infinity/models/deepseek_v4/README.md)
 - [ContextPilot](./contextpilot/README.md)
 

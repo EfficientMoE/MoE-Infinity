@@ -240,10 +240,14 @@ class MoE:
         # MiniMax-M3 uses block-sparse (Lightning Indexer) attention that the
         # native paged backend does not support yet, so it runs through HF's
         # eager path too (initial support; optimized kernels are a follow-up).
+        # glm5_next (GLM-5.3-Flash) mixes KDA linear attention with DSA sparse
+        # attention; neither is representable in the native paged backend, so
+        # it stays on HF's eager path as well.
         # hy_v3 (Hy3-FP8) starts on the HF eager path like GLM-5.2; a
         # PagedAttention shim is a follow-up.
         if getattr(model_config, "model_type", "") in (
             "glm_moe_dsa",
+            "glm5_next",
             "minimax_m3_vl",
             "hy_v3",
         ):

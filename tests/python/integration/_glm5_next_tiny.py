@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 
 import torch
@@ -82,6 +83,78 @@ def build_tiny_glm5_next(save_dir: str) -> str:
     model.save_pretrained(save_dir, safe_serialization=True)
     cfg.save_pretrained(save_dir)
 
+    _save_tokenizer(save_dir)
+    return save_dir
+
+
+def build_tiny_glm5_next_fp8(save_dir: str) -> str:
+    bf16_dir = build_tiny_glm5_next(os.path.join(save_dir, "_bf16"))
+
+    from transformers import AutoConfig
+    from transformers.models.glm5_next.modeling_glm5_next import (
+        Glm5NextForConditionalGeneration,
+    )
+
+    cfg = AutoConfig.from_pretrained(bf16_dir)
+    model = Glm5NextForConditionalGeneration.from_pretrained(
+        bf16_dir, torch_dtype=torch.bfloat16
+    )
+
+    expert_weight_suffixes = (
+        "gate_proj.weight",
+        "up_proj.weight",
+        "down_proj.weight",
+    )
+    for name, param in list(model.named_parameters(recurse=True)):
+        if "shared_expert" in name:
+            continue
+        if "experts" not in name:
+            continue
+        if not any(name.endswith(sfx) for sfx in expert_weight_suffixes):
+            continue
+        q_fp8, scale_inv = _quantize_weight_fp8(param.data)
+        param.data = q_fp8
+        parts = name.split(".")
+        parent = model
+        for part in parts[:-1]:
+            parent = getattr(parent, part)
+        parent.register_buffer(parts[-1] + "_scale_inv", scale_inv)
+
+    cfg.quantization_config = {
+        "quant_method": "fp8",
+        "fmt": "e4m3",
+        "weight_block_size": [128, 128],
+        "activation_scheme": "dynamic",
+    }
+
+    model.save_pretrained(save_dir, safe_serialization=True)
+    cfg.save_pretrained(save_dir)
+    _save_tokenizer(save_dir)
+    return save_dir
+
+
+def _quantize_weight_fp8(w: torch.Tensor):
+    FP8_MAX = 448.0
+    BLOCK = 128
+    N, K = w.shape
+    SN = math.ceil(N / BLOCK)
+    SK = math.ceil(K / BLOCK)
+    w_f32 = w.float()
+    scale_inv = torch.zeros(SN, SK, dtype=torch.float32)
+    q = torch.zeros(N, K, dtype=torch.float32)
+    for i in range(SN):
+        for j in range(SK):
+            r0, r1 = i * BLOCK, min((i + 1) * BLOCK, N)
+            c0, c1 = j * BLOCK, min((j + 1) * BLOCK, K)
+            block = w_f32[r0:r1, c0:c1]
+            amax = block.abs().max().item()
+            s = amax / FP8_MAX if amax > 0 else 1.0
+            scale_inv[i, j] = s
+            q[r0:r1, c0:c1] = (block / s).clamp(-FP8_MAX, FP8_MAX)
+    return q.to(torch.float8_e4m3fn), scale_inv
+
+
+def _save_tokenizer(save_dir: str) -> None:
     try:
         from transformers import AutoTokenizer
 
@@ -89,5 +162,3 @@ def build_tiny_glm5_next(save_dir: str) -> str:
         tokenizer.save_pretrained(save_dir)
     except Exception:
         pass
-
-    return save_dir
