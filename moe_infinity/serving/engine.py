@@ -2348,11 +2348,6 @@ class ContinuousBatchingEngine:
             decode_logits = self._execute_decode_batch(split.decode_batch)
         return split.recombine_outputs(prefill_logits, decode_logits)
 
-    def _execute_and_commit(self, batch: BatchMetadata) -> torch.Tensor:
-        logits = self._execute_batch(batch)
-        self._commit_executed_batch(batch)
-        return logits
-
     def _commit_executed_batch(self, batch: BatchMetadata) -> None:
         query_lengths = batch.query_lengths
         is_prefill = batch.is_prefill
