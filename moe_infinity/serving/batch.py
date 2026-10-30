@@ -69,6 +69,11 @@ class BatchMetadata:
     sampling_params: list[SamplingParams]
     multimodal_inputs: dict[str, Any] | None = None
     prefill_is_terminal: list[bool] = field(default_factory=list)
+    # Per-row multimodal inputs (``None`` for text rows); empty when the
+    # batch carries no multimodal rows. ``multimodal_inputs`` is their merge.
+    row_multimodal_inputs: list[dict[str, Any] | None] = field(
+        default_factory=list
+    )
 
     def __init__(
         self,
@@ -83,6 +88,7 @@ class BatchMetadata:
         token_offsets: list[int] | None = None,
         multimodal_inputs: dict[str, Any] | None = None,
         prefill_is_terminal: list[bool] | None = None,
+        row_multimodal_inputs: list[dict[str, Any] | None] | None = None,
     ) -> None:
         self.seq_ids = seq_ids
         self.input_token_ids = input_token_ids
@@ -91,6 +97,7 @@ class BatchMetadata:
         self.block_tables = list(block_tables or [])
         self.sampling_params = list(sampling_params or [])
         self.multimodal_inputs = multimodal_inputs
+        self.row_multimodal_inputs = list(row_multimodal_inputs or [])
         if lengths is None:
             if seq_lengths is None:
                 raise ValueError(
@@ -153,6 +160,13 @@ class BatchMetadata:
             raise ValueError(
                 f"prefill_is_terminal must have length {expected}, "
                 f"got {len(self.prefill_is_terminal)}"
+            )
+        if self.row_multimodal_inputs and (
+            len(self.row_multimodal_inputs) != expected
+        ):
+            raise ValueError(
+                f"row_multimodal_inputs must have length {expected}, "
+                f"got {len(self.row_multimodal_inputs)}"
             )
 
     @property
@@ -277,11 +291,25 @@ def _slice_batch(batch: BatchMetadata, seq_indices: list[int]) -> BatchMetadata:
     block_tables = [batch.block_tables[i] for i in seq_indices]
     sampling_params = [batch.sampling_params[i] for i in seq_indices]
     prefill_is_terminal = [batch.prefill_is_terminal[i] for i in seq_indices]
-    multimodal_inputs = (
-        batch.multimodal_inputs
-        if any(batch.is_prefill[i] for i in seq_indices)
-        else None
+    row_multimodal_inputs = (
+        [batch.row_multimodal_inputs[i] for i in seq_indices]
+        if batch.row_multimodal_inputs
+        else []
     )
+    if batch.row_multimodal_inputs:
+        # Merge only this slice's rows so the pixel inputs line up with the
+        # image tokens the slice actually contains.
+        multimodal_inputs = BatchBuilder._merge_multimodal_dicts(
+            [inputs for inputs in row_multimodal_inputs if inputs is not None]
+        )
+        if not any(inputs is not None for inputs in row_multimodal_inputs):
+            row_multimodal_inputs = []
+    else:
+        multimodal_inputs = (
+            batch.multimodal_inputs
+            if any(batch.is_prefill[i] for i in seq_indices)
+            else None
+        )
 
     src_offsets = batch.query_offsets
     input_token_ids: list[int] = []
@@ -307,6 +335,7 @@ def _slice_batch(batch: BatchMetadata, seq_indices: list[int]) -> BatchMetadata:
         sampling_params=sampling_params,
         multimodal_inputs=multimodal_inputs,
         prefill_is_terminal=prefill_is_terminal,
+        row_multimodal_inputs=row_multimodal_inputs,
     )
 
 
@@ -339,11 +368,21 @@ class BatchBuilder:
     def _merge_multimodal_inputs(
         sequences: list[SequenceData],
     ) -> dict[str, Any] | None:
+        return BatchBuilder._merge_multimodal_dicts(
+            [
+                sequence.multimodal_inputs
+                for sequence in sequences
+                if sequence.multimodal_inputs is not None
+            ]
+        )
+
+    @staticmethod
+    def _merge_multimodal_dicts(
+        inputs: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
         values_by_key: dict[str, list[Any]] = {}
-        for sequence in sequences:
-            if sequence.multimodal_inputs is None:
-                continue
-            for key, value in sequence.multimodal_inputs.items():
+        for row_inputs in inputs:
+            for key, value in row_inputs.items():
                 values_by_key.setdefault(key, []).append(value)
 
         if not values_by_key:
@@ -351,7 +390,9 @@ class BatchBuilder:
 
         merged: dict[str, Any] = {}
         for key, values in values_by_key.items():
-            if all(isinstance(value, torch.Tensor) for value in values):
+            if all(isinstance(value, torch.Tensor) for value in values) and (
+                len({tuple(value.shape[1:]) for value in values}) == 1
+            ):
                 merged[key] = torch.cat(values, dim=0)
             elif len(values) == 1:
                 merged[key] = values[0]
@@ -378,6 +419,7 @@ class BatchBuilder:
         sampling_params: list[SamplingParams] = []
         prefill_is_terminal: list[bool] = []
         multimodal_sequences: list[SequenceData] = []
+        row_multimodal_inputs: list[dict[str, Any] | None] = []
 
         for seq_id in scheduler_output.prefill_seq_ids:
             sequence = sequences[seq_id]
@@ -402,6 +444,7 @@ class BatchBuilder:
             sampling_params.append(sequence.sampling_params)
             if sequence.multimodal_inputs is not None:
                 multimodal_sequences.append(sequence)
+            row_multimodal_inputs.append(sequence.multimodal_inputs)
 
         for seq_id in scheduler_output.decode_seq_ids:
             sequence = sequences[seq_id]
@@ -448,6 +491,12 @@ class BatchBuilder:
                 multimodal_sequences
             ),
             prefill_is_terminal=prefill_is_terminal,
+            row_multimodal_inputs=(
+                row_multimodal_inputs
+                + [None] * len(scheduler_output.decode_seq_ids)
+                if multimodal_sequences
+                else []
+            ),
         )
 
 
