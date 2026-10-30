@@ -11,6 +11,8 @@ from typing import Optional
 
 import torch
 
+from moe_infinity.boundary.hybrid_attention_layout import paged_kv_layer_count
+
 from .engine import ContinuousBatchingEngine
 from .sequence import SamplingParams
 
@@ -47,8 +49,9 @@ def build_serving_config(moe: object, **overrides: object) -> dict[str, object]:
         "kv_cache_ratio": 0.25,
         "max_batch_size": 1,
         "block_size": 16,
-        "num_layers": _model_int(
-            model_config, "num_hidden_layers", "num_layers"
+        "num_layers": paged_kv_layer_count(
+            model_config,
+            _model_int(model_config, "num_hidden_layers", "num_layers"),
         ),
         "num_kv_heads": _model_int(
             model_config,

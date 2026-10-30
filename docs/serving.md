@@ -300,7 +300,9 @@ with cold/warm equivalence.
   prefill/decode. Any other runtime keeps the existing cold path and reports a
   stable `prefix_cache_disabled_reason` (for example
   `prefix-aware-prefill-unavailable`, `incomplete-paged-layer-registry`, or
-  `kv-store-binding-mismatch`).
+  `kv-store-binding-mismatch`). Hybrid linear-attention models (Qwen3.5-MoE)
+  report `hybrid-linear-attention-state-unsupported`, because a reused KV
+  prefix has no state for their recurrent layers.
 - **Exact identity.** A hit requires exact compatibility namespace (model,
   tokenizer, adapter, dtype, KV geometry, attention backend/layout, position
   config, runtime epoch), exact parent-entry path, and exact token blocks.
@@ -596,7 +598,9 @@ remains the total decode-plus-prefill budget. Runnable decode rows consume one
 token each before prefill receives the remaining budget.
 
 Activation requires complete Qwen3 paged-layer registration, real FlashInfer,
-and the canonical production `LayeredPagedKVStore`. Logical block capacity is
+and the canonical production `LayeredPagedKVStore`. Hybrid linear-attention
+models (Qwen3.5-MoE) always fall back with
+`hybrid_linear_attention_state_unsupported`. Logical block capacity is
 `min(memory_budget_blocks, block_store.physical_capacity)`; unequal capacities are
 valid. If any capability is unavailable,
 the engine reports `chunked_prefill_active=false` and
