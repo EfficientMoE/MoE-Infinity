@@ -1043,7 +1043,7 @@ Note: the `model(ids)` call signature and the prompt encoding must follow the of
 - [ ] **Step 3: Verify collection-time behavior without a checkpoint**
 
 Run: `.venv/bin/python -m pytest tests/python/v41 -q`
-Expected: `2 skipped` (no checkpoint env vars) — the suite must never fail on machines without the 510 GB checkpoint.
+Expected: `no tests ran` — the gated smoke lives in `e2e_offload.py`, which is deliberately not named `test_*.py` (mirroring `tests/python/v4/e2e_mp4_offload.py`), so it is never auto-collected and the suite never fails on machines without the 510 GB checkpoint. Run it explicitly with `pytest tests/python/v41/e2e_offload.py`.
 
 - [ ] **Step 4: Run for real on the GPU host, record evidence**
 

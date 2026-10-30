@@ -51,7 +51,7 @@ VRAM (resident remainder is ~30 GB):
 
 ```bash
 MOE_V41_FLASH_CKPT=/ckpt/DeepSeek-V4.1-Flash \
-MOE_V41_OFFICIAL_DIR=<official-dir>/inference \
+MOE_V41_OFFICIAL_DIR=<official-dir> \
 CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest \
     tests/python/v41/e2e_offload.py -q -s
 ```

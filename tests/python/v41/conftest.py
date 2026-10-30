@@ -26,8 +26,11 @@ def v41_official_module(v41_ckpt_dir: str):
     in moe_store/wrappers/deepseek_v41 for the revision and review notes)."""
     official = os.environ.get(OFFICIAL_ENV, "")
     if not official or not os.path.isdir(official):
-        pytest.skip(f"set {OFFICIAL_ENV} to the pinned official inference dir")
-    sys.path.insert(0, official)
+        pytest.skip(
+            f"set {OFFICIAL_ENV} to the pinned official download root "
+            "(containing inference/ and encoding/)"
+        )
+    sys.path.insert(0, os.path.join(official, "inference"))
     import model as official_model  # the reference inference/model.py
 
     return official_model

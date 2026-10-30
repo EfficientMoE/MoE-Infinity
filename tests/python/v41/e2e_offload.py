@@ -8,7 +8,7 @@
 Run (host with >= 40 GB VRAM and the full checkpoint on local SSD):
 
     MOE_V41_FLASH_CKPT=/ckpt/DeepSeek-V4.1-Flash \
-    MOE_V41_OFFICIAL_DIR=/path/to/official-v41/inference \
+    MOE_V41_OFFICIAL_DIR=/path/to/official-v41 \
     CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest \
         tests/python/v41/e2e_offload.py -q -s
 
@@ -60,7 +60,7 @@ def test_greedy_decode_produces_stable_tokens(
     model, store = load_offloaded_v41_flash(
         v41_official_module,
         ckpt_path=v41_ckpt_dir,
-        config_path=os.path.join(official_dir, "config.json"),
+        config_path=os.path.join(official_dir, "inference", "config.json"),
         device=device,
         max_resident_experts=16,
         text_only=True,
