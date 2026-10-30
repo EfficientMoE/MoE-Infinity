@@ -110,7 +110,7 @@ class HeapExpertCache:
             if decode:
                 self.decode_misses += 1
             self.misses += 1
-            if value is not None:
+            if value is not None and self.cache_size > 0:
                 if len(self.cache) >= self.cache_size:
                     self.evict()
                 self.cache[key] = value
@@ -204,7 +204,7 @@ class ExpertCache:
             if decode:
                 self.decode_misses += 1
             self.misses += 1
-            if value is not None:
+            if value is not None and self.cache_size > 0:
                 if len(self.cache) >= self.cache_size:
                     self.evict()
                 self.cache[key] = value
@@ -217,7 +217,7 @@ class ExpertCache:
         for key in self.cache:
             try:
                 next_use = self.access_sequence_dict[key][0]
-            except (ValueError, IndexError):
+            except (KeyError, ValueError, IndexError):
                 next_use = float("inf")  # Key is not used again.
             if next_use > farthest_use:
                 farthest_use = next_use
@@ -256,9 +256,7 @@ class AccessSequence:
         self.decoding_trace = decoding_trace
         self.requests = self.parse_sequence(sequence_num)
 
-    def parse_sequence(
-        self, count: Optional[int] = None, enable_encoder=True
-    ) -> List[Request]:
+    def parse_sequence(self, count: Optional[int] = None) -> List[Request]:
         iteration_order = sorted(self.decoding_trace.keys())
 
         results = []
@@ -267,8 +265,6 @@ class AccessSequence:
             if count is not None and sequence_num >= count:
                 break
             sequence_num += 1
-            if i not in self.decoding_trace.keys():
-                continue
 
             prefilling_trace = self.prefilling_trace[i]
             decoding_trace = self.decoding_trace[i]
@@ -293,9 +289,16 @@ class AccessSequence:
                 layer_num = 0
                 activated_expert_num = 0
                 if len(decoding_trace[iteration_idx].shape) == 3:
-                    layer_num, _, activated_expert_num = decoding_trace[
-                        iteration_idx
-                    ].shape
+                    layer_num, tokens_in_step, activated_expert_num = (
+                        decoding_trace[iteration_idx].shape
+                    )
+                    # The parser models one decode token per step; a batched
+                    # [L, T>1, K] step would silently drop tokens 1..T-1.
+                    assert tokens_in_step == 1, (
+                        "batched decode steps (middle dim > 1) are "
+                        "unsupported, got shape "
+                        f"{decoding_trace[iteration_idx].shape}"
+                    )
                 elif len(decoding_trace[iteration_idx].shape) == 2:
                     layer_num, activated_expert_num = decoding_trace[
                         iteration_idx
@@ -449,7 +452,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = MODEL_CONFIG[args.model]
-    cache_size = args.cache_size or config["cache_size"]
+    cache_size = (
+        args.cache_size if args.cache_size is not None else config["cache_size"]
+    )
 
     prefilling_path = config.get("prefilling_trace")
     if prefilling_path is not None:

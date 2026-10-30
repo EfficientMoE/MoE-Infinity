@@ -107,6 +107,20 @@ def test_hit_rates_zero_without_accesses():
         assert cache.get_decode_hit_rate() == 0.0
 
 
+def test_capacity_zero_caches_nothing():
+    # cache_size=0 must behave like "no cache": every access misses and
+    # nothing is retained, matching belady_simulate(capacity <= 0).
+    seq = [ExpertIndex(0, 0), ExpertIndex(0, 0), ExpertIndex(0, 0)]
+    for cache_cls in CACHES:
+        cache = cache_cls(0)
+        _quiet_set(cache, seq)
+        for item in seq:
+            assert cache.access(item, value=1) is None
+            assert len(cache.cache) == 0
+        assert (cache.hits, cache.misses) == (0, 3)
+        assert cache.get_hit_rate() == 0.0
+
+
 def test_evicts_farthest_future_entry():
     # cap=2 over A B C B A C: inserting C must evict A (next use 4) and keep
     # B (next use 3), the Belady choice.

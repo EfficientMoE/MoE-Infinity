@@ -47,6 +47,11 @@ class FetchEngineBase:
         raise NotImplementedError
 
     def fetch(self, layer_id, expert_id):
+        # Policies assume fetch-on-miss: fetching an already-resident expert
+        # would over-count n_fetch and evict one resident too many.
+        assert not self.access(
+            layer_id, expert_id
+        ), f"fetch() called for resident expert {(layer_id, expert_id)}"
         n_fetch, fetch_list, exemption_list = self._prefetch(
             (layer_id, expert_id)
         )

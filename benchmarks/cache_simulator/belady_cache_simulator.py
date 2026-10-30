@@ -93,7 +93,7 @@ def load_records(file_path: str) -> Sequence[dict]:
 
     import torch  # Imported lazily so pure helpers stay dependency-free.
 
-    payload = torch.load(file_path, map_location="cpu")
+    payload = torch.load(file_path, map_location="cpu", weights_only=False)
     if "records" not in payload:
         raise ValueError(f"File {file_path} does not contain 'records'.")
     return payload["records"]

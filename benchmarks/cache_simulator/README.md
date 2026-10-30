@@ -121,6 +121,13 @@ request id to its per-layer activated-expert array. The prefill trace is
 `[num_layers, ...]` and the decode trace is a list of per-iteration arrays of
 shape `[num_layers, topk]` or `[num_layers, 1, topk]`.
 
+> **Prefill accounting differs between the two tools.** `cache_strategy.py`
+> de-duplicates experts per layer within a prefill step (`np.unique`), while
+> `belady_cache_simulator.py` replays each activation as a separate access, so
+> experts repeated within a step count as additional hits. Both tools skip
+> `-1` padding. The two prefill hit-rate numbers are therefore not directly
+> comparable.
+
 ## Trace data
 
 Trace files are large and are **git-ignored** (see `.gitignore`). They are not
