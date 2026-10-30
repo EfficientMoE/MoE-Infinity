@@ -40,6 +40,19 @@ try:
 except ImportError:
     OlmoePagedAttention = None
 
+try:
+    from moe_store.wrappers import SyncHYV3MoEBlock
+except ImportError:
+    # moe-store builds that predate the hy_v3 wrapper.
+    SyncHYV3MoEBlock = None
+
+try:
+    from moe_infinity.boundary.qwen3_5_moe_paged_attention import (
+        Qwen3_5MoePagedAttention,
+    )
+except ImportError:
+    Qwen3_5MoePagedAttention = None
+
 
 def _model_module(name: str):
     return importlib.import_module(
@@ -104,6 +117,11 @@ def install_transformers_model_overrides() -> None:
     qwen3_5 = _model_module("qwen3_5_moe")
     qwen3_5._old_qwen3_5_sparse_moe = qwen3_5.Qwen3_5MoeSparseMoeBlock
     qwen3_5.Qwen3_5MoeSparseMoeBlock = SyncQwen3_5MoeSparseMoeBlock
+    if Qwen3_5MoePagedAttention is not None:
+        # Full-attention layers only; Qwen3_5MoeGatedDeltaNet and the vision
+        # attention keep their HuggingFace classes.
+        qwen3_5._old_qwen3_5_attention = qwen3_5.Qwen3_5MoeAttention
+        qwen3_5.Qwen3_5MoeAttention = Qwen3_5MoePagedAttention
 
     try:
         glm = _model_module("glm_moe_dsa")
@@ -118,6 +136,14 @@ def install_transformers_model_overrides() -> None:
         glm5_next.Glm5NextTextMoE = SyncGlm5NextMoEBlock
     except (ImportError, AttributeError):
         pass
+
+    if SyncHYV3MoEBlock is not None:
+        try:
+            hy_v3 = _model_module("hy_v3")
+            hy_v3._old_hy_v3_moe = hy_v3.HYV3MoE
+            hy_v3.HYV3MoE = SyncHYV3MoEBlock
+        except (ImportError, AttributeError):
+            pass
 
     try:
         minimax_m3 = _model_module("minimax_m3_vl")
@@ -142,6 +168,8 @@ def restore_context_transformers_model_overrides() -> None:
     qwen3_5 = _model_module("qwen3_5_moe")
     if hasattr(qwen3_5, "_old_qwen3_5_sparse_moe"):
         qwen3_5.Qwen3_5MoeSparseMoeBlock = qwen3_5._old_qwen3_5_sparse_moe
+    if hasattr(qwen3_5, "_old_qwen3_5_attention"):
+        qwen3_5.Qwen3_5MoeAttention = qwen3_5._old_qwen3_5_attention
 
     olmoe = _model_module("olmoe")
     if hasattr(olmoe, "_old_olmoe_attention"):
@@ -158,6 +186,13 @@ def restore_context_transformers_model_overrides() -> None:
         glm5_next = _model_module("glm5_next")
         if hasattr(glm5_next, "_old_glm5_next_moe"):
             glm5_next.Glm5NextTextMoE = glm5_next._old_glm5_next_moe
+    except (ImportError, AttributeError):
+        pass
+
+    try:
+        hy_v3 = _model_module("hy_v3")
+        if hasattr(hy_v3, "_old_hy_v3_moe"):
+            hy_v3.HYV3MoE = hy_v3._old_hy_v3_moe
     except (ImportError, AttributeError):
         pass
 
@@ -217,6 +252,8 @@ def restore_runtime_transformers_model_overrides() -> None:
     qwen3_5 = _model_module("qwen3_5_moe")
     if hasattr(qwen3_5, "_old_qwen3_5_sparse_moe"):
         qwen3_5.Qwen3_5MoeSparseMoeBlock = qwen3_5._old_qwen3_5_sparse_moe
+    if hasattr(qwen3_5, "_old_qwen3_5_attention"):
+        qwen3_5.Qwen3_5MoeAttention = qwen3_5._old_qwen3_5_attention
 
     try:
         minimax_m3 = _model_module("minimax_m3_vl")
@@ -224,5 +261,12 @@ def restore_runtime_transformers_model_overrides() -> None:
             minimax_m3.MiniMaxM3VLAttention.forward = (
                 minimax_m3._old_minimax_m3_vl_attention_forward
             )
+    except (ImportError, AttributeError):
+        pass
+
+    try:
+        hy_v3 = _model_module("hy_v3")
+        if hasattr(hy_v3, "_old_hy_v3_moe"):
+            hy_v3.HYV3MoE = hy_v3._old_hy_v3_moe
     except (ImportError, AttributeError):
         pass

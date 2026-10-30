@@ -409,6 +409,42 @@ def test_engine_single_request_run_until_done() -> None:
     assert engine.has_pending_requests() is False
 
 
+class CountingMockModel(MockModel):
+    forward_calls: int
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.forward_calls = 0
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        **kwargs: object,
+    ) -> types.SimpleNamespace:
+        self.forward_calls += 1
+        return super().forward(input_ids, **kwargs)
+
+
+def test_one_forward_per_non_speculative_scheduler_step() -> None:
+    model = CountingMockModel()
+    engine = ContinuousBatchingEngine(
+        model=model,
+        engine=MockOffloadEngine(),
+        config=_make_config(),
+        tokenizer=MockTokenizer(),
+    )
+    engine.add_request(
+        request_id="req-single-forward",
+        prompt_token_ids=[10],
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=3),
+    )
+
+    outputs = engine.run_until_done()
+
+    assert outputs == {"req-single-forward": [11, 12, 13]}
+    assert model.forward_calls == 3
+
+
 def test_engine_delegates_single_greedy_request_to_speculator() -> None:
     speculator = MockSpeculator()
     engine = ContinuousBatchingEngine(

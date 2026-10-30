@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import weakref
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from math import ceil
@@ -32,11 +33,12 @@ from .batch import (
 )
 from .cuda_graph import CudaGraphRunner
 from .kv_cache import PagedKVCache
+from .linear_attention_state import LinearAttentionStateCache
 from .memory_manager import MemoryManager
 from .memory_resize import TransactionalServingMemoryResizer
-from .model_runner import ModelRunner
+from .model_runner import ModelRunner, paged_layer_index
 from .prefix_cache import CacheNamespace, PrefixCache
-from .sampler import Sampler
+from .sampler import Sampler, SamplerOutput
 from .scheduler import Scheduler
 from .sequence import (
     SamplingParams,
@@ -229,7 +231,8 @@ class ContinuousBatchingEngine:
             kv_cache_ratio=self._get_float_config("kv_cache_ratio", 0.25),
         )
         self._memory_budget = self.memory_manager.compute_budget(
-            model_memory_bytes=self._resolve_model_memory_bytes(model)
+            model_memory_bytes=self._resolve_model_memory_bytes(model),
+            free_memory_reserve_bytes=self._sequence_state_reserve_bytes(model),
         )
 
         block_size = self._get_int_config("block_size")
@@ -283,6 +286,18 @@ class ContinuousBatchingEngine:
         if fallback_reason is not None:
             _logger.warning("%s", fallback_reason)
         self.model_runner = ModelRunner(model, engine, device=self.device)
+        # Bounds device-resident recurrent state to what the budget reserves.
+        self.model_runner.set_sequence_state_limit(
+            self._get_int_config("max_batch_size", 32)
+        )
+        # A weak reference keeps the runner from pinning this engine (and its
+        # device KV store) in a cycle that only the cyclic GC can collect.
+        is_live_ref = weakref.WeakMethod(self._sequence_is_live)
+        self.model_runner.set_sequence_liveness(
+            lambda seq_id: (
+                (is_live := is_live_ref()) is not None and is_live(seq_id)
+            )
+        )
 
         self.prefix_cache: PrefixCache | None = None
         self.cache_namespace: CacheNamespace | None = None
@@ -529,6 +544,14 @@ class ContinuousBatchingEngine:
             )
         self._is_shutdown = False
 
+    def _sequence_state_reserve_bytes(self, model: object) -> int:
+        # Hybrid linear-attention models keep recurrent state per running
+        # sequence outside the paged KV cache; reserve it for a full batch.
+        per_sequence = LinearAttentionStateCache.bytes_per_sequence(
+            getattr(model, "config", None), self.dtype
+        )
+        return per_sequence * self._get_int_config("max_batch_size", 32)
+
     def _resolve_kv_swap_settings(self) -> KVSwapConfig:
         return _EngineKVSwapSettings(
             kv_swap_mode=self._get_str_config("kv_swap_mode", "sync"),
@@ -599,6 +622,7 @@ class ContinuousBatchingEngine:
             self._tick_adaptive_memory()
         self._prepare_speculative_rounds()
         scheduler_output = self.scheduler.schedule()
+        self._sync_sequence_state()
         outputs = self._verify_speculative_rounds(
             scheduler_output.verify_seq_ids
         )
@@ -660,7 +684,9 @@ class ContinuousBatchingEngine:
             self._num_steps += 1
             return []
 
-        logits = self._execute_and_commit(batch)
+        # Issue #276: commit KV/prefix metadata for the batch we already
+        # executed and sampled above instead of running the model again.
+        self._commit_executed_batch(batch)
         # Compatibility limit: pre-Stage4a session doubles do not accept a
         # request-scoped generator and retain the original singleton,
         # whole-request Step-5 behavior. Canonical SpecSession implementations
@@ -697,26 +723,110 @@ class ContinuousBatchingEngine:
                 if len(fallback_indices) == len(batch.seq_ids)
                 else _slice_batch(batch, fallback_indices)
             )
-            outputs.extend(self._step_standard(fallback_batch))
+            if fallback_batch is batch:
+                outputs.extend(
+                    self._step_standard(
+                        fallback_batch,
+                        logits=logits,
+                        sampler_output=sampler_output,
+                    )
+                )
+            else:
+                outputs.extend(self._step_standard(fallback_batch))
 
         if speculative_indices and not fallback_indices:
             self._num_steps += 1
         return outputs
 
-    def _step_standard(self, batch: BatchMetadata) -> list[RequestOutput]:
-        """Execute the ordinary serving path for a scheduler-selected subset."""
+    def _update_after_step(
+        self,
+        *,
+        completed_seq_ids: list[int],
+        new_decode_seq_ids: list[int],
+        committed_counts: dict[int, int] | None = None,
+    ) -> None:
+        if committed_counts is None:
+            self.scheduler.update_after_step(
+                completed_seq_ids=completed_seq_ids,
+                new_decode_seq_ids=new_decode_seq_ids,
+            )
+        else:
+            self.scheduler.update_after_step(
+                completed_seq_ids=completed_seq_ids,
+                new_decode_seq_ids=new_decode_seq_ids,
+                committed_counts=committed_counts,
+            )
+        if completed_seq_ids:
+            self.model_runner.release_sequence_state(completed_seq_ids)
+
+    def _sequence_is_live(self, seq_id: int) -> bool:
+        sequence = self._sequences.get(seq_id)
+        return sequence is not None and sequence.status in (
+            SequenceStatus.PREFILL,
+            SequenceStatus.DECODE,
+            SequenceStatus.DRAFT,
+            SequenceStatus.VERIFY,
+        )
+
+    def _sync_sequence_state(self) -> None:
+        """Keep runner-side per-sequence state in step with the scheduler.
+
+        Runs right after scheduling, where preemption happens: a sequence
+        reset for recompute restarts from token 0 and drops its state, and a
+        swapped-out sequence keeps its state on the host like its KV.
+        """
+        held = self.model_runner.sequence_state_ids()
+        if not held:
+            return
+        release: list[int] = []
+        offload: list[int] = []
+        for seq_id in held:
+            sequence = self._sequences.get(seq_id)
+            status = sequence.status if sequence is not None else None
+            if status is SequenceStatus.SWAPPED:
+                offload.append(seq_id)
+            elif status not in (
+                SequenceStatus.PREFILL,
+                SequenceStatus.DECODE,
+                SequenceStatus.DRAFT,
+                SequenceStatus.VERIFY,
+            ):
+                release.append(seq_id)
+        if release:
+            self.model_runner.release_sequence_state(release)
+        if offload:
+            self.model_runner.offload_sequence_state(offload)
+
+    def _step_standard(
+        self,
+        batch: BatchMetadata,
+        *,
+        logits: torch.Tensor | None = None,
+        sampler_output: SamplerOutput | None = None,
+    ) -> list[RequestOutput]:
+        """Execute the ordinary serving path for a scheduler-selected subset.
+
+        When ``step()`` has already executed and sampled this exact batch for
+        the non-speculative path, it passes ``logits`` and ``sampler_output``
+        here so the model is not run again (issue #276). When they are omitted
+        the batch is executed and sampled locally as before.
+        """
 
         sampled_indices = self._sampled_row_indices(batch)
-        logits = self._execute_batch(batch)
+        if logits is None:
+            logits = self._execute_batch(batch)
         next_token_ids = None
         if sampled_indices:
-            sampled_logits = self._extract_last_token_logits(
-                logits, batch, sampled_indices
-            )
-            sampled_params = [
-                batch.sampling_params[index] for index in sampled_indices
-            ]
-            sampler_output = self.sampler.sample(sampled_logits, sampled_params)
+            if sampler_output is None:
+                sampled_logits = self._extract_last_token_logits(
+                    logits, batch, sampled_indices
+                )
+                sampled_params = [
+                    batch.sampling_params[index] for index in sampled_indices
+                ]
+                sampler_output = self.sampler.sample(
+                    sampled_logits, sampled_params
+                )
             next_token_ids = sampler_output.token_ids
 
         outputs: list[RequestOutput] = []
@@ -764,7 +874,7 @@ class ContinuousBatchingEngine:
                 )
             )
 
-        self.scheduler.update_after_step(
+        self._update_after_step(
             completed_seq_ids=completed_seq_ids,
             new_decode_seq_ids=new_decode_seq_ids,
         )
@@ -1067,7 +1177,7 @@ class ContinuousBatchingEngine:
         if finished:
             if sequence.status in (SequenceStatus.DRAFT, SequenceStatus.VERIFY):
                 sequence.set_status(SequenceStatus.FINISHED)
-            self.scheduler.update_after_step(
+            self._update_after_step(
                 completed_seq_ids=[record.seq_id],
                 new_decode_seq_ids=[],
                 committed_counts={record.seq_id: committed_count},
@@ -1083,7 +1193,7 @@ class ContinuousBatchingEngine:
         else:
             if sequence.status is SequenceStatus.VERIFY:
                 sequence.set_status(SequenceStatus.DRAFT)
-            self.scheduler.update_after_step(
+            self._update_after_step(
                 completed_seq_ids=[],
                 new_decode_seq_ids=[],
                 committed_counts={record.seq_id: committed_count},
@@ -1221,7 +1331,7 @@ class ContinuousBatchingEngine:
             if finished:
                 break
 
-        self.scheduler.update_after_step(
+        self._update_after_step(
             completed_seq_ids=[seq_id],
             new_decode_seq_ids=[],
             committed_counts={seq_id: len(outputs)},
@@ -1344,7 +1454,7 @@ class ContinuousBatchingEngine:
         ):
             sequence.set_status(SequenceStatus.FINISHED)
 
-        self.scheduler.update_after_step(
+        self._update_after_step(
             completed_seq_ids=[seq_id],
             new_decode_seq_ids=[],
             committed_counts={seq_id: len(outputs)},
@@ -1460,6 +1570,7 @@ class ContinuousBatchingEngine:
 
         for request_id in list(self._request_to_seq_ids.keys()):
             self.abort_request(request_id)
+        self.model_runner.clear_sequence_state()
 
         if self.kv_cache.has_pending_transfers():
             _logger.warning(
@@ -1500,6 +1611,7 @@ class ContinuousBatchingEngine:
                 driver.cancel(seq_id)
                 self.scheduler.clear_verify_demand(seq_id)
         self.scheduler.abort_request(request_id)
+        self.model_runner.release_sequence_state(seq_ids)
         _ = self._callbacks.pop(request_id, None)
 
         if not was_pending:
@@ -2153,7 +2265,7 @@ class ContinuousBatchingEngine:
             modules = self.model_runner._get_qwen3_paged_attention_modules()
             backend.register_layers(
                 [
-                    LayerRegistration(int(module.layer_idx), id(module))
+                    LayerRegistration(paged_layer_index(module), id(module))
                     for module in modules
                 ]
             )
@@ -2236,8 +2348,7 @@ class ContinuousBatchingEngine:
             decode_logits = self._execute_decode_batch(split.decode_batch)
         return split.recombine_outputs(prefill_logits, decode_logits)
 
-    def _execute_and_commit(self, batch: BatchMetadata) -> torch.Tensor:
-        logits = self._execute_batch(batch)
+    def _commit_executed_batch(self, batch: BatchMetadata) -> None:
         query_lengths = batch.query_lengths
         is_prefill = batch.is_prefill
         for index, seq_id in enumerate(batch.seq_ids):
@@ -2248,7 +2359,6 @@ class ContinuousBatchingEngine:
                 continue
             sequence.committed_kv_tokens += query_lengths[index]
             self._publish_committed_prefix(seq_id, sequence)
-        return logits
 
     def _publish_committed_prefix(
         self, seq_id: int, sequence: SequenceData

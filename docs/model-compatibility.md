@@ -1,6 +1,6 @@
 # Model compatibility matrix
 
-Adaptive candidate evaluation is limited to unquantized Mixtral, Qwen3-MoE, and DeepSeek-V2. GPT-OSS MXFP4, GLM-5.2 FP8, DeepSeek-V4-Flash FP4, DeepSeek-V3 FP8, and GPTQ/AWQ remain protected.
+Adaptive candidate evaluation is limited to unquantized Mixtral, Qwen3-MoE, and DeepSeek-V2. GPT-OSS MXFP4, GLM-5.2 FP8, DeepSeek-V4-Flash FP4, DeepSeek-V3 FP8, Hy3-FP8 per-tensor FP8, and GPTQ/AWQ remain protected.
 
 This guide is the source of truth for the families registered in
 `moe_infinity/common/constants.py` and the runtime adapters wired in
@@ -25,11 +25,13 @@ a claim that any particular DeepSeek DFlash pair has been validated.
 | DeepSeek-V3 (`DeepseekV3ForCausalLM`) | implemented/experimental | implemented/experimental | Routing and paged-attention parity evidence. |
 | DeepSeek-V4 (`DeepseekV4ForCausalLM`) | validated official mp4 path | not validated | DFlash unsupported; mp1 not covered. |
 | Mixtral (`MixtralForCausalLM`) | implemented/experimental | implemented/experimental | No real-model serving harness recorded. |
-| Qwen3 / Qwen3.5 MoE | Qwen3 validated; Qwen3.5 tiny-fixture validated | implemented/experimental | Qwen3.5 keeps the `visual.*` vision tower resident; MTP unused; requires newer Transformers. |
+| Qwen3 / Qwen3.5 MoE | Qwen3 validated; Qwen3.5 tiny-fixture validated | implemented/experimental; Qwen3.5 paged serving tiny-checkpoint validated (CPU) | Qwen3.5 keeps the `visual.*` vision tower resident; MTP unused; requires newer Transformers. Qwen3.5 serving disables prefix reuse and chunked prefill. |
 | MiniMax-M3 (`minimax_m3_vl`) | implemented/experimental | not recorded | BF16, eager attention, native engine off; 128 routed experts offloaded; MiniMax Community License; no real-checkpoint evidence yet. |
 | GLM-5.2 (`GlmMoeDsaForCausalLM`) | validated | tiny serving harness | Built-in MTP, not DFlash. |
 | GLM-5.3 (`GlmMoeDsaForCausalLM`) | validated (real-checkpoint generate smoke) | tiny serving harness (shared GLM-5.2 path) | Same base and FP8 path as GLM-5.2 (post-training only); `zai-org/GLM-5.3` 16-token generate smoke passed; config and chat template (`reasoning_effort`/`clear_thinking`) pinned by `tests/python/unit/test_glm53_registry.py` and `test_glm53_chat_template.py`. 32k long-context prefill not separately validated (harness one-model-per-process limit). |
 | GLM-5.3-Flash (`Glm5NextForConditionalGeneration`) | validated (tiny + real-checkpoint generate smoke, text-only) | tiny serving harness | New glm5_next family (transformers >= 5.16, guarded); 288 routed FP8 experts offloaded, KDA/DSA/mHC/vision/MTP resident; `zai-org/GLM-5.3-Flash` 32-token generate smoke passed (17.9 GiB resident). See the [GLM-5.3-Flash guide](glm-5.3-flash.md). |
+| Hy3-FP8 (`hy_v3`, `HYV3ForCausalLM`) | validated | not recorded | `tencent/Hy3-FP8`; per-tensor static FP8 experts offloaded via scalar-to-block-grid scale expansion over the GLM FP8-in-store path; whole non-expert namespace resident; MTP layer 80 excluded; HF eager serving path (`use_native_engine=False`); requires moe-store with hy_v3 support. Validated 2026-10-29 on 1x RTX PRO 6000 Blackwell (96 GB): `HY3_FP8_CKPT=<ckpt> PYTHONPATH=<moe-store> pytest tests/python/hy3/test_e2e_offload.py` — real-checkpoint greedy decode of "The capital of France is" yielded " Paris.\nThe capital of Japan is Tokyo.\nThe capital of Germany is" (1 passed, 12m37s incl. store build, `device_memory_ratio 0.75`). Single-GPU greedy smoke only; throughput and multi-GPU not recorded. |
+| Hy3 (`hy_v3`, `HYV3ForCausalLM`, BF16) | not recorded | not recorded | `tencent/Hy3`; expected to work via the same wrapper without FP8 handling; untested. |
 | GPT-OSS (`GptOssForCausalLM`) | 20B validated | 20B validated | Resident expert implementation. |
 | DBRX / Jamba / OLMoE / NLLB-MoE | implemented/experimental | not validated | Registry/adapter evidence only. |
 | OPT (`OPTForCausalLM`) | unsupported | unsupported | Registry entry only. |
@@ -91,6 +93,28 @@ The v5 packed expert tensors expand to per-expert on load; the `visual.*`
 weights stay resident so image prompts are supported, while MTP weights remain
 present but unused for generation. A `device_memory_ratio` near `0.5` is a
 reasonable starting point.
+
+In the OpenAI server, `Qwen3_5MoePagedAttention`
+(`moe_infinity/boundary/qwen3_5_moe_paged_attention.py`) replaces only the gated
+full-attention layers, so the paged KV cache holds one plane per
+full-attention layer (`layer_types == "full_attention"`) instead of one per
+decoder layer. The Gated DeltaNet linear-attention layers and the vision tower
+keep their HuggingFace classes. Their conv and recurrent state is kept per
+sequence by the serving runner (`serving/linear_attention_state.py`). At most
+`max_batch_size` sequences keep state on the GPU (two snapshots each), which is
+what the serving memory budget reserves; when more requests are live, the
+least recently scheduled ones are moved to host memory and restored on their
+next forward. State also moves to host memory while a sequence's KV is swapped
+out, and is released when the sequence finishes, is aborted (including while
+its forward is in flight), or is reset for recompute. Image and video prompts get
+HuggingFace's M-RoPE positions (`get_rope_index`) at prefill, and every later
+decode step applies the per-sequence rope delta, matching `generate`
+(`boundary/qwen3_5_moe_mrope.py`). A cached KV prefix carries no
+linear-attention state, so prefix reuse
+(`hybrid-linear-attention-state-unsupported`) and chunked prefill
+(`hybrid_linear_attention_state_unsupported`) stay disabled for this family.
+Speculative (rich) serving execution is rejected for the same reason. Decode
+CUDA graphs are not eligible.
 
 ### MiniMax-M3
 

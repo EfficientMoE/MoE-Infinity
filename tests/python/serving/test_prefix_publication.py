@@ -23,7 +23,8 @@ def test_publication_uses_successfully_committed_range_only(
         query_tokens=list(range(8, 12)),
         block_table=engine.kv_cache.get_block_table(seq.seq_id),
     )
-    engine._execute_and_commit(batch)
+    engine._execute_batch(batch)
+    engine._commit_executed_batch(batch)
     assert seq.committed_kv_tokens == 12
     lease = engine.prefix_cache.acquire_prefix_lease(
         engine.cache_namespace, list(range(20)), max_prefix_tokens=16
@@ -46,7 +47,8 @@ def test_failed_chunk_does_not_advance_or_publish(
         seq, 8, [8, 9, 10, 11], engine.kv_cache.get_block_table(seq.seq_id)
     )
     with pytest.raises(RuntimeError):
-        engine._execute_and_commit(batch)
+        engine._execute_batch(batch)
+        engine._commit_executed_batch(batch)
     assert seq.committed_kv_tokens == 8
 
 

@@ -5,12 +5,28 @@ from __future__ import annotations
 import logging
 import math
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Optional,
+    Protocol,
+    cast,
+    runtime_checkable,
+)
 
 import torch
 
+from moe_infinity.boundary.hybrid_attention_layout import (
+    linear_attention_layer_indices,
+    paged_kv_layer_indices,
+)
+from moe_infinity.boundary.qwen3_5_moe_mrope import (
+    has_vision_grid,
+    mrope_prompt_positions,
+    supports_mrope_positions,
+)
 from moe_infinity.memory.expert_policy import (
     ExpertPhase,
     expert_phase_scope,
@@ -22,7 +38,8 @@ from moe_infinity.runtime.attention_types import (
     PagedBatchLengths,
 )
 
-from .batch import BatchMetadata
+from .batch import BatchMetadata, _slice_batch
+from .linear_attention_state import LinearAttentionStateCache
 
 if TYPE_CHECKING:
     from moe_infinity.runtime.attention_backend import PrefixReuseCapability
@@ -32,8 +49,30 @@ logger = logging.getLogger(__name__)
 # chunked prefill, layered store binding). Matched by class name, like
 # ``_get_paged_attention_classes``.
 _LAYER_REGISTERED_SHIMS = frozenset(
-    {"Qwen3PagedAttention", "OlmoePagedAttention"}
+    {"Qwen3PagedAttention", "OlmoePagedAttention", "Qwen3_5MoePagedAttention"}
 )
+
+# Hybrid models (linear-attention + full-attention layers) keep per-sequence
+# recurrent state outside the paged KV cache. Reusing a cached KV prefix or
+# continuing a chunk would skip that state, so both stay off for them.
+HYBRID_PREFIX_REUSE_DISABLED_REASON = (
+    "hybrid-linear-attention-state-unsupported"
+)
+HYBRID_CHUNKED_PREFILL_DISABLED_REASON = (
+    "hybrid_linear_attention_state_unsupported"
+)
+
+
+def paged_layer_index(module: object) -> int:
+    """Index of ``module``'s plane in the paged KV store.
+
+    Hybrid shims expose a dense ``paged_layer_idx`` (the ordinal among the
+    full-attention layers); every other shim is indexed by ``layer_idx``.
+    """
+    paged_idx = getattr(module, "paged_layer_idx", None)
+    if isinstance(paged_idx, int) and not isinstance(paged_idx, bool):
+        return paged_idx
+    return int(getattr(module, "layer_idx"))
 
 
 @runtime_checkable
@@ -102,6 +141,10 @@ class ModelRunner:
         self.paged_attention_registry = paged_attention_registry
         self.decode_graph_capability_provider = decode_graph_capability_provider
         self._warned_no_paged_shim = False
+        self._linear_attention_state: LinearAttentionStateCache | None = None
+        self._linear_attention_state_resolved = False
+        self._sequence_state_limit: int | None = None
+        self._sequence_liveness: Callable[[int], bool] | None = None
         if kv_store is not None or attention_backend is not None:
             self._validate_store_identity(kv_store, attention_backend, owner_id)
 
@@ -226,7 +269,9 @@ class ModelRunner:
         )
         self._warned_no_paged_shim = False
 
-    def prepare_inputs(self, batch: BatchMetadata) -> dict[str, Any]:
+    def prepare_inputs(
+        self, batch: BatchMetadata, *, left_pad: bool = False
+    ) -> dict[str, Any]:
         num_seqs = len(batch.seq_ids)
         query_lengths = batch.query_lengths
         query_offsets = batch.query_offsets
@@ -268,9 +313,11 @@ class ModelRunner:
                 device=self.device,
             )
 
-            input_ids[seq_idx, :seq_len] = token_tensor
-            position_ids[seq_idx, :seq_len] = position_tensor
-            attention_mask[seq_idx, :seq_len] = 1
+            start_col = max_seq_len - seq_len if left_pad else 0
+            end_col = start_col + seq_len
+            input_ids[seq_idx, start_col:end_col] = token_tensor
+            position_ids[seq_idx, start_col:end_col] = position_tensor
+            attention_mask[seq_idx, start_col:end_col] = 1
 
         prepared: dict[str, Any] = {
             "input_ids": input_ids,
@@ -339,6 +386,20 @@ class ModelRunner:
                 row_lengths=tuple(batch.seq_lengths),
             )
 
+        linear_state = (
+            self._get_linear_attention_state()
+            if past_key_values is None
+            else None
+        )
+        if linear_state is not None and self._uses_paged_context():
+            if rich:
+                raise RuntimeError(
+                    "speculative (rich) execution is not supported for hybrid "
+                    "linear-attention models on the paged serving path: their "
+                    "recurrent state cannot be rolled back"
+                )
+            return self._execute_linear_attention_hybrid(batch, linear_state)
+
         model_inputs = self.prepare_inputs(batch)
 
         forward_kwargs: dict[str, object] = {
@@ -355,21 +416,7 @@ class ModelRunner:
                 forward_kwargs, batch=batch
             )
 
-        logits = self._extract_logits(outputs)
-        if logits.dim() == 3:
-            token_mask = model_inputs["attention_mask"].to(
-                dtype=torch.bool, device=logits.device
-            )
-            logits = logits[token_mask]
-        elif logits.dim() != 2:
-            raise ValueError(
-                f"model output logits must be rank-2 or rank-3, got rank-{logits.dim()}"
-            )
-
-        if logits.size(0) != batch.total_tokens:
-            raise ValueError(
-                f"packed logits row count must match batch.total_tokens; got {logits.size(0)} vs {batch.total_tokens}"
-            )
+        logits = self._pack_logits(outputs, model_inputs, batch)
         if not rich:
             return logits
 
@@ -396,11 +443,234 @@ class ModelRunner:
             row_lengths=tuple(batch.seq_lengths),
         )
 
+    def _pack_logits(
+        self,
+        outputs: object,
+        model_inputs: dict[str, Any],
+        batch: BatchMetadata,
+    ) -> torch.Tensor:
+        logits = self._extract_logits(outputs)
+        if logits.dim() == 3:
+            token_mask = model_inputs["attention_mask"].to(
+                dtype=torch.bool, device=logits.device
+            )
+            logits = logits[token_mask]
+        elif logits.dim() != 2:
+            raise ValueError(
+                f"model output logits must be rank-2 or rank-3, got rank-{logits.dim()}"
+            )
+
+        if logits.size(0) != batch.total_tokens:
+            raise ValueError(
+                f"packed logits row count must match batch.total_tokens; got {logits.size(0)} vs {batch.total_tokens}"
+            )
+        return logits
+
+    def _get_linear_attention_state(self) -> LinearAttentionStateCache | None:
+        """Per-sequence linear-attention state for hybrid models, else None."""
+        if not self._linear_attention_state_resolved:
+            self._linear_attention_state_resolved = True
+            config = getattr(self.model, "config", None)
+            linear_layers = linear_attention_layer_indices(config)
+            if linear_layers:
+                self._linear_attention_state = LinearAttentionStateCache(
+                    config,
+                    linear_layers,
+                    max_resident=self._sequence_state_limit,
+                )
+                self._linear_attention_state.is_live = self._sequence_liveness
+        return self._linear_attention_state
+
+    def _uses_paged_context(self) -> bool:
+        return bool(
+            self._get_paged_attention_classes()
+            and self._get_attention_backend() is not None
+        )
+
+    def set_sequence_state_limit(self, max_sequences: int) -> None:
+        """Bound how many sequences keep recurrent state on the device.
+
+        The engine passes ``max_batch_size``, the most rows one forward can
+        hold, matching what ``sequence_state_reserve_bytes`` reserves.
+        """
+        self._sequence_state_limit = int(max_sequences)
+        state = self._linear_attention_state
+        if state is not None:
+            state.max_resident = self._sequence_state_limit
+
+    def set_sequence_liveness(self, is_live: Callable[[int], bool]) -> None:
+        """Commit state only for sequences ``is_live`` still reports live."""
+        self._sequence_liveness = is_live
+        state = self._linear_attention_state
+        if state is not None:
+            state.is_live = is_live
+
+    def sequence_state_ids(self) -> set[int]:
+        """Sequences holding runner-side state (recurrent state, M-RoPE)."""
+        state = self._linear_attention_state
+        return set() if state is None else state.seq_ids()
+
+    def release_sequence_state(self, seq_ids: Iterable[int]) -> None:
+        """Drop runner-side state of finished, aborted or reset sequences."""
+        state = self._linear_attention_state
+        if state is not None:
+            state.release(seq_ids)
+
+    def offload_sequence_state(self, seq_ids: Iterable[int]) -> None:
+        """Move recurrent state to host memory while KV is swapped out."""
+        state = self._linear_attention_state
+        if state is not None:
+            state.offload(seq_ids)
+
+    def clear_sequence_state(self) -> None:
+        state = self._linear_attention_state
+        if state is not None:
+            state.clear()
+
+    def sequence_state_reserve_bytes(self, max_sequences: int) -> int:
+        """Device bytes to reserve for ``max_sequences`` running sequences."""
+        config = getattr(self.model, "config", None)
+        dtype = getattr(self.model, "dtype", torch.float32)
+        if not isinstance(dtype, torch.dtype):
+            dtype = torch.float32
+        per_sequence = LinearAttentionStateCache.bytes_per_sequence(
+            config, dtype
+        )
+        return max(0, int(max_sequences)) * per_sequence
+
+    @staticmethod
+    def _linear_attention_row_groups(batch: BatchMetadata) -> list[list[int]]:
+        # Rows starting a sequence share one forward (left-padded so padding
+        # precedes the real tokens of the recurrent layers); continuing rows
+        # are grouped by query length so they need no padding at all.
+        groups: dict[int, list[int]] = {}
+        for row, (context_len, query_len) in enumerate(
+            zip(batch.context_lengths, batch.query_lengths)
+        ):
+            key = 0 if context_len == 0 else int(query_len)
+            groups.setdefault(key, []).append(row)
+        return list(groups.values())
+
+    def _execute_linear_attention_hybrid(
+        self, batch: BatchMetadata, state: LinearAttentionStateCache
+    ) -> torch.Tensor:
+        groups = self._linear_attention_row_groups(batch)
+        if len(groups) == 1:
+            return self._execute_linear_attention_group(batch, state)
+
+        packed: torch.Tensor | None = None
+        for rows in groups:
+            sub_batch = _slice_batch(batch, rows)
+            if any(batch.context_lengths[row] for row in rows):
+                sub_batch.multimodal_inputs = None
+            self.prepare_batch_side_effects(sub_batch)
+            sub_logits = self._execute_linear_attention_group(sub_batch, state)
+            if packed is None:
+                packed = sub_logits.new_empty(
+                    (batch.total_tokens, sub_logits.size(-1))
+                )
+            for sub_row, row in enumerate(rows):
+                src = sub_batch.query_offsets[sub_row]
+                dst = batch.query_offsets[row]
+                length = batch.query_lengths[row]
+                packed[dst : dst + length] = sub_logits[src : src + length]
+        assert packed is not None
+        return packed
+
+    def _execute_linear_attention_group(
+        self, batch: BatchMetadata, state: LinearAttentionStateCache
+    ) -> torch.Tensor:
+        fresh = all(context == 0 for context in batch.context_lengths)
+        ticket = state.begin(batch.seq_ids)
+        cache = state.build_cache(
+            batch.seq_ids, batch.context_lengths, device=self.device
+        )
+        model_inputs = self.prepare_inputs(batch, left_pad=fresh)
+        mrope_positions, mrope_deltas = self._mrope_position_ids(
+            batch, model_inputs, state
+        )
+        forward_kwargs: dict[str, object] = {
+            **model_inputs,
+            "use_cache": True,
+            "past_key_values": cache,
+        }
+        if mrope_positions is not None:
+            # The token types only feed HF's own position derivation.
+            forward_kwargs["position_ids"] = mrope_positions
+            forward_kwargs.pop("mm_token_type_ids", None)
+        with expert_phase_scope(self._expert_phase(batch)):
+            outputs = self._forward_with_optional_paged_context(
+                forward_kwargs,
+                batch=batch,
+                query_padding="left" if fresh else "right",
+            )
+        logits = self._pack_logits(outputs, model_inputs, batch)
+        # Rows released while the forward ran (aborted requests) are skipped.
+        state.commit(
+            batch.seq_ids,
+            batch.context_lengths,
+            batch.query_lengths,
+            cache,
+            ticket=ticket,
+            rope_deltas=mrope_deltas,
+        )
+        return logits
+
+    def _mrope_position_ids(
+        self,
+        batch: BatchMetadata,
+        model_inputs: dict[str, Any],
+        state: LinearAttentionStateCache,
+    ) -> tuple[torch.Tensor | None, dict[int, int]]:
+        """Build HF's ``[4, batch, seq]`` M-RoPE positions for VL Qwen3.5.
+
+        Row 0 is the text position (as ``prepare_inputs`` laid it out, with
+        either padding side); rows 1-3 are the temporal/height/width rotary
+        positions. Image/video prompts get ``get_rope_index`` positions and
+        a per-sequence delta that offsets every later decode position, the
+        same way ``generate`` applies ``rope_deltas``. Returns ``None`` when
+        no row needs M-RoPE, leaving text-only batches unchanged.
+        """
+        deltas: dict[int, int] = {}
+        if not supports_mrope_positions(self.model):
+            return None, deltas
+        text_positions = model_inputs["position_ids"]
+        token_mask = model_inputs["attention_mask"].to(torch.bool)
+        rotary = text_positions.unsqueeze(0).repeat(3, 1, 1)
+        row_inputs = batch.row_multimodal_inputs
+        needs_mrope = False
+        for row, seq_id in enumerate(batch.seq_ids):
+            if batch.context_lengths[row] == 0:
+                inputs = row_inputs[row] if row_inputs else None
+                deltas[seq_id] = 0
+                if not has_vision_grid(inputs):
+                    continue
+                start = batch.query_offsets[row]
+                end = batch.query_offsets[row + 1]
+                positions, delta = mrope_prompt_positions(
+                    self.model,
+                    batch.input_token_ids[start:end],
+                    cast(dict[str, Any], inputs),
+                    device=text_positions.device,
+                )
+                rotary[:, row, token_mask[row]] = positions.to(rotary.dtype)
+                deltas[seq_id] = delta
+                needs_mrope = True
+            else:
+                delta = state.rope_delta(seq_id)
+                if delta:
+                    rotary[:, row, token_mask[row]] += delta
+                    needs_mrope = True
+        if not needs_mrope:
+            return None, deltas
+        return torch.cat([text_positions.unsqueeze(0), rotary], dim=0), deltas
+
     def _forward_with_optional_paged_context(
         self,
         forward_kwargs: dict[str, object],
         *,
         batch: BatchMetadata,
+        query_padding: str = "right",
     ) -> object:
         eval_fn = getattr(self.model, "eval", None)
         if callable(eval_fn):
@@ -424,7 +694,7 @@ class ModelRunner:
                 f"served model ({type(self.model).__name__}); the paged KV "
                 "cache is NOT wired into its attention, so multi-token decode "
                 "output will be INCORRECT. Implement a *PagedAttention shim for "
-                "this model (reference: moe_infinity/models/qwen3_paged_attention.py)."
+                "this model (reference: moe_store/wrappers/qwen3_paged_attention.py)."
             )
             if os.environ.get("MOE_STRICT_PAGED_ATTENTION", "0") == "1":
                 raise RuntimeError(_msg)
@@ -435,7 +705,9 @@ class ModelRunner:
         with torch.no_grad():
             if not use_paged_context:
                 return forward_fn(**forward_kwargs)
-            metadata = self._build_runtime_attention_metadata(batch)
+            metadata = self._build_runtime_attention_metadata(
+                batch, query_padding=query_padding
+            )
             for attn_cls in paged_attention_classes:
                 attn_cls.set_paged_context(backend, metadata)
             try:
@@ -643,7 +915,7 @@ class ModelRunner:
         )
 
     def _build_runtime_attention_metadata(
-        self, batch: BatchMetadata
+        self, batch: BatchMetadata, *, query_padding: str = "right"
     ) -> RuntimeAttentionMetadata:
         block_size = self._resolve_block_size()
         max_blocks = max((len(row) for row in batch.block_tables), default=0)
@@ -700,6 +972,7 @@ class ModelRunner:
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
             is_prefill=bool(batch.is_prefill and all(batch.is_prefill)),
+            query_padding=query_padding,
         )
 
     @staticmethod
@@ -804,6 +1077,13 @@ class ModelRunner:
                 for layer_idx, module_id in registrations
             ]
         )
+        # The layered store above still backs the paged KV of a hybrid model;
+        # only reuse is refused, because a cached KV prefix carries no state
+        # for the linear-attention layers.
+        if self._is_hybrid_linear_attention_model():
+            return PrefixReuseCapability.disabled(
+                HYBRID_PREFIX_REUSE_DISABLED_REASON
+            )
         return PrefixReuseCapability.active(backend, store)
 
     def _collect_qwen_layer_registrations(self) -> list[tuple[int, int]]:
@@ -820,11 +1100,18 @@ class ModelRunner:
             layer_idx = getattr(module, "layer_idx", None)
             if not isinstance(layer_idx, int):
                 continue
-            registrations.append((layer_idx, id(module)))
+            registrations.append((paged_layer_index(module), id(module)))
         return registrations
+
+    def _is_hybrid_linear_attention_model(self) -> bool:
+        config = getattr(self.model, "config", None)
+        return paged_kv_layer_indices(config) is not None
 
     def _resolve_expected_layers(self) -> int | None:
         config = getattr(self.model, "config", None)
+        paged_layers = paged_kv_layer_indices(config)
+        if paged_layers is not None:
+            return len(paged_layers)
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
         if isinstance(num_hidden_layers, int):
             return num_hidden_layers
@@ -836,6 +1123,7 @@ class ModelRunner:
             "DeepseekV3PagedAttention",
             "Qwen3PagedAttention",
             "OlmoePagedAttention",
+            "Qwen3_5MoePagedAttention",
         }
         classes: list[type[Any]] = []
         seen: set[type[Any]] = set()
@@ -887,6 +1175,8 @@ class ModelRunner:
             PagedAttentionBackend,
         )
 
+        if self._is_hybrid_linear_attention_model():
+            return False
         backend = self._get_attention_backend()
         qwen_modules = self._get_qwen3_paged_attention_modules()
         expected_layers = int(
@@ -910,6 +1200,8 @@ class ModelRunner:
             PagedAttentionBackend,
         )
 
+        if self._is_hybrid_linear_attention_model():
+            return HYBRID_CHUNKED_PREFILL_DISABLED_REASON
         qwen_modules = self._get_qwen3_paged_attention_modules()
         expected_layers = int(
             getattr(self.model.config, "num_hidden_layers", 0)

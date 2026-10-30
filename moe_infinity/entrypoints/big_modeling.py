@@ -243,10 +243,13 @@ class MoE:
         # glm5_next (GLM-5.3-Flash) mixes KDA linear attention with DSA sparse
         # attention; neither is representable in the native paged backend, so
         # it stays on HF's eager path as well.
+        # hy_v3 (Hy3-FP8) starts on the HF eager path like GLM-5.2; a
+        # PagedAttention shim is a follow-up.
         if getattr(model_config, "model_type", "") in (
             "glm_moe_dsa",
             "glm5_next",
             "minimax_m3_vl",
+            "hy_v3",
         ):
             self.use_native_engine = False
         if getattr(model_config, "model_type", "") == "minimax_m3_vl":
@@ -312,6 +315,11 @@ class MoE:
                 or arch == "qwen3"
                 or arch == "qwen3_5"
                 or arch == "minimaxm3"
+                # hy_v3 declares FA2 support upstream, but force eager for
+                # first bring-up, matching the GLM-5.2 validated path. This
+                # branch is unvalidated (FA was unavailable during bring-up)
+                # and is coupled to moe-store registering the arch as "hyv3".
+                or arch == "hyv3"
             ):
                 is_flash_attn_available = False
         except ImportError:
@@ -416,6 +424,9 @@ class MoE:
             self._native_expert_offload_coordinator = None
             return {}
 
+        from moe_infinity.boundary.hybrid_attention_layout import (
+            paged_kv_layer_count,
+        )
         from moe_infinity.engine.generation_loop import GenerationEngine
         from moe_infinity.engine.scheduler import Scheduler
         from moe_infinity.engine.unified_transfer_scheduler import (
@@ -434,6 +445,9 @@ class MoE:
             "n_layer",
         )
         num_layers = model_num_layers if model_num_layers is not None else 1
+        # Hybrid models only page KV for their full-attention layers; this
+        # must match the serving engine config built by api_server_v2.
+        num_layers = paged_kv_layer_count(model_config, num_layers)
 
         num_attention_heads = self._resolve_model_int_attr(
             model_config,
