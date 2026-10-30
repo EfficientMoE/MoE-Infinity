@@ -1,0 +1,17 @@
+# Trace data and simulator outputs are large and machine-local; never commit
+# them. See README.md "Trace data" for where to fetch them.
+*.pkl
+*.pt
+*.npy
+*.npz
+
+# Generated figures / logs / archives
+*.png
+*.pdf
+*.log
+*.tar.gz
+
+# Default working directories
+data/
+results/
+plots_sum/
