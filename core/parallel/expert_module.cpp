@@ -363,6 +363,8 @@ void MoEMLP::DequantFp8Params(cudaStream_t stream) {
     if (wdtype != torch::kFloat8_e4m3fn && wdtype != torch::kUInt8) continue;
     auto& s = fp8_scales_[i];
     if (!s.defined()) continue;
+    // Scales are expected to already be fp32 on this device (cached per-GPU
+    // at ExpertDispatcher::SetScales time), making both .to() calls no-ops.
     auto s_gpu = s.to(torch::kFloat32).to(CUDA_DEVICE(device));
     int N = w.size(0);
     int K = w.size(1);

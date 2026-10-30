@@ -58,6 +58,7 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 | [Qwen3.5-MoE](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | `Qwen/Qwen3.5-35B-A3B` |
 | [GLM-5.2 / GLM-5.3](https://huggingface.co/zai-org/GLM-5.3) | `zai-org/GLM-5.2-FP8`, `zai-org/GLM-5.3` |
 | [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) | `zai-org/GLM-5.3-Flash` |
+| [Hy3 / Hy3-FP8](https://huggingface.co/tencent/Hy3-FP8) | `tencent/Hy3-FP8`, `tencent/Hy3` |
 | [GPT-OSS](https://huggingface.co/models?search=gpt-oss) | `openai/gpt-oss-*` |
 | [DBRX](https://huggingface.co/models?search=dbrx) | `databricks/dbrx-instruct` |
 | [Jamba](https://huggingface.co/models?search=jamba) | `ai21labs/Jamba-*` |
@@ -73,6 +74,8 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 > GLM-5.2 (`GlmMoeDsaForCausalLM`, `model_type="glm_moe_dsa"`) requires `transformers` >= 5.12 and is registered only when that class is importable. Its 256 routed FP8 experts are offloaded while the dense layers, shared expert, MLA attention, DSA indexer, and MTP layer stay resident. See the [GLM-5.2 guide](docs/glm-5.2.md).
 
 > GLM-5.3 (`zai-org/GLM-5.3`, native FP8) reuses the same `GlmMoeDsaForCausalLM` base as GLM-5.2 — all gains are post-training — so it runs through the identical registry entry and FP8 expert-offload path (config resolution is pinned by `tests/python/unit/test_glm53_registry.py`). Its chat template adds `reasoning_effort` (`low`/`high`/`max`, default `max`) and `clear_thinking`; pass them through the tokenizer's chat template as needed.
+
+> Hy3-FP8 (`HYV3ForCausalLM`, `model_type="hy_v3"`): per-tensor static FP8 routed experts are offloaded via scalar→block-grid scale expansion over the GLM FP8-in-store path, the whole non-expert namespace stays resident, the MTP layer is excluded from generation, and serving uses the HF eager path (`use_native_engine=False`). Requires a moe-store build with hy_v3 support. Validated with a real-checkpoint single-GPU greedy-decode smoke (96 GB GPU); BF16 `tencent/Hy3` is expected to work via the same wrapper but is untested. See [docs/model-compatibility.md](docs/model-compatibility.md).
 
 ## Installation
 

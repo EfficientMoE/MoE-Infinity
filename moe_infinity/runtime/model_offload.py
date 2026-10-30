@@ -122,6 +122,59 @@ from moe_infinity.utils.async_transfer import (
 from moe_infinity.utils.device import get_default_device, get_device
 
 
+class _GPTQLinear(torch.nn.Module):
+    """Packed GPTQ inference using only torch; buffers are hydrated by Archer."""
+
+    def __init__(self, layer, bits, checkpoint_format, bias, sym=False):
+        super().__init__()
+        self.in_features = layer.in_features
+        self.out_features = layer.out_features
+        self.bits = bits
+        self.checkpoint_format = checkpoint_format
+        self.sym = sym
+        # Match empty-init: do not allocate full weights for every MoE expert.
+        for name in ("qweight", "qzeros", "scales", "g_idx", "bias"):
+            if name == "bias" and not bias:
+                self.register_buffer(name, None)
+                continue
+            dtype = (
+                torch.int32
+                if name in {"qweight", "qzeros", "g_idx"}
+                else layer.weight.dtype
+            )
+            self.register_buffer(
+                name, torch.zeros(1, dtype=dtype, device=layer.weight.device)
+            )
+        self.train(layer.training)
+
+    def forward(self, x):
+        pack = 32 // self.bits
+        shifts = torch.arange(
+            0, 32, self.bits, dtype=torch.int32, device=self.qweight.device
+        )
+        mask = (1 << self.bits) - 1
+        weight = (self.qweight.unsqueeze(1) >> shifts.view(1, pack, 1)) & mask
+        weight = weight.reshape(-1, self.out_features)[: self.in_features]
+        groups = self.g_idx.long()
+        if self.sym:
+            # Symmetric GPTQ has a fixed midpoint zero; like the Marlin and
+            # ExLlama kernels, ignore qzeros, whose stored offset varies.
+            weight = (weight - (1 << (self.bits - 1))).to(x.dtype)
+        else:
+            zeros = (self.qzeros.unsqueeze(-1) >> shifts) & mask
+            zeros = zeros.reshape(self.qzeros.shape[0], -1)
+            zeros = zeros[:, : self.out_features]
+            # Original GPTQ stores zero_point - 1; GPTQ v2 stores zero_point.
+            if self.checkpoint_format == "gptq":
+                zeros = zeros + 1
+            weight = (weight - zeros[groups]).to(x.dtype)
+        weight = weight * self.scales[groups].to(x.dtype)
+        out = torch.matmul(x, weight)
+        if self.bias is not None:
+            out = out + self.bias.to(x.dtype)
+        return out
+
+
 @dataclass(frozen=True)
 class AdaptivePrecisionResolution:
     enabled: bool
@@ -539,6 +592,66 @@ def _identify_fp8_blockwise_pairs(keys):
             if base in key_set:
                 pairs.append((base, k))
     return pairs
+
+
+def _identify_fp8_pertensor_pairs(keys):
+    # Hy3-FP8 style: scalar scales named "<weight key>_scale" (i.e.
+    # "...weight" + "_scale"), distinct from the GLM "..._scale_inv" block
+    # tensors handled by _identify_fp8_blockwise_pairs above.
+    key_set = set(keys)
+    pairs = []
+    for k in keys:
+        if k.endswith(".weight_scale"):
+            base = k[: -len("_scale")]
+            if base in key_set:
+                pairs.append((base, k))
+    return pairs
+
+
+def _expand_pertensor_scale_to_blocks(
+    weight_shape, scale: torch.Tensor, block_size: int = 128
+) -> torch.Tensor:
+    # Expand a per-tensor scalar scale to the uniform [ceil(N/b), ceil(K/b)]
+    # float32 grid the native glm_fp8_block128 dequant-on-copy path consumes.
+    # A uniform grid makes blockwise dequant numerically identical to
+    # per-tensor dequant, so no new native format is needed.
+    n, k = int(weight_shape[0]), int(weight_shape[1])
+    rows = (n + block_size - 1) // block_size
+    cols = (k + block_size - 1) // block_size
+    return torch.full((rows, cols), float(scale), dtype=torch.float32)
+
+
+def _dequant_fp8_pertensor(
+    weight: torch.Tensor, scale: torch.Tensor, *, dtype: torch.dtype
+) -> torch.Tensor:
+    return (weight.to(torch.float32) * float(scale)).to(dtype)
+
+
+def _split_fp8_pertensor_state_dict(state_dict, scales_out) -> None:
+    # Per-tensor sibling of the blockwise split at the _has_fp8_blockwise
+    # call site: routed experts stay FP8 with their scalar scale expanded
+    # into scales_out; everything else dequantizes to BF16 in place. All
+    # consumed scale keys and the activation input_scale keys (unused by
+    # BF16 execution) are removed from the state dict.
+    for base_key, scale_key in _identify_fp8_pertensor_pairs(
+        list(state_dict.keys())
+    ):
+        w = state_dict.get(base_key)
+        s = state_dict.get(scale_key)
+        if w is None or s is None:
+            continue
+        if w.dtype != torch.float8_e4m3fn:
+            del state_dict[scale_key]
+            continue
+        if _is_routed_expert_key(base_key):
+            scales_out[base_key] = _expand_pertensor_scale_to_blocks(w.shape, s)
+        else:
+            state_dict[base_key] = _dequant_fp8_pertensor(
+                w, s, dtype=torch.bfloat16
+            )
+        del state_dict[scale_key]
+    for k in [k for k in state_dict if k.endswith(".input_scale")]:
+        del state_dict[k]
 
 
 _ROUTED_EXPERT_RE = re.compile(r"\.mlp\.experts\.\d+\.")
@@ -1242,6 +1355,18 @@ class OffloadEngine(object):
                                     )
                                 del state_dict[scale_key]
 
+                            if (
+                                getattr(self.config, "model_type", "")
+                                == "hy_v3"
+                            ):
+                                # Per-tensor FP8 (hy_v3) only: don't run the
+                                # input_scale purge / per-tensor dequant for
+                                # _scale_inv blockwise models (GLM/DeepSeek),
+                                # restoring their pre-hy3 offload behavior.
+                                _split_fp8_pertensor_state_dict(
+                                    state_dict, self._blockwise_fp8_scales
+                                )
+
                         self._offload_state_dict(state_dict, empty_state_dict)
 
                         del state_dict
@@ -1275,6 +1400,17 @@ class OffloadEngine(object):
 
                     if _has_fp8_blockwise(self.config):
                         self._rebuild_blockwise_fp8_scales_from_ckpt()
+                        if not self._blockwise_fp8_scales:
+                            warnings.warn(
+                                "FP8-blockwise routed experts were offloaded "
+                                "but no dequant scales could be recovered from "
+                                "the moe-store or the original checkpoint "
+                                "(both may be missing). Routed experts will "
+                                "dequantize incorrectly; rebuild the store with "
+                                "the original checkpoint present.",
+                                RuntimeWarning,
+                                stacklevel=2,
+                            )
 
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
@@ -1367,7 +1503,11 @@ class OffloadEngine(object):
 
                 # for deepseek and glm, we need to set the expert_tensor_map for the model
                 first_k_dense_replace = 0
-                if "deepseek" in model_name or "glm" in model_name.lower():
+                if (
+                    "deepseek" in model_name
+                    or "glm" in model_name.lower()
+                    or getattr(self.config, "model_type", "") == "hy_v3"
+                ):
                     first_k_dense_replace = moe_text_config(
                         self.config
                     ).first_k_dense_replace
@@ -1492,6 +1632,7 @@ class OffloadEngine(object):
                     "qwen3_5_moe",
                     "glm5_next",
                     "minimax_m3_vl",
+                    "hy_v3",
                 ):
                     self._load_resident_shared_experts(model)
                     for _name in list(self.name_id_map.keys()):
@@ -1506,7 +1647,7 @@ class OffloadEngine(object):
                 # and are excluded via name_id_map membership).
                 if (
                     getattr(self.config, "model_type", "")
-                    in ("glm5_next", "minimax_m3_vl", "qwen3_5_moe")
+                    in ("glm5_next", "minimax_m3_vl", "qwen3_5_moe", "hy_v3")
                     and torch.cuda.is_available()
                 ):
                     _resident_device = torch.device("cuda", 0)
@@ -1657,6 +1798,14 @@ class OffloadEngine(object):
         if getattr(self.config, "model_type", "") == "minimax_m3_vl":
             _, expert_id = parse_expert_id(name, self.config)
             return expert_id is None
+        # hy_v3 (Hy3-FP8): same whole-namespace policy as glm5_next. Only the
+        # routed experts are offloaded; attention, dense layer-0 MLP, shared
+        # experts (module name "shared_experts" after the WeightRenaming from
+        # on-disk "shared_mlp"), router gate, expert bias, and lm_head stay
+        # resident (parse_expert_id returns None for every non-routed key).
+        if getattr(self.config, "model_type", "") == "hy_v3":
+            _, expert_id = parse_expert_id(name, self.config)
+            return expert_id is None
         return False
 
     def _resident_ckpt_key_renamer(self):
@@ -1773,12 +1922,18 @@ class OffloadEngine(object):
             if weight.dtype == torch.float8_e4m3fn:
                 if scale is None:
                     raise RuntimeError(
-                        f"FP8 shared-expert weight {name!r} is missing its "
-                        "_scale_inv; cannot dequantize resident shared experts."
+                        f"FP8 resident weight {name!r} is missing its scale "
+                        "(_scale_inv block tensor or per-tensor weight_scale); "
+                        "cannot dequantize."
                     )
-                weight = dequant_fp8_blockwise(
-                    weight, scale, dtype=param.dtype, block_size=128
-                )
+                if scale.numel() == 1:
+                    weight = _dequant_fp8_pertensor(
+                        weight, scale, dtype=param.dtype
+                    )
+                else:
+                    weight = dequant_fp8_blockwise(
+                        weight, scale, dtype=param.dtype, block_size=128
+                    )
             return weight.to(dtype=param.dtype, device="cpu").contiguous()
 
         for ckpt in self.ckpt_files:
@@ -1792,7 +1947,9 @@ class OffloadEngine(object):
                         if name not in keys:
                             continue
                         param = wanted[name]
-                        scale_key = keys.get(name + "_scale_inv")
+                        scale_key = keys.get(name + "_scale_inv") or keys.get(
+                            name + "_scale"
+                        )
                         scale = (
                             f.get_tensor(scale_key)
                             if scale_key is not None
@@ -1829,7 +1986,12 @@ class OffloadEngine(object):
                         continue
                     param = wanted[name]
                     param.data = _resolve(
-                        param, name, state[name], state.get(name + "_scale_inv")
+                        param,
+                        name,
+                        state[name],
+                        state.get(
+                            name + "_scale_inv", state.get(name + "_scale")
+                        ),
                     )
                     param.requires_grad_(False)
                     param._moe_infinity_resident = True
@@ -2018,6 +2180,21 @@ class OffloadEngine(object):
                     base = k[: -len("_scale_inv")]
                     if base in keys:
                         self._blockwise_fp8_scales[base] = f.get_tensor(k)
+                for k in keys:
+                    if not k.endswith(".weight_scale"):
+                        continue
+                    base = k[: -len("_scale")]
+                    if base not in keys:
+                        continue
+                    # Safe superset, same policy as the _scale_inv loop
+                    # above: the dispatcher only applies scales to routed
+                    # weights actually stored as FP8.
+                    shape = f.get_slice(base).get_shape()
+                    self._blockwise_fp8_scales[base] = (
+                        _expand_pertensor_scale_to_blocks(
+                            shape, f.get_tensor(k)
+                        )
+                    )
 
     def get_topology(self, model):
         name_lst = []
@@ -2229,7 +2406,11 @@ class OffloadEngine(object):
                 )
 
         expert_layer_id = 0
-        if "deepseek" in self.model_name or "glm" in self.model_name.lower():
+        if (
+            "deepseek" in self.model_name
+            or "glm" in self.model_name.lower()
+            or getattr(self.config, "model_type", "") == "hy_v3"
+        ):
             expert_layer_id = moe_text_config(self.config).first_k_dense_replace
 
         output_device_index = None
@@ -2314,7 +2495,9 @@ class OffloadEngine(object):
                     continue
 
                 if is_blockwise_fp8_ckpt and (
-                    k.endswith("_scale_inv") or v.dtype == torch.float8_e4m3fn
+                    k.endswith("_scale_inv")
+                    or k.endswith("_scale")
+                    or v.dtype == torch.float8_e4m3fn
                 ):
                     state_dict[k] = v.to("cpu")
                     continue
@@ -2368,13 +2551,33 @@ class OffloadEngine(object):
             quantization_config["use_exllama"] = False
             quantization_config["disable_exllama"] = True
 
+            converted = self._convert_model_for_gptq(model, quantization_config)
+            if converted is not None:
+                return converted
+
             try:
-                gptq_module = importlib.import_module("optimum.gptq")
+                gptq_module = importlib.import_module("optimum.gptq.quantizer")
                 GPTQQuantizer = getattr(gptq_module, "GPTQQuantizer")
+                # Use the same version-aware checks as the quantizer's
+                # conditional backend imports. Newer optimum releases no
+                # longer support auto-gptq and can import without gptqmodel,
+                # then fail with an undefined QuantizeConfig in from_dict.
+                if not any(
+                    getattr(gptq_module, check, lambda: False)()
+                    for check in (
+                        "is_gptqmodel_available",
+                        "is_auto_gptq_available",
+                    )
+                ):
+                    raise ImportError(
+                        "No GPTQ backend supported by this optimum is available."
+                    )
             except ImportError as e:
                 raise ImportError(
-                    "GPTQ model detected but 'optimum' is not installed. "
-                    "Install with: pip install optimum[gptq]"
+                    "GPTQ conversion requires 'optimum' and a compatible "
+                    "GPTQ backend. Install with: pip install optimum gptqmodel. "
+                    "Match gptqmodel and torch versions to your optimum "
+                    "release; older optimum may also support auto-gptq."
                 ) from e
 
             optimum_quantizer = GPTQQuantizer.from_dict(quantization_config)
@@ -2384,6 +2587,72 @@ class OffloadEngine(object):
             self.quant_method = "awq"
             return self._convert_model_for_awq(model)
 
+        return model
+
+    def _convert_model_for_gptq(self, model, quantization_config):
+        """Convert standard int32 GPTQ Linear weights listed in the store.
+
+        Checkpoint keys select layers exactly, including dynamic exclusions
+        (routers, shared experts, vision, MTP). Unsupported formats retain the
+        guarded optimum path, without partially converting the model.
+        """
+        bits = quantization_config.get("bits", 4)
+        sym = bool(quantization_config.get("sym", False))
+        checkpoint_format = quantization_config.get(
+            "checkpoint_format", quantization_config.get("format", "gptq")
+        )
+        if (
+            bits not in (2, 4, 8)
+            or checkpoint_format not in ("gptq", "gptq_v2")
+            or quantization_config.get("pack_dtype", "int32")
+            not in ("int32", "torch.int32", torch.int32)
+            or any((quantization_config.get("dynamic") or {}).values())
+        ):
+            return None
+
+        names = getattr(self, "name_id_map", {})
+        packed = [
+            name[: -len(".qweight")]
+            for name in names
+            if name.endswith(".qweight")
+        ]
+        if not packed:
+            return None
+
+        replacements = []
+        for name in packed:
+            # Checkpoints may omit the base-model prefix, as in the legacy
+            # parameter mapping below model creation.
+            target = name
+            try:
+                layer = model.get_submodule(target)
+            except AttributeError:
+                target = f"{model.base_model_prefix}.{name}"
+                layer = model.get_submodule(target)
+            if not isinstance(layer, torch.nn.Linear):
+                return None
+            required = ("qweight", "qzeros", "scales", "g_idx")
+            missing = [key for key in required if f"{name}.{key}" not in names]
+            if missing:
+                raise ValueError(
+                    f"Incomplete GPTQ layer {name}: missing {missing}"
+                )
+            replacements.append((name, target, layer))
+
+        for name, target, layer in replacements:
+            parent_name, _, attr = target.rpartition(".")
+            parent = model.get_submodule(parent_name)
+            bias = f"{name}.bias" in names
+            setattr(
+                parent,
+                attr,
+                _GPTQLinear(layer, bits, checkpoint_format, bias, sym),
+            )
+            if target != name:
+                for key in ("qweight", "qzeros", "scales", "g_idx", "bias"):
+                    old_key = f"{name}.{key}"
+                    if old_key in names:
+                        names[f"{target}.{key}"] = names.pop(old_key)
         return model
 
     def _convert_model_for_awq(self, model):
