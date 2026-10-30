@@ -15,9 +15,9 @@ import os
 import pytest
 
 pytest.importorskip("transformers")
-from transformers.utils.chat_template_utils import (  # noqa: E402
-    render_jinja_template,
-)
+render_jinja_template = pytest.importorskip(
+    "transformers.utils.chat_template_utils"
+).render_jinja_template
 
 FIXTURE = os.path.join(
     os.path.dirname(__file__),

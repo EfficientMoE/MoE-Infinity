@@ -1799,6 +1799,12 @@ class OffloadEngine(object):
         fusion_buffers = {}
 
         def _collect_fusions(name, getter, available):
+            # Fusion source keys live in the renamed key space, but the
+            # safetensors branch passes raw (un-renamed) on-disk keys as both
+            # ``available`` and the ``getter`` argument. This resolves only
+            # because the supported fusion sources (glm5_next
+            # q/k/v_conv1d.weight) are rename-invariant; a renamed source would
+            # miss here and would first need mapping through rename().
             src_keys, dim = fusion_plan[name]
             buf = fusion_buffers.setdefault(name, {})
             for sk in src_keys:
@@ -1837,6 +1843,7 @@ class OffloadEngine(object):
                         param.requires_grad_(False)
                         param._moe_infinity_resident = True
                         remaining.remove(name)
+                        fusion_buffers.pop(name, None)
                     for name in list(remaining):
                         if name not in fusion_plan:
                             continue
@@ -1855,6 +1862,7 @@ class OffloadEngine(object):
                     param.requires_grad_(False)
                     param._moe_infinity_resident = True
                     remaining.remove(name)
+                    fusion_buffers.pop(name, None)
                 for name in list(remaining):
                     if name not in fusion_plan:
                         continue
