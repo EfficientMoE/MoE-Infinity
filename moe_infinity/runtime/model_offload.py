@@ -1551,15 +1551,15 @@ class OffloadEngine(object):
                         if self._is_shared_expert_param(_name):
                             del self.name_id_map[_name]
 
-                # glm5_next and minimax_m3_vl keep the whole non-expert
-                # backbone resident (attention, embeddings, shared expert,
-                # vision tower / multimodal projector), so no archer forward
-                # hook ever moves those modules; place them on the GPU once
-                # here (offload-managed tensors stay behind as placeholders and
-                # are excluded via name_id_map membership).
+                # glm5_next, minimax_m3_vl and qwen3_5_moe keep the whole
+                # non-expert backbone resident (attention, embeddings, shared
+                # expert, vision tower / multimodal projector), so no archer
+                # forward hook ever moves those modules; place them on the GPU
+                # once here (offload-managed tensors stay behind as placeholders
+                # and are excluded via name_id_map membership).
                 if (
                     getattr(self.config, "model_type", "")
-                    in ("glm5_next", "minimax_m3_vl")
+                    in ("glm5_next", "minimax_m3_vl", "qwen3_5_moe")
                     and torch.cuda.is_available()
                 ):
                     _resident_device = torch.device("cuda", 0)
