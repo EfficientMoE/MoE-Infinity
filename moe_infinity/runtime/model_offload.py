@@ -1302,9 +1302,17 @@ class OffloadEngine(object):
                                     )
                                 del state_dict[scale_key]
 
-                            _split_fp8_pertensor_state_dict(
-                                state_dict, self._blockwise_fp8_scales
-                            )
+                            if (
+                                getattr(self.config, "model_type", "")
+                                == "hy_v3"
+                            ):
+                                # Per-tensor FP8 (hy_v3) only: don't run the
+                                # input_scale purge / per-tensor dequant for
+                                # _scale_inv blockwise models (GLM/DeepSeek),
+                                # restoring their pre-hy3 offload behavior.
+                                _split_fp8_pertensor_state_dict(
+                                    state_dict, self._blockwise_fp8_scales
+                                )
 
                         self._offload_state_dict(state_dict, empty_state_dict)
 
@@ -1339,6 +1347,17 @@ class OffloadEngine(object):
 
                     if _has_fp8_blockwise(self.config):
                         self._rebuild_blockwise_fp8_scales_from_ckpt()
+                        if not self._blockwise_fp8_scales:
+                            warnings.warn(
+                                "FP8-blockwise routed experts were offloaded "
+                                "but no dequant scales could be recovered from "
+                                "the moe-store or the original checkpoint "
+                                "(both may be missing). Routed experts will "
+                                "dequantize incorrectly; rebuild the store with "
+                                "the original checkpoint present.",
+                                RuntimeWarning,
+                                stacklevel=2,
+                            )
 
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False

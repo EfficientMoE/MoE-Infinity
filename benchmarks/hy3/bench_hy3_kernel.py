@@ -83,8 +83,11 @@ def time_op(
 
 def uniform_grid(shape: tuple[int, int], scalar: float) -> torch.Tensor:
     """Expand a per-tensor scalar into the uniform 128x128 scale grid."""
-    rows = shape[0] // BLOCK
-    cols = shape[1] // BLOCK
+    # Ceil division to match the production
+    # _expand_pertensor_scale_to_blocks grid (identical for the 128-multiple
+    # shapes benched here, but keeps the two in lockstep).
+    rows = -(-shape[0] // BLOCK)
+    cols = -(-shape[1] // BLOCK)
     return torch.full((rows, cols), scalar, dtype=torch.float32, device="cuda")
 
 

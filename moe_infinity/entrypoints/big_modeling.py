@@ -312,7 +312,9 @@ class MoE:
                 or arch == "qwen3_5"
                 or arch == "minimaxm3"
                 # hy_v3 declares FA2 support upstream, but force eager for
-                # first bring-up, matching the GLM-5.2 validated path.
+                # first bring-up, matching the GLM-5.2 validated path. This
+                # branch is unvalidated (FA was unavailable during bring-up)
+                # and is coupled to moe-store registering the arch as "hyv3".
                 or arch == "hyv3"
             ):
                 is_flash_attn_available = False
