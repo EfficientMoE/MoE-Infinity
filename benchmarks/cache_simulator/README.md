@@ -94,6 +94,19 @@ python -m benchmarks.cache_simulator.convert_sglang_traces \
 See [`collect_traces_sglang.md`](./collect_traces_sglang.md) for the full
 SGLang capture + conversion runbook.
 
+## Runbooks (agent prompts)
+
+Reusable prompts for driving this work with coding agents:
+
+- [`collect_traces_sglang.md`](./collect_traces_sglang.md) — capture expert
+  routing traces from SGLang 0.5.20 (Qwen3-235B-A22B-Instruct-2507-FP8).
+- [`auto_research_policies.md`](./auto_research_policies.md) — orchestration hub
+  for researching cache/prefetch policies into baselines and accelerating the
+  simulator. It dispatches three sub-agent prompts in
+  [`prompts/`](./prompts/): `01_research_baselines.md` (literature → survey),
+  `02_implement_baselines.md` (implement + benchmark vs Belady), and
+  `03_accelerate_simulator.md` (parallel / GPU acceleration).
+
 ## Trace formats
 
 **`.pt` recorder trace** (`belady_cache_simulator.py`) — a dict with a
