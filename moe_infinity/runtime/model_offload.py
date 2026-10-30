@@ -594,6 +594,66 @@ def _identify_fp8_blockwise_pairs(keys):
     return pairs
 
 
+def _identify_fp8_pertensor_pairs(keys):
+    # Hy3-FP8 style: scalar scales named "<weight key>_scale" (i.e.
+    # "...weight" + "_scale"), distinct from the GLM "..._scale_inv" block
+    # tensors handled by _identify_fp8_blockwise_pairs above.
+    key_set = set(keys)
+    pairs = []
+    for k in keys:
+        if k.endswith(".weight_scale"):
+            base = k[: -len("_scale")]
+            if base in key_set:
+                pairs.append((base, k))
+    return pairs
+
+
+def _expand_pertensor_scale_to_blocks(
+    weight_shape, scale: torch.Tensor, block_size: int = 128
+) -> torch.Tensor:
+    # Expand a per-tensor scalar scale to the uniform [ceil(N/b), ceil(K/b)]
+    # float32 grid the native glm_fp8_block128 dequant-on-copy path consumes.
+    # A uniform grid makes blockwise dequant numerically identical to
+    # per-tensor dequant, so no new native format is needed.
+    n, k = int(weight_shape[0]), int(weight_shape[1])
+    rows = (n + block_size - 1) // block_size
+    cols = (k + block_size - 1) // block_size
+    return torch.full((rows, cols), float(scale), dtype=torch.float32)
+
+
+def _dequant_fp8_pertensor(
+    weight: torch.Tensor, scale: torch.Tensor, *, dtype: torch.dtype
+) -> torch.Tensor:
+    return (weight.to(torch.float32) * float(scale)).to(dtype)
+
+
+def _split_fp8_pertensor_state_dict(state_dict, scales_out) -> None:
+    # Per-tensor sibling of the blockwise split at the _has_fp8_blockwise
+    # call site: routed experts stay FP8 with their scalar scale expanded
+    # into scales_out; everything else dequantizes to BF16 in place. All
+    # consumed scale keys and the activation input_scale keys (unused by
+    # BF16 execution) are removed from the state dict.
+    for base_key, scale_key in _identify_fp8_pertensor_pairs(
+        list(state_dict.keys())
+    ):
+        w = state_dict.get(base_key)
+        s = state_dict.get(scale_key)
+        if w is None or s is None:
+            continue
+        if w.dtype != torch.float8_e4m3fn:
+            del state_dict[scale_key]
+            continue
+        if _is_routed_expert_key(base_key):
+            scales_out[base_key] = _expand_pertensor_scale_to_blocks(w.shape, s)
+        else:
+            state_dict[base_key] = _dequant_fp8_pertensor(
+                w, s, dtype=torch.bfloat16
+            )
+        del state_dict[scale_key]
+    for k in [k for k in state_dict if k.endswith(".input_scale")]:
+        del state_dict[k]
+
+
 _ROUTED_EXPERT_RE = re.compile(r"\.mlp\.experts\.\d+\.")
 
 
@@ -1295,6 +1355,18 @@ class OffloadEngine(object):
                                     )
                                 del state_dict[scale_key]
 
+                            if (
+                                getattr(self.config, "model_type", "")
+                                == "hy_v3"
+                            ):
+                                # Per-tensor FP8 (hy_v3) only: don't run the
+                                # input_scale purge / per-tensor dequant for
+                                # _scale_inv blockwise models (GLM/DeepSeek),
+                                # restoring their pre-hy3 offload behavior.
+                                _split_fp8_pertensor_state_dict(
+                                    state_dict, self._blockwise_fp8_scales
+                                )
+
                         self._offload_state_dict(state_dict, empty_state_dict)
 
                         del state_dict
@@ -1328,6 +1400,17 @@ class OffloadEngine(object):
 
                     if _has_fp8_blockwise(self.config):
                         self._rebuild_blockwise_fp8_scales_from_ckpt()
+                        if not self._blockwise_fp8_scales:
+                            warnings.warn(
+                                "FP8-blockwise routed experts were offloaded "
+                                "but no dequant scales could be recovered from "
+                                "the moe-store or the original checkpoint "
+                                "(both may be missing). Routed experts will "
+                                "dequantize incorrectly; rebuild the store with "
+                                "the original checkpoint present.",
+                                RuntimeWarning,
+                                stacklevel=2,
+                            )
 
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
@@ -1420,7 +1503,11 @@ class OffloadEngine(object):
 
                 # for deepseek and glm, we need to set the expert_tensor_map for the model
                 first_k_dense_replace = 0
-                if "deepseek" in model_name or "glm" in model_name.lower():
+                if (
+                    "deepseek" in model_name
+                    or "glm" in model_name.lower()
+                    or getattr(self.config, "model_type", "") == "hy_v3"
+                ):
                     first_k_dense_replace = moe_text_config(
                         self.config
                     ).first_k_dense_replace
@@ -1545,6 +1632,7 @@ class OffloadEngine(object):
                     "qwen3_5_moe",
                     "glm5_next",
                     "minimax_m3_vl",
+                    "hy_v3",
                 ):
                     self._load_resident_shared_experts(model)
                     for _name in list(self.name_id_map.keys()):
@@ -1559,7 +1647,7 @@ class OffloadEngine(object):
                 # and are excluded via name_id_map membership).
                 if (
                     getattr(self.config, "model_type", "")
-                    in ("glm5_next", "minimax_m3_vl", "qwen3_5_moe")
+                    in ("glm5_next", "minimax_m3_vl", "qwen3_5_moe", "hy_v3")
                     and torch.cuda.is_available()
                 ):
                     _resident_device = torch.device("cuda", 0)
@@ -1710,6 +1798,14 @@ class OffloadEngine(object):
         if getattr(self.config, "model_type", "") == "minimax_m3_vl":
             _, expert_id = parse_expert_id(name, self.config)
             return expert_id is None
+        # hy_v3 (Hy3-FP8): same whole-namespace policy as glm5_next. Only the
+        # routed experts are offloaded; attention, dense layer-0 MLP, shared
+        # experts (module name "shared_experts" after the WeightRenaming from
+        # on-disk "shared_mlp"), router gate, expert bias, and lm_head stay
+        # resident (parse_expert_id returns None for every non-routed key).
+        if getattr(self.config, "model_type", "") == "hy_v3":
+            _, expert_id = parse_expert_id(name, self.config)
+            return expert_id is None
         return False
 
     def _resident_ckpt_key_renamer(self):
@@ -1826,12 +1922,18 @@ class OffloadEngine(object):
             if weight.dtype == torch.float8_e4m3fn:
                 if scale is None:
                     raise RuntimeError(
-                        f"FP8 shared-expert weight {name!r} is missing its "
-                        "_scale_inv; cannot dequantize resident shared experts."
+                        f"FP8 resident weight {name!r} is missing its scale "
+                        "(_scale_inv block tensor or per-tensor weight_scale); "
+                        "cannot dequantize."
                     )
-                weight = dequant_fp8_blockwise(
-                    weight, scale, dtype=param.dtype, block_size=128
-                )
+                if scale.numel() == 1:
+                    weight = _dequant_fp8_pertensor(
+                        weight, scale, dtype=param.dtype
+                    )
+                else:
+                    weight = dequant_fp8_blockwise(
+                        weight, scale, dtype=param.dtype, block_size=128
+                    )
             return weight.to(dtype=param.dtype, device="cpu").contiguous()
 
         for ckpt in self.ckpt_files:
@@ -1845,7 +1947,9 @@ class OffloadEngine(object):
                         if name not in keys:
                             continue
                         param = wanted[name]
-                        scale_key = keys.get(name + "_scale_inv")
+                        scale_key = keys.get(name + "_scale_inv") or keys.get(
+                            name + "_scale"
+                        )
                         scale = (
                             f.get_tensor(scale_key)
                             if scale_key is not None
@@ -1882,7 +1986,12 @@ class OffloadEngine(object):
                         continue
                     param = wanted[name]
                     param.data = _resolve(
-                        param, name, state[name], state.get(name + "_scale_inv")
+                        param,
+                        name,
+                        state[name],
+                        state.get(
+                            name + "_scale_inv", state.get(name + "_scale")
+                        ),
                     )
                     param.requires_grad_(False)
                     param._moe_infinity_resident = True
@@ -2071,6 +2180,21 @@ class OffloadEngine(object):
                     base = k[: -len("_scale_inv")]
                     if base in keys:
                         self._blockwise_fp8_scales[base] = f.get_tensor(k)
+                for k in keys:
+                    if not k.endswith(".weight_scale"):
+                        continue
+                    base = k[: -len("_scale")]
+                    if base not in keys:
+                        continue
+                    # Safe superset, same policy as the _scale_inv loop
+                    # above: the dispatcher only applies scales to routed
+                    # weights actually stored as FP8.
+                    shape = f.get_slice(base).get_shape()
+                    self._blockwise_fp8_scales[base] = (
+                        _expand_pertensor_scale_to_blocks(
+                            shape, f.get_tensor(k)
+                        )
+                    )
 
     def get_topology(self, model):
         name_lst = []
@@ -2282,7 +2406,11 @@ class OffloadEngine(object):
                 )
 
         expert_layer_id = 0
-        if "deepseek" in self.model_name or "glm" in self.model_name.lower():
+        if (
+            "deepseek" in self.model_name
+            or "glm" in self.model_name.lower()
+            or getattr(self.config, "model_type", "") == "hy_v3"
+        ):
             expert_layer_id = moe_text_config(self.config).first_k_dense_replace
 
         output_device_index = None
@@ -2367,7 +2495,9 @@ class OffloadEngine(object):
                     continue
 
                 if is_blockwise_fp8_ckpt and (
-                    k.endswith("_scale_inv") or v.dtype == torch.float8_e4m3fn
+                    k.endswith("_scale_inv")
+                    or k.endswith("_scale")
+                    or v.dtype == torch.float8_e4m3fn
                 ):
                     state_dict[k] = v.to("cpu")
                     continue

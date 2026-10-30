@@ -98,6 +98,14 @@ PROTECTED_MODEL_PATHS = {
     "glm_moe_dsa": "protected:glm_fp8",
     "deepseek_v3": "protected:existing_fp8",
     "deepseek_v4": "protected:deepseek_v4_fp4",
+    # Hy3-FP8 routed experts are FP8 E4M3 with *per-tensor* scalar
+    # weight_scale/input_scale (activation_scheme static, no
+    # weight_block_size). The loader expands each scalar to a uniform
+    # 128x128 block grid, after which the store format is exactly
+    # glm_fp8_block128 — but the generic protected:fp8 reason must never
+    # catch this model_type: its loader path looks for *_scale_inv block
+    # tensors that do not exist here and would silently skip dequant.
+    "hy_v3": "protected:hy3_fp8_pertensor",
 }
 
 # Quality rank is lower-is-better: BF16 is the highest-quality reference.
@@ -190,6 +198,10 @@ _PROTECTED_FORMAT_BY_REASON = {
         ExecutionKind.GPT_OSS_MXFP4,
     ),
     "protected:fp8": (
+        ExpertFormat.GLM_FP8_BLOCK128,
+        ExecutionKind.FP8_DEQUANT_BF16_GEMM,
+    ),
+    "protected:hy3_fp8_pertensor": (
         ExpertFormat.GLM_FP8_BLOCK128,
         ExecutionKind.FP8_DEQUANT_BF16_GEMM,
     ),

@@ -26,6 +26,7 @@ All notable changes to MoE-Infinity will be documented in this file.
 - No-download unified-execution benchmark/validator and compatibility assertions that fail closed on sampling, ordering, cache invariant, or ownership failures.
 - Documented GLM-5.3 (`zai-org/GLM-5.3`) as running through the existing GlmMoeDsa path (same base as GLM-5.2), with a config-resolution regression test (`tests/python/unit/test_glm53_registry.py`).
 - GLM-5.3-Flash (`zai-org/GLM-5.3-Flash`) glm5_next family support: guarded registry entry, nested text_config parsing, `SyncGlm5NextMoEBlock`, and offload runtime wiring (routed FP8 experts offloaded; KDA/DSA/mHC/vision resident, text-only).
+- Hy3-FP8 (`hy_v3`) support: per-tensor static FP8 expert offloading via scalar→block-grid scale expansion over the GLM FP8-in-store path; whole non-expert namespace resident; MTP layer excluded (#283).
 
 ### Changed
 

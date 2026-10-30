@@ -240,9 +240,12 @@ class MoE:
         # MiniMax-M3 uses block-sparse (Lightning Indexer) attention that the
         # native paged backend does not support yet, so it runs through HF's
         # eager path too (initial support; optimized kernels are a follow-up).
+        # hy_v3 (Hy3-FP8) starts on the HF eager path like GLM-5.2; a
+        # PagedAttention shim is a follow-up.
         if getattr(model_config, "model_type", "") in (
             "glm_moe_dsa",
             "minimax_m3_vl",
+            "hy_v3",
         ):
             self.use_native_engine = False
         if getattr(model_config, "model_type", "") == "minimax_m3_vl":
@@ -308,6 +311,11 @@ class MoE:
                 or arch == "qwen3"
                 or arch == "qwen3_5"
                 or arch == "minimaxm3"
+                # hy_v3 declares FA2 support upstream, but force eager for
+                # first bring-up, matching the GLM-5.2 validated path. This
+                # branch is unvalidated (FA was unavailable during bring-up)
+                # and is coupled to moe-store registering the arch as "hyv3".
+                or arch == "hyv3"
             ):
                 is_flash_attn_available = False
         except ImportError:
