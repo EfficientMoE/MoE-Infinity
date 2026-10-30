@@ -278,6 +278,9 @@ class AccessSequence:
             for layer_idx in range(layer_num):
                 token_trace_i = prefilling_trace[layer_idx]
                 unique_vectors = np.unique(token_trace_i)
+                # -1 marks an unused top-k slot; it is not a real expert and
+                # must not occupy cache capacity (matches belady_simulate).
+                unique_vectors = unique_vectors[unique_vectors >= 0]
                 prefillAccessSequence.extend(
                     [
                         ExpertIndex(expert_idx, layer_idx)
@@ -310,6 +313,7 @@ class AccessSequence:
                             for expert_idx in decoding_trace[iteration_idx][
                                 layer_idx
                             ][0]
+                            if expert_idx >= 0
                         ]
                     elif len(decoding_trace[iteration_idx].shape) == 2:
                         current_iteration_trace = [
@@ -317,6 +321,7 @@ class AccessSequence:
                             for expert_idx in decoding_trace[iteration_idx][
                                 layer_idx
                             ]
+                            if expert_idx >= 0
                         ]
                     decodeAccessSequence.extend(current_iteration_trace)
 

@@ -146,6 +146,22 @@ def test_access_sequence_prefill_dedup_and_decode_order():
     ]
 
 
+def test_access_sequence_filters_negative_padding():
+    # -1 marks an unused top-k slot; it must not leak in as a (layer, -1)
+    # cache key, which would occupy capacity and skew hit/miss accounting.
+    prefilling = {0: np.array([[0, -1, 1], [-1, -1, 2]])}  # [L=2, T=3]
+    decoding = {0: [np.array([[1, -1], [-1, -1]])]}  # one iter, [L=2, K=2]
+    request = AccessSequence(prefilling, decoding).requests[0]
+    assert request.prefillAccessSequence == [
+        ExpertIndex(0, 0),
+        ExpertIndex(1, 0),
+        ExpertIndex(2, 1),
+    ]
+    assert request.decodeAccessSequence == [ExpertIndex(1, 0)]
+    assert all(e.expert_idx >= 0 for e in request.prefillAccessSequence)
+    assert all(e.expert_idx >= 0 for e in request.decodeAccessSequence)
+
+
 def test_access_sequence_2d_and_3d_decode_are_equivalent():
     prefilling, decoding_2d = _simple_traces()
     decoding_3d = {0: [np.array([[[1, 3]], [[0, 0]]])]}  # [L=2, 1, K=2]
