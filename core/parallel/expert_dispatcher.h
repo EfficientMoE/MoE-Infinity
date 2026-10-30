@@ -486,6 +486,12 @@ class ExpertDispatcher : public base::noncopyable {
 
   bool fp8_in_store_ = false;
   std::vector<std::vector<std::vector<torch::Tensor>>> fp8_scales_;
+  // FP32 copies of fp8_scales_ cached on every CUDA device at SetScales time
+  // (~70-90 MB per GPU for a 290 GB FP8 model) so exec workers never pay a
+  // blocking pageable H2D upload per expert execution. Indexed
+  // [gpu_id][layer][expert][weight].
+  std::vector<std::vector<std::vector<std::vector<torch::Tensor>>>>
+      fp8_scales_gpu_;
   std::map<ResidencyVariantKey, ResidencyVariant> registered_variants_;
   std::map<ResidencyVariantKey, ExpertExecutionDescriptor>
       execution_descriptors_;

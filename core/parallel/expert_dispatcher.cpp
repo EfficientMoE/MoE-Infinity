@@ -286,6 +286,11 @@ void ExpertDispatcher::SetScales(
   fp8_scales_.assign(max_layer + 1,
                      std::vector<std::vector<torch::Tensor>>(
                          max_expert + 1, std::vector<torch::Tensor>(3)));
+  fp8_scales_gpu_.assign(
+      std::max(kNumDevices(), 1),
+      std::vector<std::vector<std::vector<torch::Tensor>>>(
+          max_layer + 1, std::vector<std::vector<torch::Tensor>>(
+                             max_expert + 1, std::vector<torch::Tensor>(3))));
 
   for (auto& kv : scales) {
     std::smatch m;
@@ -300,7 +305,16 @@ void ExpertDispatcher::SetScales(
       }
     }
     if (layer_idx >= 0 && expert_idx >= 0 && weight_idx >= 0) {
-      fp8_scales_[layer_idx][expert_idx][weight_idx] = kv.second.cpu();
+      auto cpu_scale = kv.second.to(torch::kFloat32).cpu();
+      fp8_scales_[layer_idx][expert_idx][weight_idx] = cpu_scale;
+      // Cache the fp32 scale on every device once, at load time, so
+      // DequantFp8Params' .to() calls are no-ops on the exec path. Blocking
+      // copies are fine here; this runs once before inference starts.
+      for (int d = 0; d < kNumDevices(); ++d) {
+        c10::cuda::CUDAGuard device_guard(d);
+        fp8_scales_gpu_[d][layer_idx][expert_idx][weight_idx] =
+            cpu_scale.to(torch::Device(torch::kCUDA, d));
+      }
     }
   }
 
@@ -1506,10 +1520,16 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       if (fp8_in_store_) {
         int64_t layer_idx = args.expert_node->layer_idx;
         int64_t expert_idx_val = args.expert_node->expert_idx;
-        if (layer_idx < (int64_t)fp8_scales_.size() &&
-            expert_idx_val < (int64_t)fp8_scales_[layer_idx].size()) {
+        // Use the per-device GPU-resident fp32 scales cached at SetScales
+        // time; uploading CPU scales here would be a synchronizing pageable
+        // H2D copy per weight per execution (#285).
+        const auto& device_scales = (gpu_id < (int)fp8_scales_gpu_.size())
+                                        ? fp8_scales_gpu_[gpu_id]
+                                        : fp8_scales_;
+        if (layer_idx < (int64_t)device_scales.size() &&
+            expert_idx_val < (int64_t)device_scales[layer_idx].size()) {
           modules_[thread_idx]->SetFp8Scales(
-              fp8_scales_[layer_idx][expert_idx_val]);
+              device_scales[layer_idx][expert_idx_val]);
           modules_[thread_idx]->DequantFp8Params(stream);
         }
       }
