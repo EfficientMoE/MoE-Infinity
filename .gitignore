@@ -245,6 +245,9 @@ AGENTS.md
 /results/
 benchmarks/expert_io_microbench/results/
 benchmarks/eval/__pycache__/
+# Large rendered figures from the cache-policy benchmark (sources + small
+# tables are committed; regenerate with research/run_policies.py).
+benchmarks/cache_simulator/research/figures/
 *.nsys-rep
 *.sqlite
 
