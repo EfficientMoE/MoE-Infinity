@@ -16,9 +16,65 @@ Ported from the Archer / MoE-Infinity prefetch study (`Archer-rel/simulation`).
 | `belady_cache_simulator.py` | Belady optimal hit-rate simulator over `.pt` recorder traces (CLI). Pure-Python core (`extract_access_sequence`, `belady_simulate`) reusable as a library. |
 | `cache_strategy.py` | Belady optimal expert cache over pickled prefill/decode activation traces (CLI). Provides `ExpertIndex`, `ExpertCache` (reference scan) and `HeapExpertCache` (heap, for large traces). |
 | `fetch_engines.py` | Prefetch/replacement policy library: `StreamFetch` (FIFO), `StreamFetchLRU` (LRU), `LFUFetch` (LFU), `LFUKFetch` (windowed LFU). |
+| `policies.py` | `CachePolicy` ABC + baseline shortlist over a flat access sequence: LRU, LFU, LFU-K, model-tracing (BrainStorm), score-based, LHU (HOBBIT), plus trace-oracle prefetch variants (single-layer-ahead, stride, multi-layer, activation-matrix). One shared `simulate()` harness. |
+| `research/run_policies.py` | Benchmark harness: sweeps capacity, runs every policy over synthetic MoE traces, emits a policy x capacity hit-rate table + MRC plots with Belady as "Ideal". |
 
 The cache key throughout is `(layer_idx, expert_id)` and one cache entry holds
 one expert's weights.
+
+## Cache-policy baselines (`policies.py`)
+
+`policies.py` adds a small `CachePolicy` ABC that replays a flat
+`(layer, expert)` access sequence (the output of
+`extract_access_sequence`) through a demand-paging cache and reports
+`(hits, misses, hit_rate)` via a single shared `simulate()` harness. Each
+policy's **demand** hit rate is directly comparable to `belady_simulate` on the
+same trace and is bounded above by it on every trace.
+
+| Policy | Class | Eviction / prefetch rule | Source lineage |
+| --- | --- | --- | --- |
+| LRU | `LRUPolicy` | evict least-recently-used | DeepSpeed-Inference / Mixtral base |
+| LFU | `LFUPolicy` | evict least-frequent (LRU tie-break) | classic |
+| LFU-K | `LFUKPolicy` | LFU over a sliding window of the last `k` accesses | windowed LFU |
+| Model-tracing | `ModelTracingPolicy` | evict globally least-popular (offline profile counts) | BrainStorm (OSDI'23) |
+| Score-based | `ScorePolicy` | evict smallest time-decayed accumulated activation score | ExpertFlow / Specter |
+| LHU | `LHUPolicy` | evict coldest "hot unit" (aged frequency + recency) | HOBBIT (arXiv:2411.01433) |
+| 1-layer-ahead* | `SingleLayerAheadPolicy` | prefetch the next layer's experts | Mixtral-Offloading / Pre-gated MoE |
+| Stride* | `StridePrefetchPolicy` | prefetch the access `stride` steps ahead | ProMoE (arXiv:2410.22134) |
+| Multi-layer* | `MultiLayerAheadPolicy` | prefetch the union over the next `horizon` layers | HOBBIT |
+| Activation-matrix* | `ActivationMatrixPolicy` | prefetch top co-activated next-layer experts | MoE-Infinity EAM |
+
+`*` = **trace-oracle** prefetch policy: the predictor is realised as a *perfect*
+next-layer routing lookahead read from the trace, so the reported numbers are an
+**upper bound** on any real gate/hidden-state predictor. Prefetch hides a
+compulsory miss's fetch stall but does not remove the access, so a speculatively
+prefetched expert counts as a (covered) miss on first demand. The demand hit
+rate therefore stays bounded by Belady; the prefetch value shows up in
+`policy.effective_hit_rate` (demand hits + prefetch-covered misses), reported
+separately as the predictor's upper bound.
+
+```python
+from benchmarks.cache_simulator.policies import build_policy, simulate
+
+accesses = [(3, 0), (3, 1), (4, 2), (3, 0)]
+policy = build_policy("model_tracing", capacity=2)
+hits, misses, hit_rate = simulate(policy, accesses)
+```
+
+### Benchmark harness
+
+```bash
+python -m benchmarks.cache_simulator.research.run_policies \
+    --out benchmarks/cache_simulator/research
+```
+
+This sweeps cache capacity and runs every policy over three **synthetic** MoE
+routing workloads (there are no real Qwen3-235B captures on this machine). It
+writes a policy x capacity hit-rate table (`results_synthetic.md` /
+`results_synthetic.csv`), appends rows to `research/EXPERIMENTS.md`, and renders
+one hit-rate-vs-capacity (MRC-style) plot per model with Belady drawn as
+"Ideal". Figures are git-ignored; the tables and `run_policies.py` are the
+committed artifacts. Regenerate figures with the command above.
 
 ## Install
 
