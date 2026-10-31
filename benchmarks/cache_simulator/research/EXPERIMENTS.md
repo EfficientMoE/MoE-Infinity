@@ -294,3 +294,97 @@ Parity (checked by `bench_speed` inline and by
 `lru_mrc` matches an independent LRU reference. SHARDS abs-error bound reported
 as `max(0.05, 4/sqrt(sample_size))`; not recommended for this small-key-universe
 domain (see `research/report.md`).
+
+## Real-trace runs — SGLang 0.5.20 capture (#289)
+
+Rows appended by
+`benchmarks/cache_simulator/research/run_policies_real.py` over **real**
+SGLang `per_token` expert-routing captures (provenance = `real`, in contrast to
+the `synthetic` rows above). Capture + conversion method and the full
+policy x capacity table live in
+`research/results_real_qwen3_235b.md` and `research/capture_report.md`.
+
+Hardware H2: `6x NVIDIA RTX PRO 6000 Blackwell (sm_120, 96 GB)`; capture on the
+2 free GPUs (Max-Q Workstation Edition, 300 W). SGLang `0.5.20`,
+torch `2.13.0+cu130`, flashinfer `0.6.18`. Simulator run in the repo venv
+(`python 3.12.3, numpy 2.4.4, torch 2.11.0+cu130`). `belady` is the
+Belady-optimal ceiling; every on-line policy satisfies
+`hit_rate(policy) <= hit_rate(belady)` on these real traces too (asserted at
+runtime, and cross-checked against the vectorized `opt_mrc` MRC engine).
+
+Model actually captured: `Qwen/Qwen1.5-MoE-A2.7B-Chat` (smoke-test MoE —
+24 MoE layers, 60 experts, top-4; `ignore_layers=0`). The 235B target
+(`Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`, `--tp 4`) was **blocked**: only 2 of
+6 GPUs were free on this shared box (GPUs 0-3 held by another user), below the
+>=4 GPUs required for TP4. See `capture_report.md`.
+
+| policy | model | dataset | capacity | hit_rate | eff_hit_rate | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| belady | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.3012 | 0.3012 | real | 34717d3 |
+| lru | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.0382 | 0.0382 | real | 34717d3 |
+| lfu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.0710 | 0.0710 | real | 34717d3 |
+| lfu_k | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.0382 | 0.0382 | real | 34717d3 |
+| model_tracing | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.0793 | 0.0793 | real | 34717d3 |
+| score | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.0382 | 0.0382 | real | 34717d3 |
+| lhu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.0731 | 0.0731 | real | 34717d3 |
+| single_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.0382 | 0.9455 | real | 34717d3 |
+| stride_prefetch | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.0382 | 0.9999 | real | 34717d3 |
+| multi_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.0310 | 0.9277 | real | 34717d3 |
+| activation_matrix | qwen1.5-moe-a2.7b | mixed20-greedy64 | 64 | 0.0375 | 0.6259 | real | 34717d3 |
+| belady | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.4239 | 0.4239 | real | 34717d3 |
+| lru | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.1699 | 0.1699 | real | 34717d3 |
+| lfu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.1340 | 0.1340 | real | 34717d3 |
+| lfu_k | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.1699 | 0.1699 | real | 34717d3 |
+| model_tracing | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.1478 | 0.1478 | real | 34717d3 |
+| score | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.1699 | 0.1699 | real | 34717d3 |
+| lhu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.1367 | 0.1367 | real | 34717d3 |
+| single_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.1694 | 0.9996 | real | 34717d3 |
+| stride_prefetch | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.1698 | 0.9998 | real | 34717d3 |
+| multi_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.1693 | 0.9765 | real | 34717d3 |
+| activation_matrix | qwen1.5-moe-a2.7b | mixed20-greedy64 | 128 | 0.0384 | 0.6653 | real | 34717d3 |
+| belady | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.5776 | 0.5776 | real | 34717d3 |
+| lru | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.2625 | 0.2625 | real | 34717d3 |
+| lfu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.2481 | 0.2481 | real | 34717d3 |
+| lfu_k | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.2625 | 0.2625 | real | 34717d3 |
+| model_tracing | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.2693 | 0.2693 | real | 34717d3 |
+| score | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.2625 | 0.2625 | real | 34717d3 |
+| lhu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.2509 | 0.2509 | real | 34717d3 |
+| single_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.2587 | 0.9974 | real | 34717d3 |
+| stride_prefetch | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.2579 | 0.9949 | real | 34717d3 |
+| multi_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.2559 | 0.9978 | real | 34717d3 |
+| activation_matrix | qwen1.5-moe-a2.7b | mixed20-greedy64 | 256 | 0.0626 | 0.6704 | real | 34717d3 |
+| belady | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.7573 | 0.7573 | real | 34717d3 |
+| lru | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.4722 | 0.4722 | real | 34717d3 |
+| lfu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.4520 | 0.4520 | real | 34717d3 |
+| lfu_k | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.4722 | 0.4722 | real | 34717d3 |
+| model_tracing | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.4813 | 0.4813 | real | 34717d3 |
+| score | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.4722 | 0.4722 | real | 34717d3 |
+| lhu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.4566 | 0.4566 | real | 34717d3 |
+| single_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.4687 | 0.9978 | real | 34717d3 |
+| stride_prefetch | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.4694 | 0.9969 | real | 34717d3 |
+| multi_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.4662 | 0.9979 | real | 34717d3 |
+| activation_matrix | qwen1.5-moe-a2.7b | mixed20-greedy64 | 512 | 0.2457 | 0.7643 | real | 34717d3 |
+| belady | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.8639 | 0.8639 | real | 34717d3 |
+| lru | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.6525 | 0.6525 | real | 34717d3 |
+| lfu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.6324 | 0.6324 | real | 34717d3 |
+| lfu_k | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.6525 | 0.6525 | real | 34717d3 |
+| model_tracing | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.6605 | 0.6605 | real | 34717d3 |
+| score | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.6525 | 0.6525 | real | 34717d3 |
+| lhu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.6325 | 0.6325 | real | 34717d3 |
+| single_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.6498 | 0.9982 | real | 34717d3 |
+| stride_prefetch | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.6508 | 0.9982 | real | 34717d3 |
+| multi_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.6481 | 0.9984 | real | 34717d3 |
+| activation_matrix | qwen1.5-moe-a2.7b | mixed20-greedy64 | 768 | 0.4023 | 0.8245 | real | 34717d3 |
+| belady | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.9300 | 0.9300 | real | 34717d3 |
+| lru | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.8089 | 0.8089 | real | 34717d3 |
+| lfu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.7899 | 0.7899 | real | 34717d3 |
+| lfu_k | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.8089 | 0.8089 | real | 34717d3 |
+| model_tracing | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.8122 | 0.8122 | real | 34717d3 |
+| score | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.8089 | 0.8089 | real | 34717d3 |
+| lhu | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.7899 | 0.7899 | real | 34717d3 |
+| single_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.8077 | 0.9991 | real | 34717d3 |
+| stride_prefetch | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.8082 | 0.9991 | real | 34717d3 |
+| multi_layer_ahead | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.8068 | 0.9992 | real | 34717d3 |
+| activation_matrix | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.6264 | 0.8916 | real | 34717d3 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model qwen1.5-moe-a2.7b --dataset mixed20-greedy64 --ignore-layers 0 | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: 34717d3 -->
