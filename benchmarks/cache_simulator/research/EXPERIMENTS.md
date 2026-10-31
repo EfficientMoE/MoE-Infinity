@@ -263,3 +263,34 @@ Rows appended by `benchmarks/cache_simulator/research/run_policies.py`. All trac
 | activation_matrix | uniform-stress-synthetic | synthetic | 384 | 0.5021 | 0.8057 | synthetic | b0aff90 |
 
 <!-- run: python -m benchmarks.cache_simulator.research.run_policies | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: b0aff90 -->
+
+## Acceleration — Task C (#292)
+
+Hardware H1: `python=3.12.3, x86_64, 128 cores, numpy=2.4.4,
+torch=2.11.0+cu130, 2x NVIDIA RTX PRO 6000 Blackwell Server Edition`.
+
+Base commit: `b0aff90`. Trace: synthetic Zipf (`skew=1.1`), `94 layers x 128
+experts`, `topk=8`, `seed=0`. Metric: wall-clock seconds for the full
+miss-ratio-curve sweep, and speedup vs the pure-Python reference.
+
+| method | trace (accesses) | capacities | metric | value | hardware | source |
+| --- | --- | --- | --- | --- | --- | --- |
+| reference `belady_simulate` (per-cap) | 2,000,000 | 12 | wall_s | 20.02 | H1 | `bench_speed --accesses 2000000 --seed 0 --capacities 64..4096` |
+| vectorized `opt_mrc` | 2,000,000 | 12 | wall_s / speedup | 17.35 / 1.2x | H1 | same |
+| parallel `opt_mrc` | 2,000,000 | 12 | wall_s / speedup | 3.66 / 5.5x | H1 | same |
+| exact `lru_mrc` (one pass) | 2,000,000 | 12 | wall_s / speedup | 8.78 / 2.3x | H1 | same |
+| `lru_mrc_gpu` (GPU histogram) | 2,000,000 | 12 | wall_s / speedup | 8.89 / 2.3x | H1 | same |
+| SHARDS `lru` (1% sample, approx) | 2,000,000 | 12 | wall_s / speedup | 0.07 / 305x | H1 | same |
+| vectorized `opt_mrc` | 10,000,000 | 7 | wall_s | 52.08 | H1 | `bench_speed --accesses 10000000 --seed 0 --skip-reference --capacities 64..4096` |
+| parallel `opt_mrc` | 10,000,000 | 7 | wall_s | 11.75 | H1 | same |
+| exact `lru_mrc` (one pass) | 10,000,000 | 7 | wall_s | 49.35 | H1 | same |
+| `lru_mrc_gpu` (GPU histogram) | 10,000,000 | 7 | wall_s | 49.78 | H1 | same |
+| SHARDS `lru` (1% sample, approx) | 10,000,000 | 7 | wall_s | 0.37 | H1 | same |
+| vectorized access-seq construction | 3,640,000 | n/a | wall_s / speedup | 0.060 / 5.6x | H1 | `vectorized_access_sequence` vs `extract_access_sequence` |
+
+Parity (checked by `bench_speed` inline and by
+`tests/python/unit/test_cache_simulator_mrc.py`): `reference`, vectorized
+`opt_mrc`, and parallel `opt_mrc` give identical hit rates for every capacity;
+`lru_mrc` matches an independent LRU reference. SHARDS abs-error bound reported
+as `max(0.05, 4/sqrt(sample_size))`; not recommended for this small-key-universe
+domain (see `research/report.md`).
