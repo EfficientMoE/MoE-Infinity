@@ -388,3 +388,100 @@ Model actually captured: `Qwen/Qwen1.5-MoE-A2.7B-Chat` (smoke-test MoE —
 | activation_matrix | qwen1.5-moe-a2.7b | mixed20-greedy64 | 1024 | 0.6264 | 0.8916 | real | 34717d3 |
 
 <!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model qwen1.5-moe-a2.7b --dataset mixed20-greedy64 --ignore-layers 0 | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: 34717d3 -->
+
+### Qwen3-30B-A3B — 235B-family proxy (#289 follow-up)
+
+Real capture of `Qwen/Qwen3-30B-A3B` — the closest available proxy for the
+235B target: same `Qwen3MoeForCausalLM` routing family, **128 experts, top-8,
+48 MoE layers** (`ignore_layers=0`), identity physical->logical map
+(`ep_num_redundant_experts=0`), expert ids in `[0, 127]`. This matches the
+235B's 128-expert/top-8 routing geometry exactly (only the layer count and
+weight precision differ). Captured on GPUs 4,5 (Max-Q Blackwell, sm_120) with
+`--tp 2`, SGLang `0.5.20`, greedy, `max_new_tokens=64`, 150 MMLU
+(`cais/mmlu[all][test]`, first 150 in fixed order) prompts, batch size 1 per
+dump. TP0 and TP1 each dump the (replicated) routing; the 300 raw dumps are
+de-duplicated to 150 by routing content before the merge. `belady` is the
+ceiling; invariant checked at runtime and against `opt_mrc`. Full table in
+`results_real_qwen3_30b.md`.
+
+| policy | model | dataset | capacity | hit_rate | eff_hit_rate | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| belady | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.7028 | 0.7028 | real | 963aab0 |
+| lru | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.4565 | 0.4565 | real | 963aab0 |
+| lfu | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.2021 | 0.2021 | real | 963aab0 |
+| lfu_k | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.4565 | 0.4565 | real | 963aab0 |
+| model_tracing | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.2083 | 0.2083 | real | 963aab0 |
+| score | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.4565 | 0.4565 | real | 963aab0 |
+| lhu | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.4485 | 0.4485 | real | 963aab0 |
+| single_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.4565 | 0.9974 | real | 963aab0 |
+| stride_prefetch | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.4565 | 1.0000 | real | 963aab0 |
+| multi_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.4559 | 0.9472 | real | 963aab0 |
+| activation_matrix | qwen3-30b-a3b | mmlu150-greedy64 | 256 | 0.4565 | 0.8067 | real | 963aab0 |
+| belady | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.7898 | 0.7898 | real | 963aab0 |
+| lru | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.6617 | 0.6617 | real | 963aab0 |
+| lfu | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.3266 | 0.3266 | real | 963aab0 |
+| lfu_k | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.6617 | 0.6617 | real | 963aab0 |
+| model_tracing | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.3387 | 0.3387 | real | 963aab0 |
+| score | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.6617 | 0.6617 | real | 963aab0 |
+| lhu | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.6505 | 0.6505 | real | 963aab0 |
+| single_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.6614 | 0.9998 | real | 963aab0 |
+| stride_prefetch | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.6616 | 0.9999 | real | 963aab0 |
+| multi_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.6613 | 0.9999 | real | 963aab0 |
+| activation_matrix | qwen3-30b-a3b | mmlu150-greedy64 | 512 | 0.4567 | 0.8068 | real | 963aab0 |
+| belady | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.8705 | 0.8705 | real | 963aab0 |
+| lru | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.7631 | 0.7631 | real | 963aab0 |
+| lfu | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.5069 | 0.5069 | real | 963aab0 |
+| lfu_k | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.7631 | 0.7631 | real | 963aab0 |
+| model_tracing | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.5181 | 0.5181 | real | 963aab0 |
+| score | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.7631 | 0.7631 | real | 963aab0 |
+| lhu | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.7535 | 0.7535 | real | 963aab0 |
+| single_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.7622 | 0.9994 | real | 963aab0 |
+| stride_prefetch | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.7629 | 0.9997 | real | 963aab0 |
+| multi_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.7615 | 0.9994 | real | 963aab0 |
+| activation_matrix | qwen3-30b-a3b | mmlu150-greedy64 | 1024 | 0.7052 | 0.8724 | real | 963aab0 |
+| belady | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.9462 | 0.9462 | real | 963aab0 |
+| lru | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.8696 | 0.8696 | real | 963aab0 |
+| lfu | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.7650 | 0.7650 | real | 963aab0 |
+| lfu_k | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.8696 | 0.8696 | real | 963aab0 |
+| model_tracing | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.7750 | 0.7750 | real | 963aab0 |
+| score | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.8696 | 0.8696 | real | 963aab0 |
+| lhu | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.8663 | 0.8663 | real | 963aab0 |
+| single_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.8684 | 0.9993 | real | 963aab0 |
+| stride_prefetch | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.8695 | 0.9999 | real | 963aab0 |
+| multi_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.8677 | 0.9993 | real | 963aab0 |
+| activation_matrix | qwen3-30b-a3b | mmlu150-greedy64 | 2048 | 0.8422 | 0.9222 | real | 963aab0 |
+| belady | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9810 | 0.9810 | real | 963aab0 |
+| lru | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9378 | 0.9378 | real | 963aab0 |
+| lfu | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9188 | 0.9188 | real | 963aab0 |
+| lfu_k | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9378 | 0.9378 | real | 963aab0 |
+| model_tracing | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9253 | 0.9253 | real | 963aab0 |
+| score | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9378 | 0.9378 | real | 963aab0 |
+| lhu | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9412 | 0.9412 | real | 963aab0 |
+| single_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9363 | 0.9991 | real | 963aab0 |
+| stride_prefetch | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9378 | 1.0000 | real | 963aab0 |
+| multi_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9353 | 0.9991 | real | 963aab0 |
+| activation_matrix | qwen3-30b-a3b | mmlu150-greedy64 | 3072 | 0.9277 | 0.9571 | real | 963aab0 |
+| belady | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9961 | 0.9961 | real | 963aab0 |
+| lru | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9891 | 0.9891 | real | 963aab0 |
+| lfu | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9824 | 0.9824 | real | 963aab0 |
+| lfu_k | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9891 | 0.9891 | real | 963aab0 |
+| model_tracing | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9846 | 0.9846 | real | 963aab0 |
+| score | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9891 | 0.9891 | real | 963aab0 |
+| lhu | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9897 | 0.9897 | real | 963aab0 |
+| single_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9888 | 0.9999 | real | 963aab0 |
+| stride_prefetch | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9891 | 1.0000 | real | 963aab0 |
+| multi_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9886 | 0.9998 | real | 963aab0 |
+| activation_matrix | qwen3-30b-a3b | mmlu150-greedy64 | 4096 | 0.9866 | 0.9886 | real | 963aab0 |
+| belady | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 0.9992 | real | 963aab0 |
+| lru | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 0.9992 | real | 963aab0 |
+| lfu | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 0.9992 | real | 963aab0 |
+| lfu_k | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 0.9992 | real | 963aab0 |
+| model_tracing | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 0.9992 | real | 963aab0 |
+| score | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 0.9992 | real | 963aab0 |
+| lhu | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 0.9992 | real | 963aab0 |
+| single_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 1.0000 | real | 963aab0 |
+| stride_prefetch | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 1.0000 | real | 963aab0 |
+| multi_layer_ahead | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 1.0000 | real | 963aab0 |
+| activation_matrix | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 0.9994 | real | 963aab0 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model qwen3-30b-a3b --dataset mmlu150-greedy64 --ignore-layers 0 | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: 963aab0 -->

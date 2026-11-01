@@ -140,3 +140,117 @@ See the "Reproduce" block in `results_real_qwen3_235b.md`. Capture used
 per_token`, `--disable-cuda-graph`, `--chunked-prefill-size 8192`,
 `--mem-fraction-static 0.85`, greedy (`temperature=0`, `max_new_tokens=64`),
 12 prompts, batch size 1 per dump.
+
+---
+
+# Addendum — 2026-10-31 run: Qwen3-30B-A3B (235B-family proxy)
+
+Follow-up capture after PR #293 merged. Goal: real traces on the **actual
+235B routing family** while the 235B itself stays GPU-blocked.
+
+## Why Qwen3-30B-A3B
+
+`Qwen/Qwen3-30B-A3B` is the closest available proxy for
+`Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`:
+
+| field | Qwen3-30B-A3B (captured) | Qwen3-235B target |
+| --- | --- | --- |
+| architecture | `Qwen3MoeForCausalLM` | `Qwen3MoeForCausalLM` |
+| routed experts | **128** | **128** |
+| experts per token | **top-8** | **top-8** |
+| MoE layers | 48 (all MoE) | ~94 (all MoE) |
+| `ignore_layers` | 0 | 0 |
+| weights | BF16 (~60 GB) | FP8 block-wise (~235 GB) |
+
+The routing geometry (128 experts, top-8, all-MoE) is **identical** to the
+235B; only layer count and weight precision differ. Since FP8 quantizes expert
+*weights* not the gate, the 235B's `topk_ids` would come from the same
+Qwen3-MoE routing — so this is a faithful proxy for the cache-key behaviour,
+with the only caveat that the 235B has ~2x the layers (larger absolute
+key-space 94x128=12032 vs 48x128=6144).
+
+## Hardware / config (verified)
+
+- GPUs **4 and 5** free (97 GB each, 0% util); GPUs 0-3 pinned by another user
+  (~44 GB used, 53 GB free each, 80-94% util) the whole run — Max-Q
+  Workstation Edition (300 W) on 4/5, Server Edition on 0-3; sm_120, driver
+  590.48.01.
+- Launched `--tp-size 2 --dp-size 1` on `CUDA_VISIBLE_DEVICES=4,5`, SGLang
+  0.5.20, `--expert-distribution-recorder-mode per_token --disable-cuda-graph
+  --chunked-prefill-size 8192 --mem-fraction-static 0.85`.
+- **TP2 came up cleanly on sm_120** (NCCL 2.29.7, both TP0/TP1 ranks), ~35
+  tok/s greedy decode. First multi-GPU SGLang run validated on these cards.
+
+## Dataset
+
+- **150 MMLU** questions (`cais/mmlu`, config `all`, split `test`), first 150
+  in fixed dataset order (deterministic — no shuffle), each rendered as a
+  4-choice MC prompt (see `drive_capture_mmlu.py`).
+- Greedy (`temperature=0`), `max_new_tokens=64`, batch size 1 per dump.
+- Merged decode access stream: **7,686,912** accesses, **5,796** distinct
+  `(layer, expert)` keys out of the 6144 key space (94.3% coverage).
+
+## TP2 dual-rank dump handling (new vs the TP1 smoke run)
+
+With `--tp 2`, **both** TP ranks call `dump_record()` on each
+`/dump_expert_distribution_record`, so each prompt produced **2** `.pt` files
+(300 files for 150 prompts). Because attention is non-DP (Config A), the MoE
+gate is replicated and the two ranks' dumps carry **identical routing** — I
+verified `torch.equal` on the topk of same-prompt file pairs. I de-duplicated
+by routing-content hash to exactly **150** files (each of 150 contents appeared
+in exactly 2 files) before merging, so no prompt is double-counted. Dedup
+filelist: `/mnt/raid0nvme0/leyang/moeinf-traces/qwen3_30b_dedup_filelist.json`.
+
+## Physical vs logical (verified)
+
+`last_physical_to_logical_map` is `[48, 128]` and **exactly identity**
+(`ep_num_redundant_experts=0`, `enable_eplb=False`), expert ids observed in
+`[0, 127]` with **no `-1` padding** (top-8 exactly fills the recorder's
+8-slot buffer, unlike the 60-expert smoke model). Converter remap is a verified
+no-op.
+
+## Validation (acceptance criteria)
+
+1. **Schema**: 65 records = 1 prefill `[48, 60, 8]` + 64 decode `[48, 1, 8]`,
+   int32, ids in `[0, 127]`. OK.
+2. **Belady sane + monotonic** (merged stream, `ignore_layers=0`):
+   cap 256/512/1024/2048/3072/4096/6144 -> 0.7028 / 0.7898 / 0.8705 / 0.9462 /
+   0.9810 / 0.9961 / 0.9992. In (0,1), non-decreasing. OK.
+3. **Belady-ceiling invariant**: enforced at runtime in `run_policies_real.py`.
+4. **MRC cross-check**: `opt_mrc` reproduces the Belady row bit-for-bit.
+5. **Coverage**: 5,796 / 6,144 keys (94.3%); 64 decode steps/request.
+
+## 235B status (this run): GPU-PENDING
+
+Re-checked `nvidia-smi` at the **start** of this run and **again after** the
+30B capture (the two mandated checks). Both times GPUs 0-3 had only ~53 GB free
+each at 80-94% util; only GPUs 4-5 were free. That is **2 usable GPUs**, below
+the >=4 (each >=90 GB free) needed for `Qwen3-235B-A22B-Instruct-2507-FP8`
+`--tp 4 --dp 1`. The 235B capture was therefore **not run** and remains
+**GPU-pending** — purely a shared-box availability issue, not a software or
+pipeline limitation. The exact 235B launch recipe is in
+`collect_traces_sglang.md`; the 30B proxy here already validates the full
+128-expert/top-8 Qwen3-MoE routing path end to end, including multi-GPU TP.
+
+## Exact commands (30B run)
+
+```bash
+export HF_HOME=/mnt/raid0nvme0/leyang/hf_cache
+export SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR=<raw_dir>
+export CUDA_VISIBLE_DEVICES=4,5
+python -m sglang.launch_server \
+    --model-path Qwen/Qwen3-30B-A3B --trust-remote-code \
+    --tp-size 2 --dp-size 1 \
+    --expert-distribution-recorder-mode per_token --disable-cuda-graph \
+    --chunked-prefill-size 8192 --mem-fraction-static 0.85 \
+    --host 127.0.0.1 --port 30000
+python drive_capture_mmlu.py --port 30000 --max-new-tokens 64 --num-prompts 150
+# de-dup 300 -> 150 by routing content, then:
+python -m benchmarks.cache_simulator.convert_sglang_traces \
+    --inputs "<dedup_dir>/*.pt" --to belady --out <belady_dir>/stream.pt --merge
+python -m benchmarks.cache_simulator.research.run_policies_real \
+    --files "<belady_dir>/stream.pt" --model qwen3-30b-a3b \
+    --dataset mmlu150-greedy64 --ignore-layers 0 \
+    --capacities 256 512 1024 2048 3072 4096 6144 \
+    --tag qwen3_30b --out benchmarks/cache_simulator/research
+```
