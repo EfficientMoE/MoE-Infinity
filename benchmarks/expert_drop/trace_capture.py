@@ -112,6 +112,7 @@ def main():
     GenerationEngine._sample = timed_sample
 
     itl_ms = []
+    itl_ms_per_prompt = []
     gen_tokens = []
     for prompt in PROMPTS[: args.num_prompts]:
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(
@@ -125,7 +126,9 @@ def main():
             do_sample=False,
         )
         ts = list(token_times)
-        itl_ms.extend((b - a) * 1e3 for a, b in zip(ts[1:], ts[2:]))
+        prompt_itl = [(b - a) * 1e3 for a, b in zip(ts[1:], ts[2:])]
+        itl_ms.extend(prompt_itl)
+        itl_ms_per_prompt.append(prompt_itl)
         gen_tokens.append(
             [int(t) for t in out[0][-args.max_new_tokens :].tolist()]
         )
@@ -157,6 +160,11 @@ def main():
         "adaptive_miss0": args.adaptive_miss0,
         "fused_drop_stats": fused_drop_stats,
         "gen_tokens": gen_tokens,
+        # Raw per-prompt decode intervals, in capture order. Needed by
+        # classify_tail_tokens.py to align each decode forward in the trace
+        # with its measured ITL (itl[i] covers decode forward i+1).
+        "itl_ms_per_prompt": itl_ms_per_prompt,
+        "min_k": 1,
     }
     with open(args.latency_out, "w") as fh:
         json.dump(latency, fh, indent=2)

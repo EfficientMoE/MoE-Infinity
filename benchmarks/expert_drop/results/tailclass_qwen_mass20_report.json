@@ -1,0 +1,104 @@
+{
+  "trace":
+      "/mnt/raid0nvme0/leyang/moe-bench-results/tailclass/qwen_mass20.trace",
+  "latency":
+      "/mnt/raid0nvme0/leyang/moe-bench-results/tailclass/tailclass_qwen_mass20.json",
+  "policy": "on_miss",
+  "counterfactual": false,
+  "min_k": 1,
+  "mass_budget": 0.2,
+  "flatness_floor": 0.5,
+  "num_tokens": 3024,
+  "skipped_residency_unknown_records": 0,
+  "itl_percentiles_ms": {
+    "p50": 88.27042765915394,
+    "p90": 111.02052144706255,
+    "p99": 217.10641767829657
+  },
+  "bands": {
+    "p0_50": {
+      "tokens": 1512,
+      "itl_ms_mean": 83.53382338296682,
+      "itl_ms_max": 88.27028796076775,
+      "per_token_mean": {
+        "dropped": 100.77116402116403,
+        "mustkeep_mass": 184.91931216931218,
+        "kept_mink": 0.0,
+        "kept_flat": 17.13425925925926,
+        "kept_guard": 0.0
+      },
+      "fetched_per_token_mean": 202.05357142857142,
+      "fetched_share_mustkeep": 0.9151994239046825,
+      "fetched_share_droppable_kept": 0.08480057609531759,
+      "mass_rank_mustkeep_mean": 3.4319773388936974,
+      "mass_rank_droppable_kept_mean": 4.643262438723125,
+      "fetch_depth_max_mean": 6.943783068783069,
+      "fetch_depth_mean_mean": 4.217447807474082,
+      "layers_with_fetch_mean": 47.895502645502646,
+      "fetch_mb_per_token_mean": 1906.8167314285715
+    },
+    "p50_90": {
+      "tokens": 1209,
+      "itl_ms_mean": 94.67690106022201,
+      "itl_ms_max": 110.87763495743275,
+      "per_token_mean": {
+        "dropped": 98.46815550041356,
+        "mustkeep_mass": 195.94210090984285,
+        "kept_mink": 0.0,
+        "kept_flat": 21.066170388751033,
+        "kept_guard": 0.0
+      },
+      "fetched_per_token_mean": 217.00827129859388,
+      "fetched_share_mustkeep": 0.9029245739681281,
+      "fetched_share_droppable_kept": 0.09707542603187187,
+      "mass_rank_mustkeep_mean": 3.4191537143194846,
+      "mass_rank_droppable_kept_mean": 4.604224743806196,
+      "fetch_depth_max_mean": 7.1141439205955335,
+      "fetch_depth_mean_mean": 4.524729247597485,
+      "layers_with_fetch_mean": 47.95450785773367,
+      "fetch_mb_per_token_mean": 2047.9469857667493
+    },
+    "p90_99": {
+      "tokens": 272,
+      "itl_ms_mean": 137.5178706845926,
+      "itl_ms_max": 216.56427904963493,
+      "per_token_mean": {
+        "dropped": 99.15441176470588,
+        "mustkeep_mass": 187.47058823529412,
+        "kept_mink": 0.0,
+        "kept_flat": 19.235294117647058,
+        "kept_guard": 0.0
+      },
+      "fetched_per_token_mean": 206.7058823529412,
+      "fetched_share_mustkeep": 0.9069436539556062,
+      "fetched_share_droppable_kept": 0.09305634604439385,
+      "mass_rank_mustkeep_mean": 3.4421477878882962,
+      "mass_rank_droppable_kept_mean": 4.64315749235474,
+      "fetch_depth_max_mean": 6.886029411764706,
+      "fetch_depth_mean_mean": 4.311589030559031,
+      "layers_with_fetch_mean": 47.93382352941177,
+      "fetch_mb_per_token_mean": 1950.7214456470588
+    },
+    "p99_100": {
+      "tokens": 31,
+      "itl_ms_mean": 296.023003576744,
+      "itl_ms_max": 426.87438428401947,
+      "per_token_mean": {
+        "dropped": 96.45161290322581,
+        "mustkeep_mass": 195.06451612903226,
+        "kept_mink": 0.0,
+        "kept_flat": 19.258064516129032,
+        "kept_guard": 0.0
+      },
+      "fetched_per_token_mean": 214.32258064516128,
+      "fetched_share_mustkeep": 0.910144491270319,
+      "fetched_share_droppable_kept": 0.08985550872968091,
+      "mass_rank_mustkeep_mean": 3.4498098230527536,
+      "mass_rank_droppable_kept_mean": 4.681742043551089,
+      "fetch_depth_max_mean": 7.096774193548387,
+      "fetch_depth_mean_mean": 4.470144131777626,
+      "layers_with_fetch_mean": 47.935483870967744,
+      "fetch_mb_per_token_mean": 2022.601628903226
+    }
+  }
+}
