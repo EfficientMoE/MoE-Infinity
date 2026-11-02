@@ -313,21 +313,23 @@ def _merge_splits_kernel(
     stride_o_h,
     D: tl.constexpr,
     D_PAD: tl.constexpr,
+    D_BLOCK: tl.constexpr,
     S_CHUNK: tl.constexpr,
 ):
-    """Online log-sum-exp merge of the splits of one (sequence, head).
+    """Online log-sum-exp merge of the splits of one (sequence, head, D_BLOCK
+    slice of head_dim).
 
     Empty splits carry lse = -1e30 and o = 0, so a sequence of length 0
     merges to zeros."""
     head = tl.program_id(0)
     seq = tl.program_id(1).to(tl.int64)
-    offs_d = tl.arange(0, D_PAD)
+    offs_d = tl.program_id(2) * D_BLOCK + tl.arange(0, D_BLOCK)
     offs_c = tl.arange(0, S_CHUNK)
     base = (seq * num_heads + head) * num_splits
 
     m_run = tl.full((), -1e30, dtype=tl.float32)
     w_sum = tl.zeros((), dtype=tl.float32)
-    acc = tl.zeros((D_PAD,), dtype=tl.float32)
+    acc = tl.zeros((D_BLOCK,), dtype=tl.float32)
     for start in range(0, num_splits, S_CHUNK):
         s = start + offs_c
         s_mask = s < num_splits
@@ -567,7 +569,9 @@ def split_kv_decode_attention(
         num_stages=1,
     )
     if not direct:
-        _merge_splits_kernel[(num_heads, batch)](
+        d_block = min(d_pad, 64)
+        s_chunk = min(triton.next_power_of_2(splits), 4096 // d_block)
+        _merge_splits_kernel[(num_heads, batch, d_pad // d_block)](
             part_o,
             part_lse,
             out,
@@ -577,7 +581,8 @@ def split_kv_decode_attention(
             out.stride(1),
             D=head_dim,
             D_PAD=d_pad,
-            S_CHUNK=min(16, triton.next_power_of_2(splits)),
+            D_BLOCK=d_block,
+            S_CHUNK=s_chunk,
             num_warps=_MERGE_WARPS,
         )
     return out
