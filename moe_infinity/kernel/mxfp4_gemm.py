@@ -15,16 +15,18 @@ autotuning on the request path; ``warmup_mxfp4_gemm`` pre-compiles every
 bucket):
 
     * ``_mxfp4_gemv_kernel`` (M == 1): register-only weight streaming. Each
-      thread owns 4-byte slices of 16-byte scale groups, decodes E2M1 with bit
-      operations straight into fp32 and applies the scale once per group.
+      thread owns 4-byte slices of 16-byte scale groups, decodes E2M1 with the
+      native ``cvt.rn.f16x2.e2m1x2`` into fp32 and FMAs against the bf16
+      activation pairs read in the same per-thread layout.
     * ``_mxfp4_mma_kernel`` (M > 1): tensor-core GEMM with BLOCK_K >= 64 (one
       scale per 32 broadcast in registers), bit-trick E2M1 -> BF16 decode and an
       N-fastest program order so every M band of activations is read from DRAM
       once while the (L2-resident) weights are swept.
 
-Both use split-K for small M. Partial sums go to an fp32 scratch buffer and
-the last CTA of each output tile (per-tile arrival counter) reduces them in a
-fixed order, so results are deterministic and no zero-fill launch is needed.
+Small M uses split-K when there are too few output tiles to fill the GPU.
+Partial sums go to an fp32 scratch buffer and the last CTA of each output tile
+(per-tile arrival counter) reduces them in a fixed order, so results are
+deterministic and no zero-fill launch is needed.
 """
 
 from typing import Dict, Optional, Tuple
@@ -33,39 +35,37 @@ import torch
 import triton
 import triton.language as tl
 
-# The GEMV path decodes E2M1 to fp32 as value * 2^-126 and folds 2^63 of the
-# missing 2^126 into the per-group scale; the other 2^63 is applied at the end.
-_TWO_POW_63 = tl.constexpr(9.223372036854775808e18)
-
 
 @triton.jit
-def _e2m1_to_f32_raw(w):
-    """4 packed bytes -> (lo, hi) nibbles as fp32 equal to value * 2^-126.
+def _e2m1_to_f32(w):
+    """4 packed bytes -> (lo, hi) nibbles as exact fp32 E2M1 values.
 
-    Each nibble's 3 magnitude bits land in fp32 bits 22-24 and its sign bit in
-    bit 31, i.e. 2^(e-127) * (1 + m/2) for e > 0 and the matching subnormal for
-    e == 0 -- exactly the E2M1 value scaled by 2^-126.
+    Uses the sm_100a/sm_120a ``cvt.rn.f16x2.e2m1x2`` conversion (one
+    instruction per byte) and widens the halves to fp32.
     """
     return tl.inline_asm_elementwise(
         asm="""
         {
-        .reg .b32 a, b;
-        shl.b32 a, $8, 22; shl.b32 b, $8, 28;
-        and.b32 a, a, 0x01C00000; and.b32 b, b, 0x80000000; or.b32 $0, a, b;
-        shl.b32 a, $8, 14; shl.b32 b, $8, 20;
-        and.b32 a, a, 0x01C00000; and.b32 b, b, 0x80000000; or.b32 $1, a, b;
-        shl.b32 a, $8, 6; shl.b32 b, $8, 12;
-        and.b32 a, a, 0x01C00000; and.b32 b, b, 0x80000000; or.b32 $2, a, b;
-        shr.b32 a, $8, 2; shl.b32 b, $8, 4;
-        and.b32 a, a, 0x01C00000; and.b32 b, b, 0x80000000; or.b32 $3, a, b;
-        shl.b32 a, $8, 18; shl.b32 b, $8, 24;
-        and.b32 a, a, 0x01C00000; and.b32 b, b, 0x80000000; or.b32 $4, a, b;
-        shl.b32 a, $8, 10; shl.b32 b, $8, 16;
-        and.b32 a, a, 0x01C00000; and.b32 b, b, 0x80000000; or.b32 $5, a, b;
-        shl.b32 a, $8, 2; shl.b32 b, $8, 8;
-        and.b32 a, a, 0x01C00000; and.b32 b, b, 0x80000000; or.b32 $6, a, b;
-        shr.b32 a, $8, 6; and.b32 b, $8, 0x80000000;
-        and.b32 a, a, 0x01C00000; or.b32 $7, a, b;
+        .reg .b8 b0, b1, b2, b3;
+        .reg .b16 l0, l1, l2, l3, h0, h1, h2, h3;
+        .reg .b32 p0, p1, p2, p3;
+        mov.b32 {b0, b1, b2, b3}, $8;
+        cvt.rn.f16x2.e2m1x2 p0, b0;
+        cvt.rn.f16x2.e2m1x2 p1, b1;
+        cvt.rn.f16x2.e2m1x2 p2, b2;
+        cvt.rn.f16x2.e2m1x2 p3, b3;
+        mov.b32 {l0, h0}, p0;
+        mov.b32 {l1, h1}, p1;
+        mov.b32 {l2, h2}, p2;
+        mov.b32 {l3, h3}, p3;
+        cvt.f32.f16 $0, l0;
+        cvt.f32.f16 $1, l1;
+        cvt.f32.f16 $2, l2;
+        cvt.f32.f16 $3, l3;
+        cvt.f32.f16 $4, h0;
+        cvt.f32.f16 $5, h1;
+        cvt.f32.f16 $6, h2;
+        cvt.f32.f16 $7, h3;
         }
         """,
         constraints="=r,=r,=r,=r,=r,=r,=r,=r,r",
@@ -201,12 +201,8 @@ def _mxfp4_gemv_kernel(
             other=0,
         )
         s = tl.load(s_ptr + rn * stride_sn + g, mask=gm, other=0)
-        # 2^(s-127) * 2^63; the remaining 2^63 is applied once at the end so
-        # the per-group factor stays finite for scale bytes up to 191.
-        scale = ((s.to(tl.int32) + 63).to(tl.int32) << 23).to(
-            tl.float32, bitcast=True
-        )
-        lo, hi = _e2m1_to_f32_raw(w)
+        scale = (s.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+        lo, hi = _e2m1_to_f32(w)
         xp = tl.load(
             x_ptr + (g * 16)[:, None] + j[None, :], mask=gm[:, None], other=0
         )
@@ -214,7 +210,6 @@ def _mxfp4_gemv_kernel(
         x_odd = (xp & -65536).to(tl.float32, bitcast=True)
         acc += (lo * x_even + hi * x_odd) * scale[:, None]
     acc_n = tl.sum(tl.sum(acc, axis=1).reshape(BLOCK_N, BLOCK_G), axis=1)
-    acc_n = acc_n * _TWO_POW_63
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_m = tl.arange(0, 1)
     _epilogue(

@@ -76,7 +76,7 @@ def test_fused_mxfp4_gemm_every_e2m1_code_and_scale():
     packed = ((codes[None, :] + 37 * rows) % 256).to(torch.uint8)
     assert packed.shape == (64, K // 2)
     scales = torch.arange(64, 64 + 64 * 16, dtype=torch.int32, device="cuda")
-    scales = (scales.reshape(64, 16) % 128 + 64).to(torch.uint8)
+    scales = (scales.reshape(64, 16) % 192 + 32).to(torch.uint8)
     for M in (1, 4, 300):
         x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
         _check(
