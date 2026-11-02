@@ -724,16 +724,39 @@ class MoE:
             if not engine_capability.safe:
                 return engine_capability
 
+        # The native engine always builds a transfer scheduler; it only
+        # moves data during a step once a coordinator registered a handler.
         transfer_scheduler = getattr(self, "_native_transfer_scheduler", None)
-        if transfer_scheduler is not None:
-            return DecodeGraphCapability(False, "transfer_scheduler")
+        handlers = getattr(transfer_scheduler, "_handlers", None)
+        if transfer_scheduler is not None and (handlers is None or handlers):
+            kinds = sorted(
+                getattr(kind, "name", str(kind)) for kind in handlers or ()
+            )
+            return DecodeGraphCapability(
+                False,
+                "transfer_scheduler",
+                detail=(
+                    "transfer handlers registered: " + ", ".join(kinds)
+                    if kinds
+                    else "transfer scheduler handlers are unknown"
+                ),
+            )
 
         if getattr(self, "_native_kv_offload_coordinator", None) is not None:
-            return DecodeGraphCapability(False, "kv_offload")
+            return DecodeGraphCapability(
+                False, "kv_offload", detail="KV offload coordinator is active"
+            )
 
         storage = getattr(self, "_native_paged_kv_storage", None)
         if storage is None:
-            return DecodeGraphCapability(False, "native_paged_required")
+            return DecodeGraphCapability(
+                False,
+                "native_paged_required",
+                detail=(
+                    "native engine has no PagedKVStorage "
+                    "(use_native_engine=False or storage allocation failed)"
+                ),
+            )
 
         return DecodeGraphCapability(
             True, "eligible", storage_owner_id=storage.owner_id
@@ -1375,6 +1398,18 @@ class MoE:
         enable_deepseek_mla_paging: bool = False,
         max_resident_paged_speculative_sessions: int = 1,
         min_free_mla_blocks_after_admission: int = 1,
+        enable_decode_cuda_graphs: bool = False,
+        decode_cuda_graph_batch_sizes: tuple[int, ...] = (1, 2, 4, 8, 16, 32),
+        decode_cuda_graph_context_sizes: tuple[int, ...] = (
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+        ),
+        decode_cuda_graph_warmup_iters: int = 2,
+        decode_cuda_graph_max_memory_bytes: int = 0,
     ) -> None:
         """
         Start the OpenAI-compatible continuous batching server.
@@ -1392,6 +1427,15 @@ class MoE:
             enable_deepseek_mla_paging: Enable default-off DeepSeek V2/V3 MLA paging.
             max_resident_paged_speculative_sessions: Resident paged-session cap.
             min_free_mla_blocks_after_admission: Free blocks retained after admission.
+            enable_decode_cuda_graphs: Replay decode steps from CUDA graphs
+                captured per (batch, context) bucket when the runtime is
+                graph-safe; otherwise every step runs eagerly and
+                ``/stats`` reports the blocking reason (default: False).
+            decode_cuda_graph_batch_sizes: Batch-size buckets to capture.
+            decode_cuda_graph_context_sizes: Context-length buckets to capture.
+            decode_cuda_graph_warmup_iters: Eager warm-up runs before capture.
+            decode_cuda_graph_max_memory_bytes: Cap on graph pool memory
+                (0 = unbounded).
             offload_dir: Path to offload directory (required)
             speculative_draft: Optional DFlash checkpoint, speculator, or draft
                 module for greedy batch-1 serving.
@@ -1469,6 +1513,15 @@ class MoE:
             ),
             min_free_mla_blocks_after_admission=(
                 min_free_mla_blocks_after_admission
+            ),
+            enable_decode_cuda_graphs=enable_decode_cuda_graphs,
+            decode_cuda_graph_batch_sizes=tuple(decode_cuda_graph_batch_sizes),
+            decode_cuda_graph_context_sizes=tuple(
+                decode_cuda_graph_context_sizes
+            ),
+            decode_cuda_graph_warmup_iters=decode_cuda_graph_warmup_iters,
+            decode_cuda_graph_max_memory_bytes=(
+                decode_cuda_graph_max_memory_bytes
             ),
         )
 

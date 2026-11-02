@@ -930,21 +930,46 @@ class OffloadEngine(object):
     def decode_graph_capability(self):
         from moe_infinity.runtime.attention_types import DecodeGraphCapability
 
-        if getattr(self, "forward_hooks", None) or getattr(
-            self, "backward_hooks", None
-        ):
-            return DecodeGraphCapability(False, "active_model_hooks")
+        forward_hooks = getattr(self, "forward_hooks", None) or []
+        backward_hooks = getattr(self, "backward_hooks", None) or []
+        if forward_hooks or backward_hooks:
+            return DecodeGraphCapability(
+                False,
+                "active_model_hooks",
+                detail=(
+                    f"OffloadEngine installed {len(forward_hooks)} forward / "
+                    f"{len(backward_hooks)} backward hooks (per-module "
+                    "parameter fetch and device moves run on the host)"
+                ),
+            )
         if getattr(self, "archer_engine", None) is not None:
-            return DecodeGraphCapability(False, "archer_callbacks")
+            return DecodeGraphCapability(
+                False,
+                "archer_callbacks",
+                detail="archer prefetch engine callbacks run per module",
+            )
         if getattr(self, "expert_dispatcher", None) is not None:
-            return DecodeGraphCapability(False, "expert_dispatcher")
+            return DecodeGraphCapability(
+                False,
+                "expert_dispatcher",
+                detail="expert dispatch routes tokens on the host",
+            )
         if getattr(self, "expert_prefetcher", None) is not None:
-            return DecodeGraphCapability(False, "transfer_scheduler")
-        if (
-            self._enable_kv_cache_offload
-            or getattr(self, "_kv_cache_manager", None) is not None
-        ):
-            return DecodeGraphCapability(False, "kv_offload")
+            return DecodeGraphCapability(
+                False,
+                "transfer_scheduler",
+                detail="ExpertPrefetcher issues expert transfers per step",
+            )
+        if self._enable_kv_cache_offload:
+            return DecodeGraphCapability(
+                False, "kv_offload", detail="enable_kv_cache_offload is set"
+            )
+        if getattr(self, "_kv_cache_manager", None) is not None:
+            return DecodeGraphCapability(
+                False,
+                "kv_offload",
+                detail="a KV cache manager is attached to the OffloadEngine",
+            )
         return DecodeGraphCapability(True, "eligible")
 
     def get_attention_backend(self):
