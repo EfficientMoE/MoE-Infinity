@@ -5,8 +5,9 @@ handles one (KV split, KV head, sequence) triple: it loads every query head of
 the GQA group at once, so each KV head is read from DRAM once per step for the
 whole group, and walks its slice of the context in tiles of whole pages with
 ``tl.dot`` + online softmax. A second, tiny kernel merges the splits through
-their log-sum-exp; with a single split the main kernel writes the output
-directly.
+their log-sum-exp (partials in the output dtype, launched as a programmatic
+dependent launch so its scheduling overlaps the main grid); with a single
+split the main kernel writes the output directly.
 
 The cache layout is described by strides, so the same kernel reads
 
@@ -33,6 +34,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra.cuda import gdc_launch_dependents, gdc_wait
 
 _LOG2E = 1.4426950408889634
 _MAX_SPLITS = 256
@@ -123,6 +125,8 @@ def _split_kv_decode_kernel(
     part_lse_ptr,
     qk_scale,
     num_splits,
+    tiles_per_split_hint,
+    bt_cols,
     num_heads,
     stride_q_b,
     stride_q_h,
@@ -155,19 +159,34 @@ def _split_kv_decode_kernel(
     VS_ST: tl.constexpr,
     IS_INT8: tl.constexpr,
     DIRECT: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+    STATIC_SPLIT: tl.constexpr,
 ):
+    # Let the merge kernel (programmatic dependent launch) get scheduled
+    # while this grid runs; it blocks in gdc_wait until this grid is done.
+    gdc_launch_dependents()
     split = tl.program_id(0)
     kv_head = tl.program_id(1)
     seq = tl.program_id(2).to(tl.int64)
     BLOCK_N: tl.constexpr = PAGES * PAGE
 
-    # Each sequence splits its own context evenly into num_splits ranges of
-    # whole tiles; programs past the end store an empty partial.
     seq_len = tl.load(lens_ptr + seq)
     num_tiles = tl.cdiv(seq_len, BLOCK_N)
-    tiles_per_split = tl.cdiv(num_tiles, num_splits)
-    tile_lo = split * tiles_per_split
-    tile_hi = tl.minimum(tile_lo + tiles_per_split, num_tiles)
+    if STATIC_SPLIT:
+        # Split length from the host-side max_seq_len: the tile range (and
+        # the first block-table read) does not wait for seq_lens. The last
+        # split also takes any tiles past the hint, so an underestimated
+        # max_seq_len costs time, never tokens.
+        tile_lo = split * tiles_per_split_hint
+        tile_hi = tl.minimum(tile_lo + tiles_per_split_hint, num_tiles)
+        tile_hi = tl.where(split == num_splits - 1, num_tiles, tile_hi)
+    else:
+        # Each sequence splits its own context evenly into num_splits
+        # ranges of whole tiles.
+        tiles_per_split = tl.cdiv(num_tiles, num_splits)
+        tile_lo = split * tiles_per_split
+        tile_hi = tl.minimum(tile_lo + tiles_per_split, num_tiles)
+    # Programs past the end of their sequence store an empty partial.
 
     offs_g = tl.arange(0, G_PAD)
     offs_d = tl.arange(0, D_PAD)
@@ -195,9 +214,21 @@ def _split_kv_decode_kernel(
     l_i = tl.zeros((G_PAD,), dtype=tl.float32)
     acc = tl.zeros((G_PAD, D_PAD), dtype=tl.float32)
 
-    for tile in range(tile_lo, tile_hi):
+    # Block-table entries are read one tile ahead, so the page ids of the
+    # next tile are never on the critical path.
+    if PAGES == 1:
+        page_next = tl.load(bt_row + tile_lo, mask=tile_lo < bt_cols, other=0)
+    else:
+        first_pages = tile_lo * PAGES + offs_p
+        page_next = tl.load(
+            bt_row + first_pages, mask=first_pages < bt_cols, other=0
+        )
+    for tile in tl.range(tile_lo, tile_hi, num_stages=NUM_STAGES):
+        page = page_next.to(tl.int64)
         if PAGES == 1:
-            page = tl.load(bt_row + tile).to(tl.int64)
+            page_next = tl.load(
+                bt_row + tile + 1, mask=tile + 1 < tile_hi, other=0
+            )
             tok_mask = tile * PAGE + offs_t < seq_len
             valid = tok_mask
             if D == D_PAD:
@@ -205,12 +236,13 @@ def _split_kv_decode_kernel(
             else:
                 kv_mask = tok_mask[:, None] & d_mask[None, :]
         else:
-            logical_page = tile * PAGES + offs_p
-            page = tl.load(
-                bt_row + logical_page,
-                mask=logical_page * PAGE < seq_len,
+            next_pages = (tile + 1) * PAGES + offs_p
+            page_next = tl.load(
+                bt_row + next_pages,
+                mask=(next_pages * PAGE < seq_len) & (tile + 1 < tile_hi),
                 other=0,
-            ).to(tl.int64)
+            )
+            logical_page = tile * PAGES + offs_p
             tok_mask = logical_page[:, None] * PAGE + offs_t[None, :] < seq_len
             valid = tl.reshape(tok_mask, (BLOCK_N,))
             if D == D_PAD:
@@ -295,7 +327,7 @@ def _split_kv_decode_kernel(
         row = (seq * num_heads + heads) * num_splits + split
         tl.store(
             part_o_ptr + row[:, None] * D_PAD + offs_d[None, :],
-            o,
+            o.to(part_o_ptr.dtype.element_ty),
             mask=g_mask[:, None],
         )
         lse = tl.where(has, m_i + tl.log2(tl.where(has, l_i, 1.0)), -1e30)
@@ -321,6 +353,7 @@ def _merge_splits_kernel(
 
     Empty splits carry lse = -1e30 and o = 0, so a sequence of length 0
     merges to zeros."""
+    gdc_wait()
     head = tl.program_id(0)
     seq = tl.program_id(1).to(tl.int64)
     offs_d = tl.program_id(2) * D_BLOCK + tl.arange(0, D_BLOCK)
@@ -342,7 +375,7 @@ def _merge_splits_kernel(
         m_new = tl.maximum(m_run, tl.max(lse, axis=0))
         alpha = tl.exp2(m_run - m_new)
         w = tl.where(s_mask, tl.exp2(lse - m_new), 0.0)
-        acc = acc * alpha + tl.sum(o * w[:, None], axis=0)
+        acc = acc * alpha + tl.sum(o.to(tl.float32) * w[:, None], axis=0)
         w_sum = w_sum * alpha + tl.sum(w, axis=0)
         m_run = m_new
     acc = acc / tl.where(w_sum > 0.0, w_sum, 1.0)
@@ -365,11 +398,22 @@ def _sm_count(device: torch.device) -> int:
     return count
 
 
-# Per padded head_dim: (tokens per tile, num_warps, resident programs per SM
-# the split count aims for). Tuned on sm_120 (RTX PRO 6000): one 16-token page
-# per tile with 2 warps keeps registers low enough for 3 (D <= 128) or 2
-# (D = 256) programs per SM, and a grid of one full wave avoids a tail.
-_TILE_CONFIG = {64: (16, 2, 3), 128: (16, 2, 3), 256: (16, 2, 2)}
+# Per (padded head_dim, int8 KV): (tokens per tile, num_warps, resident
+# programs per SM the split count aims for, num_stages). Tuned on sm_120
+# (RTX PRO 6000, 188 SMs) against the size-matched read ceiling: bf16 KV uses
+# one 16-token page per tile with 2 warps for D >= 128 (low registers, 4
+# programs per SM for D = 128, 2 for D = 256); D = 64 moves few bytes per
+# page and uses 64-token tiles; int8 KV moves half the bytes per token and
+# also needs bigger tiles to keep enough bytes in flight. Software
+# pipelining (num_stages > 1) was slower in every configuration tried.
+_TILE_CONFIG = {
+    (64, False): (64, 4, 2, 1),
+    (128, False): (16, 2, 4, 1),
+    (256, False): (16, 2, 2, 1),
+    (64, True): (32, 2, 4, 1),
+    (128, True): (32, 2, 4, 1),
+    (256, True): (32, 2, 3, 1),
+}
 _MERGE_WARPS = 2
 
 
@@ -378,11 +422,11 @@ def _num_splits(
     num_kv_heads: int,
     max_context: int,
     block_n: int,
-    ctas_per_sm: int,
+    ctas_per_sm: float,
     device: torch.device,
 ) -> int:
     programs = batch * num_kv_heads
-    target = ctas_per_sm * _sm_count(device)
+    target = int(ctas_per_sm * _sm_count(device))
     max_tiles = max(1, triton.cdiv(max_context, block_n))
     return max(1, min(_MAX_SPLITS, max_tiles, triton.cdiv(target, programs)))
 
@@ -436,8 +480,12 @@ def split_kv_decode_attention(
         seq_lens: ``[batch]`` int32 context lengths (0 yields zeros).
         key_scale / value_scale: per-token fp16 scales ``[blocks, kv_heads,
             block]`` (any strides) when the caches are int8.
-        max_seq_len: optional host-side upper bound of ``seq_lens``; only
-            used to size the split count, defaults to the block-table
+        max_seq_len: optional host-side upper bound of ``seq_lens``. When
+            given, every sequence uses the same split length derived from it
+            (the tile range does not wait for ``seq_lens``; the last split
+            absorbs anything longer, so an underestimate is slower but still
+            exact). Without it, each sequence splits its own length on the
+            device and the split count is sized from the block-table
             capacity.
 
     Returns:
@@ -482,7 +530,9 @@ def split_kv_decode_attention(
 
     d_pad = triton.next_power_of_2(head_dim)
     g_pad = max(16, triton.next_power_of_2(group))
-    tile_tokens, num_warps, ctas_per_sm = _TILE_CONFIG[d_pad]
+    tile_tokens, num_warps, ctas_per_sm, num_stages = _TILE_CONFIG[
+        (d_pad, is_int8)
+    ]
     pages = max(1, tile_tokens // page)
     block_n = pages * page
     max_context = (
@@ -492,9 +542,19 @@ def split_kv_decode_attention(
     )
     max_context = min(max_context, block_tables.shape[1] * page)
     splits = _num_splits(
-        batch, num_kv_heads, max_context, block_n, ctas_per_sm, query.device
+        batch,
+        num_kv_heads,
+        max_context,
+        block_n,
+        ctas_per_sm,
+        query.device,
     )
     direct = splits == 1
+    # With a host-side max_seq_len every sequence uses the same split length;
+    # without one the capacity bound may be far too long, so each sequence
+    # derives its split length from seq_lens on the device instead.
+    static_split = max_seq_len is not None
+    tiles_hint = triton.cdiv(triton.cdiv(max_context, block_n), splits)
 
     if direct:
         part_o = out
@@ -502,7 +562,7 @@ def split_kv_decode_attention(
     else:
         part_o = torch.empty(
             (batch, num_heads, splits, d_pad),
-            dtype=torch.float32,
+            dtype=out.dtype,
             device=query.device,
         )
         part_lse = torch.empty(
@@ -533,6 +593,8 @@ def split_kv_decode_attention(
         part_lse,
         float(scale) * _LOG2E,
         splits,
+        tiles_hint,
+        block_tables.shape[1],
         num_heads,
         query.stride(0),
         query.stride(1),
@@ -565,8 +627,10 @@ def split_kv_decode_attention(
         VS_ST=vs_st,
         IS_INT8=is_int8,
         DIRECT=direct,
+        NUM_STAGES=num_stages,
+        STATIC_SPLIT=static_split,
         num_warps=num_warps,
-        num_stages=1,
+        num_stages=num_stages,
     )
     if not direct:
         d_block = min(d_pad, 64)
@@ -584,6 +648,7 @@ def split_kv_decode_attention(
             D_BLOCK=d_block,
             S_CHUNK=s_chunk,
             num_warps=_MERGE_WARPS,
+            launch_pdl=True,
         )
     return out
 

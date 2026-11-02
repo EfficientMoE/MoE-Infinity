@@ -167,7 +167,8 @@ def test_paged_attention_max_seq_len_hint_and_no_host_sync():
     k, v, bt, lens = make_vllm_cache(seq_lens, 2, 256)
     q = torch.randn(3, 16, 256, device="cuda").bfloat16()
     ref = sdpa_reference(q, k, v, bt, lens, 256**-0.5, 2)
-    for hint in (None, 9000, 20000):
+    # 4000 underestimates the longest sequence: still exact, only slower.
+    for hint in (None, 9000, 20000, 4000):
         paged_attention_fwd(q, k, v, bt, lens, 256**-0.5, 2, 16, hint)
         torch.cuda.synchronize()
         torch.cuda.set_sync_debug_mode("error")
@@ -178,6 +179,45 @@ def test_paged_attention_max_seq_len_hint_and_no_host_sync():
         torch.testing.assert_close(
             out.float(), ref.float(), atol=2e-2, rtol=2e-2
         )
+
+
+@requires_cuda
+@pytest.mark.parametrize("int8", [False, True])
+@pytest.mark.parametrize("batch,seq_len", [(1, 9000), (64, 300)])
+def test_paged_attention_cuda_graph_replay_matches_eager(int8, batch, seq_len):
+    """Single and multi-split launches (incl. the programmatic dependent
+    launch of the merge kernel) capture into a CUDA graph and replay with
+    bit-identical outputs."""
+    torch.manual_seed(6)
+    k, v, bt, lens = make_vllm_cache([seq_len] * batch, 4, 128)
+    ks = vs = None
+    if int8:
+        k = (k.float() * 40).to(torch.int8)
+        v = (v.float() * 40).to(torch.int8)
+        ks = torch.rand(k.shape[0], 4, 16, device="cuda").half()
+        vs = torch.rand(k.shape[0], 4, 16, device="cuda").half()
+    q = torch.randn(batch, 32, 128, device="cuda").bfloat16()
+
+    def run():
+        return paged_attention_fwd(
+            q, k, v, bt, lens, 128**-0.5, 4, 16, seq_len, ks, vs
+        )
+
+    eager = run().clone()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        run()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run()
+    q.copy_(torch.randn_like(q))
+    expected = run().clone()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured, expected)
+    assert not torch.equal(captured, eager)
 
 
 @requires_cuda
