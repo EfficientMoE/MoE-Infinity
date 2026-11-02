@@ -1219,8 +1219,86 @@ def _gptoss_moe_loop_builder(T: int, H: int, I: int, E: int, k: int):
     return build
 
 
+def _gptoss_moe_grouped_builder(
+    T: int,
+    H: int,
+    I: int,
+    E: int,
+    k: int,
+    graph: bool = False,
+    router: bool = True,
+):
+    """Same router, then device-side dispatch (#313): moe_align + grouped
+    MXFP4 GEMM1 (+SwiGLU) + GEMM2 (weighted scatter-add), no host sync.
+    `graph=True` replays the layer as one CUDA graph; `router=False` times
+    the expert block alone (top-k ids/weights computed once outside)."""
+
+    def build():
+        from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
+
+        x = _rand(T, H, scale=1.0)
+        wr, br = _rand(E, H), _rand(E)
+        gu_p = torch.randint(
+            0, 255, (E, 2 * I, H // 2), device="cuda", dtype=torch.uint8
+        )
+        gu_s = torch.randint(
+            118, 124, (E, 2 * I, H // 32), device="cuda", dtype=torch.uint8
+        )
+        d_p = torch.randint(
+            0, 255, (E, H, I // 2), device="cuda", dtype=torch.uint8
+        )
+        d_s = torch.randint(
+            118, 124, (E, H, I // 32), device="cuda", dtype=torch.uint8
+        )
+        gu_b, d_b = _rand(E, 2 * I), _rand(E, H)
+        F = torch.nn.functional
+
+        def route():
+            logits = F.linear(x, wr, br)
+            p = F.softmax(logits, dim=-1, dtype=torch.float32)
+            w, sel = torch.topk(p, k, dim=-1)
+            return sel, (w / w.sum(-1, keepdim=True)).to(x.dtype)
+
+        fixed = None if router else route()
+
+        def run():
+            sel, w = fixed or route()
+            return fused_moe_mxfp4(x, sel, w, gu_p, gu_s, gu_b, d_p, d_s, d_b)
+
+        if not graph:
+            return run
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                run()
+        torch.cuda.current_stream().wait_stream(s)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            run()
+        return g.replay
+
+    return build
+
+
 def gptoss_loop_cases(model_keys: list[str] | None = None) -> list[Case]:
     out = []
+    impls = (
+        ("gptoss_moe_loop", _gptoss_moe_loop_builder, {}, 5),
+        ("gptoss_moe_grouped", _gptoss_moe_grouped_builder, {}, None),
+        (
+            "gptoss_moe_grouped_graph",
+            _gptoss_moe_grouped_builder,
+            {"graph": True},
+            None,
+        ),
+        (
+            "gptoss_moe_experts_graph",
+            _gptoss_moe_grouped_builder,
+            {"graph": True, "router": False},
+            None,
+        ),
+    )
     for key in ("gpt-oss-20b", "gpt-oss-120b"):
         if model_keys and key not in model_keys:
             continue
@@ -1228,31 +1306,35 @@ def gptoss_loop_cases(model_keys: list[str] | None = None) -> list[Case]:
         for phase, lbl, T in (
             ("decode", "b1", 1),
             ("decode", "b16", 16),
+            ("decode", "b64", 64),
             ("prefill", "1K", 1024),
         ):
             M, A = expert_tokens(m, T)
-            out.append(
-                Case(
-                    f"{key}|{lbl}|gptoss_moe_loop",
-                    suite="gptoss_loop",
-                    model=key,
-                    phase=phase,
-                    size=lbl,
-                    impl="gptoss_moe_loop",
-                    flops=2.0 * T * m.top_k * 3 * m.hidden * m.inter,
-                    bytes_min=round(A)
-                    * 3
-                    * m.hidden
-                    * m.inter
-                    * _W_BYTES["gptoss_resident"],
-                    build=_gptoss_moe_loop_builder(
-                        T, m.hidden, m.inter, m.experts, m.top_k
-                    ),
-                    layers=m.moe_layers,
-                    meta={"T": T, "active": A},
-                    iters=5,
+            for impl, builder, kw, iters in impls:
+                if impl == "gptoss_moe_loop" and lbl == "b64":
+                    continue
+                out.append(
+                    Case(
+                        f"{key}|{lbl}|{impl}",
+                        suite="gptoss_loop",
+                        model=key,
+                        phase=phase,
+                        size=lbl,
+                        impl=impl,
+                        flops=2.0 * T * m.top_k * 3 * m.hidden * m.inter,
+                        bytes_min=round(A)
+                        * 3
+                        * m.hidden
+                        * m.inter
+                        * _W_BYTES["gptoss_resident"],
+                        build=builder(
+                            T, m.hidden, m.inter, m.experts, m.top_k, **kw
+                        ),
+                        layers=m.moe_layers,
+                        meta={"T": T, "active": A},
+                        iters=iters,
+                    )
                 )
-            )
     return out
 
 
