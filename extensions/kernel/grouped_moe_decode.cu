@@ -623,12 +623,13 @@ void grouped_moe_decode(const torch::Tensor& hidden,
   // Token tile: enough n8 tiles for the largest possible per-expert batch
   // (all T tokens), capped at 64 tokens per pass.
   const int nt = T <= 8 ? 1 : T <= 16 ? 2 : T <= 32 ? 4 : 8;
-  // Few tokens per expert: 8 K-split warps per 8-16 rows keep enough CTAs and
-  // bytes in flight. Many tokens per expert: 8 row-split warps share the token
-  // fragments through L1, and two m16 tiles per warp halve their L2 traffic.
-  // Long K rows (wide experts) want more bytes in flight per thread (U = 8);
-  // short ones want more CTAs. Measured on sm_120 (RTX PRO 6000 Max-Q) over
-  // the audit's decode shapes.
+  // Up to 32 tokens: 8 K-split warps per 8-32 rows keep enough CTAs and bytes
+  // in flight; long K rows (wide experts) want more bytes in flight per
+  // thread (U = 8), short ones more CTAs. More tokens: 8 row-split warps share
+  // the token fragments through L1 (two m16 tiles per warp halve their L2
+  // traffic at >= 32 tokens / expert), except the down projection of wide
+  // experts, which needs the K split to fill the GPU. Measured on sm_120
+  // (RTX PRO 6000 Max-Q) over the audit's decode shapes.
   const int64_t m_avg = (T * kcap + n - 1) / n;
   const int u_max = nt <= 2 ? 8 : 4;
   LaunchCfg up{1, 1, 8, H >= 4096 ? u_max : 2};
@@ -637,7 +638,7 @@ void grouped_moe_decode(const torch::Tensor& hidden,
                                    : LaunchCfg{1, 2, 4, nt <= 2 ? 4 : 2};
   if (nt == 8) {
     up = m_avg >= 32 ? LaunchCfg{2, 8, 1, 2} : LaunchCfg{1, 8, 1, 2};
-    down = up;
+    down = m_avg < 32 && inter >= 3072 ? LaunchCfg{1, 2, 4, 2} : up;
   }
   env_cfg(up, down);
   launch<false>(nt, up, p, stream);
