@@ -564,9 +564,9 @@ def _config(bucket: int, N: int, K: int, num_sms: int) -> dict:
         many = triton.cdiv(N, 2) >= 2048
         cfg = dict(
             kind="gemv",
-            BLOCK_N=2,
+            BLOCK_N=2 if many else 4,
             BLOCK_G=32 if many else 128,
-            num_warps=2 if many else 4,
+            num_warps=2 if many else 8,
         )
         tiles = triton.cdiv(N, cfg["BLOCK_N"])
         if tiles < 2 * num_sms:
