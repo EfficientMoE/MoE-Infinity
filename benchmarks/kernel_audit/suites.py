@@ -6,7 +6,7 @@ issues the same kernels MoE-Infinity issues for that op on sm_120
 
 Impl names:
   production paths   cutlass_fused, fp8_prod, gptoss_resident, gptoss_offload,
-                     v4_fp4_prod, sdpa_shim, hf_eager, paged_v1,
+                     v4_fp4_prod, v4_fp4_native, sdpa_shim, hf_eager, paged_v1,
                      sdpa_fallback, hf_eager_decode, router_*, gdn_torch,
                      kv_write_loop, moe_gqa, moe_gqa_swa, moe_gqa_masked,
                      moe_gqa_decode, moe_gqa_masked_decode (HF models
@@ -250,6 +250,65 @@ def _v4_fp4_builder(M: int, H: int, I: int):
     return build
 
 
+def _v4_fp4_expert_weights(H: int, I: int) -> dict:
+    """Random packed e2m1 weights + ue8m0 scales of one V4 routed expert."""
+    w = {}
+    for name, (n, k) in (("w1", (I, H)), ("w3", (I, H)), ("w2", (H, I))):
+        w[name] = torch.randint(
+            0, 255, (n, k // 2), device="cuda", dtype=torch.uint8
+        )
+        w["s" + name[1]] = torch.randint(
+            118, 124, (n, k // 32), device="cuda", dtype=torch.uint8
+        )
+    return w
+
+
+def _v4_fp4_native_builder(M: int, H: int, I: int):
+    """DeepSeek-V4 native W4A8 block-scaled path, one expert per call."""
+
+    def build():
+        import moe_infinity._v4_fp4 as v4
+
+        x = _rand(M, H, scale=1.0)
+        w = _v4_fp4_expert_weights(H, I)
+        args = [w[k] for k in ("w1", "s1", "w2", "s2", "w3", "s3")]
+        return lambda: v4.v4_expert_forward_fp4(x, *args, 10.0)
+
+    return build
+
+
+def _v4_fp4_native_layer_builder(T: int, n_exp: int, H: int, I: int, k: int):
+    """One MoE layer on the native path: a single grouped call for T tokens
+    routed top-k over n_exp distinct (cold) experts, routing on device."""
+
+    def build():
+        import moe_infinity._v4_fp4 as v4
+
+        experts = [_v4_fp4_expert_weights(H, I) for _ in range(n_exp)]
+        table = torch.tensor(
+            [
+                [e[n].data_ptr() for n in ("w1", "s1", "w3", "s3", "w2", "s2")]
+                for e in experts
+            ],
+            dtype=torch.int64,
+            device="cuda",
+        )
+        # balanced routing: slot j of all tokens goes to expert j % n_exp,
+        # so every expert receives ~T*k/n_exp rows (the case's M)
+        ids = (torch.arange(T * k, device="cuda") % n_exp).view(T, k)
+        ids = ids.to(torch.int32)
+        wts = torch.rand(T, k, device="cuda")
+        x = _rand(T, H, scale=1.0)
+
+        def run():
+            v4.v4_moe_forward(x, ids, wts, table, I, 10.0)
+
+        run.experts = experts  # keep the weights alive
+        return run
+
+    return build
+
+
 # weight bytes per element of one expert in each storage format
 _W_BYTES = {
     "cutlass_fused": BF16,
@@ -259,6 +318,7 @@ _W_BYTES = {
     "gptoss_resident": 0.5 + 1 / 32,
     "gptoss_offload": 0.5 + 1 / 32,
     "v4_fp4_prod": 0.5 + 1 / 32,
+    "v4_fp4_native": 0.5 + 1 / 32,
 }
 
 
@@ -278,6 +338,7 @@ def _expert_impls(m: MoEModel):
         impls.append(("fp8_prod", _fp8_prod_builder))
     if m.expert_dtype.startswith("fp4"):
         impls.append(("v4_fp4_prod", _v4_fp4_builder))
+        impls.append(("v4_fp4_native", _v4_fp4_native_builder))
     impls += [
         ("cutlass_fused", _cutlass_builder),
         ("cublas_ref", _cublas_ref_builder),
@@ -501,6 +562,14 @@ def expert_layer_cases(model_keys: list[str] | None = None) -> list[Case]:
         H, I = c.meta["H"], c.meta["I"]
         eb = 3 * H * I * _W_BYTES[c.impl]
         streams = 1 if c.impl in _SEQUENTIAL_IMPLS else EXEC_STREAMS
+        if c.impl == "v4_fp4_native":  # one grouped launch per layer
+            m = MODELS[c.model]
+            build = _v4_fp4_native_layer_builder(
+                c.meta["tokens"], n_exec, H, I, m.top_k
+            )
+            streams = 1
+        else:
+            build = _layer_builder(c, n_exec, eb, streams)
         out.append(
             Case(
                 cid=c.cid.replace("|", "|layer|", 1),
@@ -511,7 +580,7 @@ def expert_layer_cases(model_keys: list[str] | None = None) -> list[Case]:
                 impl=c.impl,
                 flops=c.flops * n_exec,
                 bytes_min=c.bytes_min * n_exec,
-                build=_layer_builder(c, n_exec, eb, streams),
+                build=build,
                 per_layer=1.0,
                 layers=c.layers,
                 meta={**c.meta, "n_exec": n_exec, "streams": streams},
