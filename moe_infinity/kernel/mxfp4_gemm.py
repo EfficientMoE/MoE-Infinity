@@ -118,6 +118,52 @@ def _e2m1_to_bf16(w, s):
 
 
 @triton.jit
+def _e2m1_to_bf16_cvt(w, s):
+    """Same contract as ``_e2m1_to_bf16`` using sm_100a+ ``cvt.rn.f16x2.e2m1x2``
+    (exact E2M1 -> f16), widened to f32, packed to bf16x2, then scaled."""
+    return tl.inline_asm_elementwise(
+        asm="""
+        {
+        .reg .b8 b0, b1, b2, b3;
+        .reg .b16 l0, l1, l2, l3, h0, h1, h2, h3;
+        .reg .b32 p0, p1, p2, p3, s0, s1;
+        .reg .f32 a0, a1, a2, a3, c0, c1, c2, c3;
+        mov.b32 {b0, b1, b2, b3}, $4;
+        cvt.rn.f16x2.e2m1x2 p0, b0;
+        cvt.rn.f16x2.e2m1x2 p1, b1;
+        cvt.rn.f16x2.e2m1x2 p2, b2;
+        cvt.rn.f16x2.e2m1x2 p3, b3;
+        mov.b32 {l0, h0}, p0;
+        mov.b32 {l1, h1}, p1;
+        mov.b32 {l2, h2}, p2;
+        mov.b32 {l3, h3}, p3;
+        cvt.f32.f16 a0, l0; cvt.f32.f16 a1, l1;
+        cvt.f32.f16 a2, l2; cvt.f32.f16 a3, l3;
+        cvt.f32.f16 c0, h0; cvt.f32.f16 c1, h1;
+        cvt.f32.f16 c2, h2; cvt.f32.f16 c3, h3;
+        cvt.rn.bf16x2.f32 p0, a1, a0;
+        cvt.rn.bf16x2.f32 p1, a3, a2;
+        cvt.rn.bf16x2.f32 p2, c1, c0;
+        cvt.rn.bf16x2.f32 p3, c3, c2;
+        prmt.b32 s0, $5, 0, 0x4140;
+        prmt.b32 s1, $5, 0, 0x4342;
+        shl.b32 s0, s0, 7;
+        shl.b32 s1, s1, 7;
+        mul.rn.bf16x2 $0, p0, s0;
+        mul.rn.bf16x2 $1, p1, s1;
+        mul.rn.bf16x2 $2, p2, s0;
+        mul.rn.bf16x2 $3, p3, s1;
+        }
+        """,
+        constraints="=r,=r,=r,=r,r,r",
+        args=[w, s],
+        dtype=(tl.bfloat16, tl.bfloat16),
+        is_pure=True,
+        pack=4,
+    )
+
+
+@triton.jit
 def _e2m1_bits_f32(n):
     """Portable decode: E2M1 nibble (int32, 0..15) -> fp32 bit pattern."""
     v = n & 7
@@ -247,6 +293,64 @@ def _mxfp4_gemv_kernel(
     )
 
 
+@triton.jit
+def _mma_k_range(
+    acc,
+    x_ptr,
+    w_ptr,
+    s_ptr,
+    rm,
+    rn,
+    k_lo,
+    k_hi,
+    stride_xm,
+    stride_wn,
+    stride_sn,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    NATIVE_BF16X2: tl.constexpr,
+):
+    """acc += x[rm, k_lo:k_hi] @ dequant(w[rn, k_lo:k_hi]).T"""
+    BKH: tl.constexpr = BLOCK_K // 2
+    BKS: tl.constexpr = BLOCK_K // 32
+    for k0 in range(k_lo, k_hi, BLOCK_K):
+        kh = k0 // 2 + tl.arange(0, BKH)
+        ks = k0 // 32 + tl.arange(0, BKS)
+        kk = k0 + tl.arange(0, BLOCK_K)
+        w = tl.load(
+            w_ptr + rn[:, None] * stride_wn + kh[None, :],
+            mask=kh[None, :] < k_hi // 2,
+            other=0,
+        )
+        s = tl.load(
+            s_ptr + rn[:, None] * stride_sn + ks[None, :],
+            mask=ks[None, :] < k_hi // 32,
+            other=0,
+        )
+        s = tl.broadcast_to(s[:, :, None], (BLOCK_N, BKS, 16)).reshape(
+            BLOCK_N, BKH
+        )
+        x = tl.load(
+            x_ptr + rm[:, None] * stride_xm + kk[None, :],
+            mask=kk[None, :] < k_hi,
+            other=0.0,
+        )
+        if NATIVE_BF16X2 == 2:
+            lo, hi = _e2m1_to_bf16_cvt(w, s)
+        elif NATIVE_BF16X2:
+            lo, hi = _e2m1_to_bf16(w, s)
+        else:
+            w32 = w.to(tl.int32)
+            scale = (s.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+            lo = _e2m1_bits_f32(w32).to(tl.float32, bitcast=True) * scale
+            hi = _e2m1_bits_f32(w32 >> 4).to(tl.float32, bitcast=True) * scale
+            lo = lo.to(tl.bfloat16)
+            hi = hi.to(tl.bfloat16)
+        wb = tl.join(lo, hi).reshape(BLOCK_N, BLOCK_K)
+        acc = tl.dot(x, tl.trans(wb), acc)
+    return acc
+
+
 @triton.jit(do_not_specialize=["M"])
 def _mxfp4_mma_kernel(
     x_ptr,  # [M, K]    bf16
@@ -279,46 +383,25 @@ def _mxfp4_mma_kernel(
     pid_n = pid % num_n
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    rm = offs_m % M
-    rn = offs_n % N
-    BKH: tl.constexpr = BLOCK_K // 2
-    BKS: tl.constexpr = BLOCK_K // 32
     k_lo = pid_k * K_PER_SPLIT
     k_hi = tl.minimum(k_lo + K_PER_SPLIT, K)
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k0 in range(k_lo, k_hi, BLOCK_K):
-        kh = k0 // 2 + tl.arange(0, BKH)
-        ks = k0 // 32 + tl.arange(0, BKS)
-        kk = k0 + tl.arange(0, BLOCK_K)
-        w = tl.load(
-            w_ptr + rn[:, None] * stride_wn + kh[None, :],
-            mask=kh[None, :] < k_hi // 2,
-            other=0,
-        )
-        s = tl.load(
-            s_ptr + rn[:, None] * stride_sn + ks[None, :],
-            mask=ks[None, :] < k_hi // 32,
-            other=0,
-        )
-        s = tl.broadcast_to(s[:, :, None], (BLOCK_N, BKS, 16)).reshape(
-            BLOCK_N, BKH
-        )
-        x = tl.load(
-            x_ptr + rm[:, None] * stride_xm + kk[None, :],
-            mask=kk[None, :] < k_hi,
-            other=0.0,
-        )
-        if NATIVE_BF16X2:
-            lo, hi = _e2m1_to_bf16(w, s)
-        else:
-            w32 = w.to(tl.int32)
-            scale = (s.to(tl.int32) << 23).to(tl.float32, bitcast=True)
-            lo = _e2m1_bits_f32(w32).to(tl.float32, bitcast=True) * scale
-            hi = _e2m1_bits_f32(w32 >> 4).to(tl.float32, bitcast=True) * scale
-            lo = lo.to(tl.bfloat16)
-            hi = hi.to(tl.bfloat16)
-        wb = tl.join(lo, hi).reshape(BLOCK_N, BLOCK_K)
-        acc = tl.dot(x, tl.trans(wb), acc)
+    acc = _mma_k_range(
+        acc,
+        x_ptr,
+        w_ptr,
+        s_ptr,
+        offs_m % M,
+        offs_n % N,
+        k_lo,
+        k_hi,
+        stride_xm,
+        stride_wn,
+        stride_sn,
+        BLOCK_N,
+        BLOCK_K,
+        NATIVE_BF16X2,
+    )
     _epilogue(
         acc,
         offs_m,
@@ -335,6 +418,120 @@ def _mxfp4_mma_kernel(
         HAS_BIAS,
         SPLIT_K,
     )
+
+
+@triton.jit
+def _first_cta(i, T, G):
+    """Stream-K: the CTA whose iteration range [c*T//G, (c+1)*T//G) holds i."""
+    return ((i + 1) * G + T - 1) // T - 1
+
+
+@triton.jit(do_not_specialize=["M", "DP_TILES"])
+def _mxfp4_mma_streamk_kernel(
+    x_ptr,
+    w_ptr,
+    s_ptr,
+    bias_ptr,
+    out_ptr,
+    part_ptr,  # [num_programs, 2, BLOCK_M, BLOCK_N] fp32 scratch
+    cnt_ptr,  # [tiles] int32, zero on entry and exit
+    M,
+    N,
+    K,
+    stride_xm,
+    stride_wn,
+    stride_sn,
+    stride_om,
+    DP_TILES,
+    HAS_BIAS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    NATIVE_BF16X2: tl.constexpr,
+):
+    """Persistent stream-K schedule: the tiles * k_steps iterations are cut
+    into one equal, contiguous range per resident CTA, so the last wave is
+    never partially empty. A tile covered by several CTAs is reduced by the
+    last one to arrive, reading the partials in CTA order (deterministic)."""
+    c = tl.program_id(0).to(tl.int64)
+    G = tl.num_programs(0).to(tl.int64)
+    num_n = tl.cdiv(N, BLOCK_N)
+    KS = tl.cdiv(K, BLOCK_K)
+    # Tiles [0, DP_TILES) are whole tiles, round-robin over CTAs (full
+    # waves); only the remaining tiles' iterations are split stream-K style.
+    dp = DP_TILES.to(tl.int64)
+    T = (tl.cdiv(M, BLOCK_M) * num_n - dp).to(tl.int64) * KS
+    base = dp * KS
+    start = base + c * T // G
+    end = base + (c + 1) * T // G
+    rows = tl.arange(0, BLOCK_M)
+    cols = tl.arange(0, BLOCK_N)
+    dp_tile = c
+    it = start
+    while (dp_tile < dp) or (it < end):
+        if dp_tile < dp:
+            tile = dp_tile
+            ks0 = tile * 0
+            ks1 = ks0 + KS
+            dp_tile += G
+        else:
+            tile = it // KS
+            ks0 = it - tile * KS
+            ks1 = tl.minimum(KS, ks0 + (end - it))
+            it += ks1 - ks0
+        pid_m = (tile // num_n).to(tl.int32)
+        pid_n = (tile % num_n).to(tl.int32)
+        offs_m = pid_m * BLOCK_M + rows
+        offs_n = pid_n * BLOCK_N + cols
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        acc = _mma_k_range(
+            acc,
+            x_ptr,
+            w_ptr,
+            s_ptr,
+            offs_m % M,
+            offs_n % N,
+            (ks0 * BLOCK_K).to(tl.int32),
+            tl.minimum(ks1 * BLOCK_K, K).to(tl.int32),
+            stride_xm,
+            stride_wn,
+            stride_sn,
+            BLOCK_N,
+            BLOCK_K,
+            NATIVE_BF16X2,
+        )
+        mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+        if (ks0 != 0) or (ks1 != KS):
+            t0 = tile * KS
+            c_first = _first_cta(t0 - base, T, G)
+            c_last = _first_cta(t0 - base + KS - 1, T, G)
+            local = rows[:, None] * BLOCK_N + cols[None, :]
+            seg = (start < t0).to(tl.int64)  # 0: our first tile, 1: our last
+            tl.store(
+                part_ptr + ((c * 2 + seg) * BLOCK_M * BLOCK_N) + local, acc
+            )
+            tl.debug_barrier()
+            arrived = tl.atomic_add(cnt_ptr + tile, 1, sem="acq_rel")
+            last = arrived == (c_last - c_first)
+            mask = mask & last
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for cc in range(c_first, c_last + 1):
+                seg_cc = ((base + cc * T // G) < t0).to(tl.int64)
+                acc += tl.load(
+                    part_ptr + ((cc * 2 + seg_cc) * BLOCK_M * BLOCK_N) + local,
+                    mask=mask,
+                    other=0.0,
+                    cache_modifier=".cg",
+                )
+            tl.atomic_xchg(cnt_ptr + tile, 0, mask=last)
+        if HAS_BIAS:
+            bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)
+            acc += bias[None, :].to(tl.float32)
+        tl.store(
+            out_ptr + offs_m[:, None] * stride_om + offs_n[None, :],
+            acc.to(tl.bfloat16),
+            mask=mask,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +587,7 @@ def _config(bucket: int, N: int, K: int, num_sms: int) -> dict:
             num_warps=4,
             num_stages=3,
         )
+        cfg["CVT"] = True  # native E2M1 cvt (sm_100a+ only; else ignored)
         target = (2 if wide_n or bucket > 16 else 3) * num_sms
     elif bucket <= 256:
         cfg = dict(
@@ -400,9 +598,24 @@ def _config(bucket: int, N: int, K: int, num_sms: int) -> dict:
             num_stages=3,
         )
         target = 2 * num_sms
+    elif bucket >= 1024 and not wide_n:
+        # Narrow N (e.g. the 2880-wide down projection): 64x128 tiles leave
+        # a partial last wave (M = 1600: 575 tiles on 376 resident CTAs), so
+        # use the persistent stream-K schedule; native E2M1 cvt decode.
+        return dict(
+            kind="streamk",
+            BLOCK_M=64,
+            BLOCK_N=128,
+            BLOCK_K=64 if bucket >= 4096 else 128,
+            num_warps=4,
+            num_stages=3 if bucket >= 4096 else 2,
+            DP="auto",
+            CVT=True,
+            SPLIT_K=1,
+        )
     else:
         cfg = dict(
-            BLOCK_M=128 if bucket >= 4096 and not wide_n else 64,
+            BLOCK_M=64,
             BLOCK_N=128 if wide_n else 64,
             BLOCK_K=64,
             num_warps=4,
@@ -452,6 +665,110 @@ def _counters(device: torch.device, n: int) -> torch.Tensor:
     return buf
 
 
+# CTAs per SM of each compiled stream-K variant (from its regs / smem).
+_RESIDENT: Dict[Tuple, int] = {}
+
+
+def _resident_ctas(kernel, device: torch.device) -> int:
+    if getattr(kernel, "n_regs", None) is None:
+        kernel._init_handles()  # loads the cubin; sets n_regs
+    props = torch.cuda.get_device_properties(device)
+    threads = kernel.metadata.num_warps * 32
+    by_regs = props.regs_per_multiprocessor // max(1, kernel.n_regs * threads)
+    by_smem = props.shared_memory_per_multiprocessor // max(
+        1, kernel.metadata.shared + 1024
+    )
+    by_threads = props.max_threads_per_multi_processor // threads
+    return max(1, min(by_regs, by_smem, by_threads))
+
+
+def _launch_streamk(
+    x_2d, weight_packed, weight_scales, bias_arg, output, cfg, has_bias
+):
+    M, K = x_2d.shape
+    N = weight_packed.shape[0]
+    device = x_2d.device
+    bm, bn = cfg["BLOCK_M"], cfg["BLOCK_N"]
+    tiles = triton.cdiv(M, bm) * triton.cdiv(N, bn)
+    iters = tiles * triton.cdiv(K, cfg["BLOCK_K"])
+    native = int(_capability(device)[0] >= 9)
+    if native and cfg.get("CVT", False) and _capability(device)[0] >= 10:
+        native = 2
+    key = (
+        bm,
+        bn,
+        cfg["BLOCK_K"],
+        cfg["num_warps"],
+        cfg["num_stages"],
+        cfg.get("maxnreg"),
+        native,
+        has_bias,
+        device.index,
+    )
+    resident = _RESIDENT.get(key)
+    launch = _mxfp4_mma_streamk_kernel.warmup if resident is None else None
+    grid = (
+        1
+        if resident is None
+        else max(1, min(iters, resident * _num_sms(device)))
+    )
+    # "DP + SK" hybrid: whole tiles for the full waves, stream-K only for the
+    # tail (cfg DP: "auto" | "full" | "minus1" | "none"; "minus1" also
+    # stream-Ks the last full wave, which balances better from 2 waves up).
+    waves, rem = divmod(tiles, grid)
+    mode = cfg.get("DP", "auto")
+    if mode == "auto":
+        mode = "minus1" if waves >= 2 else "full"
+    if rem == 0:
+        dp_tiles = tiles
+    elif mode == "full":
+        dp_tiles = waves * grid
+    elif mode == "minus1":
+        dp_tiles = max(0, waves - 1) * grid
+    else:
+        dp_tiles = 0
+    part = torch.empty((grid, 2, bm, bn), dtype=torch.float32, device=device)
+    cnt = _counters(device, tiles)
+    args = (
+        x_2d,
+        weight_packed,
+        weight_scales,
+        bias_arg,
+        output,
+        part,
+        cnt,
+        M,
+        N,
+        K,
+        x_2d.stride(0),
+        weight_packed.stride(0),
+        weight_scales.stride(0),
+        output.stride(0),
+        dp_tiles,
+    )
+    meta = dict(
+        HAS_BIAS=has_bias,
+        BLOCK_M=bm,
+        BLOCK_N=bn,
+        BLOCK_K=cfg["BLOCK_K"],
+        NATIVE_BF16X2=native,
+        num_warps=cfg["num_warps"],
+        num_stages=cfg["num_stages"],
+    )
+    if "maxnreg" in cfg:
+        meta["maxnreg"] = cfg["maxnreg"]
+    if launch is not None:
+        # First use of this variant: compile, size the persistent grid from
+        # its occupancy, then launch (the split depends on the grid size).
+        kernel = launch(*args, grid=(1,), **meta)
+        _RESIDENT[key] = _resident_ctas(kernel, device)
+        _launch_streamk(
+            x_2d, weight_packed, weight_scales, bias_arg, output, cfg, has_bias
+        )
+        return
+    _mxfp4_mma_streamk_kernel[(grid,)](*args, **meta)
+
+
 def _launch(
     x_2d: torch.Tensor,
     weight_packed: torch.Tensor,
@@ -468,7 +785,7 @@ def _launch(
         tiles = triton.cdiv(N, cfg["BLOCK_N"])
     else:
         tiles = triton.cdiv(M, cfg["BLOCK_M"]) * triton.cdiv(N, cfg["BLOCK_N"])
-    if split > 1:
+    if split > 1 and cfg["kind"] != "streamk":
         part = torch.empty(
             (split, M, N), dtype=torch.float32, device=x_2d.device
         )
@@ -476,6 +793,11 @@ def _launch(
     else:
         part = cnt = output
     bias_arg = bias if has_bias else output
+    if cfg["kind"] == "streamk":
+        _launch_streamk(
+            x_2d, weight_packed, weight_scales, bias_arg, output, cfg, has_bias
+        )
+        return
     if cfg["kind"] == "gemv":
         num_g = K // 32
         g_per_split = (
@@ -530,7 +852,11 @@ def _launch(
             BLOCK_K=cfg["BLOCK_K"],
             SPLIT_K=split,
             K_PER_SPLIT=k_per_split,
-            NATIVE_BF16X2=_capability(x_2d.device)[0] >= 9,
+            NATIVE_BF16X2=(
+                2
+                if cfg.get("CVT", False) and _capability(x_2d.device)[0] >= 10
+                else int(_capability(x_2d.device)[0] >= 9)
+            ),
             num_warps=cfg["num_warps"],
             num_stages=cfg["num_stages"],
         )

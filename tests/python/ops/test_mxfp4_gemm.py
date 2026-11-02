@@ -148,6 +148,38 @@ def test_split_k_is_deterministic_and_reusable(M):
 
 @requires_cuda
 @requires_triton
+@pytest.mark.parametrize("dp", ["full", "minus1", "none"])
+@pytest.mark.parametrize("M", [1600, 2900])
+def test_stream_k_schedules_match_reference(dp, M):
+    """Persistent DP + stream-K hybrid: tiles split across CTAs are reduced
+    deterministically by the last arriving CTA."""
+    from moe_infinity.kernel import mxfp4_gemm as mg
+
+    N, K = 2880, 2880
+    packed, scales = _weights(N, K)
+    bias = torch.randn(N, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    cfg = dict(
+        kind="streamk",
+        BLOCK_M=64,
+        BLOCK_N=128,
+        BLOCK_K=128,
+        num_warps=4,
+        num_stages=2,
+        DP=dp,
+        CVT=True,
+        SPLIT_K=1,
+    )
+    out = torch.empty(M, N, dtype=torch.bfloat16, device="cuda")
+    mg._launch(x, packed, scales, bias, out, cfg)
+    _check(out, _reference(x, packed, scales, bias))
+    again = torch.empty_like(out)
+    mg._launch(x, packed, scales, bias, again, cfg)
+    assert torch.equal(again, out)
+
+
+@requires_cuda
+@requires_triton
 def test_no_compile_or_autotune_for_unseen_m_after_warmup():
     from moe_infinity.kernel import mxfp4_gemm as mg
 
@@ -159,7 +191,11 @@ def test_no_compile_or_autotune_for_unseen_m_after_warmup():
     def n_compiled():
         return sum(
             len(cache)
-            for kern in (mg._mxfp4_gemv_kernel, mg._mxfp4_mma_kernel)
+            for kern in (
+                mg._mxfp4_gemv_kernel,
+                mg._mxfp4_mma_kernel,
+                mg._mxfp4_mma_streamk_kernel,
+            )
             for cache, *_ in kern.device_caches.values()
         )
 
@@ -186,5 +222,10 @@ def test_m_bucket_and_configs_cpu():
     for bucket in (1 << i for i in range(13)):
         for N, K in ((5760, 2880), (2880, 2880), (64, 128)):
             cfg = mg._config(bucket, N, K, 188)
-            assert cfg["kind"] == ("gemv" if bucket == 1 else "mma")
+            if bucket == 1:
+                assert cfg["kind"] == "gemv"
+            elif bucket >= 1024 and N < 4096:
+                assert cfg["kind"] == "streamk"
+            else:
+                assert cfg["kind"] == "mma"
             assert cfg["SPLIT_K"] >= 1
