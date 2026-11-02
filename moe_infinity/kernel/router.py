@@ -1,5 +1,3 @@
-import threading
-import weakref
 from typing import NamedTuple
 
 import torch
@@ -450,32 +448,26 @@ PREFILL_GEMM_MIN_TOKENS = 4096
 
 
 class RouteOutput(NamedTuple):
-    topk_ids: torch.Tensor
-    topk_weights: torch.Tensor
+    topk_ids: torch.Tensor | None
+    topk_weights: torch.Tensor | None
     router_mask: torch.Tensor | None
     routing_weights: torch.Tensor | None
     logits: torch.Tensor | None
     active_flags: torch.Tensor | None
 
 
-_LAST_FLAGS = threading.local()
-
-
 def take_active_flags(router_mask):
     """Pinned ``[E]`` active-expert flags produced together with
-    ``router_mask`` by the last :func:`fused_route` call on this thread, or
+    ``router_mask`` by the last fused routing call on this thread, or
     ``None``. Consumes the entry."""
-    entry = getattr(_LAST_FLAGS, "entry", None)
-    if entry is None:
+    if _CUDA_EXT is None:
         return None
-    _LAST_FLAGS.entry = None
-    ref, flags = entry
-    return flags if ref() is router_mask else None
+    return _CUDA_EXT.take_active_flags(router_mask)
 
 
 # CUDA backend: token count from which logits come from cuBLAS + one
 # epilogue launch instead of the single split-K launch.
-CUDA_GEMM_MIN_TOKENS = 257
+CUDA_GEMM_MIN_TOKENS = 0  # 0: automatic choice in the extension
 try:
     from moe_infinity import _router as _CUDA_EXT
 except ImportError:  # extension not built: Triton / torch fallbacks
@@ -526,6 +518,7 @@ def fused_route(
     gemm_min_tokens: int | None = None,
     backend: str = "auto",
     active_flags: bool = False,
+    compact: bool = True,
 ):
     """Fused MoE routing.
 
@@ -548,6 +541,8 @@ def fused_route(
         return_logits: also return ``[T, E]`` logits (activations dtype for
             softmax, fp32 otherwise).
         dense: also write the dense ``[T, E]`` mask / weights.
+        compact: also return ``topk_ids`` / ``topk_weights`` (CUDA backend may
+            skip them when ``False``: one allocation less per call).
         backend: ``"cuda"`` (``moe_infinity._router``), ``"triton"`` or
             ``"auto"`` (CUDA when built and applicable, else Triton).
         active_flags: also produce the ``[E]`` active-expert flags directly
@@ -590,15 +585,12 @@ def fused_route(
         res = _CUDA_EXT.fused_route(
             x, weight, top_k, sc, bias, n_group, topk_group, renormalize,
             scaling, eps, round_logits, weights_dtype, logits_dtype,
-            return_logits, dense, active_flags,
+            return_logits, dense, active_flags, compact,
             CUDA_GEMM_MIN_TOKENS if gemm_min_tokens is None
             else gemm_min_tokens,
         )  # fmt: skip
         if res:
-            out = RouteOutput._make(res)
-            if active_flags and dense:
-                _LAST_FLAGS.entry = (weakref.ref(res[2]), res[5])
-            return out
+            return RouteOutput._make(res)
     if backend == "cuda":
         raise RuntimeError(
             "moe_infinity._router is unavailable for these inputs"
@@ -608,6 +600,85 @@ def fused_route(
         scaling, eps, round_logits, weights_dtype, logits_dtype,
         return_logits, dense, gemm_min_tokens,
     )  # fmt: skip
+
+
+def make_router(
+    weight: torch.Tensor,
+    top_k: int,
+    *,
+    scoring: str = "softmax",
+    bias: torch.Tensor | None = None,
+    n_group: int = 1,
+    topk_group: int = 1,
+    renormalize: bool = True,
+    scaling: float = 1.0,
+    eps: float = 0.0,
+    round_logits: bool | None = None,
+    weights_dtype: torch.dtype | None = None,
+    return_logits: bool = False,
+    dense: bool = True,
+    active_flags: bool = False,
+    compact: bool = True,
+    gemm_min_tokens: int | None = None,
+):
+    """A router bound to one gate: ``router(hidden_states)`` returns the same
+    six outputs as :func:`fused_route` (as a plain tuple, in
+    :class:`RouteOutput` order). With the CUDA extension the static
+    arguments are converted once, so a call costs one native call -- build
+    it once per MoE layer. Falls back to :func:`fused_route`."""
+    sc = _SCORING.get(scoring)
+    if sc is None:
+        raise ValueError(f"unknown scoring {scoring!r}")
+    wdt = weight.dtype
+    if round_logits is None:
+        round_logits = sc == SCORING_SOFTMAX and wdt == torch.bfloat16
+    if weights_dtype is None:
+        weights_dtype = wdt if sc == SCORING_SOFTMAX else torch.float32
+    logits_dtype = (
+        wdt
+        if sc == SCORING_SOFTMAX and wdt in _LOW_PRECISION
+        else torch.float32
+    )
+    gmt = CUDA_GEMM_MIN_TOKENS if gemm_min_tokens is None else gemm_min_tokens
+    if _CUDA_EXT is not None and weight.is_cuda and wdt in _LOW_PRECISION:
+        native = _CUDA_EXT.Router(
+            weight, top_k, sc, bias, n_group, topk_group, renormalize,
+            scaling, eps, round_logits, weights_dtype, logits_dtype,
+            return_logits, dense, active_flags, compact, gmt,
+        )  # fmt: skip
+        kwargs = dict(
+            scoring=scoring, bias=bias, n_group=n_group,
+            topk_group=topk_group, renormalize=renormalize, scaling=scaling,
+            eps=eps, round_logits=round_logits, weights_dtype=weights_dtype,
+            return_logits=return_logits, dense=dense,
+            active_flags=active_flags, compact=compact, gemm_min_tokens=gmt,
+        )  # fmt: skip
+
+        def route(hidden_states):
+            res = native(hidden_states)
+            # empty: shape / alignment outside the CUDA kernel's envelope
+            return (
+                res
+                if res
+                else tuple(fused_route(hidden_states, weight, top_k, **kwargs))
+            )
+
+        return route
+
+    def route(hidden_states):
+        return tuple(
+            fused_route(
+                hidden_states, weight, top_k, scoring=scoring, bias=bias,
+                n_group=n_group, topk_group=topk_group,
+                renormalize=renormalize, scaling=scaling, eps=eps,
+                round_logits=round_logits, weights_dtype=weights_dtype,
+                return_logits=return_logits, dense=dense,
+                active_flags=active_flags, compact=compact,
+                gemm_min_tokens=gmt,
+            )
+        )  # fmt: skip
+
+    return route
 
 
 def _fused_route_triton(
@@ -660,7 +731,7 @@ def _fused_route_triton(
 
     both_low = low_precision and w.dtype == x.dtype
     precision = "ieee" if both_low else "tf32x3"
-    if gemm_min_tokens is None:
+    if not gemm_min_tokens:  # None / 0: default
         gemm_min_tokens = PREFILL_GEMM_MIN_TOKENS
     common = dict(
         H=H,

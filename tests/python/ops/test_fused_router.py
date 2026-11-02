@@ -314,3 +314,47 @@ def test_active_flags_match_mask(T):
         torch.cuda.synchronize()
         assert torch.equal(flags, out.router_mask.any(0).cpu())
     assert take_active_flags(out.router_mask) is None
+
+
+@pytest.mark.skipif(
+    not _has_cuda_ext(), reason="moe_infinity._router not built"
+)
+@pytest.mark.parametrize("T", [1, 64, 2000])
+def test_no_host_sync_and_graph_replay(T):
+    """Rule D: the per-layer routing step never synchronises the host, and a
+    captured CUDA graph replays it with identical outputs."""
+    from moe_infinity.kernel.router import make_router, take_active_flags
+
+    torch.manual_seed(T)
+    x = torch.randn(T, 4096, device="cuda").to(torch.bfloat16)
+    w = (torch.randn(256, 4096, device="cuda") * 0.02).to(torch.bfloat16)
+    bias = torch.randn(256, device="cuda") * 0.01
+    route = make_router(
+        w, 8, scoring="sigmoid", bias=bias, eps=1e-20, active_flags=True,
+        compact=False,
+    )  # fmt: skip
+    route(x)  # warm-up: one-time allocations / plan selection
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        for _ in range(3):
+            out = route(x)
+            assert take_active_flags(out[2]) is out[5]
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    torch.cuda.synchronize()
+    ref_mask, ref_w = out[2].clone(), out[3].clone()
+
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        route(x)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g, stream=s):
+            cap = route(x)
+    torch.cuda.current_stream().wait_stream(s)
+    cap[2].zero_()
+    g.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(cap[2], ref_mask)
+    assert torch.equal(cap[3], ref_w)

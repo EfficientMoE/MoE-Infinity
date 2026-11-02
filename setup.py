@@ -437,6 +437,7 @@ if cuda_available:
             name="moe_infinity._router",
             sources=_ROUTER_SOURCES,
             include_dirs=COMMON_INCLUDE_PATHS,
+            extra_link_args=["-lcublasLt"],
             extra_compile_args={
                 "cxx": COMMON_CXX_ARGS,
                 # No --use_fast_math: scores must round exactly like the

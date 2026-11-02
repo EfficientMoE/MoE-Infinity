@@ -228,17 +228,3 @@ def test_old_binding_without_flags_argument_falls_back(monkeypatch):
     native = [c for c in dispatcher.calls if c[0] == "dispatch_experts"]
     assert native == [("dispatch_experts", 0), ("dispatch_experts", 1)]
     assert executor._dispatch_accepts_flags is False
-
-
-def test_take_active_flags_matches_only_the_producing_mask():
-    pytest.importorskip("triton")
-    from moe_infinity.kernel import router
-
-    mask = torch.zeros(2, 4, dtype=torch.bool)
-    other = mask.clone()
-    flags = torch.zeros(4, dtype=torch.bool)
-    router._LAST_FLAGS.entry = (__import__("weakref").ref(mask), flags)
-    assert router.take_active_flags(other) is None
-    router._LAST_FLAGS.entry = (__import__("weakref").ref(mask), flags)
-    assert router.take_active_flags(mask) is flags
-    assert router.take_active_flags(mask) is None

@@ -19,6 +19,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CachingHostAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <cublasLt.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <mma.h>
@@ -27,8 +28,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace moe_router {
 
@@ -41,11 +44,28 @@ constexpr int kStages = 3;
 constexpr int kMaxE = 512;
 constexpr int kMaxK = 32;
 constexpr int kMaxGroups = 32;
-constexpr int kMaxSplit = 16;
+#ifndef ROUTER_MAXSPLIT
+  #define ROUTER_MAXSPLIT 16
+#endif
+constexpr int kMaxSplit = ROUTER_MAXSPLIT;
+#ifndef ROUTER_BE16
+  #define ROUTER_BE16 32
+#endif
+#ifndef ROUTER_BT64_MIN
+  #define ROUTER_BT64_MIN 17
+#endif
+constexpr int kBT64MinTokens = ROUTER_BT64_MIN;
+#ifndef ROUTER_BE64
+  #define ROUTER_BE64 64
+#endif
 constexpr int kRows = 8;  // phase-2 rows reduced per smem pass (1 per warp)
 constexpr int kFusedMaxTokens = 1024;
+constexpr int64_t kFusedMaxElems = 196608;  // T * E, see fused_route
 // One CTA reduces all partials when T * E is this small (decode b1).
-constexpr int kSingleTileMaxElems = 512;
+#ifndef ROUTER_SINGLE_ELEMS
+  #define ROUTER_SINGLE_ELEMS 512
+#endif
+constexpr int kSingleTileMaxElems = ROUTER_SINGLE_ELEMS;
 
 enum Scoring : int { kSoftmax = 0, kSigmoid = 1, kSqrtSoftplus = 2 };
 
@@ -75,7 +95,9 @@ struct EpilogueParams {
   void* logits_out;  // [T, E] or nullptr
   int logits_dtype;
   RouteState* state;
-  bool* flags_host;  // [E] pinned host memory or nullptr
+  bool* flags_host;    // [E] pinned host memory or nullptr
+  int64_t* done_word;  // pinned; receives seq when a CTA finishes, or null
+  int64_t seq;
 };
 
 __device__ __forceinline__ void store_typed(void* base, int64_t i, float v,
@@ -124,160 +146,193 @@ __device__ __forceinline__ float warp_sum(float v) {
   return v;
 }
 
-// One warp routes one token (expert e is owned by lane e % 32).
-//
-// A decode step runs this once per SM, cold: its latency is set by
-// instruction-cache misses on straight-line code, not by ALU work. So the
-// per-expert work runs in non-unrolled lane-strided loops over shared memory
-// (scores / keys), and only the top-k scan keeps its VPL candidate keys in
-// registers (that loop body is re-executed K times, i.e. cached).
-//   lrow: the token's logits (smem or global); srow / krow: this warp's smem
-//   scratch (E floats / E keys).
-template <int VPL, int SC, typename Tl>
-__device__ __forceinline__ void route_token(const Tl* lrow, float* srow,
-                                            uint32_t* krow, int t,
-                                            const EpilogueParams& p,
-                                            int* flag_sink) {
-  const int lane = threadIdx.x & 31;
+// Routing of `rows` (<= kWarps) consecutive tokens by one CTA, in three
+// stages so a single decode token is spread over all 256 threads:
+//   1. every thread scores (token, expert) elements -> smem scores / keys;
+//   2. warp r runs token r's top-k (its keys in registers, lane e % 32 owns
+//      expert e), writes ids / weights / flags, marks chosen keys with 0 and
+//      leaves (top logit, 1 / sum, denominator) in smem;
+//   3. every thread writes the dense mask / weights.
+// logit(i) returns the logit of element i = r * E + e.
+template <int VPL, int SC, typename LogitFn>
+__device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
+                                           const EpilogueParams& p, float* st,
+                                           uint32_t* kt, bool* chosen,
+                                           int* flag_sink) {
+  __shared__ float rowinfo[kWarps][3];
   const int E = p.E;
-  const int64_t row_off = static_cast<int64_t>(t) * E;
+  const int n = rows * E;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
 
-#pragma unroll 4
-  for (int e = lane; e < E; e += 32) {
-    float v = to_float(lrow[e]);
+  for (int i = tid; i < n; i += blockDim.x) {
+    float v = logit(i);
     if (p.round_logits) v = __bfloat162float(__float2bfloat16_rn(v));
     if (p.logits_out != nullptr)
-      store_typed(p.logits_out, row_off + e, v, p.logits_dtype);
-    float s;
+      store_typed(p.logits_out, static_cast<int64_t>(t0) * E + i, v,
+                  p.logits_dtype);
+    float sc;
     uint32_t key;
     if (SC == kSoftmax) {
       // softmax is strictly increasing: select on the (rounded) logits; the
       // probabilities of the selected experts are formed below.
-      s = v;
+      sc = v;
       key = ord32(v);
     } else {
       if (SC == kSigmoid) {
-        s = __frcp_rn(1.0f + expf(-v));  // == 1.0f / (...), IEEE
+        sc = __frcp_rn(1.0f + expf(-v));  // == 1.0f / (...), IEEE
       } else {
-        s = sqrtf(v > 20.f ? v : log1pf(expf(v)));
+        sc = sqrtf(v > 20.f ? v : log1pf(expf(v)));
       }
-      key = ord32(p.bias != nullptr ? s + p.bias[e] : s);
+      const int e = i - (i / E) * E;
+      key = ord32(p.bias != nullptr ? sc + p.bias[e] : sc);
     }
-    srow[e] = s;
-    krow[e] = key;
+    st[i] = sc;
+    kt[i] = key;
   }
-  __syncwarp();
+  __syncthreads();
 
-  if (p.n_group > 1) {
-    // noaux_tc: group score = sum of the group's top-2 selection values;
-    // experts outside the topk_group best groups are masked to -inf.
-    const int gs = E / p.n_group;
-    uint32_t keep = 0;
+  if (warp < rows && p.n_group > 1) {
+    uint32_t* krow = kt + warp * E;
+    {
+      // noaux_tc: group score = sum of the group's top-2 selection values;
+      // experts outside the topk_group best groups are masked to -inf.
+      const int gs = E / p.n_group;
+      uint32_t keep = 0;
 #pragma unroll 1
-    for (int j = 0; j < p.topk_group; ++j) {
-      int bi = -1;
-      float best = 0.f;
+      for (int j = 0; j < p.topk_group; ++j) {
+        int bi = -1;
+        float best = 0.f;
 #pragma unroll 1
-      for (int g = 0; g < p.n_group; ++g) {
-        if ((keep >> g) & 1u) continue;
-        uint32_t lv = 0;
-        int li = 0x7FFFFFFF;
+        for (int g = 0; g < p.n_group; ++g) {
+          if ((keep >> g) & 1u) continue;
+          uint32_t lv = 0;
+          int li = 0x7FFFFFFF;
 #pragma unroll 1
-        for (int e = g * gs + lane; e < (g + 1) * gs; e += 32) {
-          if (krow[e] > lv) {
-            lv = krow[e];
-            li = e;
+          for (int e = g * gs + lane; e < (g + 1) * gs; e += 32) {
+            if (krow[e] > lv) {
+              lv = krow[e];
+              li = e;
+            }
+          }
+          uint32_t m1;
+          const int i1 = warp_argmax(lv, li, &m1);
+          uint32_t lv2 = 0;
+#pragma unroll 1
+          for (int e = g * gs + lane; e < (g + 1) * gs; e += 32)
+            if (e != i1) lv2 = max(lv2, krow[e]);
+          const uint32_t m2 = __reduce_max_sync(0xffffffffu, lv2);
+          const float score = unord32(m1) + unord32(m2);
+          if (bi < 0 || score > best) {
+            bi = g;
+            best = score;
           }
         }
-        uint32_t m1;
-        const int i1 = warp_argmax(lv, li, &m1);
-        uint32_t lv2 = 0;
-#pragma unroll 1
-        for (int e = g * gs + lane; e < (g + 1) * gs; e += 32)
-          if (e != i1) lv2 = max(lv2, krow[e]);
-        const uint32_t m2 = __reduce_max_sync(0xffffffffu, lv2);
-        const float score = unord32(m1) + unord32(m2);
-        if (bi < 0 || score > best) {
-          bi = g;
-          best = score;
-        }
+        keep |= 1u << bi;
       }
-      keep |= 1u << bi;
+      const uint32_t masked = ord32(-INFINITY);
+#pragma unroll 1
+      for (int e = lane; e < E; e += 32)
+        if (!((keep >> (e / gs)) & 1u)) krow[e] = masked;
+      __syncwarp();
     }
-    const uint32_t masked = ord32(-INFINITY);
-#pragma unroll 1
-    for (int e = lane; e < E; e += 32)
-      if (!((keep >> (e / gs)) & 1u)) krow[e] = masked;
-    __syncwarp();
   }
+  __syncthreads();
 
-  uint32_t key[VPL];  // 0 = not a candidate (no real value maps to 0)
-#pragma unroll
-  for (int i = 0; i < VPL; ++i)
-    key[i] = lane + 32 * i < E ? krow[lane + 32 * i] : 0u;
-
-  int my_id = 0;
-  float my_w = 0.f;
-#pragma unroll 1
-  for (int k = 0; k < p.K; ++k) {
-    uint32_t lv = 0;
-    int li = 0x7FFFFFFF;
+  // Top-k: warp r scans row r. Lane l owns experts l, l + 32, ... in
+  // registers; each step takes the warp argmax (larger key, then lower
+  // index -- torch's tie order) and removes it from the owner lane.
+  if (warp < rows) {
+    const int t = t0 + warp;
+    float* srow = st + warp * E;
+    const uint32_t* krow = kt + warp * E;
+    bool* crow = chosen + warp * E;
+    uint32_t key[VPL];  // 0 = not a candidate (no real value maps to 0)
 #pragma unroll
     for (int i = 0; i < VPL; ++i) {
-      if (key[i] > lv) {
-        lv = key[i];
-        li = lane + 32 * i;
-      }
+      const int e = lane + 32 * i;
+      key[i] = e < E ? krow[e] : 0u;
+      if (e < E) crow[e] = false;
     }
-    uint32_t wmax;
-    const int idx = warp_argmax(lv, li, &wmax);
-    if ((idx & 31) == lane) {
-#pragma unroll
-      for (int i = 0; i < VPL; ++i)
-        if (i == (idx >> 5)) key[i] = 0u;
-      krow[idx] = 0u;  // marks "chosen" for the dense pass
-    }
-    if (lane == k) my_id = idx;
-  }
-  __syncwarp();
-  if (lane < p.K) my_w = srow[my_id];
-  const float top_logit = __shfl_sync(0xffffffffu, my_w, 0);
-
-  // Weights. Softmax: p_k = exp(l_k - m) / sum(exp(l - m)); with renorm the
-  // full-row sum cancels, so only the selected experts are exponentiated.
-  float inv_all = 1.f;
-  if (SC == kSoftmax) {
-    if (!p.renorm) {
-      float s = 0.f;
+    int my_id = 0;
 #pragma unroll 1
-      for (int e = lane; e < E; e += 32) s += expf(srow[e] - top_logit);
-      inv_all = 1.f / warp_sum(s);
+    for (int k = 0; k < p.K; ++k) {
+      uint32_t lv = 0;
+      int li = 0x7FFFFFFF;
+#pragma unroll
+      for (int i = 0; i < VPL; ++i) {
+        if (key[i] > lv) {
+          lv = key[i];
+          li = lane + 32 * i;
+        }
+      }
+      uint32_t wmax;
+      const int idx = warp_argmax(lv, li, &wmax);
+      if ((idx & 31) == lane) {
+#pragma unroll
+        for (int i = 0; i < VPL; ++i)
+          if (i == (idx >> 5)) key[i] = 0u;
+      }
+      if (lane == k) my_id = idx;
     }
-    my_w = lane < p.K ? expf(my_w - top_logit) * inv_all : 0.f;
+    __syncwarp();
+    if (lane < p.K) crow[my_id] = true;
+    float my_w = lane < p.K ? srow[my_id] : 0.f;
+    const float top_logit = __shfl_sync(0xffffffffu, my_w, 0);  // rank 0
+    // Softmax: p_k = exp(l_k - m) / sum(exp(l - m)); with renorm the
+    // full-row sum cancels, so only the selected experts are exponentiated.
+    float inv_all = 1.f;
+    if (SC == kSoftmax) {
+      if (!p.renorm) {
+        float sum = 0.f;
+#pragma unroll 1
+        for (int e = lane; e < E; e += 32) sum += expf(srow[e] - top_logit);
+        inv_all = 1.f / warp_sum(sum);
+      }
+      my_w = lane < p.K ? expf(my_w - top_logit) * inv_all : 0.f;
+    }
+    float den = 1.f;
+    if (p.renorm) den = warp_sum(lane < p.K ? my_w : 0.f) + p.eps;
+    if (lane < p.K) {
+      const float v = (p.renorm ? my_w / den : my_w) * p.scale;
+      if (p.ids != nullptr) {
+        p.ids[static_cast<int64_t>(t) * p.K + lane] = my_id;
+        p.tw[static_cast<int64_t>(t) * p.K + lane] = v;
+      }
+      if (flag_sink != nullptr) flag_sink[my_id] = 1;
+    }
+    if (lane == 0) {
+      rowinfo[warp][0] = top_logit;
+      rowinfo[warp][1] = inv_all;
+      rowinfo[warp][2] = den;
+    }
   }
-  float den = 1.f;
-  if (p.renorm) den = warp_sum(lane < p.K ? my_w : 0.f) + p.eps;
-  if (lane < p.K) {
-    const float v = (p.renorm ? my_w / den : my_w) * p.scale;
-    p.ids[static_cast<int64_t>(t) * p.K + lane] = my_id;
-    p.tw[static_cast<int64_t>(t) * p.K + lane] = v;
-    if (flag_sink != nullptr) flag_sink[my_id] = 1;
-  }
+  __syncthreads();
+
   if (p.mask != nullptr) {
-#pragma unroll 4
-    for (int e = lane; e < E; e += 32) {
-      const bool on = krow[e] == 0u;
-      p.mask[row_off + e] = on;
+    for (int i = tid; i < n; i += blockDim.x) {
+      const int r = i / E;
+      const bool on = chosen[i];
+      p.mask[static_cast<int64_t>(t0) * E + i] = on;
       float v = 0.f;
       if (on) {
-        const float raw =
-            SC == kSoftmax ? expf(srow[e] - top_logit) * inv_all : srow[e];
-        v = (p.renorm ? raw / den : raw) * p.scale;
+        const float raw = SC == kSoftmax
+                              ? expf(st[i] - rowinfo[r][0]) * rowinfo[r][1]
+                              : st[i];
+        v = (p.renorm ? raw / rowinfo[r][2] : raw) * p.scale;
       }
-      store_typed(p.dw, row_off + e, v, p.dw_dtype);
+      store_typed(p.dw, static_cast<int64_t>(t0) * E + i, v, p.dw_dtype);
     }
   }
-  __syncwarp();
+  __syncthreads();
+}
+
+// Tell the host ring this launch's slot writes are done (see FlagRing).
+// No fence needed: the host only trusts done > S, i.e. a CTA of a LATER
+// launch finished, which implies launch S drained.
+__device__ __forceinline__ void signal_done(const EpilogueParams& p) {
+  if (p.done_word == nullptr) return;
+  if (threadIdx.x == 0)
+    *reinterpret_cast<volatile int64_t*>(p.done_word) = p.seq;
 }
 
 // After a CTA has routed its tokens: the last CTA to finish publishes the
@@ -298,6 +353,7 @@ __device__ void publish_flags(const EpilogueParams& p, unsigned int n_ctas) {
     f[e] = 0;
   }
   if (threadIdx.x == 0) p.state->publish_count = 0;
+  signal_done(p);
 }
 
 __device__ void grid_barrier(RouteState* st) {
@@ -329,13 +385,20 @@ struct DecodeArgs {
 };
 
 // Work-item tile: BT tokens x kBE experts over one H split.
-//   BT=16 : 8 warps = 4 expert columns (16) x 2 halves of each H stage.
-//   BT=64 : 8 warps = 4 token rows (16) x 2 expert columns (32).
+//   BT=16 : 8 warps = (kBE / 16) expert columns x (8 / columns) slices of
+//           each H stage; slices are summed in a fixed order.
+//   BT=64 : 8 warps = 4 token rows (16) x 2 expert column halves
+//           (kBE / 2 experts each, kBE / 32 fragments per warp).
 //   (A 64x128 tile with 2x2 warp fragments measured slower at T=256: fewer
 //   items -> fewer SMs streaming the gate weight.)
+constexpr int kBE16 = ROUTER_BE16;
+constexpr int kBE64 = ROUTER_BE64;
 template <int BT>
 struct Tile {
-  static constexpr int kBE = 64;
+  static constexpr int kBE = BT == 16 ? kBE16 : kBE64;
+  static constexpr int kFr64 = kBE / 32;  // BT=64: 16x16 fragments per warp
+  static constexpr int kCols = kBE / 16;  // BT=16 column groups
+  static constexpr int kParts = kWarps / kCols;    // BT=16 H slices
   static constexpr int kHC = BT == 16 ? 128 : 64;  // H per stage
   static constexpr int kLd = kHC + kPad;
   static constexpr int kXElems = BT * kLd;
@@ -346,8 +409,9 @@ template <typename Tin, int BT>
 constexpr int decode_smem_bytes() {
   using TL = Tile<BT>;
   constexpr int op = kStages * (TL::kXElems + TL::kWElems) * sizeof(Tin);
-  constexpr int acc = (BT == 16 ? 2 * 16 : BT) * TL::kBE * 4;
-  constexpr int red = 3 * kRows * kMaxE * 4;  // logits, scores, keys
+  constexpr int acc = (BT == 16 ? TL::kParts * 16 : BT) * TL::kBE * 4;
+  constexpr int red =
+      2 * kRows * kMaxE * 4 + kRows * kMaxE;  // scores, keys, chosen
   constexpr int m = op > acc ? op : acc;
   return m > red ? m : red;
 }
@@ -422,24 +486,26 @@ __device__ void logits_item(const DecodeArgs& a, const EpilogueParams& p,
     const Tin* xa = xs + (c % kStages) * TL::kXElems;
     const Tin* wb = ws + (c % kStages) * TL::kWElems;
     if constexpr (BT == 16) {
-      const int col = (warp & 3) * 16, half = warp >> 2;
+      constexpr int kSlice = kHC / TL::kParts;
+      const int col = (warp % TL::kCols) * 16;
+      const int h0 = (warp / TL::kCols) * kSlice;
 #pragma unroll
-      for (int kk = 0; kk < kHC / 2; kk += 16) {
+      for (int kk = 0; kk < kSlice; kk += 16) {
         FragA fa;
         FragB fb;
-        wmma::load_matrix_sync(fa, xa + half * (kHC / 2) + kk, kLd);
-        wmma::load_matrix_sync(fb, wb + col * kLd + half * (kHC / 2) + kk, kLd);
+        wmma::load_matrix_sync(fa, xa + h0 + kk, kLd);
+        wmma::load_matrix_sync(fb, wb + col * kLd + h0 + kk, kLd);
         wmma::mma_sync(acc[0][0], fa, fb, acc[0][0]);
       }
     } else {
-      const int row = (warp & 3) * 16, col = (warp >> 2) * 32;
+      const int row = (warp & 3) * 16, col = (warp >> 2) * (kBE / 2);
 #pragma unroll
       for (int kk = 0; kk < kHC; kk += 16) {
         FragA fa;
         FragB fb[2];
         wmma::load_matrix_sync(fa, xa + row * kLd + kk, kLd);
 #pragma unroll
-        for (int j = 0; j < 2; ++j) {
+        for (int j = 0; j < TL::kFr64; ++j) {
           wmma::load_matrix_sync(fb[j], wb + (col + 16 * j) * kLd + kk, kLd);
           wmma::mma_sync(acc[0][j], fa, fb[j], acc[0][j]);
         }
@@ -450,13 +516,13 @@ __device__ void logits_item(const DecodeArgs& a, const EpilogueParams& p,
   __syncthreads();
   float* cs = reinterpret_cast<float*>(smem);
   if constexpr (BT == 16) {
-    const int col = (warp & 3) * 16, half = warp >> 2;
-    wmma::store_matrix_sync(cs + half * 16 * kBE + col, acc[0][0], kBE,
+    const int col = (warp % TL::kCols) * 16, part = warp / TL::kCols;
+    wmma::store_matrix_sync(cs + part * 16 * kBE + col, acc[0][0], kBE,
                             wmma::mem_row_major);
   } else {
-    const int row = (warp & 3) * 16, col = (warp >> 2) * 32;
+    const int row = (warp & 3) * 16, col = (warp >> 2) * (kBE / 2);
 #pragma unroll
-    for (int j = 0; j < 2; ++j)
+    for (int j = 0; j < TL::kFr64; ++j)
       wmma::store_matrix_sync(cs + row * kBE + col + 16 * j, acc[0][j], kBE,
                               wmma::mem_row_major);
   }
@@ -466,7 +532,10 @@ __device__ void logits_item(const DecodeArgs& a, const EpilogueParams& p,
     const int t = t0 + r, e = e0 + ce;
     if (t < T && e < E) {
       float v = cs[i];
-      if constexpr (BT == 16) v += cs[16 * kBE + i];
+      if constexpr (BT == 16) {
+#pragma unroll
+        for (int q = 1; q < TL::kParts; ++q) v += cs[q * 16 * kBE + i];
+      }
       a.partial[(static_cast<int64_t>(split) * T + t) * E + e] = v;
     }
   }
@@ -479,9 +548,9 @@ template <int VPL, int SC>
 __device__ void reduce_and_route(const DecodeArgs& a, const EpilogueParams& p,
                                  int t_begin, int t_end, unsigned char* smem) {
   const int T = p.T, E = p.E;
-  float* lt = reinterpret_cast<float*>(smem);  // [kRows][E] logits
-  float* st = lt + kRows * E;                  // [kRows][E] scores
+  float* st = reinterpret_cast<float*>(smem);                  // scores
   uint32_t* kt = reinterpret_cast<uint32_t*>(st + kRows * E);  // keys
+  bool* chosen = reinterpret_cast<bool*>(kt + kRows * E);
   __shared__ int sflags[kMaxE];
   const bool want_flags = p.flags_host != nullptr;
   if (want_flags)
@@ -489,29 +558,38 @@ __device__ void reduce_and_route(const DecodeArgs& a, const EpilogueParams& p,
   const int64_t plane = static_cast<int64_t>(T) * E;
   const int n_split = a.n_split;
   for (int t0 = t_begin; t0 < t_end; t0 += kRows) {
-    const int rows = min(kRows, t_end - t0);
-    for (int i = threadIdx.x; i < rows * E; i += kThreads) {
-      const float* src = a.partial + static_cast<int64_t>(t0) * E + i;
-      float v[kMaxSplit];
-#pragma unroll
-      for (int s = 0; s < kMaxSplit; ++s)
-        v[s] = s < n_split ? __ldcg(src + s * plane) : 0.f;
+    const float* base = a.partial + static_cast<int64_t>(t0) * E;
+    // Fixed split order s = 0, 1, 2, ... (deterministic); unconditional
+    // groups keep 8 (then 4) loads in flight.
+    auto logit = [&](int i) {
+      const float* src = base + i;
       float acc = 0.f;
+      int s = 0;
+      for (; s + 8 <= n_split; s += 8) {
+        float v[8];
 #pragma unroll
-      for (int s = 0; s < kMaxSplit; ++s) acc += v[s];
-      lt[i] = acc;
-    }
-    __syncthreads();
-    const int warp = threadIdx.x >> 5;
-    if (warp < rows)
-      route_token<VPL, SC>(lt + warp * E, st + warp * E, kt + warp * E,
-                           t0 + warp, p, want_flags ? sflags : nullptr);
-    __syncthreads();
+        for (int j = 0; j < 8; ++j) v[j] = __ldcg(src + (s + j) * plane);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) acc += v[j];
+      }
+      for (; s + 4 <= n_split; s += 4) {
+        float v[4];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) v[j] = __ldcg(src + (s + j) * plane);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) acc += v[j];
+      }
+      for (; s < n_split; ++s) acc += __ldcg(src + s * plane);
+      return acc;
+    };
+    route_rows<VPL, SC>(logit, t0, min(kRows, t_end - t0), p, st, kt, chosen,
+                        want_flags ? sflags : nullptr);
   }
   // Host pre-zeroed the pinned flags; set the experts this CTA routed to.
   if (want_flags && t_begin < t_end)
     for (int e = threadIdx.x; e < E; e += kThreads)
       if (sflags[e]) p.flags_host[e] = true;
+  signal_done(p);
 }
 
 // T <= BT (one token tile): no grid barrier -- the last CTA to finish its
@@ -521,6 +599,23 @@ template <typename Tin, int BT, int VPL, int SC, bool kSingleTile>
 __global__ void __launch_bounds__(kThreads)
     fused_route_kernel(DecodeArgs a, EpilogueParams p) {
   extern __shared__ __align__(128) unsigned char smem[];
+  // Warm L2 with what phase 2 touches (counter / barrier words, bias) while
+  // phase 1 waits on the gate weight: after an L2 flush each of these would
+  // otherwise add a serial DRAM round trip to the critical path.
+  if (threadIdx.x < 32) {
+    if (threadIdx.x == 0)
+      asm volatile("prefetch.global.L2 [%0];" ::"l"(p.state));
+    if (p.bias != nullptr)
+      for (int e = threadIdx.x * 32; e < p.E; e += 32 * 32)
+        asm volatile("prefetch.global.L2 [%0];" ::"l"(p.bias + e));
+  }
+  // Phase 2 reads the bias from shared memory (loaded under phase 1).
+  __shared__ float sbias[kMaxE];
+  EpilogueParams q = p;
+  if (p.bias != nullptr) {
+    for (int e = threadIdx.x; e < p.E; e += kThreads) sbias[e] = p.bias[e];
+    q.bias = sbias;
+  }
   const int n_items = a.n_t * a.n_e * a.n_split;
   for (int item = blockIdx.x; item < n_items; item += gridDim.x)
     logits_item<Tin, BT>(a, p, item, smem);
@@ -533,13 +628,13 @@ __global__ void __launch_bounds__(kThreads)
     __syncthreads();
     if (!last) return;
     __threadfence();
-    reduce_and_route<VPL, SC>(a, p, 0, p.T, smem);
+    reduce_and_route<VPL, SC>(a, q, 0, p.T, smem);
     if (threadIdx.x == 0) p.state->tile_count = 0;
   } else {
     grid_barrier(p.state);
     const int tpc = (p.T + gridDim.x - 1) / gridDim.x;
     const int t_begin = blockIdx.x * tpc;
-    reduce_and_route<VPL, SC>(a, p, t_begin, min(p.T, t_begin + tpc), smem);
+    reduce_and_route<VPL, SC>(a, q, t_begin, min(p.T, t_begin + tpc), smem);
   }
 }
 
@@ -548,13 +643,15 @@ template <typename Tl, int VPL, int SC>
 __global__ void __launch_bounds__(256)
     route_logits_kernel(const Tl* __restrict__ logits, EpilogueParams p) {
   extern __shared__ __align__(16) unsigned char smem[];
-  const int warp = threadIdx.x >> 5;
-  const int t = blockIdx.x * (blockDim.x / 32) + warp;
-  float* st = reinterpret_cast<float*>(smem) + warp * 2 * p.E;
-  if (t < p.T)
-    route_token<VPL, SC>(logits + static_cast<int64_t>(t) * p.E, st,
-                         reinterpret_cast<uint32_t*>(st + p.E), t, p,
-                         p.flags_host != nullptr ? p.state->flags : nullptr);
+  float* st = reinterpret_cast<float*>(smem);
+  uint32_t* kt = reinterpret_cast<uint32_t*>(st + kWarps * p.E);
+  bool* chosen = reinterpret_cast<bool*>(kt + kWarps * p.E);
+  const int t0 = blockIdx.x * kWarps;
+  const Tl* base = logits + static_cast<int64_t>(t0) * p.E;
+  if (t0 < p.T)
+    route_rows<VPL, SC>([&](int i) { return to_float(base[i]); }, t0,
+                        min(kWarps, p.T - t0), p, st, kt, chosen,
+                        p.flags_host != nullptr ? p.state->flags : nullptr);
   publish_flags(p, gridDim.x);
 }
 
@@ -588,6 +685,195 @@ RouteState* state_for(int device, cudaStream_t stream) {
   return reinterpret_cast<RouteState*>(buf.data_ptr());
 }
 
+// Pinned active-flag slots, one ring per (device, stream). Every routing
+// launch stores its sequence number into a pinned word when its CTAs finish
+// (zero-copy), so the host can tell that the launch which last used a slot
+// has completed with a plain memory read -- no allocation, no CUDA event, no
+// API call per MoE layer. A slot is reused kFlagSlots calls later; the
+// returned flags stay valid until then (the dispatcher consumes them within
+// the same layer).
+constexpr int kFlagSlots = 256;
+struct FlagRing {
+  at::Tensor buf;  // pinned: [kFlagSlots * kMaxE] flags + 8 B done word
+  int64_t slot_seq[kFlagSlots] = {0};
+  int64_t issued = 0;
+  int next = 0;
+  volatile int64_t* done() {
+    return reinterpret_cast<volatile int64_t*>(
+        static_cast<uint8_t*>(buf.data_ptr()) +
+        static_cast<int64_t>(kFlagSlots) * kMaxE);
+  }
+  // Returns (slot, seq). Launch S is complete once done > S: a CTA of a
+  // later launch on the same stream has finished, so S has drained.
+  std::pair<int, int64_t> acquire() {
+    const int s = next;
+    next = (next + 1) % kFlagSlots;
+    while (slot_seq[s] != 0 && *done() <= slot_seq[s]) {
+      // The GPU is >= kFlagSlots routing launches behind: wait.
+    }
+    slot_seq[s] = ++issued;
+    return {s, issued};
+  }
+  // Per-slot views, created once per expert count (no per-call op).
+  int64_t views_e = -1;
+  std::vector<at::Tensor> views;
+  const at::Tensor& view(int s, int64_t E) {
+    if (views_e != E) {
+      views.clear();
+      for (int i = 0; i < kFlagSlots; ++i)
+        views.push_back(buf.narrow(0, static_cast<int64_t>(i) * kMaxE, E));
+      views_e = E;
+    }
+    return views[s];
+  }
+};
+
+FlagRing* flag_ring_for(int device, cudaStream_t stream) {
+  static std::mutex mu;
+  static std::unordered_map<StateKey, std::unique_ptr<FlagRing>, StateKeyHash>
+      rings;
+  std::lock_guard<std::mutex> lock(mu);
+  auto& r = rings[StateKey{device, stream}];
+  if (!r) {
+    r = std::make_unique<FlagRing>();
+    r->buf =
+        at::zeros({static_cast<int64_t>(kFlagSlots) * kMaxE + 64},
+                  at::TensorOptions().dtype(at::kBool).pinned_memory(true));
+  }
+  return r.get();
+}
+
+// Split-K partials: a grow-only fp32 buffer per (device, stream). Stream
+// order makes reuse safe; it is fully overwritten before it is read.
+float* scratch_for(int device, cudaStream_t stream, int64_t numel) {
+  static std::mutex mu;
+  static std::unordered_map<StateKey, at::Tensor, StateKeyHash> bufs;
+  std::lock_guard<std::mutex> lock(mu);
+  at::Tensor& buf = bufs[StateKey{device, stream}];
+  if (!buf.defined() || buf.numel() < numel) {
+    buf = at::empty(
+        {std::max<int64_t>(numel, 1 << 20)},
+        at::TensorOptions().dtype(at::kFloat).device(at::kCUDA, device));
+  }
+  return buf.data_ptr<float>();
+}
+
+// logits[T, E] = x[T, H] @ w[E, H]^T on tensor cores (fp32 accumulate) with
+// a cuBLASLt algorithm that does not split K: at::mm may pick split-K,
+// which adds a reduction kernel (a third launch per MoE layer).
+cudaDataType_t lt_type(at::ScalarType t) {
+  return t == at::kFloat      ? CUDA_R_32F
+         : t == at::kBFloat16 ? CUDA_R_16BF
+                              : CUDA_R_16F;
+}
+
+at::Tensor lt_logits(const at::Tensor& x, const at::Tensor& w,
+                     at::ScalarType out_dtype) {
+  const int64_t T = x.size(0), H = x.size(1), E = w.size(0);
+  at::Tensor out = at::empty({T, E}, x.options().dtype(out_dtype));
+  cublasLtHandle_t handle = at::cuda::getCurrentCUDABlasLtHandle();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+  struct Key {
+    int64_t T, H, E, ldx, ldw;
+    int in, out;
+    bool operator==(const Key& o) const {
+      return T == o.T && H == o.H && E == o.E && ldx == o.ldx && ldw == o.ldw &&
+             in == o.in && out == o.out;
+    }
+  };
+  struct KeyHash {
+    size_t operator()(const Key& k) const {
+      return std::hash<int64_t>()(k.T * 1000003 + k.H * 101 + k.E) ^
+             (k.in * 7 + k.out);
+    }
+  };
+  struct Plan {
+    cublasLtMatmulDesc_t op = nullptr;
+    cublasLtMatrixLayout_t a = nullptr, b = nullptr, c = nullptr;
+    cublasLtMatmulAlgo_t algo;
+    size_t ws = 0;
+  };
+  static std::mutex mu;
+  static std::unordered_map<Key, Plan, KeyHash> plans;
+  const Key key{T,
+                H,
+                E,
+                x.stride(0),
+                w.stride(0),
+                static_cast<int>(x.scalar_type()),
+                static_cast<int>(out_dtype)};
+  Plan plan;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = plans.find(key);
+    if (it != plans.end()) plan = it->second;
+  }
+  const cudaDataType_t tin = lt_type(x.scalar_type());
+  const cudaDataType_t tout = lt_type(out_dtype);
+  if (plan.op == nullptr) {
+    // Column-major view: C^T[E, T] = W[E, H] (op T on the [H, E] buffer)
+    // times X^T[H, T].
+    TORCH_CUDABLAS_CHECK(
+        cublasLtMatmulDescCreate(&plan.op, CUBLAS_COMPUTE_32F, CUDA_R_32F));
+    const cublasOperation_t ta = CUBLAS_OP_T, tb = CUBLAS_OP_N;
+    TORCH_CUDABLAS_CHECK(cublasLtMatmulDescSetAttribute(
+        plan.op, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof(ta)));
+    TORCH_CUDABLAS_CHECK(cublasLtMatmulDescSetAttribute(
+        plan.op, CUBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof(tb)));
+    TORCH_CUDABLAS_CHECK(
+        cublasLtMatrixLayoutCreate(&plan.a, tin, H, E, w.stride(0)));
+    TORCH_CUDABLAS_CHECK(
+        cublasLtMatrixLayoutCreate(&plan.b, tin, H, T, x.stride(0)));
+    TORCH_CUDABLAS_CHECK(cublasLtMatrixLayoutCreate(&plan.c, tout, E, T, E));
+    cublasLtMatmulPreference_t pref;
+    TORCH_CUDABLAS_CHECK(cublasLtMatmulPreferenceCreate(&pref));
+    const size_t max_ws = 32u << 20;
+    TORCH_CUDABLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(
+        pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
+        sizeof(max_ws)));
+    cublasLtMatmulHeuristicResult_t res[16];
+    int n = 0;
+    TORCH_CUDABLAS_CHECK(cublasLtMatmulAlgoGetHeuristic(
+        handle, plan.op, plan.a, plan.b, plan.c, plan.c, pref, 16, res, &n));
+    cublasLtMatmulPreferenceDestroy(pref);
+    // Take the best candidate that runs unsplit: force split-K = 1 and no
+    // reduction scheme, keep it if cuBLASLt accepts that configuration.
+    int pick = -1;
+    for (int i = 0; i < n && pick < 0; ++i) {
+      if (res[i].state != CUBLAS_STATUS_SUCCESS) continue;
+      const uint32_t one = 1, none = CUBLASLT_REDUCTION_SCHEME_NONE;
+      cublasLtMatmulAlgoConfigSetAttribute(
+          &res[i].algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &one, sizeof(one));
+      cublasLtMatmulAlgoConfigSetAttribute(
+          &res[i].algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &none,
+          sizeof(none));
+      cublasLtMatmulHeuristicResult_t check;
+      if (cublasLtMatmulAlgoCheck(handle, plan.op, plan.a, plan.b, plan.c,
+                                  plan.c, &res[i].algo,
+                                  &check) == CUBLAS_STATUS_SUCCESS &&
+          check.workspaceSize <= max_ws) {
+        res[i].workspaceSize = check.workspaceSize;
+        pick = i;
+      }
+    }
+    TORCH_CHECK(pick >= 0, "fused_route: no cuBLASLt algorithm for logits");
+    plan.algo = res[pick].algo;
+    plan.ws = res[pick].workspaceSize;
+    std::lock_guard<std::mutex> lock(mu);
+    plans.emplace(key, plan);
+  }
+  at::Tensor ws;
+  if (plan.ws > 0)
+    ws = at::empty({static_cast<int64_t>(plan.ws)},
+                   x.options().dtype(at::kByte));
+  const float alpha = 1.f, beta = 0.f;
+  TORCH_CUDABLAS_CHECK(cublasLtMatmul(
+      handle, plan.op, &alpha, w.data_ptr(), plan.a, x.data_ptr(), plan.b,
+      &beta, out.data_ptr(), plan.c, out.data_ptr(), plan.c, &plan.algo,
+      plan.ws > 0 ? ws.data_ptr() : nullptr, plan.ws, stream));
+  return out;
+}
+
 int dtype_code(at::ScalarType t) {
   switch (t) {
     case at::kFloat:
@@ -606,7 +892,8 @@ void launch_logits_route(const at::Tensor& logits, const EpilogueParams& p,
                          cudaStream_t stream) {
   constexpr int warps = 8;
   dim3 grid((p.T + warps - 1) / warps);
-  const size_t smem = static_cast<size_t>(warps) * 2 * p.E * sizeof(float);
+  const size_t smem =
+      static_cast<size_t>(warps) * p.E * (2 * sizeof(float) + 1);
   switch (logits.scalar_type()) {
     case at::kFloat:
       route_logits_kernel<float, VPL, SC>
@@ -653,18 +940,10 @@ void launch_fused(const at::Tensor& x, const at::Tensor& w, int H,
   const int n_items = n_t * n_e * split;
   const int grid = std::min(n_items, cap);
 
-  auto partial = at::empty({static_cast<int64_t>(split) * T * E},
-                           x.options().dtype(at::kFloat));
-  DecodeArgs a{x.data_ptr(),
-               x.stride(0),
-               w.data_ptr(),
-               w.stride(0),
-               H,
-               n_t,
-               n_e,
-               split,
-               h_per_split,
-               partial.data_ptr<float>()};
+  float* partial =
+      scratch_for(device, stream, static_cast<int64_t>(split) * T * E);
+  DecodeArgs a{x.data_ptr(), x.stride(0), w.data_ptr(), w.stride(0), H,
+               n_t,          n_e,         split,        h_per_split, partial};
   if constexpr (kSingleTile) {
     kernel<<<grid, kThreads, smem, stream>>>(a, p);
   } else {
@@ -681,24 +960,19 @@ void launch_fused_dispatch(const at::Tensor& x, const at::Tensor& w, int H,
                            int device) {
   const int T = p.T;
   if (x.scalar_type() == at::kBFloat16) {
-    if (T * p.E <= kSingleTileMaxElems)
+    if (T <= kRows && T * p.E <= kSingleTileMaxElems)
       launch_fused<__nv_bfloat16, 16, VPL, SC, true>(x, w, H, p, stream,
                                                      device);
-    else if (T <= 16)
-      launch_fused<__nv_bfloat16, 16, VPL, SC, false>(x, w, H, p, stream,
-                                                      device);
-    else if (T <= 64)
+    else if (T < kBT64MinTokens)
       launch_fused<__nv_bfloat16, 16, VPL, SC, false>(x, w, H, p, stream,
                                                       device);
     else
       launch_fused<__nv_bfloat16, 64, VPL, SC, false>(x, w, H, p, stream,
                                                       device);
   } else {
-    if (T * p.E <= kSingleTileMaxElems)
+    if (T <= kRows && T * p.E <= kSingleTileMaxElems)
       launch_fused<__half, 16, VPL, SC, true>(x, w, H, p, stream, device);
-    else if (T <= 16)
-      launch_fused<__half, 16, VPL, SC, false>(x, w, H, p, stream, device);
-    else if (T <= 64)
+    else if (T < kBT64MinTokens)
       launch_fused<__half, 16, VPL, SC, false>(x, w, H, p, stream, device);
     else
       launch_fused<__half, 64, VPL, SC, false>(x, w, H, p, stream, device);
@@ -739,6 +1013,30 @@ struct LogitsL {
   }
 };
 
+// Flags produced together with a mask on this thread, for the executor
+// (take_active_flags): identity of the mask, held weakly.
+thread_local c10::weak_intrusive_ptr<c10::TensorImpl> t_last_mask{
+    c10::intrusive_ptr<c10::TensorImpl>()};
+thread_local at::Tensor t_last_flags;
+
+void remember_flags(const at::Tensor& mask, const at::Tensor& flags) {
+  t_last_mask =
+      c10::weak_intrusive_ptr<c10::TensorImpl>(mask.getIntrusivePtr());
+  t_last_flags = flags;
+}
+
+c10::optional<at::Tensor> take_active_flags(const at::Tensor& mask) {
+  if (!t_last_flags.defined()) return c10::nullopt;
+  auto held = t_last_mask.lock();
+  at::Tensor flags = std::move(t_last_flags);
+  t_last_flags = at::Tensor();
+  t_last_mask = c10::weak_intrusive_ptr<c10::TensorImpl>(
+      c10::intrusive_ptr<c10::TensorImpl>());
+  if (held && mask.defined() && held.get() == mask.unsafeGetTensorImpl())
+    return flags;
+  return c10::nullopt;
+}
+
 // Returns [topk_ids, topk_weights, router_mask, routing_weights, logits,
 // active_flags] (unrequested outputs are None), or an empty list when the
 // shape / dtype / alignment is outside what this kernel supports.
@@ -748,7 +1046,7 @@ std::vector<at::Tensor> fused_route(
     int64_t topk_group, bool renormalize, double scaling, double eps,
     bool round_logits, at::ScalarType weights_dtype,
     at::ScalarType logits_dtype, bool return_logits, bool dense,
-    bool active_flags, int64_t gemm_min_tokens) {
+    bool active_flags, bool compact, int64_t gemm_min_tokens) {
   TORCH_CHECK(x_in.is_cuda() && w_in.is_cuda(), "fused_route: CUDA tensors");
   TORCH_CHECK(x_in.dim() == 2 && w_in.dim() == 2, "fused_route: 2-D inputs");
   const int64_t T = x_in.size(0), H = x_in.size(1), E = w_in.size(0);
@@ -769,31 +1067,70 @@ std::vector<at::Tensor> fused_route(
       reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0 &&
       reinterpret_cast<uintptr_t>(w.data_ptr()) % 16 == 0;
   if (!supported) return {};
-  const at::cuda::CUDAGuard guard(x.device());
+  const int device = x.get_device();
+  c10::cuda::OptionalCUDAGuard guard;
+  if (c10::cuda::current_device() != device) guard.set_index(device);
+  const auto cstream = at::cuda::getCurrentCUDAStream(device);
+  cudaStream_t stream = cstream.stream();
 
+  // One device allocation for every output (this runs once per MoE layer
+  // per decode step; each allocator round trip is host latency).
   const auto opts = x.options();
-  auto ids = at::empty({T, top_k}, opts.dtype(at::kInt));
-  auto tw = at::empty({T, top_k}, opts.dtype(at::kFloat));
-  at::Tensor mask, dw, logits_out, bias, flags;
-  if (dense) {
-    mask = at::empty({T, E}, opts.dtype(at::kBool));
-    dw = at::empty({T, E}, opts.dtype(weights_dtype));
+  const int64_t wsz = c10::elementSize(weights_dtype);
+  const int64_t lsz = c10::elementSize(logits_dtype);
+  auto align = [](int64_t b) { return (b + 255) / 256 * 256; };
+  const int64_t b_dw = dense ? align(T * E * wsz) : 0;
+  const int64_t b_lg = return_logits ? align(T * E * lsz) : 0;
+  const int64_t b_ids = compact ? align(T * top_k * 4) : 0;
+  const int64_t b_tw = compact ? align(T * top_k * 4) : 0;
+  const int64_t b_mask = dense ? align(T * E) : 0;
+  const int64_t total = b_dw + b_lg + b_ids + b_tw + b_mask;
+  at::Tensor ids, tw, mask, dw, logits_out, bias, flags;
+  if (total > 0) {
+    const at::Tensor buf = at::empty({total}, opts.dtype(at::kByte));
+    auto* base = static_cast<uint8_t*>(buf.data_ptr());
+    const c10::Storage keep = buf.storage();
+    auto view = [&](int64_t off, at::IntArrayRef sizes, at::ScalarType dt) {
+      return at::from_blob(base + off, sizes, [keep](void*) {}, opts.dtype(dt));
+    };
+    int64_t off = 0;
+    if (dense) dw = view(off, {T, E}, weights_dtype), off += b_dw;
+    if (return_logits)
+      logits_out = view(off, {T, E}, logits_dtype), off += b_lg;
+    if (compact) {
+      ids = view(off, {T, top_k}, at::kInt), off += b_ids;
+      tw = view(off, {T, top_k}, at::kFloat), off += b_tw;
+    }
+    if (dense) mask = view(off, {T, E}, at::kBool);
   }
-  if (return_logits) logits_out = at::empty({T, E}, opts.dtype(logits_dtype));
   if (bias_in.has_value() && bias_in->defined()) {
-    bias = bias_in->to(x.device(), at::kFloat).contiguous();
+    const at::Tensor& b = *bias_in;
+    bias = (b.is_cuda() && b.get_device() == device &&
+            b.scalar_type() == at::kFloat && b.is_contiguous())
+               ? b
+               : b.to(x.device(), at::kFloat).contiguous();
     TORCH_CHECK(bias.numel() == E, "fused_route: bias must have E elements");
   }
-  const int device = x.get_device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device).stream();
+  volatile int64_t* done_word = nullptr;
+  int64_t seq = 0;
   if (active_flags) {
-    flags = at::empty({E},
-                      at::TensorOptions().dtype(at::kBool).pinned_memory(true));
-    // The kernel writes this pinned block: keep it from being recycled
-    // until the stream has passed this point.
-    at::getHostAllocator(at::kCUDA)->record_event(
-        flags.data_ptr(), flags.storage().data_ptr().get_context(),
-        at::cuda::getCurrentCUDAStream(device).unwrap());
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    C10_CUDA_CHECK(cudaStreamIsCapturing(stream, &capture));
+    if (capture == cudaStreamCaptureStatusNone) {
+      FlagRing* ring = flag_ring_for(device, stream);
+      const auto slot = ring->acquire();
+      flags = ring->view(slot.first, E);
+      done_word = ring->done();
+      seq = slot.second;
+    } else {
+      flags = at::empty(
+          {E}, at::TensorOptions().dtype(at::kBool).pinned_memory(true));
+      // The kernel writes this pinned block: keep it from being recycled
+      // until the stream has passed this point.
+      at::getHostAllocator(at::kCUDA)->record_event(
+          flags.data_ptr(), flags.storage().data_ptr().get_context(),
+          cstream.unwrap());
+    }
     // Zeroed on the host; the routing kernel only sets flags.
     std::memset(flags.data_ptr(), 0, E);
   }
@@ -810,8 +1147,8 @@ std::vector<at::Tensor> fused_route(
   p.scale = static_cast<float>(scaling);
   p.eps = static_cast<float>(eps);
   p.round_logits = round_logits;
-  p.ids = ids.data_ptr<int32_t>();
-  p.tw = tw.data_ptr<float>();
+  p.ids = compact ? ids.data_ptr<int32_t>() : nullptr;
+  p.tw = compact ? tw.data_ptr<float>() : nullptr;
   p.mask = dense ? mask.data_ptr<bool>() : nullptr;
   p.dw = dense ? dw.data_ptr() : nullptr;
   p.dw_dtype = dense ? dtype_code(weights_dtype) : 0;
@@ -819,20 +1156,81 @@ std::vector<at::Tensor> fused_route(
   p.logits_dtype = return_logits ? dtype_code(logits_dtype) : 0;
   p.state = state_for(device, stream);
   p.flags_host = active_flags ? flags.data_ptr<bool>() : nullptr;
+  p.done_word = const_cast<int64_t*>(done_word);
+  p.seq = seq;
 
   const int sc = static_cast<int>(scoring);
-  if (T > std::min<int64_t>(gemm_min_tokens - 1, kFusedMaxTokens)) {
-    // Tensor-core logits (cuBLAS); fp32 out unless the router rounds.
+  // gemm_min_tokens <= 0: automatic. The single fused launch wins while its
+  // split-K GEMM keeps every SM busy (decode, and small prefill chunks);
+  // beyond that cuBLASLt's GEMM plus the routing launch is faster.
+  const bool use_gemm =
+      T > kFusedMaxTokens ||
+      (gemm_min_tokens > 0 ? T >= gemm_min_tokens
+                           : (T > 256 && T * E > kFusedMaxElems));
+  if (use_gemm) {
+    // Tensor-core logits (cuBLASLt, no split-K so the layer stays at two
+    // launches); fp32 out unless the router rounds to the model dtype.
     at::Tensor logits =
-        round_logits ? at::mm(x, w.t()) : at::mm(x, w.t(), at::kFloat);
+        lt_logits(x, w, round_logits ? x.scalar_type() : at::kFloat);
     dispatch_vpl_sc<LogitsL>(static_cast<int>(E), sc, logits, p, stream);
   } else {
     dispatch_vpl_sc<FusedL>(static_cast<int>(E), sc, x, w, static_cast<int>(H),
                             p, stream, device);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if (active_flags && dense) remember_flags(mask, flags);
   return {ids, tw, mask, dw, logits_out, flags};
 }
+
+// A router bound to one gate: per-call work is a single-tensor call (the
+// static arguments are converted once). One per MoE layer in the wrappers.
+class Router {
+ public:
+  Router(at::Tensor weight, int64_t top_k, int64_t scoring,
+         c10::optional<at::Tensor> bias, int64_t n_group, int64_t topk_group,
+         bool renormalize, double scaling, double eps, bool round_logits,
+         at::ScalarType weights_dtype, at::ScalarType logits_dtype,
+         bool return_logits, bool dense, bool active_flags, bool compact,
+         int64_t gemm_min_tokens)
+      : w_(weight.stride(1) == 1 ? weight : weight.contiguous()),
+        top_k_(top_k),
+        scoring_(scoring),
+        n_group_(n_group),
+        topk_group_(topk_group),
+        renormalize_(renormalize),
+        scaling_(scaling),
+        eps_(eps),
+        round_logits_(round_logits),
+        weights_dtype_(weights_dtype),
+        logits_dtype_(logits_dtype),
+        return_logits_(return_logits),
+        dense_(dense),
+        active_flags_(active_flags),
+        compact_(compact),
+        gemm_min_tokens_(gemm_min_tokens) {
+    if (bias.has_value() && bias->defined())
+      bias_ = bias->to(w_.device(), at::kFloat).contiguous();
+  }
+  std::vector<at::Tensor> operator()(const at::Tensor& x) const {
+    return fused_route(
+        x, w_, top_k_, scoring_,
+        bias_.defined() ? c10::optional<at::Tensor>(bias_) : c10::nullopt,
+        n_group_, topk_group_, renormalize_, scaling_, eps_, round_logits_,
+        weights_dtype_, logits_dtype_, return_logits_, dense_, active_flags_,
+        compact_, gemm_min_tokens_);
+  }
+  const at::Tensor& weight() const { return w_; }
+
+ private:
+  at::Tensor w_, bias_;
+  int64_t top_k_, scoring_, n_group_, topk_group_;
+  bool renormalize_;
+  double scaling_, eps_;
+  bool round_logits_;
+  at::ScalarType weights_dtype_, logits_dtype_;
+  bool return_logits_, dense_, active_flags_, compact_;
+  int64_t gemm_min_tokens_;
+};
 
 }  // namespace moe_router
 
@@ -844,5 +1242,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("topk_group"), py::arg("renormalize"), py::arg("scaling"),
         py::arg("eps"), py::arg("round_logits"), py::arg("weights_dtype"),
         py::arg("logits_dtype"), py::arg("return_logits"), py::arg("dense"),
-        py::arg("active_flags"), py::arg("gemm_min_tokens"));
+        py::arg("active_flags"), py::arg("compact"),
+        py::arg("gemm_min_tokens"));
+  m.def("take_active_flags", &moe_router::take_active_flags,
+        "Pinned active-expert flags produced with this mask by the last "
+        "routing call on this thread (consumed), or None");
+  py::class_<moe_router::Router>(m, "Router")
+      .def(
+          py::init<at::Tensor, int64_t, int64_t, c10::optional<at::Tensor>,
+                   int64_t, int64_t, bool, double, double, bool, at::ScalarType,
+                   at::ScalarType, bool, bool, bool, bool, int64_t>(),
+          py::arg("weight"), py::arg("top_k"), py::arg("scoring"),
+          py::arg("bias"), py::arg("n_group"), py::arg("topk_group"),
+          py::arg("renormalize"), py::arg("scaling"), py::arg("eps"),
+          py::arg("round_logits"), py::arg("weights_dtype"),
+          py::arg("logits_dtype"), py::arg("return_logits"), py::arg("dense"),
+          py::arg("active_flags"), py::arg("compact"),
+          py::arg("gemm_min_tokens"))
+      .def("__call__", &moe_router::Router::operator())
+      .def_property_readonly("weight", &moe_router::Router::weight);
 }
