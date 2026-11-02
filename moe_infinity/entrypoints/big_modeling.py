@@ -337,10 +337,10 @@ class MoE:
                 trust_remote_code=True,
             )
         from moe_infinity.kernel.linear_attention import (
-            check_linear_attention_kernels,
+            enable_linear_attention_kernels,
         )
 
-        check_linear_attention_kernels(self.model)
+        enable_linear_attention_kernels(self.model)
         mla_cache = native_components.get("mla_cache")
         if mla_cache is not None:
             from moe_store.wrappers.deepseek_mla_attention import (
