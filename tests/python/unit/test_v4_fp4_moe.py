@@ -197,3 +197,37 @@ def test_single_expert_vs_bf16_dequant_path():
     # vs. the BF16-activation dequant path: only FP8 activation rounding differs
     bf16 = ext.v4_expert_forward(*args)
     assert _rel(out, bf16) < 0.1
+
+
+@pytest.mark.parametrize("T", [1, 3, 300])  # decode kernel, decode, grouped
+def test_moe_no_host_sync_and_cuda_graph_replay(T):
+    """No host synchronisation inside the op, and the decode kernel's
+    self-resetting counters survive repeated CUDA-graph replays."""
+    ext = _ext()
+    gen = torch.Generator().manual_seed(T)
+    E, H, I, k = 16, 512, 256, 6
+    experts = [make_expert(H, I, gen) for _ in range(E)]
+    table = table_of(experts)
+    x = torch.randn(T, H, generator=gen).bfloat16().cuda()
+    ids = torch.rand(T, E, generator=gen).topk(k, -1).indices.cuda()
+    wts = torch.rand(T, k, generator=gen).cuda()
+    ref = ext.v4_moe_forward(x, ids, wts, table, I, 10.0)  # warm-up
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        eager = ext.v4_moe_forward(x, ids, wts, table, I, 10.0)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        ext.v4_moe_forward(x, ids, wts, table, I, 10.0)
+    torch.cuda.current_stream().wait_stream(s)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = ext.v4_moe_forward(x, ids, wts, table, I, 10.0)
+    for _ in range(3):
+        g.replay()
+        torch.cuda.synchronize()
+        assert torch.equal(out, ref)
+    assert torch.equal(eager, ref)
