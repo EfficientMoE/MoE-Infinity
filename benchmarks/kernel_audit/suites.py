@@ -8,7 +8,9 @@ Impl names:
   production paths   cutlass_fused, fp8_prod, gptoss_resident, gptoss_offload,
                      v4_fp4_prod, sdpa_shim, hf_eager, paged_v1,
                      sdpa_fallback, hf_eager_decode, router_*, gdn_torch,
-                     kv_write_loop
+                     kv_write_loop, moe_gqa, moe_gqa_swa, moe_gqa_masked,
+                     moe_gqa_decode, moe_gqa_masked_decode (HF models
+                     without a paged shim, runtime/hf_attention.py)
   references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode
 """
 
@@ -617,6 +619,38 @@ def _hf_eager_prefill_builder(T, H, KVH, dqk, dv, sinks):
     return build
 
 
+def _moe_gqa_call(q, k, v, mask, scale, sinks, window=None):
+    """Production non-paged HF attention (runtime/hf_attention.py)."""
+    from moe_infinity.runtime.hf_attention import moe_gqa_attention_forward
+
+    mod = torch.nn.Module()
+    return lambda: moe_gqa_attention_forward(
+        mod, q, k, v, mask, scaling=scale, sliding_window=window, s_aux=sinks
+    )
+
+
+def _moe_gqa_prefill_builder(T, H, KVH, dqk, dv, sinks, window, masked):
+    def build():
+        q = torch.randn(1, H, T, dqk, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(1, KVH, T, dqk, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(1, KVH, T, dv, device="cuda", dtype=torch.bfloat16)
+        snk = (
+            torch.randn(H, device="cuda", dtype=torch.bfloat16)
+            if sinks
+            else None
+        )
+        mask = (
+            torch.ones(T, T, device="cuda", dtype=torch.bool).tril_()[
+                None, None
+            ]
+            if masked
+            else None
+        )
+        return _moe_gqa_call(q, k, v, mask, dqk**-0.5, snk, window)
+
+    return build
+
+
 def _attn_dims(m: MoEModel):
     a = m.attn
     if a.kind == "mla_dsa":  # HF eager MLA: per-head K/V after kv_b_proj
@@ -679,6 +713,46 @@ def attn_prefill_cases(model_keys: list[str] | None = None) -> list[Case]:
                 if need > 0.85 * 96e9:
                     c.skip = f"OOM: eager scores need ~{need / 1e9:.0f} GB"
                 out.append(c)
+                if dqk == dv and dqk <= 256:
+                    out.append(
+                        Case(
+                            f"{key}|{lbl}|moe_gqa",
+                            impl="moe_gqa",
+                            build=_moe_gqa_prefill_builder(
+                                T, H, KVH, dqk, dv, m.attn.sinks, None, False
+                            ),
+                            **common,
+                        )
+                    )
+                if m.attn.window and dqk == dv:
+                    W = m.attn.window
+                    swa = dict(common)
+                    swa["flops"] = 2.0 * H * (dqk + dv) * (T * W - W * W / 2)
+                    swa["layers"] = m.attn.swa_layers
+                    out.append(
+                        Case(
+                            f"{key}|{lbl}|moe_gqa_swa",
+                            impl="moe_gqa_swa",
+                            build=_moe_gqa_prefill_builder(
+                                T, H, KVH, dqk, dv, m.attn.sinks, W, False
+                            ),
+                            **swa,
+                        )
+                    )
+                if m.attn.kind in ("mla_dsa", "minimax_sparse") and dqk == dv:
+                    # Sparse layers: dense SDPA under the [1, 1, T, T] index
+                    # mask HF builds (sparse kernels: #269 / out of scope).
+                    c = Case(
+                        f"{key}|{lbl}|moe_gqa_masked",
+                        impl="moe_gqa_masked",
+                        build=_moe_gqa_prefill_builder(
+                            T, H, KVH, dqk, dv, False, None, True
+                        ),
+                        **common,
+                    )
+                    if T > 51200:
+                        c.skip = "dense [T, T] index mask (> 40 GB)"
+                    out.append(c)
             if dqk == dv and dqk <= 256:
                 out.append(
                     Case(
@@ -783,6 +857,24 @@ def _hf_eager_decode_builder(B, L, H, KVH, dqk, dv, sinks):
     return build
 
 
+def _moe_gqa_decode_builder(B, L, H, KVH, dqk, dv, sinks, masked):
+    """runtime/hf_attention.py over a DynamicCache (contiguous [B, KVH, L, D])."""
+
+    def build():
+        q = torch.randn(B, H, 1, dqk, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(B, KVH, L, dqk, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(B, KVH, L, dv, device="cuda", dtype=torch.bfloat16)
+        snk = (
+            torch.randn(H, device="cuda", dtype=torch.bfloat16)
+            if sinks
+            else None
+        )
+        mask = torch.rand(B, 1, 1, L, device="cuda") > 0.5 if masked else None
+        return _moe_gqa_call(q, k, v, mask, dqk**-0.5, snk)
+
+    return build
+
+
 # Production paged decode is extremely slow; sample a few points only.
 _PAGED_POINTS = {(1, "1K"), (1, "2K"), (16, "1K"), (1, "9K")}
 _FALLBACK_POINTS = {
@@ -852,6 +944,28 @@ def attn_decode_cases(model_keys: list[str] | None = None) -> list[Case]:
                             **common,
                         )
                     )
+                    out.append(
+                        Case(
+                            f"{key}|b{B}@{lbl}|moe_gqa_decode",
+                            impl="moe_gqa_decode",
+                            build=_moe_gqa_decode_builder(
+                                B, L, H, KVH, dqk, dv, m.attn.sinks, False
+                            ),
+                            **common,
+                        )
+                    )
+                    if m.attn.kind in ("mla_dsa", "minimax_sparse"):
+                        # Sparse layers pass an explicit [B, 1, 1, L] mask.
+                        out.append(
+                            Case(
+                                f"{key}|b{B}@{lbl}|moe_gqa_masked_decode",
+                                impl="moe_gqa_masked_decode",
+                                build=_moe_gqa_decode_builder(
+                                    B, L, H, KVH, dqk, dv, False, True
+                                ),
+                                **common,
+                            )
+                        )
                 if dqk == dv and dqk in (64, 128):
                     out.append(
                         Case(
