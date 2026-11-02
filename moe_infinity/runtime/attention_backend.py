@@ -695,6 +695,24 @@ class PagedAttentionBackend:
         v_src = value.to(device=self.device, dtype=v_store.dtype)
         slots = slot_mapping.to(device=self.device, dtype=torch.long)
 
+        if (
+            self.storage is not None
+            and k_src.is_cuda
+            and k_src.device == self.storage.spec.device
+        ):
+            # Storage-bound backends serve the CUDA-graph decode path: one
+            # launch per layer, no host sync, so the write can be captured.
+            from moe_infinity.kernel.paged_kv_write import paged_kv_write_
+
+            paged_kv_write_(
+                self.storage,
+                layer_idx=layer_idx,
+                key=k_src.contiguous(),
+                value=v_src.contiguous(),
+                slot_mapping=slots,
+            )
+            return
+
         for i in range(num_tokens):
             slot = int(slots[i].item())
             if slot < 0:
