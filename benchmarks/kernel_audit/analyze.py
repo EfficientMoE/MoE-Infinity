@@ -16,8 +16,8 @@ from benchmarks.kernel_audit.common import RESULTS_DIR
 # RTX PRO 6000 Blackwell Max-Q datasheet values (188 SMs, 2280 MHz boost).
 SPEC = {"bf16": 438.9e12, "fp8": 877.8e12, "fp4": 1755.6e12, "dram": 1792e9}
 
-# Compute precision of each impl's MMA (production paths dequantize to BF16).
-IMPL_PREC = defaultdict(lambda: "bf16")
+# Compute precision of each impl's MMA (dequantizing paths run BF16 MMA).
+IMPL_PREC = defaultdict(lambda: "bf16", {"fp8_native": "fp8"})
 
 SAT = 0.80  # "saturated" threshold (fraction of ceiling)
 

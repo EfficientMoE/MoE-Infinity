@@ -5,10 +5,11 @@ issues the same kernels MoE-Infinity issues for that op on sm_120
 (torch 2.11 / cu130, no flash_attn / flashinfer / fla installed).
 
 Impl names:
-  production paths   cutlass_fused, fp8_prod, gptoss_resident, gptoss_offload,
+  production paths   cutlass_fused, fp8_native, gptoss_resident, gptoss_offload,
                      v4_fp4_prod, sdpa_shim, hf_eager, paged_v1,
                      sdpa_fallback, hf_eager_decode, router_*, gdn_torch,
                      kv_write_loop
+  previous paths     fp8_prod (per-call FP8 -> BF16 dequant + CUTLASS)
   references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode
 """
 
@@ -139,6 +140,32 @@ def _fp8_prod_builder(M: int, H: int, I: int):
     return build
 
 
+def _fp8_native_builder(M: int, H: int, I: int):
+    """Native FP8 experts (#310): block-scaled GEMV (M <= 8) or CUTLASS
+    sm_120 blockwise FP8 GEMM, reading the e4m3 weights once."""
+
+    def build():
+        from benchmarks.kernel_audit.ext import load
+
+        ext = load()
+        x = _rand(M, H, scale=1.0)
+        shapes = ((I, H), (I, H), (H, I))
+        w = [
+            torch.randint(0, 120, s, device="cuda", dtype=torch.uint8)
+            for s in shapes
+        ]
+        sc = [
+            torch.rand(-(-s[0] // 128), -(-s[1] // 128), device="cuda")
+            for s in shapes
+        ]
+        out = torch.empty(M, H, device="cuda", dtype=torch.bfloat16)
+        return lambda: ext.fused_fp8_moe_ffn_into(
+            x, w[0], sc[0], w[1], sc[1], w[2], sc[2], out
+        )
+
+    return build
+
+
 def _mxfp4_weights(H: int, I: int):
     gu_packed = torch.randint(
         0, 255, (2 * I, H // 2), device="cuda", dtype=torch.uint8
@@ -254,6 +281,7 @@ _W_BYTES = {
     "cublas_ref": BF16,
     "gptoss_bf16cached": BF16,
     "fp8_prod": 1 + 4 / (128 * 128),
+    "fp8_native": 1 + 4 / (128 * 128),
     "gptoss_resident": 0.5 + 1 / 32,
     "gptoss_offload": 0.5 + 1 / 32,
     "v4_fp4_prod": 0.5 + 1 / 32,
@@ -273,6 +301,7 @@ def _expert_impls(m: MoEModel):
         ]
     impls = []
     if m.expert_dtype.startswith("fp8"):
+        impls.append(("fp8_native", _fp8_native_builder))
         impls.append(("fp8_prod", _fp8_prod_builder))
     if m.expert_dtype.startswith("fp4"):
         impls.append(("v4_fp4_prod", _v4_fp4_builder))
