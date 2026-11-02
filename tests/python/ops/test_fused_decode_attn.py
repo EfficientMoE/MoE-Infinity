@@ -116,7 +116,7 @@ def _reference_decode_attention(
 @pytest.mark.parametrize("seq_len", [32, 128, 512, 2048])
 @pytest.mark.parametrize("num_heads", [32])
 @pytest.mark.parametrize("num_kv_heads", [8, 32])
-@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("head_dim", [80, 128, 256])
 @pytest.mark.parametrize("block_size", [16])
 def test_fused_decode_attention_matches_reference(
     batch: int,
@@ -171,6 +171,75 @@ def test_fused_decode_attention_matches_reference(
         reference.float(),
         atol=BF16_ATOL,
         rtol=BF16_RTOL,
+    )
+
+
+@requires_cuda
+@requires_triton
+def test_fused_decode_attention_ragged_seq_lens() -> None:
+    from moe_infinity.kernel.fused_decode_attn import fused_decode_attention
+
+    torch.manual_seed(5)
+    device = torch.device("cuda")
+    batch, num_heads, num_kv_heads, head_dim, block_size = 4, 32, 4, 128, 16
+    key_cache, value_cache, block_tables, _ = _make_paged_kv(
+        batch=batch,
+        seq_len=4096,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        block_size=block_size,
+        device=device,
+    )
+    seq_lens = torch.tensor([1, 4096, 17, 1000], device=device).int()
+    query = torch.randn(batch, 1, num_heads, head_dim, device=device)
+    query = query.to(torch.bfloat16)
+    scale = head_dim**-0.5
+    output = fused_decode_attention(
+        query, key_cache, value_cache, block_tables, seq_lens, scale
+    )
+    reference = _reference_decode_attention(
+        query, key_cache, value_cache, block_tables, seq_lens, scale
+    )
+    torch.testing.assert_close(
+        output.float(), reference.float(), atol=BF16_ATOL, rtol=BF16_RTOL
+    )
+
+
+@requires_cuda
+@requires_triton
+def test_fused_decode_attention_kv_pool_over_2pow31_elements() -> None:
+    """#300: offsets into a KV pool of more than 2**31 elements used to be
+    computed in 32 bits and fault with an illegal memory access."""
+    from moe_infinity.kernel.fused_decode_attn import fused_decode_attention
+
+    num_kv_heads, head_dim, block_size = 8, 128, 16
+    per_block = block_size * num_kv_heads * head_dim
+    num_blocks = (1 << 31) // per_block + 64
+    free, _ = torch.cuda.mem_get_info()
+    if free < 2 * num_blocks * per_block * 2 + (2 << 30):
+        pytest.skip("not enough GPU memory for a >2**31-element KV pool")
+    device = torch.device("cuda")
+    shape = (num_blocks, block_size, num_kv_heads, head_dim)
+    key_cache = torch.empty(shape, dtype=torch.bfloat16, device=device)
+    value_cache = torch.empty(shape, dtype=torch.bfloat16, device=device)
+    assert key_cache.numel() > 2**31
+    used = torch.arange(num_blocks - 32, num_blocks, device=device)
+    key_cache[used] = torch.randn_like(key_cache[used])
+    value_cache[used] = torch.randn_like(value_cache[used])
+    block_tables = used.to(torch.int32).view(2, 16)
+    seq_lens = torch.tensor([256, 250], dtype=torch.int32, device=device)
+    query = torch.randn(2, 1, 64, head_dim, device=device).to(torch.bfloat16)
+    scale = head_dim**-0.5
+    output = fused_decode_attention(
+        query, key_cache, value_cache, block_tables, seq_lens, scale
+    )
+    torch.cuda.synchronize()
+    reference = _reference_decode_attention(
+        query, key_cache, value_cache, block_tables, seq_lens, scale
+    )
+    del key_cache, value_cache
+    torch.testing.assert_close(
+        output.float(), reference.float(), atol=BF16_ATOL, rtol=BF16_RTOL
     )
 
 
