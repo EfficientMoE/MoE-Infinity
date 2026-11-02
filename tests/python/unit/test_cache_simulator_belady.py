@@ -19,6 +19,7 @@ from benchmarks.cache_simulator.belady_cache_simulator import (
     belady_simulate,
     build_future_positions,
     extract_access_sequence,
+    is_decode_record,
 )
 from benchmarks.cache_simulator.cache_strategy import (
     ExpertCache,
@@ -234,6 +235,35 @@ def test_extract_include_prefill_toggle():
     )
     assert only_decode == [(0, 5), (1, 6)]
     assert with_prefill == [(0, 5), (1, 6), (0, 5), (1, 6)]
+
+
+def test_extract_skips_every_prefill_of_a_merged_stream():
+    # Two requests merged into one record list (convert_sglang_traces
+    # --merge): each starts with its own prefill pass (forward_mode 1).
+    prefill = np.array([[[7, 8], [7, 9]]])  # [L=1, T=2, K=2]
+    records = [
+        {"topk_ids_of_layer": prefill, "forward_mode": 1},
+        {"topk_ids_of_layer": np.array([[[1, 2]]]), "forward_mode": 2},
+        {"topk_ids_of_layer": prefill, "forward_mode": 1},
+        {"topk_ids_of_layer": np.array([[[3, 4]]]), "forward_mode": 2},
+        {"topk_ids_of_layer": prefill, "forward_mode": 3},  # mixed batch
+    ]
+    decode_only = extract_access_sequence(
+        records, ignore_layers=0, include_prefill=False
+    )
+    assert decode_only == [(0, 1), (0, 2), (0, 3), (0, 4)]
+    everything = extract_access_sequence(
+        records, ignore_layers=0, include_prefill=True
+    )
+    assert len(everything) == 3 * 4 + 2 * 2
+
+
+def test_is_decode_record_falls_back_to_position():
+    rec = {"topk_ids_of_layer": np.array([[[1]]])}
+    assert not is_decode_record(rec, 0)
+    assert is_decode_record(rec, 1)
+    assert is_decode_record({**rec, "forward_mode": 2}, 0)
+    assert not is_decode_record({**rec, "forward_mode": 1}, 5)
 
 
 def test_extract_multi_token_flatten_order():
