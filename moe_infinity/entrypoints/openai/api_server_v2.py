@@ -111,6 +111,7 @@ from moe_infinity.serving.validation import (
     validate_required_params,
     validate_sampling_params,
 )
+from moe_infinity.utils.config import EXPERT_EVICTION_POLICIES
 
 from .protocol import (
     ChatCompletionRequest,
@@ -1600,6 +1601,9 @@ async def _initialize_model() -> None:
             "phase_specific_expert_policy": bool(
                 getattr(args, "phase_specific_expert_policy", False)
             ),
+            "expert_eviction_policy": getattr(
+                args, "expert_eviction_policy", "legacy"
+            ),
             "kv_swap_mode": getattr(args, "kv_swap_mode", "sync"),
             "kv_swap_host_memory_bytes": getattr(
                 args, "kv_swap_host_memory_bytes", 512 * 1024 * 1024
@@ -2659,6 +2663,14 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Enable phase-specific expert admission, prefetch, and eviction policy.",
+    )
+    parser.add_argument(
+        "--expert-eviction-policy",
+        choices=EXPERT_EVICTION_POLICIES,
+        default="legacy",
+        help="GPU expert-cache eviction policy (default: legacy). lcnu is the "
+        "recommended choice for decode-heavy serving; see "
+        "docs/configuration.md.",
     )
     parser.add_argument(
         "--startup-timeout",

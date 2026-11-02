@@ -642,6 +642,13 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   int layer_idx = args.layer_idx;
   int expert_idx = args.expert_idx;
   auto expert_node = experts_[expert_idx][layer_idx];
+  if (kExpertResidencyManager) {
+    // Routed accesses reach the eviction policy in execution order, before
+    // the admission a miss causes.
+    const auto& device = expert_node->node->device;
+    kExpertResidencyManager->RecordRouted(
+        expert_node->node, device.is_cuda() ? device.index() : args.gpu_id);
+  }
   if (manager_enabled_ && !ApplyPrecisionTarget(expert_node, args.gpu_id)) {
     DLOG_WARN("adaptive precision target failed; using current generation");
   }
@@ -686,7 +693,8 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
     exec_args.hit = true;
     exec_args.invocation_id = args.invocation_id;
     exec_args.generation = args.generation;
-    if (kExpertResidencyManager && kExpertResidencyManager->PolicyEnabled()) {
+    if (kExpertResidencyManager &&
+        kExpertResidencyManager->ManagedResidency()) {
       kExpertResidencyManager->RecordAccess(expert_node->node, args.phase,
                                             true);
       exec_args.residency_lease = kExpertResidencyManager->AcquireLease(
@@ -749,6 +757,10 @@ void ExpertDispatcher::RegisterExpert(
     } else if (cached_node != node) {
       DLOG_FATAL("RegisterExpert: tensor_id has multiple nodes", tensor_id);
     }
+  }
+  if (cached_node != nullptr && kExpertResidencyManager) {
+    kExpertResidencyManager->RegisterExpertKey(cached_node->id, layer_idx,
+                                               expert_idx);
   }
 }
 
@@ -1172,7 +1184,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
           exec_args.hit = true;
           exec_args.generation = args.generation;
           if (kExpertResidencyManager &&
-              kExpertResidencyManager->PolicyEnabled()) {
+              kExpertResidencyManager->ManagedResidency()) {
             kExpertResidencyManager->RecordAccess(expert_node->node, args.phase,
                                                   true);
             exec_args.residency_lease = kExpertResidencyManager->AcquireLease(
@@ -1199,8 +1211,8 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       }
 
       bool cache_hit = expert_node->node->device.is_cuda();
-      const bool managed =
-          kExpertResidencyManager && kExpertResidencyManager->PolicyEnabled();
+      const bool managed = kExpertResidencyManager &&
+                           kExpertResidencyManager->ManagedResidency();
       ResidencyTicket residency_ticket;
 
       if (managed && !cache_hit) {
