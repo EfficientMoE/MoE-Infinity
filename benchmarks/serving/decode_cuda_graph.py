@@ -30,11 +30,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--experts-impl",
-        choices=("batched_mm", "grouped_mm"),
+        choices=("batched_mm", "grouped_mm", "grouped_decode"),
         default="batched_mm",
         help=(
-            "resident mode: HF experts implementation; batched_mm is "
-            "capture-safe, grouped_mm (transformers 5.12) is not"
+            "resident mode: experts implementation. batched_mm (HF) and "
+            "grouped_decode (moe_infinity._store grouped decode kernel over a "
+            "device pointer table) are capture-safe; HF grouped_mm "
+            "(transformers 5.12) is not"
         ),
     )
     parser.add_argument("--num-layers", type=int, default=None)
@@ -148,6 +150,9 @@ _LAUNCH_APIS = (
 )
 
 
+_ATTENTION_KERNELS = ("paged_attention", "split_kv", "merge_splits")
+
+
 def _profile_cuda_operation(
     operation: Callable[[], torch.Tensor | None],
 ) -> dict[str, float | int]:
@@ -163,10 +168,13 @@ def _profile_cuda_operation(
     graph_launches = 0
     device_activities = 0
     device_time_us = 0.0
+    attention_time_us = 0.0
     for event in profile.events():
         if event.device_type == torch.autograd.DeviceType.CUDA:
             device_activities += 1
             device_time_us += float(event.device_time)
+            if any(tag in event.name for tag in _ATTENTION_KERNELS):
+                attention_time_us += float(event.device_time)
         elif event.name in _LAUNCH_APIS:
             host_launches += 1
             graph_launches += int(event.name == "cudaGraphLaunch")
@@ -175,6 +183,9 @@ def _profile_cuda_operation(
         "graph_launches": graph_launches,
         "device_activities": device_activities,
         "device_time_us": device_time_us,
+        # Decode-attention kernels, so the host / GPU ratio can also be read
+        # against the rest of the step (independent of the attention kernel).
+        "attention_device_time_us": attention_time_us,
     }
 
 

@@ -230,7 +230,8 @@ def build_resident_model(
     if num_layers is not None:
         values["num_hidden_layers"] = num_layers
     config = hf_qwen3.Qwen3MoeConfig(max_position_embeddings=8192, **values)
-    config._experts_implementation = experts_impl
+    grouped = experts_impl == "grouped_decode"
+    config._experts_implementation = "batched_mm" if grouped else experts_impl
     target = device or torch.device("cuda", 0)
     original = hf_qwen3.Qwen3MoeAttention
     previous_dtype = torch.get_default_dtype()
@@ -243,7 +244,17 @@ def build_resident_model(
     finally:
         torch.set_default_dtype(previous_dtype)
         hf_qwen3.Qwen3MoeAttention = original
-    return model.to(device=target, dtype=dtype).eval()
+    model = model.to(device=target, dtype=dtype).eval()
+    if grouped:
+        from moe_infinity.serving.resident_experts import (
+            install_grouped_resident_experts,
+        )
+
+        if not install_grouped_resident_experts(model):
+            raise RuntimeError(
+                "grouped_decode needs moe_infinity._store.grouped_moe_decode"
+            )
+    return model
 
 
 def build_resident_fixture(

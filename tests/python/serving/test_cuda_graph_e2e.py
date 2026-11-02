@@ -149,6 +149,35 @@ def _serve(model, config, device, prompts, *, graphs: bool):
 
 
 @requires_cuda
+def test_replayed_decode_step_has_no_host_sync() -> None:
+    if not _paged_kernel_available():
+        pytest.skip("native paged attention extension not built")
+    from benchmarks.serving.decode_cuda_graph_fixture import (
+        build_resident_fixture,
+    )
+
+    fixture = build_resident_fixture(
+        batch_sizes=(1, 4), context_sizes=(32,), warmup_iters=1
+    )
+    try:
+        batch = fixture.make_batch(3, 32)
+        expected = fixture.graph_runner.try_execute(batch)  # captures
+        assert expected is not None
+        torch.cuda.synchronize()
+        previous = torch.cuda.get_sync_debug_mode()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            replayed = fixture.graph_runner.try_execute(batch)
+        finally:
+            torch.cuda.set_sync_debug_mode(previous)
+        assert replayed is not None
+        torch.testing.assert_close(replayed, expected, rtol=0, atol=0)
+        assert fixture.graph_runner.stats()["replays"] == 2
+    finally:
+        fixture.close()
+
+
+@requires_cuda
 @pytest.mark.parametrize("num_prompts", [1, 3])
 def test_resident_decode_replays_graph_with_identical_tokens(
     num_prompts: int,
@@ -180,4 +209,32 @@ def test_resident_decode_replays_graph_with_identical_tokens(
     assert graph_stats["replays"] == NEW_TOKENS - 1
     assert graph_stats["captures"] >= 1
     assert graph_stats["capture_failures"] == 0
+    assert graph_stats["fallback_reasons"] == {}
+
+
+@requires_cuda
+def test_grouped_resident_experts_replay_with_identical_tokens() -> None:
+    """Experts behind the grouped decode kernel's device pointer table."""
+    if not _paged_kernel_available():
+        pytest.skip("native paged attention extension not built")
+    from moe_infinity.serving.resident_experts import (
+        grouped_decode_op,
+        install_grouped_resident_experts,
+    )
+
+    if grouped_decode_op() is None:
+        pytest.skip("moe_infinity._store built without grouped_moe_decode")
+    device = torch.device("cuda", 0)
+    config = _config()
+    runs = []
+    for graphs in (False, True):
+        model = _paged_model(config, device)
+        assert len(install_grouped_resident_experts(model)) == (
+            config.num_hidden_layers
+        )
+        runs.append(_serve(model, config, device, PROMPTS, graphs=graphs))
+    (eager_tokens, _), (graph_tokens, graph_stats) = runs
+
+    assert graph_tokens == eager_tokens
+    assert graph_stats["replays"] == NEW_TOKENS - 1
     assert graph_stats["fallback_reasons"] == {}
