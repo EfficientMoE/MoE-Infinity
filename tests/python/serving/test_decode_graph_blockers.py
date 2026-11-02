@@ -25,7 +25,7 @@ def _offload_engine(**attrs: object):
 def test_offload_engine_hooks_report_their_count() -> None:
     engine = _offload_engine(forward_hooks=[object()] * 3, backward_hooks=[])
     capability = engine.decode_graph_capability()
-    assert capability == DecodeGraphCapability(False, "active_model_hooks")
+    assert (capability.safe, capability.reason) == (False, "active_model_hooks")
     assert "3 forward / 0 backward hooks" in capability.detail
 
 
