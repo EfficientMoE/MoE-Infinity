@@ -8,8 +8,9 @@ Impl names:
   production paths   cutlass_fused, fp8_prod, gptoss_resident, gptoss_offload,
                      v4_fp4_prod, sdpa_shim, hf_eager, paged_v1,
                      sdpa_fallback, hf_eager_decode, router_*, gdn_torch,
-                     kv_write_loop
-  references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode
+                     kv_write_loop, kv_write_vec
+  references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode,
+                     kv_copy_ref
 """
 
 from __future__ import annotations
@@ -1024,6 +1025,57 @@ def _kv_write_builder(T, KVH, d):
     return build
 
 
+def _kv_write_vec_builder(T, KVH, d, decode):
+    """PagedAttentionBackend.write_kv (single Triton scatter launch).
+
+    Decode: one token per sequence, each in its own randomly placed block.
+    Prefill: one sequence over a shuffled block table.
+    """
+
+    def build():
+        from moe_infinity.runtime.attention_backend import PagedAttentionBackend
+        from moe_infinity.runtime.attention_types import KVCacheSpec
+
+        nblk = (T if decode else -(-T // KV_BLOCK)) + 1
+        spec = KVCacheSpec(
+            num_kv_heads=KVH,
+            head_dim=d,
+            dtype=torch.bfloat16,
+            block_size=KV_BLOCK,
+        )
+        backend = PagedAttentionBackend(
+            spec, nblk, torch.device("cuda"), num_layers=1
+        )
+        k_src = torch.randn(T, KVH, d, device="cuda", dtype=torch.bfloat16)
+        v_src = torch.randn(T, KVH, d, device="cuda", dtype=torch.bfloat16)
+        table = torch.randperm(nblk, device="cuda")
+        if decode:
+            slots = table[:T] * KV_BLOCK + torch.randint(
+                0, KV_BLOCK, (T,), device="cuda"
+            )
+        else:
+            pos = torch.arange(T, device="cuda")
+            slots = table[pos // KV_BLOCK] * KV_BLOCK + pos % KV_BLOCK
+
+        def run():
+            backend.write_kv(k_src, v_src, slots, 0)
+
+        return run
+
+    return build
+
+
+def _kv_copy_ref_builder(T, KVH, d):
+    """Roof reference: one contiguous copy of the same K+V bytes."""
+
+    def build():
+        src = torch.randn(2 * T * KVH * d, device="cuda", dtype=torch.bfloat16)
+        dst = torch.empty_like(src)
+        return lambda: dst.copy_(src)
+
+    return build
+
+
 def kv_write_cases(model_keys: list[str] | None = None) -> list[Case]:
     out = []
     for key in ("qwen3-235b-a22b", "qwen3.5-35b-a3b"):
@@ -1033,31 +1085,42 @@ def kv_write_cases(model_keys: list[str] | None = None) -> list[Case]:
         for phase, lbl, T in (
             ("decode", "b1", 1),
             ("decode", "b16", 16),
+            ("decode", "b64", 64),
+            ("decode", "b256", 256),
             ("prefill", "1K", 1024),
+            ("prefill", "4K", 4096),
+            ("prefill", "16K", 16384),
         ):
-            out.append(
-                Case(
-                    f"{key}|{lbl}|kv_write_loop",
-                    suite="kv_write",
-                    model=key,
-                    phase=phase,
-                    size=lbl,
-                    impl="kv_write_loop",
-                    flops=0.0,
-                    bytes_min=2
-                    * T
-                    * m.attn.kv_heads
-                    * m.attn.head_dim
-                    * BF16
-                    * 2,
-                    build=_kv_write_builder(
-                        T, m.attn.kv_heads, m.attn.head_dim
-                    ),
-                    layers=m.attn.full_layers,
-                    meta={"T": T},
-                    iters=5,
-                )
+            h, d = m.attn.kv_heads, m.attn.head_dim
+            builds = {}
+            if lbl in ("b1", "b16", "1K"):
+                builds["kv_write_loop"] = _kv_write_builder(T, h, d)
+            builds["kv_write_vec"] = _kv_write_vec_builder(
+                T, h, d, phase == "decode"
             )
+            builds["kv_copy_ref"] = _kv_copy_ref_builder(T, h, d)
+            for impl, build in builds.items():
+                out.append(
+                    Case(
+                        f"{key}|{lbl}|{impl}",
+                        suite="kv_write",
+                        model=key,
+                        phase=phase,
+                        size=lbl,
+                        impl=impl,
+                        flops=0.0,
+                        bytes_min=2
+                        * T
+                        * m.attn.kv_heads
+                        * m.attn.head_dim
+                        * BF16
+                        * 2,
+                        build=build,
+                        layers=m.attn.full_layers,
+                        meta={"T": T},
+                        iters=5 if impl == "kv_write_loop" else None,
+                    )
+                )
     return out
 
 
