@@ -537,6 +537,21 @@ def _process_completion_prompt_with_contextpilot(
         return prompt
 
 
+def _require_paged_kv_history(initialized_engine: object) -> None:
+    """Refuse at startup a model that would decode without KV history."""
+    runner = getattr(initialized_engine, "model_runner", None)
+    require = getattr(runner, "require_paged_kv_history", None)
+    if not callable(require):
+        return
+    try:
+        require()
+    except RuntimeError:
+        shutdown = getattr(initialized_engine, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+        raise
+
+
 def initialize_with_model(
     *,
     moe_model: object,
@@ -638,6 +653,7 @@ def initialize_with_model(
         speculative_draft=speculative_draft,
         decode_graph_capability_provider=moe_model,
     )
+    _require_paged_kv_history(initialized_engine)
     if stream_manager is None:
         stream_manager = StreamManager()
 
@@ -1646,6 +1662,7 @@ async def _initialize_model() -> None:
             speculative_draft=speculative_draft,
             decode_graph_capability_provider=moe_model,
         )
+        _require_paged_kv_history(initialized_engine)
         if stream_manager is None:
             stream_manager = StreamManager()
 
