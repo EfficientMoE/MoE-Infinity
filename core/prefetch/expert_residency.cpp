@@ -255,16 +255,19 @@ NodePtr ExpertResidencyManager::SelectPolicyVictim(GpuState& state,
   if (slots.size() < dense_size) slots.assign(dense_size, nullptr);
   used.clear();
   for (const auto& entry : state.entries) {
-    if (!entry.policy_key || !IsEvictable(entry, needed_bytes)) continue;
+    if (!entry.policy_key || !IsEvictable(entry, needed_bytes) ||
+        !NodeIdle(entry.node)) {
+      continue;
+    }
     if (auto slot = DenseSlot(*entry.policy_key)) {
       slots[*slot] = &entry;
       used.push_back(*slot);
     }
   }
-  // Nothing evictable (e.g. every resident is leased): skip the policy so a
-  // retried admission does not advance its state (clock hands, promotions).
+  // Nothing evictable (e.g. every resident is in flight): skip the policy so
+  // a retried admission does not advance its state (clock hands, promotions).
   if (used.empty()) {
-    return need_room ? SelectVictim(state, needed_bytes) : nullptr;
+    return need_room ? SelectIdleVictim(state, needed_bytes) : nullptr;
   }
   const auto chosen = state.policy->SelectVictim(
       incoming, need_room, [this, &slots](ExpertCacheKey key) {
@@ -281,9 +284,29 @@ NodePtr ExpertResidencyManager::SelectPolicyVictim(GpuState& state,
   if (!need_room) return nullptr;
   // Residents the policy does not know: fall back to the built-in choice
   // rather than stall the admission.
-  NodePtr fallback = SelectVictim(state, needed_bytes);
+  NodePtr fallback = SelectIdleVictim(state, needed_bytes);
   if (fallback) counters_["policy_fallback_victims"] += 1;
   return fallback;
+}
+
+bool ExpertResidencyManager::NodeIdle(const NodePtr& node) {
+  return node->exec_state.load(std::memory_order_acquire) ==
+             NodeExecState::IDLE &&
+         node->pending_dispatches.load(std::memory_order_acquire) == 0;
+}
+
+NodePtr ExpertResidencyManager::SelectIdleVictim(
+    const GpuState& state, std::int64_t needed_bytes) const {
+  NodePtr victim;
+  std::size_t best_last_access = static_cast<std::size_t>(-1);
+  for (const auto& entry : state.entries) {
+    if (!IsEvictable(entry, needed_bytes) || !NodeIdle(entry.node)) continue;
+    if (!victim || entry.node->last_access_time < best_last_access) {
+      victim = entry.node;
+      best_last_access = entry.node->last_access_time;
+    }
+  }
+  return victim;
 }
 
 bool ExpertResidencyManager::ConfigureCapacity(int gpu_id,
@@ -494,6 +517,12 @@ bool ExpertResidencyManager::EvictReserved(const ResidencyTicket& ticket) {
   GpuState& state = StateFor(pending.gpu_id);
   ResidencyEntry* victim = FindEntry(state, *pending.reserved_victim_key);
   if (victim == nullptr || victim->lease_count != 1) return false;
+  // Under an eviction policy the victim must still be idle: it may have been
+  // dispatched since BeginAdmission picked it.
+  if (state.policy && victim->policy_key && !NodeIdle(victim->node)) {
+    counters_["policy_victims_dispatched"] += 1;
+    return false;
+  }
   if (transfer_ops_ && !transfer_ops_->MoveToHost(victim->node)) return false;
   state.resident_bytes -= victim->bytes;
   const auto key = victim->key;

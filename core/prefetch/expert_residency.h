@@ -250,6 +250,12 @@ class ExpertResidencyManager {
   NodePtr SelectVictim(const GpuState& state, std::int64_t needed_bytes) const;
   NodePtr SelectPolicyVictim(GpuState& state, ExpertCacheKey incoming,
                              bool need_room, std::int64_t needed_bytes);
+  // Not claimed by a dispatch or a prefetch (exec_state IDLE, no pending
+  // dispatches). The policy path only evicts idle experts: a policy may
+  // prefer experts used moments ago (LCNU does) that are still in flight.
+  static bool NodeIdle(const NodePtr& node);
+  NodePtr SelectIdleVictim(const GpuState& state,
+                           std::int64_t needed_bytes) const;
   EvictionPolicy* PolicyFor(GpuState& state, std::int64_t expert_bytes);
   std::optional<ExpertCacheKey> KeyOf(const NodePtr& node) const;
   int RegisteredLayerCount() const;

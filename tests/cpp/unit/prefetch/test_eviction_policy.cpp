@@ -369,6 +369,37 @@ TEST_F(EvictionPolicyManagerTest, PolicyChoosesVictimAndSkipsLeased) {
   EXPECT_EQ(stats.at("eviction_policy_slots"), 2);
 }
 
+TEST_F(EvictionPolicyManagerTest, InFlightExpertsAreNeverVictims) {
+  RegisterExperts(1, 3);
+  ASSERT_TRUE(manager->ConfigureEvictionPolicy("lru", {}));
+  Replay({{0, 0}, {0, 1}}, 2);  // LRU order: expert 0, then expert 1
+  // Expert 0 is dispatched again (claimed, not yet leased): skip it.
+  Expert(0, 0)->exec_state.store(NodeExecState::FETCHING);
+  auto ticket =
+      manager->BeginAdmission(Expert(0, 2), 0, ExpertPhase::DECODE,
+                              AdmissionMode::CACHE, AdmissionSource::DEMAND);
+  ASSERT_TRUE(ticket.valid);
+  EXPECT_EQ(ticket.reserved_victim, Expert(0, 1));
+  // Expert 1 is dispatched between the pick and the eviction: refuse it.
+  Expert(0, 1)->pending_dispatches.store(1);
+  EXPECT_FALSE(manager->EvictReserved(ticket));
+  ASSERT_TRUE(manager->AbortAdmission(ticket));
+  EXPECT_EQ(manager->ResidentCount(0), 2u);
+  // Nothing idle is left: no victim, so a CACHE admission must wait.
+  EXPECT_FALSE(manager
+                   ->BeginAdmission(Expert(0, 2), 0, ExpertPhase::DECODE,
+                                    AdmissionMode::CACHE,
+                                    AdmissionSource::DEMAND)
+                   .valid);
+  Expert(0, 0)->exec_state.store(NodeExecState::IDLE);
+  ticket =
+      manager->BeginAdmission(Expert(0, 2), 0, ExpertPhase::DECODE,
+                              AdmissionMode::CACHE, AdmissionSource::DEMAND);
+  ASSERT_TRUE(ticket.valid);
+  EXPECT_EQ(ticket.reserved_victim, Expert(0, 0));
+  EXPECT_TRUE(manager->EvictReserved(ticket));
+}
+
 TEST_F(EvictionPolicyManagerTest, PolicyIsSizedByRegisteredExperts) {
   RegisterExperts(1, 2);
   ASSERT_TRUE(manager->ConfigureEvictionPolicy("lru", {}));

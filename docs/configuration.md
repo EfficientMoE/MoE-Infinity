@@ -270,7 +270,9 @@ residency manager they still do, except that when an `s3fifo` promotion pass
 owes a second eviction, the manager takes it at the next admission
 (`tests/cpp/unit/prefetch/test_eviction_policy.cpp`). Routed experts reach the
 policy in dispatch order; a prefetched expert is admitted like a demand fetch,
-so the policy, not the prefetcher, decides what it displaces. Not supported yet:
+so the policy, not the prefetcher, decides what it displaces. A policy only
+evicts idle experts: one that is being dispatched or prefetched is skipped,
+and if it was dispatched after being picked, the admission picks again. Not supported yet:
 `adaptive_memory_enabled` and `adaptive_expert_precision` (rejected at config
 time) and GPTQ checkpoints (the setting is ignored with a warning). To roll
 back, set `"expert_eviction_policy": "legacy"` or restart the server without
@@ -279,7 +281,9 @@ back, set `"expert_eviction_policy": "legacy"` or restart the server without
 `get_expert_policy_stats()` reports `eviction_policy_active`,
 `eviction_policy_slots` (policy capacity summed over GPUs),
 `policy_routed_hits` / `policy_routed_misses` (residency at the time each
-routed expert was dispatched), `policy_victims`, and
+routed expert was dispatched), `policy_victims`,
+`policy_victims_dispatched` (picked victims that were dispatched before they
+could be evicted, so the admission picked again), and
 `policy_fallback_victims` (admissions where the policy had no eligible victim
 and the built-in choice was used).
 
