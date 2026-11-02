@@ -489,6 +489,8 @@ setup(
         "flashinfer": ["flashinfer-python"],
         "flash_attn": ["flash-attn>=2.5.2"],
         "contextpilot": ["contextpilot>=0.5.0,<0.6"],
+        # chunked Triton GDN / KDA kernels for Qwen3.5 and GLM-5.3-Flash
+        "linear_attn": ["flash-linear-attention>=0.6.0"],
     },
     author="EfficientMoE Team",
     long_description=read_readme(),
