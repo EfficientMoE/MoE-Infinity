@@ -14,6 +14,7 @@ Impl names:
 
 from __future__ import annotations
 
+import functools
 import math
 import os
 from dataclasses import dataclass, field
@@ -976,9 +977,14 @@ def _fla_missing() -> str | None:
     return None
 
 
-def _gdn_fla_builder(T, Hv, dk, dv):
+def _gdn_fla_builder(T, Hv, dk, dv, fused=False):
     def build():
-        from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+        if fused:
+            from moe_infinity.kernel.linear_attention_fused import (
+                chunk_gated_delta_rule_fused as chunk_gated_delta_rule,
+            )
+        else:
+            from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 
         q = torch.randn(1, T, Hv, dk, device="cuda", dtype=torch.bfloat16)
         k = torch.randn(1, T, Hv, dk, device="cuda", dtype=torch.bfloat16)
@@ -1012,6 +1018,10 @@ def _kda_builder(T, H, d, impl):
     def build():
         if impl == "kda_fla":
             from fla.ops.kda import chunk_kda as fn
+        elif impl == "kda_fused":
+            from moe_infinity.kernel.linear_attention_fused import (
+                chunk_kda_fused as fn,
+            )
         else:
             import inspect
 
@@ -1067,20 +1077,24 @@ def gdn_cases(model_keys: list[str] | None = None) -> list[Case]:
     """Linear attention: Qwen3.5 GDN (prefill + decode), GLM-5.3-Flash KDA.
 
     ``*_torch`` is the transformers fallback, ``*_fla`` the chunked / fused
-    Triton kernels of flash-linear-attention (#304).
+    Triton kernels of flash-linear-attention, ``*_fused`` MoE-Infinity's
+    fused prefill (moe_infinity.kernel.linear_attention_fused, #304).
     """
     out = []
     fla_skip = _fla_missing()
     m = MODELS["qwen3.5-35b-a3b"]
     if not model_keys or m.key in model_keys:
         Hv, dk, dv = 32, 128, 128
-        for lbl in ("1K", "2K", "9K"):
+        for lbl in ("1K", "2K", "9K", "12K", "50K"):
             T = PREFILL_TOKENS[lbl]
             # chunked delta rule: ~ (4*C*dk + 2*dk*dv*... ) per token; use 6*T*Hv*dk*dv
             for impl, builder in (
                 ("gdn_torch", _gdn_builder),
                 ("gdn_fla", _gdn_fla_builder),
+                ("gdn_fused", functools.partial(_gdn_fla_builder, fused=True)),
             ):
+                if impl == "gdn_torch" and T > 9216:
+                    continue
                 out.append(
                     Case(
                         f"{m.key}|{lbl}|{impl}",
@@ -1094,7 +1108,7 @@ def gdn_cases(model_keys: list[str] | None = None) -> list[Case]:
                         build=builder(T, Hv, dk, dv),
                         layers=m.attn.linear_layers,
                         meta={"T": T},
-                        skip=fla_skip if impl == "gdn_fla" else None,
+                        skip=fla_skip if impl != "gdn_torch" else None,
                         iters=3 if impl == "gdn_torch" else None,
                     )
                 )
@@ -1121,10 +1135,10 @@ def gdn_cases(model_keys: list[str] | None = None) -> list[Case]:
     m = MODELS["glm-5.3-flash"]
     if not model_keys or m.key in model_keys:
         H, d = 64, 128  # linear_attn_config: num_heads=64, head_dim=128
-        for lbl in ("1K", "2K", "9K"):
+        for lbl in ("1K", "2K", "9K", "12K"):
             T = PREFILL_TOKENS[lbl]
-            for impl in ("kda_torch", "kda_fla"):
-                skip = fla_skip if impl == "kda_fla" else None
+            for impl in ("kda_torch", "kda_fla", "kda_fused"):
+                skip = fla_skip if impl != "kda_torch" else None
                 if impl == "kda_torch":
                     try:
                         from transformers.models.glm5_next import (  # noqa: F401
