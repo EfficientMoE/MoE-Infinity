@@ -25,6 +25,7 @@ This open-sourced version is HuggingFace-friendly and differs from the version r
     - [Install from Source](#install-from-source)
     - [Enable FlashAttention (Optional)](#enable-flashattention-optional)
     - [Enable FlashInfer (Optional)](#enable-flashinfer-optional)
+    - [Enable linear-attention kernels (Optional)](#enable-linear-attention-kernels-optional-recommended-for-qwen35--glm-53-flash)
 - [Usage and Examples](#usage-and-examples)
     - [Running Inference](#running-inference)
     - [Benchmarking](#benchmarking)
@@ -188,6 +189,18 @@ pip install -e '.[flashinfer]'
 Check the [FlashInfer installation guide](https://docs.flashinfer.ai/installation.html) for prebuilt-wheel options matching specific CUDA/PyTorch versions.
 
 Post-installation, MoE-Infinity will detect and use FlashInfer where the selected backend supports it. When FlashInfer is not installed, it falls back to built-in attention kernels with no behavior change.
+
+### Enable linear-attention kernels (Optional, recommended for Qwen3.5 / GLM-5.3-Flash)
+
+Qwen3.5 (Gated DeltaNet) and GLM-5.3-Flash (KDA) mix linear-attention layers into the stack (30 of 40 and 34 of 45 layers). Without [flash-linear-attention](https://github.com/fla-org/flash-linear-attention), `transformers` runs a pure-torch fallback that loops over 64-token chunks in Python. Install the chunked Triton kernels. They are pure Python + Triton, so nothing is compiled, and they work on sm_120:
+
+```bash
+pip install 'flash-linear-attention>=0.6.0'
+# or, equivalently, via the optional extra:
+pip install -e '.[linear_attn]'
+```
+
+`transformers` binds the kernels automatically. MoE-Infinity logs a warning at load time if a linear-attention layer is still on the torch fallback. On an RTX PRO 6000 (sm_120), one Qwen3.5-35B GDN layer at 9K tokens drops from 19.3 ms to 1.1 ms, and a decode step drops from 94 µs to 10 µs. [`causal-conv1d`](https://github.com/Dao-AILab/causal-conv1d) is optional (it needs a CUDA build). Without it, the short convolution runs as a cuDNN depthwise conv.
 
 ## Usage and Examples
 
