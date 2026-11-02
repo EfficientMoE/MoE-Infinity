@@ -4,9 +4,14 @@
 // EfficientMoE Team
 
 #include "expert_module.h"
+
+#include <cstdlib>
+#include <string>
+
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
 #include "kernel/fused_moe_mlp.h"
+#include "kernel/fp8_moe/fp8_moe.h"
 
 void mxfp4_dequant_cuda(const void* packed, const void* scales, void* output,
                         int rows, int packed_cols, int scale_cols,
@@ -72,6 +77,10 @@ void MoEMLP::SetRepresentation(const ExpertExecutionDescriptor& descriptor) {
 
 void MoEMLP::PrepareRepresentation(cudaStream_t stream) {
   if (representation_execution_kind_ != 1) return;
+  if (TryBindNativeFp8({param_[0], param_[2], param_[4]},
+                       {param_[1], param_[3], param_[5]})) {
+    return;
+  }
   int device = at::cuda::current_device();
   std::array<torch::Tensor, 3> dequantized;
   for (std::size_t projection = 0; projection < 3; ++projection) {
@@ -98,6 +107,7 @@ void MoEMLP::PrepareRepresentation(cudaStream_t stream) {
 }
 
 void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
+  fp8_native_ = false;
   if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
     DLOG_FATAL_IF(tensor_ids.size() != 6,
                   "GPT-OSS expert requires blocks/scales/bias for two "
@@ -330,6 +340,16 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
     auto& down_proj =
         (expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE) ? param_[2] : param_[1];
 
+    if (fp8_native_) {
+      const int up = expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ? 1 : 2;
+      const int down = expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ? 2 : 1;
+      fused_fp8_moe_ffn_into(input, fp8_native_weights_[0],
+                             fp8_native_scales_[0], fp8_native_weights_[up],
+                             fp8_native_scales_[up], fp8_native_weights_[down],
+                             fp8_native_scales_[down], output, stream);
+      return;
+    }
+
     TORCH_CHECK(gate_proj.scalar_type() == torch::kBFloat16 &&
                     up_proj.scalar_type() == torch::kBFloat16 &&
                     down_proj.scalar_type() == torch::kBFloat16,
@@ -353,8 +373,57 @@ void MoEMLP::SetFp8Scales(const std::vector<torch::Tensor>& scales) {
   has_fp8_scales_ = !scales.empty();
 }
 
+bool MoEMLP::TryBindNativeFp8(const std::array<torch::Tensor, 3>& weights,
+                              const std::array<torch::Tensor, 3>& scales) {
+  // MOE_FP8_NATIVE=0 forces the per-call BF16 dequant path (A/B, debugging).
+  static const bool kNativeEnabled = [] {
+    const char* env = std::getenv("MOE_FP8_NATIVE");
+    return env == nullptr || std::string(env) != "0";
+  }();
+  fp8_native_ = false;
+  if (!kNativeEnabled) return false;
+  if (expert_type_ != DEEPSEEK_MOE_DENSE_ACT_DENSE &&
+      expert_type_ != MIXTRAL_MOE_DENSE_ACT_DENSE) {
+    return false;
+  }
+  if (dtype_to_torch(dtype_) != torch::kBFloat16) return false;
+  for (std::size_t i = 0; i < 3; ++i) {
+    const auto& w = weights[i];
+    const auto& s = scales[i];
+    if (!w.defined() || !s.defined() || w.dim() != 2 || !w.is_cuda() ||
+        !s.is_cuda() || !w.is_contiguous() || !s.is_contiguous() ||
+        s.scalar_type() != torch::kFloat32 ||
+        (w.scalar_type() != torch::kFloat8_e4m3fn &&
+         w.scalar_type() != torch::kUInt8)) {
+      return false;
+    }
+  }
+  const int up = expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ? 1 : 2;
+  const int down = expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ? 2 : 1;
+  const int64_t inter = weights[0].size(0);
+  const int64_t hidden = weights[0].size(1);
+  if (weights[up].size(0) != inter || weights[up].size(1) != hidden ||
+      weights[down].size(0) != hidden || weights[down].size(1) != inter) {
+    return false;
+  }
+  const int64_t scale_numel = (inter / 128) * (hidden / 128);
+  for (const auto& s : scales) {
+    if (s.numel() != scale_numel) return false;
+  }
+  if (!fp8_moe_native_supported(hidden, inter)) return false;
+  fp8_native_weights_ = weights;
+  fp8_native_scales_ = scales;
+  fp8_native_ = true;
+  return true;
+}
+
 void MoEMLP::DequantFp8Params(cudaStream_t stream) {
   if (!has_fp8_scales_) return;
+  if (fp8_scales_.size() >= 3 && param_.size() >= 3 &&
+      TryBindNativeFp8({param_[0], param_[1], param_[2]},
+                       {fp8_scales_[0], fp8_scales_[1], fp8_scales_[2]})) {
+    return;
+  }
   int device = at::cuda::current_device();
   for (size_t i = 0; i < fp8_scales_.size() && i < param_.size(); ++i) {
     auto& w = param_[i];

@@ -210,6 +210,10 @@ struct MoEMLP : public torch::nn::Module {
 
  private:
   void ForwardHelper(cudaStream_t stream);
+  // Binds FP8 weights + fp32 block scales (projection order of param_) to the
+  // native FP8 kernels instead of de-quantising them; false = use dequant.
+  bool TryBindNativeFp8(const std::array<torch::Tensor, 3>& weights,
+                        const std::array<torch::Tensor, 3>& scales);
 
  private:
   std::vector<torch::Tensor> buffer_;
@@ -227,6 +231,9 @@ struct MoEMLP : public torch::nn::Module {
 
   std::vector<torch::Tensor> fp8_scales_;
   bool has_fp8_scales_ = false;
+  bool fp8_native_ = false;
+  std::array<torch::Tensor, 3> fp8_native_weights_;
+  std::array<torch::Tensor, 3> fp8_native_scales_;
   std::uint8_t representation_execution_kind_ = 0;
 };
 

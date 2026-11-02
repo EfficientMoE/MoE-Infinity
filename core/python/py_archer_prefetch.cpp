@@ -8,6 +8,9 @@
 #include "prefetch/archer_prefetch_handle.h"
 #include "model/moe.h"
 #include "kernel/ops.h"
+#include "kernel/fp8_moe/fp8_moe.h"
+
+#include <ATen/cuda/CUDAContext.h>
 
 void BindTensorStoreSurface(py::class_<ArcherPrefetchHandle>& cls);
 
@@ -156,6 +159,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gelu_and_mul", &gelu_and_mul, "Fused GeLU(gate) * up");
   m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul, "Fused GeLU-tanh(gate) * up");
   m.def("fatrelu_and_mul", &fatrelu_and_mul, "Fused FatReLU(gate) * up");
+  m.def(
+      "fp8_moe_ffn_into",
+      [](const torch::Tensor& hidden, const torch::Tensor& gate_w,
+         const torch::Tensor& gate_s, const torch::Tensor& up_w,
+         const torch::Tensor& up_s, const torch::Tensor& down_w,
+         const torch::Tensor& down_s, torch::Tensor output) {
+        fused_fp8_moe_ffn_into(hidden, gate_w, gate_s, up_w, up_s, down_w,
+                               down_s, output,
+                               at::cuda::getCurrentCUDAStream().stream());
+      },
+      "Native FP8 (e4m3, 128x128 block-scaled) SwiGLU expert into output");
+  m.def("fp8_moe_native_supported", &fp8_moe_native_supported,
+        "Whether the native FP8 expert kernels run on the current device");
 
   py::class_<ExpertDispatcher::ResizeToken>(m, "expert_resize_token")
       .def_readonly("id", &ExpertDispatcher::ResizeToken::id)
