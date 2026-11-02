@@ -32,7 +32,6 @@ import triton.language as tl
 _LOG2E = 1.4426950408889634
 _LN2 = 0.6931471805599453
 _MAX_SPLITS = 256
-_TARGET_WAVES = 1  # split programs per SM to aim for
 _PARTIAL_FRAC = 0.04  # max partial-result bytes / KV bytes
 
 
@@ -137,7 +136,9 @@ def _gqa_decode_split_kernel(
 
     row = bh.to(tl.int64) * num_splits + split
     op = OUT_P + (row * G + offs_g)[:, None] * DV + offs_dv[None, :]
-    tl.store(op, out, mask=g_ok[:, None] & dv_ok[None, :])
+    tl.store(
+        op, out.to(OUT_P.dtype.element_ty), mask=g_ok[:, None] & dv_ok[None, :]
+    )
     tl.store(LSE_P + row * G + offs_g, lse, mask=g_ok)
 
 
@@ -189,7 +190,7 @@ def _gqa_decode_merge_kernel(
             OUT_P + (rows * G + g)[:, None] * DV + offs_dv[None, :],
             mask=s_ok[:, None] & (offs_dv < DV)[None, :],
             other=0.0,
-        )
+        ).to(tl.float32)
         acc += tl.sum(o * w[:, None], 0)
     out = acc / tl.where(total > 0.0, total, 1.0)
     lse_nat = tl.where(
@@ -290,13 +291,16 @@ def _num_sms(device_index: int) -> int:
     return torch.cuda.get_device_properties(device_index).multi_processor_count
 
 
-def _config(d: int, g: int) -> tuple[int, int, int]:
-    """(BLOCK_N, num_warps, num_stages); swept on sm_120 (RTX PRO 6000)."""
+def _config(d: int, g: int) -> tuple[int, int, int, int]:
+    """(BLOCK_N, num_warps, num_stages, waves); swept on sm_120 (RTX PRO 6000).
+
+    ``waves``: split programs per SM to aim for.
+    """
     if d <= 64:
-        return 64, 4, 3
+        return 64, 4, 3, 1
     if d <= 128:
-        return 32, 4, 3
-    return 32, 4, 2
+        return 32, 4, 3, 1
+    return 32, 4, 2, 3
 
 
 def gqa_decode_supported(q, k, v, mask=None) -> bool:
@@ -354,18 +358,24 @@ def gqa_decode_attention(
     lo = 0 if window is None else max(0, klen - window)
     span = klen - lo
 
-    block_n, num_warps, num_stages = _config(max(d, dv), g)
+    block_n, num_warps, num_stages, waves = _config(max(d, dv), g)
     n_bh = bsz * kv_heads
-    target = _TARGET_WAVES * _num_sms(query.device.index or 0)
-    # Keep the fp32 partial results (one [G, Dv] row per split) a few percent
-    # of the KV bytes this (batch, kv-head) streams.
+    sms = _num_sms(query.device.index or 0)
+    # Keep the partial results (one [G, Dv] row per split, stored in the
+    # activation dtype; merged in fp32) a few percent of the KV bytes this
+    # (batch, kv-head) streams.
+    part_bytes = query.element_size()
     kv_bytes = span * (d + dv) * query.element_size()
     max_splits = min(
         _MAX_SPLITS,
         triton.cdiv(span, block_n),
-        max(1, int(_PARTIAL_FRAC * kv_bytes / (4 * g * dv))),
+        max(1, int(_PARTIAL_FRAC * kv_bytes / (part_bytes * g * dv))),
     )
-    splits = max(1, min(triton.cdiv(target, n_bh), max_splits))
+    # Split the context only when (batch, kv-head) programs underfill the GPU.
+    splits = (
+        1 if n_bh >= sms else min(triton.cdiv(waves * sms, n_bh), max_splits)
+    )
+    splits = max(1, splits)
     chunk = triton.cdiv(triton.cdiv(span, splits), block_n) * block_n
     splits = triton.cdiv(span, chunk)
 
@@ -380,7 +390,7 @@ def gqa_decode_attention(
         smn = m_arg.stride(-1)
 
     out_p = torch.empty(
-        (n_bh * splits * g, dv), device=query.device, dtype=torch.float32
+        (n_bh * splits * g, dv), device=query.device, dtype=query.dtype
     )
     lse_p = torch.empty(
         (n_bh * splits * g,), device=query.device, dtype=torch.float32
