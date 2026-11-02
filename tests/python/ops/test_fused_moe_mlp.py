@@ -351,7 +351,8 @@ def test_fused_moe_ffn_every_config_matches_reference(
     _assert_close_to_reference(
         _run_tuned(x, gate_w, up_w, down_w, -1, 0, -1, 0), ref
     )
-    for splits in (1, 3, 8):
+    # 0 = stream-K remainder (only the last partial wave is split)
+    for splits in (0, 1, 3, 8):
         for cfg in range(num_dual):
             out = _run_tuned(x, gate_w, up_w, down_w, cfg, splits, -1, 0)
             _assert_close_to_reference(out, ref)

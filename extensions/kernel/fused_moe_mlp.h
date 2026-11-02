@@ -3,7 +3,9 @@
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
+#include <array>
 #include <utility>
+#include <vector>
 
 // Fused MoE MLP forward pass using CUTLASS.
 //
@@ -41,3 +43,7 @@ void fused_moe_ffn_tuned(torch::Tensor& hidden, torch::Tensor& gate_proj,
 
 // Number of (gate/up, down) tile configs accepted by fused_moe_ffn_tuned.
 std::pair<int, int> fused_moe_ffn_num_configs();
+
+// Threadblock (M, N, K) of every (gate/up, down) config, in config order.
+std::pair<std::vector<std::array<int, 3>>, std::vector<std::array<int, 3>>>
+fused_moe_ffn_tile_shapes();

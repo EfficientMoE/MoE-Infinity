@@ -178,6 +178,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                             dual_cfg, dual_splits, down_cfg, down_splits);
       },
       "fused_moe_ffn_into with an explicit tile config per GEMM (tests)");
+  m.def("fused_moe_ffn_tile_shapes", &fused_moe_ffn_tile_shapes,
+        "Threadblock (M, N, K) of every (gate/up, down) config");
   m.def("fused_moe_ffn_num_configs", &fused_moe_ffn_num_configs,
         "(gate/up configs, down configs) of fused_moe_ffn_tuned");
 

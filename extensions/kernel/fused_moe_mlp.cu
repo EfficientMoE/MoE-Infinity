@@ -12,6 +12,7 @@
 // every compiled architecture (sm_80 / sm_86 / sm_90 / sm_120).
 
 #include "kernel/fused_moe_mlp.h"
+#include "kernel/fused_moe_mlp_tuned.h"
 #include "kernel/moe_expert_gemm.h"
 
 #include <ATen/cuda/CUDAContext.h>
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -37,10 +39,9 @@ using Shape = cutlass::gemm::GemmShape<M, N, K>;
 // or smaller: two accumulators per warp double the register footprint.
 // ---------------------------------------------------------------------------
 
-template <int TM, int TN, int TK, int WM, int WN, int WK, int Stages,
-          int Swizzle, bool Dual, bool SplitK>
+template <int TM, int TN, int TK, int WM, int WN, int WK, int Stages, bool Dual>
 using Cfg = moe_gemm::ExpertGemm<Elem, Shape<TM, TN, TK>, Shape<WM, WN, WK>,
-                                 Stages, Swizzle, Dual, SplitK>;
+                                 Stages, Dual, /*SplitK=*/true>;
 
 // Each config carries cost-model constants fitted on RTX PRO 6000 Blackwell
 // (sm_120, 188 SMs, L2 flushed) for the selection model below. On other GPUs
@@ -54,25 +55,25 @@ struct ConfigCost {
 
 // gate + up (dual)
 using DualConfigs =
-    std::tuple<Cfg<128, 128, 32, 64, 32, 32, 3, 8, true, true>,  // 0: 8 warps
-               Cfg<128, 64, 32, 64, 32, 32, 3, 8, true, true>,   // 1: 4 warps
-               Cfg<128, 64, 64, 64, 32, 64, 3, 8, true, true>,   // 2: 4 warps
-               Cfg<64, 64, 64, 32, 32, 64, 4, 4, true, true>,    // 3: 4 warps
-               Cfg<64, 64, 32, 32, 32, 32, 4, 4, true, true>,    // 4: 4 warps
-               Cfg<32, 64, 64, 32, 32, 64, 4, 1, true, true>>;   // 5: 2 warps
+    std::tuple<Cfg<128, 128, 32, 64, 32, 32, 3, true>,  // 0: 8 warps
+               Cfg<128, 64, 32, 64, 32, 32, 3, true>,   // 1: 4 warps
+               Cfg<128, 64, 64, 64, 32, 64, 3, true>,   // 2: 4 warps
+               Cfg<64, 64, 64, 32, 32, 64, 4, true>,    // 3: 4 warps
+               Cfg<64, 64, 32, 32, 32, 32, 4, true>,    // 4: 4 warps
+               Cfg<32, 64, 64, 32, 32, 64, 4, true>>;   // 5: 2 warps
 constexpr ConfigCost kDualCost[] = {{1.85, 6.59, 1.50}, {1.68, 2.93, 0.00},
                                     {1.66, 1.83, 0.47}, {1.37, 1.02, 0.87},
                                     {1.36, 1.44, 0.10}, {0.81, 0.47, 0.22}};
 
 // down
 using DownConfigs =
-    std::tuple<Cfg<128, 256, 32, 64, 64, 32, 3, 8, false, true>,  // 0: 8 warps
-               Cfg<128, 128, 32, 64, 64, 32, 4, 8, false, true>,  // 1: 4 warps
-               Cfg<128, 128, 32, 64, 64, 32, 3, 8, false, true>,  // 2: 4 warps
-               Cfg<128, 64, 64, 64, 32, 64, 4, 8, false, true>,   // 3: 4 warps
-               Cfg<128, 128, 64, 64, 64, 64, 3, 8, false, true>,  // 4: 4 warps
-               Cfg<64, 64, 32, 32, 32, 32, 4, 4, false, true>,    // 5: 4 warps
-               Cfg<32, 64, 64, 32, 32, 64, 4, 1, false, true>>;   // 6: 2 warps
+    std::tuple<Cfg<128, 256, 32, 64, 64, 32, 3, false>,  // 0: 8 warps
+               Cfg<128, 128, 32, 64, 64, 32, 4, false>,  // 1: 4 warps
+               Cfg<128, 128, 32, 64, 64, 32, 3, false>,  // 2: 4 warps
+               Cfg<128, 64, 64, 64, 32, 64, 4, false>,   // 3: 4 warps
+               Cfg<128, 128, 64, 64, 64, 64, 3, false>,  // 4: 4 warps
+               Cfg<64, 64, 32, 32, 32, 32, 4, false>,    // 5: 4 warps
+               Cfg<32, 64, 64, 32, 32, 64, 4, false>>;   // 6: 2 warps
 constexpr ConfigCost kDownCost[] = {{1.70, 2.08, 1.00}, {1.52, 0.16, 1.30},
                                     {1.64, 0.78, 0.22}, {1.34, 0.29, 1.22},
                                     {1.55, 0.38, 0.72}, {1.02, 0.00, 0.20},
@@ -194,20 +195,20 @@ TileInfo tile_info(int device) {
 // ---------------------------------------------------------------------------
 
 template <typename Gemm>
-void launch(int device, cutlass::gemm::GemmCoord problem, int splits,
+void launch(int device, int sms, cutlass::gemm::GemmCoord problem, int splits,
             Elem const* A, int lda, Elem const* B0, Elem const* B1, int ldb,
             Elem* D, int ldd, cudaStream_t stream) {
-  setup_kernel<Gemm>(device);
-  auto params = Gemm::make_params(problem, splits, A, lda, B0, B1, ldb, D, ldd,
-                                  nullptr, nullptr);
-  if (params.grid.k() > 1) {
+  int const slots = sms * (setup_kernel<Gemm>(device) - 1);
+  auto params =
+      Gemm::make_params(problem, splits, slots, A, lda, B0, B1, ldb, D, ldd);
+  if (Gemm::split_tiles(params) > 0) {
     size_t floats = Gemm::workspace_floats(params);
     Workspace ws;
     if (floats * sizeof(float) > kMaxWorkspaceBytes ||
         !get_workspace(device, stream, floats, Gemm::workspace_counters(params),
                        ws)) {
-      params = Gemm::make_params(problem, 1, A, lda, B0, B1, ldb, D, ldd,
-                                 nullptr, nullptr);
+      params =
+          Gemm::make_params(problem, 1, slots, A, lda, B0, B1, ldb, D, ldd);
     } else {
       params.partials = ws.partials;
       params.counters = ws.counters;
@@ -273,6 +274,38 @@ struct Choice {
   int splits;
 };
 
+// Modelled time (µs) of one config with `splits` K slices; infinity when the
+// split-K workspace would not fit (launch() would fall back to one slice).
+double model_cost(TileInfo const& t, ConfigCost const& cost, int sms, int M,
+                  int Nd, int K, int accumulators, int splits) {
+  long tiles_mn = long((M + t.tm - 1) / t.tm) * ((Nd + t.tn - 1) / t.tn);
+  int k_tiles = (K + t.tk - 1) / t.tk;
+  int k_per = (k_tiles + splits - 1) / splits;
+  splits = (k_tiles + k_per - 1) / k_per;
+  long ctas = tiles_mn * splits;
+  long q = (ctas + sms - 1) / sms;
+  long full = q / t.ctas_per_sm;
+  long rem = q % t.ctas_per_sm;
+  double rate = cost.tflops_per_sm * 1e6;
+  double cta_flops = 2.0 * t.tm * t.tn * t.tk * double(k_per) * accumulators;
+  double compute = full * t.ctas_per_sm * cta_flops / rate;
+  if (rem > 0) {
+    double partial = double(rem) / t.ctas_per_sm;
+    compute += rem * cta_flops / (rate * std::pow(partial, cost.gamma));
+  }
+  compute += (full + (rem > 0)) * cost.round_us;
+  double bytes = (double(accumulators) * Nd + M) * K * 2.0;
+  double memory = bytes / (2.0e6 * std::min(1.0, double(ctas) / double(sms)));
+  double reduce = 0.0;
+  if (splits > 1) {
+    if (double(ctas) * t.tm * t.tn * accumulators * 4.0 >
+        double(kMaxWorkspaceBytes))
+      return 1e30;
+    reduce = 1.13 * splits + 0.79;
+  }
+  return std::max(compute, memory) + reduce;
+}
+
 template <size_t N>
 Choice select_config(std::array<TileInfo, N> const& tiles,
                      ConfigCost const (&cost_of)[N], int sms, int M, int Nd,
@@ -296,37 +329,10 @@ Choice select_config(std::array<TileInfo, N> const& tiles,
         ++max_splits;
     }
     for (int s = 1; s <= max_splits; ++s) {
-      int k_per = (k_tiles + s - 1) / s;
-      int splits = (k_tiles + k_per - 1) / k_per;
-      long ctas = tiles_mn * splits;
-      long q = (ctas + sms - 1) / sms;
-      long full = q / t.ctas_per_sm;
-      long rem = q % t.ctas_per_sm;
-      double rate = cost_of[c].tflops_per_sm * 1e6;
-      double cta_flops =
-          2.0 * t.tm * t.tn * t.tk * double(k_per) * accumulators;
-      double compute = full * t.ctas_per_sm * cta_flops / rate;
-      if (rem > 0) {
-        double partial = double(rem) / t.ctas_per_sm;
-        compute +=
-            rem * cta_flops / (rate * std::pow(partial, cost_of[c].gamma));
-      }
-      compute += (full + (rem > 0)) * cost_of[c].round_us;
-      double bytes = (double(accumulators) * Nd + M) * K * 2.0;
-      double memory =
-          bytes / (2.0e6 * std::min(1.0, double(ctas) / double(sms)));
-      double reduce = 0.0;
-      if (splits > 1) {
-        // launch() falls back to one slice when the workspace would not fit.
-        if (double(ctas) * t.tm * t.tn * accumulators * 4.0 >
-            double(kMaxWorkspaceBytes))
-          break;
-        reduce = 1.13 * splits + 0.79;
-      }
-      double cost = std::max(compute, memory) + reduce;
+      double cost = model_cost(t, cost_of[c], sms, M, Nd, K, accumulators, s);
       if (cost < best_cost) {
         best_cost = cost;
-        best = {static_cast<int>(c), splits};
+        best = {static_cast<int>(c), s};
       }
     }
   }
@@ -350,6 +356,28 @@ Choice small_m_config(std::array<TileInfo, N> const& tiles, int M, int Nd,
     if (k_tiles >= 8 * s) splits = s;
   }
   return {static_cast<int>(N) - 1, splits};
+}
+
+// Measured table (fused_moe_mlp_tuned.h) for the expert shapes of the
+// supported models on the GPU it was tuned on: the winner at the smallest
+// tuned M ≥ M (the largest one beyond the grid). Rounding up keeps the grid
+// of CTAs no larger than the one the entry was measured with, so a config
+// never gains an extra wave between grid points. Other shapes / GPUs use the
+// cost model.
+bool tuned_config(bool dual, int sms, int M, int Nd, int K, int num_cfgs,
+                  Choice& out) {
+  if (sms != kTunedSms) return false;
+  TunedExpertGemm const* lo = nullptr;
+  TunedExpertGemm const* hi = nullptr;
+  for (auto const& e : kTunedExpertGemm) {
+    if (e.dual != dual || e.n != Nd || e.k != K || e.cfg >= num_cfgs) continue;
+    if (e.m <= M && (!lo || e.m > lo->m)) lo = &e;
+    if (e.m >= M && (!hi || e.m < hi->m)) hi = &e;
+  }
+  TunedExpertGemm const* e = hi ? hi : lo;
+  if (!e) return false;
+  out = {e->cfg, e->splits};
+  return true;
 }
 
 }  // namespace
@@ -393,6 +421,15 @@ void fused_moe_ffn_tuned(torch::Tensor& hidden, torch::Tensor& gate_proj,
   const int sms = sm_count(device);
 
   constexpr int kSmallM = 64;
+  Choice tuned;
+  if (dual_cfg < 0 && tuned_config(true, sms, M, I, H, kNumDual, tuned)) {
+    dual_cfg = tuned.cfg;
+    dual_splits = tuned.splits;
+  }
+  if (down_cfg < 0 && tuned_config(false, sms, M, H, I, kNumDown, tuned)) {
+    down_cfg = tuned.cfg;
+    down_splits = tuned.splits;
+  }
   if (dual_cfg < 0) {
     auto tiles = tile_table<DualConfigs>(device);
     Choice c = M <= kSmallM
@@ -418,12 +455,12 @@ void fused_moe_ffn_tuned(torch::Tensor& hidden, torch::Tensor& gate_proj,
   auto* out = reinterpret_cast<Elem*>(output.data_ptr());
 
   visit_config<DualConfigs>(dual_cfg, [&]<typename Gemm>() {
-    launch<Gemm>(device, {M, I, H}, dual_splits, x, H, wg, wu, H, act, I,
+    launch<Gemm>(device, sms, {M, I, H}, dual_splits, x, H, wg, wu, H, act, I,
                  stream);
   });
   visit_config<DownConfigs>(down_cfg, [&]<typename Gemm>() {
-    launch<Gemm>(device, {M, H, I}, down_splits, act, I, wd, nullptr, I, out, H,
-                 stream);
+    launch<Gemm>(device, sms, {M, H, I}, down_splits, act, I, wd, nullptr, I,
+                 out, H, stream);
   });
 }
 
@@ -441,3 +478,20 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
 }
 
 std::pair<int, int> fused_moe_ffn_num_configs() { return {kNumDual, kNumDown}; }
+
+namespace {
+template <typename Configs, size_t... Is>
+std::vector<std::array<int, 3>> tile_shapes(std::index_sequence<Is...>) {
+  return {{std::tuple_element_t<Is, Configs>::ThreadblockShape::kM,
+           std::tuple_element_t<Is, Configs>::ThreadblockShape::kN,
+           std::tuple_element_t<Is, Configs>::ThreadblockShape::kK}...};
+}
+}  // namespace
+
+std::pair<std::vector<std::array<int, 3>>, std::vector<std::array<int, 3>>>
+fused_moe_ffn_tile_shapes() {
+  return {tile_shapes<DualConfigs>(
+              std::make_index_sequence<std::tuple_size_v<DualConfigs>>{}),
+          tile_shapes<DownConfigs>(
+              std::make_index_sequence<std::tuple_size_v<DownConfigs>>{})};
+}
