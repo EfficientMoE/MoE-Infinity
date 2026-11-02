@@ -126,6 +126,19 @@ non-loopback bind on an untrusted network.
 
 `MoE.serve()` accepts the same serving knobs as the CLI for host, port, memory ratios, batch sizing, the prefix-cache flag, offload path, and DFlash drafter setup. With `--enable-prefix-caching` on a supported Qwen3 + FlashInfer runtime the flag activates request-path prefix KV reuse; otherwise the cold path runs unchanged.
 
+### Models without KV history are refused at startup
+
+Serving never passes `past_key_values` to the model: KV history lives in the
+paged KV cache and reaches attention only through a `*PagedAttention` shim
+(DeepSeek-V2/V3, Qwen3, Qwen3.5, OLMoE, Mixtral). For any other model, or when
+no paged attention backend was built (`use_native_engine=False`, e.g. GLM-5.x,
+GLM-5.3-Flash, MiniMax-M3, Hy3), every decode step would attend only to itself.
+`MoE.serve()` and `api_server_v2` therefore raise at startup, naming the model
+class and the reason. `MOE_STRICT_PAGED_ATTENTION=0` downgrades this to a
+one-time warning (multi-token output is then wrong); `MOE_STRICT_PAGED_ATTENTION=1`
+also turns the per-forward check of a directly built `ModelRunner` into an
+error. Use `MoE.generate()` for refused models.
+
 ## Decode CUDA graphs (experimental, opt-in)
 
 Decode CUDA graphs are disabled by default. Enabling the flag permits the
