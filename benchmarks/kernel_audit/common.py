@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import median
+from statistics import fmean, median
 from typing import Callable
 
 import torch
@@ -40,6 +40,9 @@ class Timing:
     min_us: float
     p90_us: float
     n: int
+    # CUDA events tick at ~1.024 us on sm_120, so medians of short kernels snap
+    # to tick multiples; the mean over many calls dithers below one tick.
+    mean_us: float = float("nan")
 
 
 def time_cuda(
@@ -78,6 +81,7 @@ def time_cuda(
         min_us=samples[0],
         p90_us=samples[min(len(samples) - 1, int(0.9 * len(samples)))],
         n=len(samples),
+        mean_us=fmean(samples),
     )
 
 
@@ -116,6 +120,7 @@ def time_graph(
         min_us=samples[0],
         p90_us=samples[-1],
         n=len(samples),
+        mean_us=fmean(samples),
     )
 
 

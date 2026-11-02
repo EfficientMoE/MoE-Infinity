@@ -54,6 +54,19 @@ Ridge points: **BF16 164 FLOP/B**, FP8 323, FP4 589. A BF16 expert FFN has arith
 Single short kernels can run at 2.2–2.3 GHz, so a few compute-bound points read >100 % of the *sustained* roof.
 ncu's `sm__pipe_tensor_cycles_active` is the clock-independent compute-saturation number and is reported too.
 
+Small transfers cannot reach the DRAM roof: per-launch overhead (~3 µs between CUDA events), ramp-up and the
+tail wave dominate a few-microsecond kernel. The best plain read / copy of the same bytes, timed like the
+harness (`size_ceiling.py`, L2 flushed, mean of 200 calls):
+
+| bytes read | 1 MB | 4 MB | 8 MB | 16 MB | 32 MB | 64 MB | 128 MB | 256 MB | 512 MB | 2 GB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| read, % of 1641 GB/s | 10 | 29 | 44 | 63 | 75 | 84 | 90 | 93 | 95 | 97 |
+| copy (read + write same bytes), % of 1463 GB/s | 21 | 65 | 96 | 96 | 99 | 98 | 99 | – | 100 | – |
+
+The copy row counts read + written bytes, but writes are absorbed by the 128 MB write-back L2 within the timed
+call, so a small copy costs about as much as a read of the same size. Memory-bound fix gates are judged against
+this size-matched ceiling for the same bytes and launch count.
+
 ---
 
 ## 2. What actually runs on sm_120
@@ -423,7 +436,8 @@ GPU=0 bash benchmarks/kernel_audit/run_all.sh          # ~2.5 h on an idle GPU; 
 | `suites.py` | cases: each one replays the production call sequence of one op |
 | `ext/audit_ext.cpp` | pybind shim linked against the shipped `_store.so`, so `fused_moe_ffn_into` and the dequant kernels are measured as built |
 | `ceilings.py` | measured roofline ceilings |
-| `run_cases.py` | `time` (CUDA events, L2 flushed per call), `busy` (CUPTI kernel time vs wall time), `ncu` modes |
+| `size_ceiling.py` | size-matched read / copy ceilings for the bytes and launch count of one kernel |
+| `run_cases.py` | `time` (CUDA events, L2 flushed per call; median and mean), `busy` (CUPTI kernel time vs wall time), `ncu` modes |
 | `ncu_driver.py` | Nsight Compute capture (3-pass metric set) → `results/ncu_*.jsonl` |
 | `analyze.py`, `report_tables.py` | roofline join, CSVs, plots, tables |
 | `results/` | committed: `summary_*.csv`, `tables_expert.md`, `ceilings.json`, `autotune_probe.json`, `plots/`; regenerated and git-ignored: raw `*_time.jsonl`, `busy.jsonl`, `ncu_*.jsonl`, `ncu_*.ncu-repz` |

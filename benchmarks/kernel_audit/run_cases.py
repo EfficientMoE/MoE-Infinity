@@ -134,6 +134,7 @@ def main() -> None:
                     )
                     rec.update(
                         t_med_us=t.median_us,
+                        t_mean_us=t.mean_us,
                         t_min_us=t.min_us,
                         t_p90_us=t.p90_us,
                         n=t.n,
