@@ -356,6 +356,10 @@ _PAGED_ATTN_SOURCES = [
     "extensions/kernel/paged_attention_int8.cu",
 ]
 
+_ROUTER_SOURCES = [
+    "extensions/kernel/fused_router.cu",
+]
+
 _MARLIN_SOURCES = [
     "moe_infinity/kernel/marlin/marlin_cuda.cpp",
     "moe_infinity/kernel/marlin/marlin_cuda_kernel.cu",
@@ -423,6 +427,22 @@ if cuda_available:
             include_dirs=COMMON_INCLUDE_PATHS,
             extra_compile_args={
                 "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,
+            },
+        )
+    )
+
+    # _router: fused MoE routing (gate logits + top-k + active-expert flags)
+    ext_modules.append(
+        cpp_extension.CUDAExtension(
+            name="moe_infinity._router",
+            sources=_ROUTER_SOURCES,
+            include_dirs=COMMON_INCLUDE_PATHS,
+            extra_compile_args={
+                "cxx": COMMON_CXX_ARGS,
+                # No --use_fast_math: scores must round exactly like the
+                # torch routers (expf / IEEE division) for identical routing.
+                "nvcc": [a for a in COMMON_NVCC_ARGS if a != "--use_fast_math"]
+                + _cuda_arch_flags,
             },
         )
     )
