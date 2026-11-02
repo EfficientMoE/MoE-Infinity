@@ -69,6 +69,70 @@ def _flashinfer_usable_on(module: object, device: torch.device | None) -> bool:
     return not module_name.startswith("flashinfer")
 
 
+# None until the first GQA call; False once torch rejects ``enable_gqa``.
+_SDPA_ENABLE_GQA: Optional[bool] = None
+_FLASH_GQA_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _use_native_gqa(q: torch.Tensor) -> bool:
+    return (
+        _SDPA_ENABLE_GQA is not False
+        and q.is_cuda
+        and q.dtype in _FLASH_GQA_DTYPES
+    )
+
+
+def _sdpa_with_scale(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float,
+    is_causal: bool,
+) -> torch.Tensor:
+    try:
+        return F.scaled_dot_product_attention(
+            q, k, v, scale=scale, is_causal=is_causal
+        )
+    except TypeError:
+        return F.scaled_dot_product_attention(
+            q * scale, k, v, is_causal=is_causal
+        )
+
+
+def causal_prefill_sdpa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    """Causal SDPA over ``q [B, H, T, d]`` and GQA ``k``/``v [B, KVH, T, d]``.
+
+    fp16/bf16 CUDA inputs use SDPA's native GQA (FlashAttention reads each
+    K/V head once). Other inputs, or torch without ``enable_gqa``, expand K/V
+    with ``repeat_interleave``: there ``enable_gqa`` would only reach the math
+    backend, which materialises the T x T scores.
+    """
+    global _SDPA_ENABLE_GQA
+    num_heads, num_kv_heads = int(q.shape[1]), int(k.shape[1])
+    if num_heads % num_kv_heads != 0:
+        raise ValueError("query num_heads must be divisible by num_kv_heads")
+    head_ratio = num_heads // num_kv_heads
+    if head_ratio == 1:
+        return _sdpa_with_scale(q, k, v, scale, is_causal=True)
+    if _use_native_gqa(q):
+        try:
+            out = F.scaled_dot_product_attention(
+                q, k, v, scale=scale, is_causal=True, enable_gqa=True
+            )
+            _SDPA_ENABLE_GQA = True
+            return out
+        except TypeError:
+            _SDPA_ENABLE_GQA = False
+    k = k.repeat_interleave(head_ratio, dim=1)
+    v = v.repeat_interleave(head_ratio, dim=1)
+    return _sdpa_with_scale(q, k, v, scale, is_causal=True)
+
+
 @dataclass
 class AttentionMetadata:
     is_prefill: bool
@@ -947,18 +1011,20 @@ class PagedAttentionBackend:
                 seq_len=seq_len,
                 execution_dtype=torch.float32,
             )
-            k = k.permute(1, 0, 2)
-            v = v.permute(1, 0, 2)
-            if head_ratio > 1:
-                k = k.repeat_interleave(head_ratio, dim=0)
-                v = v.repeat_interleave(head_ratio, dim=0)
+            k_sdpa = k.permute(1, 0, 2).unsqueeze(0)
+            v_sdpa = v.permute(1, 0, 2).unsqueeze(0)
+            # One unmasked query token: the query heads sharing a KV head
+            # become that head's query rows, so K/V are never expanded.
             q_sdpa = (
-                query[seq_idx].to(dtype=torch.float32).unsqueeze(0).unsqueeze(2)
+                query[seq_idx]
+                .to(dtype=torch.float32)
+                .reshape(num_kv_heads, head_ratio, -1)
+                .unsqueeze(0)
             )
-            k_sdpa = k.unsqueeze(0)
-            v_sdpa = v.unsqueeze(0)
             out_fp32 = self._run_sdpa_fp32(q_sdpa, k_sdpa, v_sdpa, attn_scale)
-            outputs.append(out_fp32[0, :, 0, :].to(dtype=query_dtype))
+            outputs.append(
+                out_fp32[0].reshape(num_heads, -1).to(dtype=query_dtype)
+            )
         return torch.stack(outputs, dim=0)
 
     @staticmethod
@@ -1056,39 +1122,12 @@ class PagedAttentionBackend:
             .unsqueeze(0)
         )
 
-        num_heads = q.shape[1]
-        num_kv_heads = k.shape[1]
-        if num_heads % num_kv_heads != 0:
-            raise ValueError(
-                "query num_heads must be divisible by num_kv_heads"
-            )
-        head_ratio = num_heads // num_kv_heads
-        if head_ratio > 1:
-            k = k.repeat_interleave(head_ratio, dim=1)
-            v = v.repeat_interleave(head_ratio, dim=1)
-
         attn_scale = (
             float(scale)
             if scale is not None
             else 1.0 / math.sqrt(float(self.spec.head_dim))
         )
-
-        try:
-            out = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                scale=attn_scale,
-                is_causal=True,
-            )
-        except TypeError:
-            out = F.scaled_dot_product_attention(
-                q * attn_scale,
-                k,
-                v,
-                is_causal=True,
-            )
-
+        out = causal_prefill_sdpa(q, k, v, attn_scale)
         return out.squeeze(0).transpose(0, 1)
 
     def _decode_forward(
