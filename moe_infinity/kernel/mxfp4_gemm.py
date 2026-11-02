@@ -579,12 +579,26 @@ def _config(bucket: int, N: int, K: int, num_sms: int) -> dict:
         )
         return cfg
     wide_n = N >= 4096
+    if bucket <= 8 and K >= 1024:
+        # Decode: one K pass per CTA (no software pipeline), so every CTA
+        # issues all its weight loads at once like the M = 1 GEMV; the K
+        # split (~K/6 per CTA) supplies the parallelism.
+        return dict(
+            kind="mma",
+            BLOCK_M=16,
+            BLOCK_N=64 if wide_n else 32,
+            BLOCK_K=512,
+            num_warps=8 if wide_n else 4,
+            num_stages=1,
+            CVT=True,
+            SPLIT_K=max(1, min(triton.cdiv(K, 512), 6)),
+        )
     if bucket <= 64:
         cfg = dict(
             BLOCK_M=max(16, bucket),
             BLOCK_N=64 if wide_n else 32,
             BLOCK_K=256 if bucket <= 32 else 128,
-            num_warps=4,
+            num_warps=8 if wide_n and bucket <= 32 else 4,
             num_stages=3,
         )
         cfg["CVT"] = True  # native E2M1 cvt (sm_100a+ only; else ignored)
