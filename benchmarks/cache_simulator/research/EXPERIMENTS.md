@@ -485,3 +485,44 @@ ceiling; invariant checked at runtime and against `opt_mrc`. Full table in
 | activation_matrix | qwen3-30b-a3b | mmlu150-greedy64 | 6144 | 0.9992 | 0.9994 | real | 963aab0 |
 
 <!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model qwen3-30b-a3b --dataset mmlu150-greedy64 --ignore-layers 0 | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: 963aab0 -->
+
+### Qwen3-235B-A22B-Instruct-2507-FP8 — the real target (#289)
+
+Real capture of the **actual 235B target** at last. `Qwen3MoeForCausalLM`,
+**94 MoE layers, 128 experts, top-8** (`ignore_layers=0`), identity
+physical->logical map (`ep_num_redundant_experts=0`), expert ids in `[0, 127]`,
+no `-1` padding (top-8 fills the recorder buffer). FP8 e4m3 block-wise weights;
+gates are not quantized so `topk_ids` are the true routing. Captured on GPUs
+0-3 (RTX PRO 6000 Blackwell, sm_120) with `--tp 4 --dp 1`, SGLang `0.5.20`,
+greedy, `max_new_tokens=64`, 100 MMLU (`cais/mmlu[all][test]`, first 100 in
+fixed order) prompts, batch size 1 per dump. All 4 TP ranks dump the
+(replicated, non-DP) routing; the 397 raw dumps are de-duplicated by routing
+content to 100.
+
+**Decode-only numbers below.** The per-request dumps were merged into one
+`.pt`; a merged stream holds one prefill pass *per request*
+(100 prefill + 6400 decode records here), so a replay must drop **every**
+prefill pass, not just the global `records[0]`. The correct decode-only stream
+is **4,812,800** accesses, **10,551 / 12,032** distinct `(layer, expert)` keys.
+Belady ceiling (decode-only), independently reproduced bit-for-bit by a
+per-record decode filter (`seq_len==1`) and by the vectorized `opt_mrc`:
+
+| policy | model | dataset | capacity | hit_rate | eff_hit_rate | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| belady | qwen3-235b | mmlu100-greedy64/decode | 256 | 0.3067 | 0.3067 | real | a44b9bd |
+| belady | qwen3-235b | mmlu100-greedy64/decode | 512 | 0.4898 | 0.4898 | real | a44b9bd |
+| belady | qwen3-235b | mmlu100-greedy64/decode | 1024 | 0.6581 | 0.6581 | real | a44b9bd |
+| belady | qwen3-235b | mmlu100-greedy64/decode | 2048 | 0.8082 | 0.8082 | real | a44b9bd |
+| belady | qwen3-235b | mmlu100-greedy64/decode | 4096 | 0.9320 | 0.9320 | real | a44b9bd |
+| belady | qwen3-235b | mmlu100-greedy64/decode | 8192 | 0.9947 | 0.9947 | real | a44b9bd |
+
+The **full decode-only policy x capacity study** for this capture (LRU/LFU/
+model-tracing/LHU/ARC/2Q/LIRS/S3-FIFO/SIEVE/W-TinyLFU/per-layer-LRU/LCNU plus
+prefetch oracles, Belady asserted as the ceiling) lives on branch
+`feat/cache-policy-lcnu`
+(`research/results_real_qwen3_235b_decode.md`, `research/decode_policy_study.md`),
+which also carries the per-record decode-detection fix in
+`run_policies_real.py` / `mrc.py`. These capture-provenance rows are recorded
+here to avoid duplicating that in-flight study.
+
+<!-- 235B capture: SGLang 0.5.20 TP4 on 4x RTX PRO 6000 Blackwell sm_120; decode-only Belady verified against opt_mrc; full policy study on feat/cache-policy-lcnu -->
