@@ -1,4 +1,10 @@
-"""Split-KV GQA decode attention over a contiguous (HF ``DynamicCache``) KV.
+"""Triton kernels for HF-layout GQA attention (runtime/hf_attention.py).
+
+``gqa_decode_attention``: split-KV GQA decode attention over a contiguous
+(HF ``DynamicCache``) KV.  ``apply_attention_sinks``: exact sinks from the
+log-sum-exp of a prefill kernel, one in-place pass.
+
+Decode details:
 
 One query token per sequence attends over ``K/V [B, KV_H, L, D]`` (any
 strides with a contiguous last dim, so cache views need no copy).  Each
@@ -27,6 +33,7 @@ _LOG2E = 1.4426950408889634
 _LN2 = 0.6931471805599453
 _MAX_SPLITS = 256
 _TARGET_WAVES = 1  # split programs per SM to aim for
+_PARTIAL_FRAC = 0.04  # max partial-result bytes / KV bytes
 
 
 @triton.jit
@@ -199,6 +206,81 @@ def _gqa_decode_merge_kernel(
     tl.store(LSE_OUT + b.to(tl.int64) * kv_heads * G + head, lse_nat)
 
 
+@triton.jit
+def _sink_scale_kernel(
+    OUT,
+    LSE,
+    SINKS,
+    n_rows,
+    heads,
+    qlen,
+    stride_ob,
+    stride_oq,
+    stride_oh,
+    stride_lb,
+    stride_lh,
+    stride_lq,
+    D: tl.constexpr,
+    D_PAD: tl.constexpr,
+    ROWS: tl.constexpr,
+):
+    rows = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    r_ok = rows < n_rows
+    h = rows % heads
+    t = rows // heads
+    q = t % qlen
+    b = (t // qlen).to(tl.int64)
+    lse = tl.load(
+        LSE + b * stride_lb + h * stride_lh + q * stride_lq,
+        mask=r_ok,
+        other=0.0,
+    )
+    sink = tl.load(SINKS + h, mask=r_ok, other=0.0).to(tl.float32)
+    f = tl.sigmoid(lse - sink)
+    offs_d = tl.arange(0, D_PAD)
+    ptrs = (
+        OUT
+        + (b * stride_ob + q * stride_oq + h * stride_oh)[:, None]
+        + offs_d[None, :]
+    )
+    m = r_ok[:, None] & (offs_d < D)[None, :]
+    x = tl.load(ptrs, mask=m, other=0.0)
+    tl.store(ptrs, (x.to(tl.float32) * f[:, None]).to(x.dtype), mask=m)
+
+
+def apply_attention_sinks(
+    out: torch.Tensor, lse: torch.Tensor, sinks: torch.Tensor
+) -> torch.Tensor:
+    """In place: ``out [B, Q, H, D] *= sigmoid(lse [B, H, Q] - sinks [H])``.
+
+    ``softmax([s, sink])[:-1] @ V == (softmax(s) @ V) * Z / (Z + e^sink)``
+    with ``lse = log Z``: exact attention sinks on top of any kernel that
+    returns the log-sum-exp.  One launch; ``out`` needs a contiguous last dim.
+    """
+    bsz, qlen, heads, d = out.shape
+    n_rows = bsz * qlen * heads
+    rows = max(1, min(64, 4096 // _pow2(d)))
+    _sink_scale_kernel[(triton.cdiv(n_rows, rows),)](
+        out,
+        lse,
+        sinks,
+        n_rows,
+        heads,
+        qlen,
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        lse.stride(0),
+        lse.stride(1),
+        lse.stride(2),
+        D=d,
+        D_PAD=max(16, _pow2(d)),
+        ROWS=rows,
+        num_warps=4,
+    )
+    return out
+
+
 def _pow2(x: int) -> int:
     return 1 << max(0, (x - 1).bit_length())
 
@@ -275,7 +357,14 @@ def gqa_decode_attention(
     block_n, num_warps, num_stages = _config(max(d, dv), g)
     n_bh = bsz * kv_heads
     target = _TARGET_WAVES * _num_sms(query.device.index or 0)
-    max_splits = min(_MAX_SPLITS, triton.cdiv(span, block_n))
+    # Keep the fp32 partial results (one [G, Dv] row per split) a few percent
+    # of the KV bytes this (batch, kv-head) streams.
+    kv_bytes = span * (d + dv) * query.element_size()
+    max_splits = min(
+        _MAX_SPLITS,
+        triton.cdiv(span, block_n),
+        max(1, int(_PARTIAL_FRAC * kv_bytes / (4 * g * dv))),
+    )
     splits = max(1, min(triton.cdiv(target, n_bh), max_splits))
     chunk = triton.cdiv(triton.cdiv(span, splits), block_n) * block_n
     splits = triton.cdiv(span, chunk)
@@ -356,4 +445,8 @@ def gqa_decode_attention(
     return (out, lse) if return_lse else out
 
 
-__all__ = ["gqa_decode_attention", "gqa_decode_supported"]
+__all__ = [
+    "apply_attention_sinks",
+    "gqa_decode_attention",
+    "gqa_decode_supported",
+]

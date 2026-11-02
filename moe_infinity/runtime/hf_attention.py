@@ -8,7 +8,7 @@ sinks (GPT-OSS).  This module provides one attention function, registered with
 the HF attention interface, that
 
 * decode (one query token): a split-KV Triton kernel
-  (``kernel/gqa_decode_attn.py``) that reads every KV byte once, with the
+  (``kernel/gqa_attention.py``) that reads every KV byte once, with the
   sliding window, the key mask and the sinks fused in;
 * prefill without an explicit mask: PyTorch's built-in FlashAttention-2
   (``aten._flash_attention_forward``): native GQA (K/V never expanded),
@@ -71,14 +71,14 @@ def _has_flash_op() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
-def _decode_kernel():
+def _triton_kernels():
     if os.environ.get("MOE_DISABLE_FUSED_KERNELS", "0") == "1":
         return None
     try:
-        from moe_infinity.kernel import gqa_decode_attn
+        from moe_infinity.kernel import gqa_attention
     except Exception:  # no Triton: FA2 / SDPA decode paths below
         return None
-    return gqa_decode_attn
+    return gqa_attention
 
 
 def _flash_eligible(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> bool:
@@ -212,8 +212,11 @@ def _apply_sinks(
 ) -> torch.Tensor:
     """``out [B, Q, H, D]`` *= ``Z / (Z + e^sink)`` with ``lse = log Z``.
 
-    One in-place elementwise pass (fp32 opmath); ``out`` must be owned.
+    In place (one fused Triton pass on CUDA); ``out`` must be owned.
     """
+    kernels = _triton_kernels() if out.is_cuda else None
+    if kernels is not None and out.stride(-1) == 1:
+        return kernels.apply_attention_sinks(out, lse, sinks)
     scale = torch.sigmoid(lse - sinks.float().reshape(1, -1, 1))
     return out.mul_(scale.transpose(1, 2).unsqueeze(-1))
 
@@ -286,7 +289,7 @@ def _attention(
     flash = not unsupported and _flash_eligible(query, key, value)
 
     if qlen == 1 and not unsupported:
-        decode = _decode_kernel()
+        decode = _triton_kernels()
         if decode is not None and decode.gqa_decode_supported(
             query, key, value, attention_mask
         ):

@@ -128,12 +128,16 @@ FAMILIES = {
 }
 
 
-def _build(family, **kw):
-    """fp32 CPU (eager, selected-backend) twins with identical weights."""
+def _family(family, **kw):
     try:
-        cls, cfg = FAMILIES[family](**kw)
+        return FAMILIES[family](**kw)
     except (ImportError, TypeError, ValueError) as e:  # pragma: no cover
         pytest.skip(f"{family} unavailable in this transformers: {e}")
+
+
+def _build(family, **kw):
+    """fp32 CPU (eager, selected-backend) twins with identical weights."""
+    cls, cfg = _family(family, **kw)
     impl = select_attn_implementation(cls, cfg, False)
     torch.manual_seed(0)
     eager = cls._from_config(copy.deepcopy(cfg), attn_implementation="eager")
@@ -253,12 +257,12 @@ def _compare_bf16(family, seq, pad, **kw):
 
 
 def test_select_attn_implementation():
-    cls, cfg = _gpt_oss()
+    cls, cfg = _family("gpt_oss")
     assert select_attn_implementation(cls, cfg, False) == MOE_GQA
     assert select_attn_implementation(cls, cfg, True) == "flash_attention_2"
-    cls, cfg = _mixtral()
+    cls, cfg = _family("mixtral")
     assert select_attn_implementation(cls, cfg, False) == "sdpa"
-    cls, cfg = _glm_dsa()
+    cls, cfg = _family("glm_moe_dsa")
     # GLM-DSA has no FA2 support: never eager, never flash_attention_2.
     assert select_attn_implementation(cls, cfg, True) == "sdpa"
 
@@ -398,18 +402,19 @@ def test_model_parity_cpu_fp32(family, pad):
 
 def _count_paths(monkeypatch):
     calls = {"flash": 0, "masked": 0, "decode": 0}
-    decode = hf_attention._decode_kernel()
+    decode = hf_attention._triton_kernels()
     if decode is not None:
 
         class _Spy:
             gqa_decode_supported = staticmethod(decode.gqa_decode_supported)
+            apply_attention_sinks = staticmethod(decode.apply_attention_sinks)
 
             @staticmethod
             def gqa_decode_attention(*a, **k):
                 calls["decode"] += 1
                 return decode.gqa_decode_attention(*a, **k)
 
-        monkeypatch.setattr(hf_attention, "_decode_kernel", lambda: _Spy)
+        monkeypatch.setattr(hf_attention, "_triton_kernels", lambda: _Spy)
 
     def spy(name, fn):
         def wrapped(*a, **k):
@@ -473,7 +478,7 @@ def test_gpt_oss_window_128_cuda(monkeypatch):
 @pytest.mark.parametrize("sinks", [False, True])
 @pytest.mark.parametrize("mask", [None, "bool", "additive", "bool_bcast"])
 def test_gqa_decode_kernel(B, H, KVH, L, D, DV, window, sinks, mask):
-    from moe_infinity.kernel.gqa_decode_attn import (
+    from moe_infinity.kernel.gqa_attention import (
         gqa_decode_attention,
         gqa_decode_supported,
     )
@@ -518,8 +523,28 @@ def test_gqa_decode_kernel(B, H, KVH, L, D, DV, window, sinks, mask):
 
 
 @needs_cuda
+@pytest.mark.parametrize("D", [24, 64, 128, 256])
+@pytest.mark.parametrize("strided", [False, True])
+def test_apply_attention_sinks_kernel(D, strided):
+    from moe_infinity.kernel.gqa_attention import apply_attention_sinks
+
+    torch.manual_seed(0)
+    B, Q, H = 2, 37, 8
+    base = torch.randn(B, H, Q, D, device="cuda", dtype=torch.bfloat16)
+    out = base.transpose(1, 2) if strided else base.transpose(1, 2).contiguous()
+    lse = torch.randn(B, H, Q, device="cuda")
+    snk = torch.randn(H, device="cuda", dtype=torch.bfloat16)
+    want = out.float() * torch.sigmoid(
+        lse - snk.float()[None, :, None]
+    ).transpose(1, 2).unsqueeze(-1)
+    got = apply_attention_sinks(out, lse, snk)
+    assert got.data_ptr() == out.data_ptr()
+    torch.testing.assert_close(got.float(), want, atol=1e-2, rtol=1e-2)
+
+
+@needs_cuda
 def test_gqa_decode_kernel_fully_masked_row():
-    from moe_infinity.kernel.gqa_decode_attn import gqa_decode_attention
+    from moe_infinity.kernel.gqa_attention import gqa_decode_attention
 
     q = torch.randn(1, 8, 1, 64, device="cuda", dtype=torch.bfloat16)
     k = torch.randn(1, 2, 100, 64, device="cuda", dtype=torch.bfloat16)
