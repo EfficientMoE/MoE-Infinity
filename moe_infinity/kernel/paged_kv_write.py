@@ -44,10 +44,10 @@ _STRICT_ENV = "MOE_INFINITY_KV_WRITE_CHECK"
 # Elements (BLOCK_T * BLOCK_D) per program and tensor below _FULL_BLOCK_TOKENS:
 # small tiles keep many programs in flight for decode-sized batches.
 _TILE_ELEMS = 512
-# Elements per warp.
-_WARP_ELEMS = 512
 # From this many tokens on, a program writes one whole cache block.
 _FULL_BLOCK_TOKENS = 1024
+# Largest whole-block tile (block * H * D elements) when heads are merged.
+_MAX_MERGED_TILE = 16384
 
 
 def _validate(
@@ -96,20 +96,40 @@ def check_slots(slot_mapping: torch.Tensor, num_blocks: int, block_size: int):
         raise ValueError("slot_mapping points past allocated blocks")
 
 
-def _strict(slot_mapping: torch.Tensor) -> bool:
-    return not slot_mapping.is_cuda or os.environ.get(_STRICT_ENV, "") not in (
-        "",
-        "0",
-    )
+def strict_checks(t: torch.Tensor) -> bool:
+    """Whether writers run their host-side (syncing) input checks for ``t``:
+    always on CPU, on CUDA only with ``MOE_INFINITY_KV_WRITE_CHECK=1``."""
+    return not t.is_cuda or os.environ.get(_STRICT_ENV, "") not in ("", "0")
 
 
 if _HAS_TRITON:
 
     @triton.jit
-    def _scatter_tile(
+    def _load_tile(
         src_ptr,
-        dst_ptr,
         tok0,
+        head,
+        valid,
+        S_T: tl.constexpr,
+        S_H: tl.constexpr,
+        HEAD_DIM: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        BLOCK_T: tl.constexpr,
+    ):
+        # src = tok*S_T + head*S_H + d; int64 scalar base, int32 tile offsets.
+        t = tl.arange(0, BLOCK_T)
+        d = tl.arange(0, BLOCK_D)
+        mask = valid[:, None] & (d < HEAD_DIM)[None, :]
+        return tl.load(
+            src_ptr + tok0 * S_T + head * S_H + t[:, None] * S_T + d[None, :],
+            mask=mask,
+            eviction_policy="evict_first",
+        )
+
+    @triton.jit
+    def _store_tile(
+        x,
+        dst_ptr,
         head,
         slot,
         valid,
@@ -117,8 +137,6 @@ if _HAS_TRITON:
         off0,
         is_run,
         is_full,
-        S_T: tl.constexpr,
-        S_H: tl.constexpr,
         S_B: tl.constexpr,
         S_HD: tl.constexpr,
         S_DO: tl.constexpr,
@@ -130,17 +148,11 @@ if _HAS_TRITON:
         BLOCK_T: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
-        # src = tok*S_T + head*S_H + d
         # dst = blk*S_B + head*S_HD + (d // X)*S_DO + (d % X)*S_DI + off*S_O
-        # Scalar bases are int64; offsets inside one tile stay int32.
         t = tl.arange(0, BLOCK_T)
         d = tl.arange(0, BLOCK_D)
         mask = valid[:, None] & (d < HEAD_DIM)[None, :]
-        x = tl.load(
-            src_ptr + tok0 * S_T + head * S_H + t[:, None] * S_T + d[None, :],
-            mask=mask,
-            eviction_policy="evict_first",
-        ).to(dst_ptr.dtype.element_ty)
+        x = x.to(dst_ptr.dtype.element_ty)
         d_off = (d // X)[None, :] * S_DO + (d % X)[None, :] * S_DI
         base = dst_ptr + blk0 * S_B + head * S_HD
         if is_full:
@@ -234,14 +246,21 @@ if _HAS_TRITON:
         else:
             is_full = False
 
-        _scatter_tile(
-            key_ptr, k_dst_ptr, tok0, head, slot, valid, blk0, off0, is_run,
-            is_full, S_KT, S_KH, K_SB, K_SH, K_SDO, K_SDI, K_SO, KX,
+        # Both loads before both stores: twice the bytes in flight.
+        xk = _load_tile(
+            key_ptr, tok0, head, valid, S_KT, S_KH, HEAD_DIM, BLOCK_D, BLOCK_T
+        )
+        xv = _load_tile(
+            value_ptr, tok0, head, valid, S_VT, S_VH, HEAD_DIM, BLOCK_D, BLOCK_T
+        )
+        _store_tile(
+            xk, k_dst_ptr, head, slot, valid, blk0, off0, is_run, is_full,
+            K_SB, K_SH, K_SDO, K_SDI, K_SO, KX,
             HEAD_DIM, BLOCK_D, BLOCK_T, BLOCK_SIZE,
         )  # fmt: skip
-        _scatter_tile(
-            value_ptr, v_dst_ptr, tok0, head, slot, valid, blk0, off0, is_run,
-            is_full, S_VT, S_VH, V_SB, V_SH, V_SDO, V_SDI, V_SO, VX,
+        _store_tile(
+            xv, v_dst_ptr, head, slot, valid, blk0, off0, is_run, is_full,
+            V_SB, V_SH, V_SDO, V_SDI, V_SO, VX,
             HEAD_DIM, BLOCK_D, BLOCK_T, BLOCK_SIZE,
         )  # fmt: skip
 
@@ -302,6 +321,27 @@ def _align16(t: torch.Tensor) -> bool:
     return t.data_ptr() % 16 == 0
 
 
+def _is_pow2(n: int) -> bool:
+    return n & (n - 1) == 0
+
+
+def _mergeable(key, value, k_geo, v_geo, bs: int) -> bool:
+    """Heads can be folded into the head dim when every token's heads are
+    adjacent in the source and every block's heads are adjacent in the cache,
+    i.e. head stride == head_dim (source) and == the page size (cache)."""
+    _, num_kv_heads, head_dim = key.shape
+    if key.stride(1) != head_dim or value.stride(1) != head_dim:
+        return False
+    if _is_pow2(head_dim) and not _is_pow2(num_kv_heads * head_dim):
+        return False  # would lose the whole-block path (needs a pow2 dim)
+    if bs * num_kv_heads * head_dim > _MAX_MERGED_TILE:
+        return False
+    for _, s_h, s_do, _, _, x in (k_geo, v_geo):
+        if head_dim % x or s_h != (head_dim // x) * s_do:
+            return False
+    return True
+
+
 def _launch(key, value, slots, k_dst, v_dst, k_geo, v_geo, num_blocks, bs):
     global _FAST_LAUNCH
     num_tokens, num_kv_heads, head_dim = key.shape
@@ -309,6 +349,14 @@ def _launch(key, value, slots, k_dst, v_dst, k_geo, v_geo, num_blocks, bs):
         return
     key = _src(key)
     value = _src(value)
+    if num_kv_heads > 1 and _mergeable(key, value, k_geo, v_geo, bs):
+        # All heads of a token / block form one run in source and cache: write
+        # them as a single head of size H * D (bigger tiles, one slot decode
+        # per token instead of per head).
+        k_geo = (k_geo[0], 0, *k_geo[2:])
+        v_geo = (v_geo[0], 0, *v_geo[2:])
+        head_dim *= num_kv_heads
+        num_kv_heads = 1
     # Plain-Python helpers: triton.next_power_of_2 / cdiv are slow to call.
     block_d = 1 << (head_dim - 1).bit_length()
     # Tokens per program: at most one cache block, so a prefill tile can be a
@@ -322,7 +370,11 @@ def _launch(key, value, slots, k_dst, v_dst, k_geo, v_geo, num_blocks, bs):
             max(1, _TILE_ELEMS // block_d),
             block_cap,
         )
-    num_warps = max(1, min(8, block_t * block_d // _WARP_ELEMS))
+    elems = block_t * block_d
+    # 4 warps up to 8K-element tiles (measured best for whole-block prefill
+    # tiles), fewer for small decode tiles.
+    num_warps = min(8, max(4, elems // 2048)) if elems >= 2048 else elems // 512
+    num_warps = max(1, num_warps)
     grid = (-(-num_tokens // block_t), num_kv_heads, 1)
     num_slots = num_blocks * bs
     args = (key, value, slots, k_dst, v_dst, num_tokens, num_slots)
@@ -407,7 +459,7 @@ def paged_kv_scatter_(
     device (any dtype; cast on store); ``slot_mapping``: ``[T]`` int32/int64.
     """
     num_blocks, _, _, block_size, x = k_cache.shape
-    if _strict(slot_mapping):
+    if strict_checks(slot_mapping):
         check_slots(slot_mapping, num_blocks, block_size)
     if _use_triton(k_cache):
         _launch(
@@ -439,7 +491,7 @@ def flashinfer_kv_scatter_(
     """Write K/V into one layer of a FlashInfer NHD cache
     ``[blocks, 2, block, H, D]`` in one launch."""
     num_blocks, _, block_size = kv_cache.shape[:3]
-    if _strict(slot_mapping):
+    if strict_checks(slot_mapping):
         check_slots(slot_mapping, num_blocks, block_size)
     k_cache = kv_cache[:, 0]
     v_cache = kv_cache[:, 1]
@@ -488,6 +540,7 @@ def paged_kv_write_(
 
 __all__ = [
     "check_slots",
+    "strict_checks",
     "flashinfer_kv_scatter_",
     "paged_kv_scatter_",
     "paged_kv_write_",
