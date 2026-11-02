@@ -1088,8 +1088,11 @@ def kv_write_cases(model_keys: list[str] | None = None) -> list[Case]:
             ("decode", "b64", 64),
             ("decode", "b256", 256),
             ("prefill", "1K", 1024),
+            ("prefill", "2K", 2048),
             ("prefill", "4K", 4096),
+            ("prefill", "9K", 9216),
             ("prefill", "16K", 16384),
+            ("prefill", "50K", 51200),
         ):
             h, d = m.attn.kv_heads, m.attn.head_dim
             builds = {}
