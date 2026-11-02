@@ -10,6 +10,7 @@ Impl names:
                      sdpa_fallback, hf_eager_decode, router_*, gdn_torch,
                      kv_write_loop
   previous paths     fp8_prod (per-call FP8 -> BF16 dequant + CUTLASS)
+  FP8 reference      fp8_scaled_mm_ref (cuBLASLt torch._scaled_mm, Rule B)
   references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode
 """
 
@@ -166,6 +167,31 @@ def _fp8_native_builder(M: int, H: int, I: int):
     return build
 
 
+def _scaled_mm_ref_builder(M: int, H: int, I: int):
+    """Rule-B reference for fp8_native: the same W8A8 expert through cuBLASLt
+    (torch._scaled_mm, per-tensor scales, gate|up concatenated) with eager
+    SiLU*up and e4m3 casts in between."""
+
+    def build():
+        f8 = torch.float8_e4m3fn
+        x = _rand(M, H, scale=1.0)
+        gu = torch.randint(0, 120, (2 * I, H), device="cuda", dtype=torch.uint8)
+        d = torch.randint(0, 120, (H, I), device="cuda", dtype=torch.uint8)
+        gu, d = gu.view(f8), d.view(f8)
+        one = torch.ones((), device="cuda")
+
+        def run():
+            h = torch._scaled_mm(
+                x.to(f8), gu.T, one, one, out_dtype=torch.bfloat16
+            )
+            a = (torch.nn.functional.silu(h[:, :I]) * h[:, I:]).to(f8)
+            return torch._scaled_mm(a, d.T, one, one, out_dtype=torch.bfloat16)
+
+        return run
+
+    return build
+
+
 def _mxfp4_weights(H: int, I: int):
     gu_packed = torch.randint(
         0, 255, (2 * I, H // 2), device="cuda", dtype=torch.uint8
@@ -282,6 +308,7 @@ _W_BYTES = {
     "gptoss_bf16cached": BF16,
     "fp8_prod": 1 + 4 / (128 * 128),
     "fp8_native": 1 + 4 / (128 * 128),
+    "fp8_scaled_mm_ref": 1,
     "gptoss_resident": 0.5 + 1 / 32,
     "gptoss_offload": 0.5 + 1 / 32,
     "v4_fp4_prod": 0.5 + 1 / 32,
@@ -302,6 +329,7 @@ def _expert_impls(m: MoEModel):
     impls = []
     if m.expert_dtype.startswith("fp8"):
         impls.append(("fp8_native", _fp8_native_builder))
+        impls.append(("fp8_scaled_mm_ref", _scaled_mm_ref_builder))
         impls.append(("fp8_prod", _fp8_prod_builder))
     if m.expert_dtype.startswith("fp4"):
         impls.append(("v4_fp4_prod", _v4_fp4_builder))
