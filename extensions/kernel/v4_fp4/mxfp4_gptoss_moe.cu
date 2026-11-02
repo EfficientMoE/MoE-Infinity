@@ -112,6 +112,12 @@ __device__ __forceinline__ uint4 ldg_act(const void* p) {
   return v;
 }
 
+// Release/acquire ordering for the stream-K hand-off (cheaper than the
+// sequentially consistent fence behind __threadfence()).
+__device__ __forceinline__ void fence_acq_rel_gpu() {
+  asm volatile("fence.acq_rel.gpu;" ::: "memory");
+}
+
 __device__ __forceinline__ void pdl_launch_dependents() {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
@@ -196,6 +202,14 @@ __global__ void __launch_bounds__(WK * 32)
   const int KB = K >> 5;
   const int KP = K >> 1;
   const int nG = (KB + 3) >> 2;
+  // blockIdx.y selects a slice of 8 * NT tokens (the other slices re-read
+  // the weights from L2).
+  {
+    const int t_base = blockIdx.y * 8 * NT;
+    x += static_cast<size_t>(t_base) * K;
+    y += static_cast<size_t>(t_base) * (SWIGLU ? N >> 1 : N);
+    M -= t_base;
+  }
 
   // Weight rows of MMA rows g / g+8 in each 16-row tile.
   int rg[MT], rg8[MT];
@@ -215,7 +229,7 @@ __global__ void __launch_bounds__(WK * 32)
   if constexpr (PDL_WAIT) {
     // Weights do not depend on the previous kernel: start streaming them
     // into L2 while it drains, then wait for its output (our activations).
-    if (prefetch_aligned && threadIdx.x < 16 * MT) {
+    if (prefetch_aligned && blockIdx.y == 0 && threadIdx.x < 16 * MT) {
       const int r = m0 + threadIdx.x;
       if (r < N) prefetch_l2_bulk(wq + static_cast<size_t>(r) * KP, KP);
     }
@@ -382,6 +396,8 @@ constexpr int kSideChunkBytes = kSideLanes * 17;  // 272: codes, then scales
 template <int BN, int BT, int WARPS_N, int WARPS_T, int STAGES>
 struct TileCfg {
   static constexpr int kBN = BN;
+  static constexpr int kBT = BT;
+  static constexpr int kWarpsN = WARPS_N;
   static constexpr int kThreads = 32 * WARPS_N * WARPS_T;
   static constexpr int kSplit = kThreads / BN;  // threads per weight row
   static constexpr int kStages = STAGES;        // raw (cp.async) stages
@@ -536,140 +552,88 @@ __device__ __forceinline__ int sk_owner(long long it, long long T,
   return static_cast<int>(((it + 1) * G - 1) / T);
 }
 
-template <int BN_, int BT, int WARPS_N, int WARPS_T, int STAGES, bool SWIGLU,
-          bool PDL_WAIT>
-__global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
-    mxfp4_tile_kernel(const __nv_bfloat16* __restrict__ x, int M, int K,
-                      const uint8_t* __restrict__ wq,
-                      const uint8_t* __restrict__ ws,
-                      const __nv_bfloat16* __restrict__ bias, int N,
-                      __nv_bfloat16* __restrict__ y, StreamK sk) {
-  using Cfg = TileCfg<BN_, BT, WARPS_N, WARPS_T, STAGES>;
-  constexpr int BN = Cfg::kBN;
-  constexpr int kThreads = Cfg::kThreads;
-  constexpr int S = Cfg::kStages;
-  constexpr int MT = Cfg::kMT;
-  constexpr int NT = Cfg::kNT;
-  extern __shared__ uint4 smem_u4[];
-  uint8_t* smem = reinterpret_cast<uint8_t*>(smem_u4);
-  __shared__ int s_last;
+// One CTA's view of a 128/256-row x BT-token tile: the cp.async pipeline,
+// per-row de-quantisation into the BF16 smem tile, the ldmatrix + mma.sync
+// mainloop and the bias (+ SwiGLU) epilogue, used by the stream-K GEMM.
+// `Hooks` lets the caller run work at fixed points
+// of the pipeline (PDL wait before the first activation load, the side job
+// once per K step).
+template <class Cfg, bool SWIGLU>
+struct TileEngine {
+  static constexpr int BN = Cfg::kBN;
+  static constexpr int BT = Cfg::kBT;
+  static constexpr int kThreads = Cfg::kThreads;
+  static constexpr int S = Cfg::kStages;
+  static constexpr int MT = Cfg::kMT;
+  static constexpr int NT = Cfg::kNT;
+  static constexpr int kSplit = Cfg::kSplit;
+  static constexpr int kWords = 4 / kSplit;
 
-  const int tid = threadIdx.x;
-  const int lane = tid & 31;
-  const int warp = tid >> 5;
-  const int wn = warp % WARPS_N;
-  const int wt = warp / WARPS_N;
-  const int g = lane >> 2;
-  const int t = lane & 3;
-  const int KB = K >> 5;
-  const int KP = K >> 1;
-  bool waited = !PDL_WAIT;
-  // Side job (see kSideLanes): this CTA owns blocks [side_lo, side_hi).
-  __shared__ alignas(16) uint8_t side_buf[kSideRing][kSideChunkBytes + 16];
-  __shared__ alignas(8) uint64_t side_bar[kSideRing];
-  const long long side_lo = static_cast<long long>(blockIdx.x) * sk.side_per;
-  const int side_chunks =
-      sk.side_blocks > 0
-          ? static_cast<int>(
-                (std::min<long long>(sk.side_blocks, side_lo + sk.side_per) -
-                 std::min<long long>(sk.side_blocks, side_lo)) /
-                kSideLanes)
-          : 0;
-  int side_iter = 0;  // K iterations run so far (uniform across the CTA)
-  auto side_store = [&](long long b, const uint4& q, uint32_t sc) {
-    const uint32_t s2 = e8m0_bf16x2(sc);
-    uint4* dst = reinterpret_cast<uint4*>(sk.side_out + 32 * b);
-    __stcg(dst + 0, e2m1x8_bf16(q.x, s2));
-    __stcg(dst + 1, e2m1x8_bf16(q.y, s2));
-    __stcg(dst + 2, e2m1x8_bf16(q.z, s2));
-    __stcg(dst + 3, e2m1x8_bf16(q.w, s2));
-  };
-  auto side_issue = [&](int j) {
-    if (tid == 0 && j < side_chunks) {
-      const long long b0 = side_lo + static_cast<long long>(j) * kSideLanes;
-      side_fetch(side_buf[j % kSideRing], sk.side_q + 16 * b0, sk.side_s + b0,
-                 &side_bar[j % kSideRing]);
-    }
-  };
-  // Every thread converts 256 / kThreads code bytes of the chunk, so the
-  // work is divergence-free and the 1 KB of BF16 output is written coalesced.
-  auto side_consume = [&](int j) {
-    if (j < 0 || j >= side_chunks) return;
-    mbar_wait(&side_bar[j % kSideRing], (j / kSideRing) & 1);
-    // Volatile reads: they must stay after the (clobber-free) barrier wait.
-    const volatile uint8_t* buf = side_buf[j % kSideRing];
-    uint32_t* out = reinterpret_cast<uint32_t*>(
-        sk.side_out + 32 * (side_lo + static_cast<long long>(j) * kSideLanes));
-#pragma unroll
-    for (int k = tid; k < kSideLanes * 16; k += kThreads) {
-      const uint32_t byte = buf[k];
-      const uint32_t w = (byte & 0xFu) | ((byte >> 4) << 16);
-      __stcg(out + k,
-             e2m1_pair<0>(w, e8m0_bf16x2(buf[kSideLanes * 16 + (k >> 4)])));
-    }
-  };
-  if (side_chunks > 0 && tid == 0) {
-    for (int r = 0; r < kSideRing; ++r) mbar_init(&side_bar[r], 1);
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
-#endif
+  uint8_t* smem;
+  int tid, lane, wn, wt, g, t;
+
+  __device__ __forceinline__ explicit TileEngine(uint8_t* smem_) : smem(smem_) {
+    tid = threadIdx.x;
+    lane = tid & 31;
+    const int warp = tid >> 5;
+    wn = warp % Cfg::kWarpsN;
+    wt = warp / Cfg::kWarpsN;
+    g = lane >> 2;
+    t = lane & 3;
   }
 
-  pdl_launch_dependents();
-
-  float acc[MT][NT][4];
-
-  // Accumulate K iterations [k_lo, k_hi) of tile (n0, t0) into acc.
-  auto mainloop = [&](int n0, int t0, int k_lo, int k_hi) {
+  // Accumulate K iterations [k_lo, k_hi) of tile (n0, t0) of
+  // y = x[M, K] . W[N, K]^T into acc.
+  template <class Hooks>
+  __device__ __forceinline__ void mainloop(const __nv_bfloat16* __restrict__ x,
+                                           int M, int K,
+                                           const uint8_t* __restrict__ wq,
+                                           const uint8_t* __restrict__ ws,
+                                           int N, int n0, int t0, int k_lo,
+                                           int k_hi, float (&acc)[MT][NT][4],
+                                           Hooks& hooks) {
+    const int KB = K >> 5;
+    const int KP = K >> 1;
     // This thread stages and de-quantises (part of) weight row `wrow` into
     // smem row `srow`: words [wq0, wq0 + 4 / kSplit) of its 16-B MX block.
-    constexpr int kSplit = Cfg::kSplit;
-    constexpr int kWords = 4 / kSplit;
     const int srow = tid / kSplit;
     const int wq0 = (tid % kSplit) * kWords;
     const int wrow = n0 + weight_row_of<SWIGLU>(srow);
     const bool wvalid = wrow < N;
     const uint8_t* wsrc = wq + static_cast<size_t>(wvalid ? wrow : 0) * KP;
-    const uint8_t* ssrc = ws + static_cast<size_t>(wvalid ? wrow : 0) * KB;
     // The scale byte travels with the codes: cp.async of the 4-B aligned
     // word holding it (scales are 16-B aligned with N * K/32 % 4 == 0,
     // checked on the host, so the word never leaves the tensor).
-    const uintptr_t sbase = reinterpret_cast<uintptr_t>(ssrc);
-    auto load_s = [&](int stage, int kb) {
-      cp_async4(
-          smem + stage * Cfg::kRawStage + Cfg::kXStage + Cfg::kWRaw + tid * 4,
-          reinterpret_cast<const void*>((sbase + kb) & ~uintptr_t{3}), wvalid);
-    };
-    auto scale_of = [&](int stage, int kb) -> uint32_t {
-      return smem[stage * Cfg::kRawStage + Cfg::kXStage + Cfg::kWRaw + tid * 4 +
-                  ((sbase + kb) & 3)];
-    };
+    const uintptr_t sbase = reinterpret_cast<uintptr_t>(
+        ws + static_cast<size_t>(wvalid ? wrow : 0) * KB);
+    auto raw = [&](int stage) { return smem + stage * Cfg::kRawStage; };
     auto load_w = [&](int stage, int kb) {
-      uint8_t* dst =
-          smem + stage * Cfg::kRawStage + Cfg::kXStage + tid * 4 * kWords;
+      uint8_t* dst = raw(stage) + Cfg::kXStage + tid * 4 * kWords;
       if constexpr (kSplit == 1) {
         cp_async16(dst, wsrc + 16 * kb, wvalid);
       } else {
         cp_async8(dst, wsrc + 16 * kb + 4 * wq0, wvalid);
       }
-      load_s(stage, kb);
+      cp_async4(raw(stage) + Cfg::kXStage + Cfg::kWRaw + tid * 4,
+                reinterpret_cast<const void*>((sbase + kb) & ~uintptr_t{3}),
+                wvalid);
     };
     auto load_x = [&](int stage, int kb) {
-      uint8_t* xs_s = smem + stage * Cfg::kRawStage;
 #pragma unroll
       for (int i = tid; i < BT * 4; i += kThreads) {
         const int r = i >> 2;
         const int c = i & 3;
         const int tok = t0 + r;
         const bool v = tok < M;
-        cp_async16(xs_s + swz(r, c),
+        cp_async16(raw(stage) + swz(r, c),
                    x + static_cast<size_t>(v ? tok : 0) * K + 32 * kb + 8 * c,
                    v);
       }
     };
-    auto convert = [&](int stage, int buf, uint32_t s) {
-      const uint8_t* src =
-          smem + stage * Cfg::kRawStage + Cfg::kXStage + tid * 4 * kWords;
+    auto convert = [&](int stage, int buf, int kb) {
+      const uint8_t* src = raw(stage) + Cfg::kXStage + tid * 4 * kWords;
+      const uint32_t sc =
+          raw(stage)[Cfg::kXStage + Cfg::kWRaw + tid * 4 + ((sbase + kb) & 3)];
       uint32_t q[kWords];
       if constexpr (kSplit == 1) {
         const uint4 v = *reinterpret_cast<const uint4*>(src);
@@ -682,7 +646,7 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
         q[0] = v.x;
         q[1] = v.y;
       }
-      const uint32_t s2 = e8m0_bf16x2(s);
+      const uint32_t s2 = e8m0_bf16x2(sc);
       uint8_t* dst = smem + Cfg::kWbfOffset + buf * Cfg::kWbf;
 #pragma unroll
       for (int w = 0; w < kWords; ++w)
@@ -702,10 +666,7 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
 #pragma unroll
     for (int s = 0; s < S - 1; ++s)
       if (k_lo + s < k_hi) load_w(s, k_lo + s);
-    if (!waited) {
-      pdl_wait();
-      waited = true;
-    }
+    hooks.before_activations();
 #pragma unroll
     for (int s = 0; s < S - 1; ++s) {
       if (k_lo + s < k_hi) load_x(s, k_lo + s);
@@ -713,14 +674,12 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
     }
     // De-quantise the first iteration's weights (own row only).
     cp_async_wait<S - 2>();
-    convert(0, 0, scale_of(0, k_lo));
+    convert(0, 0, k_lo);
 
     for (int kb = k_lo; kb < k_hi; ++kb) {
       const int i = kb - k_lo;
       __syncthreads();
-      side_issue(side_iter);
-      // Overlaps the MMAs below (independent instructions).
-      side_consume(side_iter - kSideLag);
+      hooks.per_iteration();
       const int nxt = kb + S - 1;
       if (nxt < k_hi) {
         const int ns = (i + S - 1) % S;
@@ -729,7 +688,7 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
       }
       cp_async_commit();
 
-      const uint8_t* xs_s = smem + (i % S) * Cfg::kRawStage;
+      const uint8_t* xs_s = raw(i % S);
       const uint8_t* wb_s = smem + Cfg::kWbfOffset + (i & 1) * Cfg::kWbf;
 #pragma unroll
       for (int kk = 0; kk < 2; ++kk) {
@@ -755,16 +714,17 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
       // With this iteration's MMAs issued, wait for our own weight codes of
       // kb + 1 and de-quantise them for the next iteration.
       cp_async_wait<S - 2>();
-      if (kb + 1 < k_hi)
-        convert((i + 1) % S, (i + 1) & 1, scale_of((i + 1) % S, kb + 1));
-      ++side_iter;
+      if (kb + 1 < k_hi) convert((i + 1) % S, (i + 1) & 1, kb + 1);
     }
     cp_async_wait<0>();
     __syncthreads();
-  };
+  }
 
   // Bias (+ SwiGLU) on FP32, staged through smem for 16-B stores.
-  auto epilogue = [&](int n0, int t0) {
+  __device__ __forceinline__ void epilogue(
+      const __nv_bfloat16* __restrict__ bias, int N,
+      __nv_bfloat16* __restrict__ y, int M, int n0, int t0,
+      const float (&acc)[MT][NT][4]) {
     constexpr int kOutCols = SWIGLU ? BN / 2 : BN;
     constexpr int kOutStride = kOutCols + 8;
     __nv_bfloat16* out_s = reinterpret_cast<__nv_bfloat16*>(smem);
@@ -812,8 +772,105 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
             *reinterpret_cast<const uint4*>(out_s + r * kOutStride + c * 8);
       }
     }
-  };
+  }
+};
 
+template <int BN_, int BT, int WARPS_N, int WARPS_T, int STAGES, bool SWIGLU,
+          bool PDL_WAIT>
+__global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
+    mxfp4_tile_kernel(const __nv_bfloat16* __restrict__ x, int M, int K,
+                      const uint8_t* __restrict__ wq,
+                      const uint8_t* __restrict__ ws,
+                      const __nv_bfloat16* __restrict__ bias, int N,
+                      __nv_bfloat16* __restrict__ y, StreamK sk) {
+  using Cfg = TileCfg<BN_, BT, WARPS_N, WARPS_T, STAGES>;
+  using Engine = TileEngine<Cfg, SWIGLU>;
+  constexpr int BN = Cfg::kBN;
+  constexpr int kThreads = Cfg::kThreads;
+  constexpr int MT = Cfg::kMT;
+  constexpr int NT = Cfg::kNT;
+  extern __shared__ uint4 smem_u4[];
+  uint8_t* smem = reinterpret_cast<uint8_t*>(smem_u4);
+  __shared__ int s_last;
+  Engine eng(smem);
+  const int tid = threadIdx.x;
+  const int KB = K >> 5;
+
+  // Side job (see kSideLanes): this CTA owns blocks [side_lo, side_hi).
+  __shared__ alignas(16) uint8_t side_buf[kSideRing][kSideChunkBytes + 16];
+  __shared__ alignas(8) uint64_t side_bar[kSideRing];
+  const long long side_lo = static_cast<long long>(blockIdx.x) * sk.side_per;
+  const int side_chunks =
+      sk.side_blocks > 0
+          ? static_cast<int>(
+                (std::min<long long>(sk.side_blocks, side_lo + sk.side_per) -
+                 std::min<long long>(sk.side_blocks, side_lo)) /
+                kSideLanes)
+          : 0;
+  auto side_store = [&](long long b, const uint4& q, uint32_t sc) {
+    const uint32_t s2 = e8m0_bf16x2(sc);
+    uint4* dst = reinterpret_cast<uint4*>(sk.side_out + 32 * b);
+    __stcg(dst + 0, e2m1x8_bf16(q.x, s2));
+    __stcg(dst + 1, e2m1x8_bf16(q.y, s2));
+    __stcg(dst + 2, e2m1x8_bf16(q.z, s2));
+    __stcg(dst + 3, e2m1x8_bf16(q.w, s2));
+  };
+  // Every thread converts 256 / kThreads code bytes of a chunk, so the work
+  // is divergence-free and the 1 KB of BF16 output is written coalesced.
+  auto side_consume = [&](int j) {
+    if (j < 0 || j >= side_chunks) return;
+    mbar_wait(&side_bar[j % kSideRing], (j / kSideRing) & 1);
+    // Volatile reads: they must stay after the (clobber-free) barrier wait.
+    const volatile uint8_t* buf = side_buf[j % kSideRing];
+    uint32_t* out = reinterpret_cast<uint32_t*>(
+        sk.side_out + 32 * (side_lo + static_cast<long long>(j) * kSideLanes));
+#pragma unroll
+    for (int k = tid; k < kSideLanes * 16; k += kThreads) {
+      const uint32_t byte = buf[k];
+      const uint32_t w = (byte & 0xFu) | ((byte >> 4) << 16);
+      __stcg(out + k,
+             e2m1_pair<0>(w, e8m0_bf16x2(buf[kSideLanes * 16 + (k >> 4)])));
+    }
+  };
+  struct Hooks {
+    bool waited;
+    int iter;  // K iterations run so far (uniform across the CTA)
+    int tid;
+    int chunks;
+    long long lo;
+    const StreamK* sk;
+    uint8_t (*buf)[kSideChunkBytes + 16];
+    uint64_t* bar;
+    decltype(side_consume)* consume;
+    __device__ __forceinline__ void before_activations() {
+      if (!waited) {
+        pdl_wait();
+        waited = true;
+      }
+    }
+    __device__ __forceinline__ void per_iteration() {
+      if (tid == 0 && iter < chunks) {
+        const long long b0 = lo + static_cast<long long>(iter) * kSideLanes;
+        side_fetch(buf[iter % kSideRing], sk->side_q + 16 * b0, sk->side_s + b0,
+                   &bar[iter % kSideRing]);
+      }
+      // Overlaps the MMAs that follow (independent instructions).
+      (*consume)(iter - kSideLag);
+      ++iter;
+    }
+  };
+  Hooks hooks{!PDL_WAIT, 0,        tid,      side_chunks,  side_lo,
+              &sk,       side_buf, side_bar, &side_consume};
+  if (side_chunks > 0 && tid == 0) {
+    for (int r = 0; r < kSideRing; ++r) mbar_init(&side_bar[r], 1);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+#endif
+  }
+
+  pdl_launch_dependents();
+
+  float acc[MT][NT][4];
   auto tile_origin = [&](int tile, int& n0, int& t0) {
     n0 = (tile % sk.tiles_n) * BN;
     t0 = (tile / sk.tiles_n) * BT;
@@ -822,8 +879,8 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
   for (int tile = blockIdx.x; tile < sk.n_dp; tile += gridDim.x) {
     int n0, t0;
     tile_origin(tile, n0, t0);
-    mainloop(n0, t0, 0, KB);
-    epilogue(n0, t0);
+    eng.mainloop(x, M, K, wq, ws, N, n0, t0, 0, KB, acc, hooks);
+    eng.epilogue(bias, N, y, M, n0, t0, acc);
   }
 
   if (sk.sk_iters > 0) {
@@ -839,9 +896,9 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
           static_cast<int>(std::min<long long>(KB, k_lo + (e - it)));
       int n0, t0;
       tile_origin(sk.n_dp + ts, n0, t0);
-      mainloop(n0, t0, k_lo, k_hi);
+      eng.mainloop(x, M, K, wq, ws, N, n0, t0, k_lo, k_hi, acc, hooks);
       if (k_lo == 0 && k_hi == KB) {
-        epilogue(n0, t0);
+        eng.epilogue(bias, N, y, M, n0, t0, acc);
       } else {
         const int which = (it == b) ? 0 : 1;
         float* mine = sk.partials + (2 * blockIdx.x + which) * slot;
@@ -853,7 +910,7 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
             for (int k = 0; k < 4; ++k)
               __stcg(mine + ((mt * NT + nt) * 4 + k) * kThreads + tid,
                      acc[mt][nt][k]);
-        __threadfence();
+        fence_acq_rel_gpu();
         __syncthreads();
         if (tid == 0) {
           const int add = k_hi - k_lo;
@@ -863,7 +920,7 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
         }
         __syncthreads();
         if (s_last) {
-          __threadfence();
+          fence_acq_rel_gpu();
           const long long tb = static_cast<long long>(ts) * KB;
           const int c_first = sk_owner(tb, T, G);
           const int c_last = sk_owner(tb + KB - 1, T, G);
@@ -880,7 +937,7 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
                   acc[mt][nt][k] +=
                       __ldcg(other + ((mt * NT + nt) * 4 + k) * kThreads + tid);
           }
-          epilogue(n0, t0);
+          eng.epilogue(bias, N, y, M, n0, t0, acc);
         }
       }
       it += k_hi - k_lo;
@@ -889,15 +946,15 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
   // Side-job chunks still in flight, then the ones this CTA had no
   // iteration for.
   if (side_chunks > 0) {
-    for (int j = side_iter - kSideLag; j < side_iter; ++j) side_consume(j);
-    for (long long k = static_cast<long long>(side_iter) * kSideLanes + tid;
+    for (int j = hooks.iter - kSideLag; j < hooks.iter; ++j) side_consume(j);
+    for (long long k = static_cast<long long>(hooks.iter) * kSideLanes + tid;
          k < static_cast<long long>(side_chunks) * kSideLanes; k += kThreads) {
       const long long b = side_lo + k;
       side_store(b, __ldg(reinterpret_cast<const uint4*>(sk.side_q) + b),
                  __ldg(sk.side_s + b));
     }
   }
-  if (!waited) pdl_wait();
+  if (!hooks.waited) pdl_wait();
 }
 
 // --------------------------------------------------------------------------
@@ -958,7 +1015,7 @@ cudaError_t run_gemv(const __nv_bfloat16* x, int M, int K, const uint8_t* wq,
                      __nv_bfloat16* y, cudaStream_t stream) {
   const int aligned =
       (reinterpret_cast<uintptr_t>(wq) % 16 == 0) && ((K / 2) % 16 == 0);
-  dim3 grid((N + 16 * MT - 1) / (16 * MT));
+  dim3 grid((N + 16 * MT - 1) / (16 * MT), (M + 8 * NT - 1) / (8 * NT));
   return launch(mxfp4_gemv_kernel<WK, U, NT, MT, SWIGLU, PDL>, grid,
                 dim3(WK * 32), 0, stream, PDL, x, M, K, wq, ws, bias, N, y,
                 aligned);
@@ -1119,9 +1176,9 @@ size_t workspace_bytes_max(int dev) {
 // Measured on RTX PRO 6000 Max-Q (sm_120) at H = I = 2880.
 int pick_config(int M, bool swiglu) {
   static_assert(kMxfp4GemvMaxTokens == 32, "keep in sync with configs 0-3");
-  if (M <= 8) return 0;
-  if (M <= 16) return 1;
-  if (M <= kMxfp4GemvMaxTokens) return swiglu ? 3 : 2;
+  // Up to 32 tokens: the NT = 1 kernel over ceil(M / 8) token slices
+  // (blockIdx.y) beats the wider NT = 2 / 4 variants on this GPU.
+  if (M <= kMxfp4GemvMaxTokens) return 0;
   if (M <= 128) return swiglu ? 6 : 4;
   if (M <= 256) return 5;
   return 7;
@@ -1155,9 +1212,7 @@ cudaError_t mxfp4_linear_cuda(const void* x, int M, int K, const void* wq,
   const int major = device_info(current_device()).major;
   const bool pdl = pdl_wait && major >= 9;
   if (config < 0) config = pick_config(M, swiglu);
-  constexpr int kGemvMaxTokens[4] = {8, 16, 32, 32};
   const bool gemv = config < 4;
-  if (gemv && M > kGemvMaxTokens[config]) return cudaErrorInvalidValue;
   if (side != nullptr && side->n_blocks > 0 &&
       (gemv || major < 9 || side->n_blocks % kSideLanes != 0)) {
     // No in-kernel side job (small-M kernels, pre-sm_90 bulk copies, ragged
