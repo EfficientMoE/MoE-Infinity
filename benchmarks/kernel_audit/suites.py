@@ -932,19 +932,20 @@ def _router_fused_builder(T, H, E, k, scoring):
     """
 
     def build():
-        from moe_infinity.kernel.router import fused_route
+        from moe_infinity.kernel.router import make_router
 
         x = _rand(T, H, scale=1.0)
         w = _rand(E, H)
         bias = torch.zeros(E, device="cuda") if scoring != "softmax" else None
+        # Built once per layer in the wrappers, like here.
+        route = make_router(
+            w, k, scoring=scoring, bias=bias,
+            eps=0.0 if scoring == "softmax" else 1e-20,
+            active_flags=True, compact=False,
+        )  # fmt: skip
 
         def run():
-            out = fused_route(
-                x, w, k, scoring=scoring, bias=bias,
-                eps=0.0 if scoring == "softmax" else 1e-20,
-                active_flags=True,
-            )  # fmt: skip
-            return out.topk_weights
+            return route(x)[3]
 
         return run
 
