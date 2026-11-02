@@ -50,6 +50,7 @@ def _load_page_tile(
     offs_t,
     offs_d_mem,
     mask,
+    UNMASKED: tl.constexpr,
     S_H: tl.constexpr,
     S_T: tl.constexpr,
     PAGES: tl.constexpr,
@@ -59,7 +60,15 @@ def _load_page_tile(
     With one page per tile the page id is a scalar and this is a plain
     strided 2-D load; otherwise each page is a slab of a 3-D load (so the
     in-page contiguity stays visible to the compiler) reshaped to 2-D."""
-    if PAGES == 1:
+    if UNMASKED:
+        return tl.load(
+            ptr
+            + page * page_stride
+            + kv_head * S_H
+            + offs_t[:, None] * S_T
+            + offs_d_mem[None, :]
+        )
+    elif PAGES == 1:
         return tl.load(
             ptr
             + page * page_stride
@@ -88,27 +97,26 @@ def _load_page_scales(
     page,
     kv_head,
     offs_t,
-    mask,
+    tok_mask,
+    page_mask,
     S_H: tl.constexpr,
     S_T: tl.constexpr,
     PAGES: tl.constexpr,
 ):
+    """Per-token scales of one tile; tokens past seq_len read as 0."""
     if PAGES == 1:
-        x = tl.load(
-            ptr + page * page_stride + kv_head * S_H + offs_t * S_T,
-            mask=mask,
-            other=0.0,
-        )
-        return x.to(tl.float32)
+        x = tl.load(ptr + page * page_stride + kv_head * S_H + offs_t * S_T)
+        return tl.where(tok_mask, x.to(tl.float32), 0.0)
     else:
         x = tl.load(
             ptr
             + (page * page_stride + kv_head * S_H)[:, None]
             + offs_t[None, :] * S_T,
-            mask=mask,
+            mask=page_mask[:, None],
             other=0.0,
         )
-        return tl.reshape(x, (x.shape[0] * x.shape[1],)).to(tl.float32)
+        x = tl.where(tok_mask, x.to(tl.float32), 0.0)
+        return tl.reshape(x, (x.shape[0] * x.shape[1],))
 
 
 @triton.jit
@@ -165,8 +173,10 @@ def _split_kv_decode_kernel(
     # Let the merge kernel (programmatic dependent launch) get scheduled
     # while this grid runs; it blocks in gdc_wait until this grid is done.
     gdc_launch_dependents()
-    split = tl.program_id(0)
-    kv_head = tl.program_id(1)
+    # KV heads of one split are adjacent in launch order, so programs that
+    # run together read neighbouring bytes of the same pages.
+    kv_head = tl.program_id(0)
+    split = tl.program_id(1)
     seq = tl.program_id(2).to(tl.int64)
     BLOCK_N: tl.constexpr = PAGES * PAGE
 
@@ -229,12 +239,14 @@ def _split_kv_decode_kernel(
             page_next = tl.load(
                 bt_row + tile + 1, mask=tile + 1 < tile_hi, other=0
             )
+            # Every tile inside the loop starts before seq_len, so its page
+            # is real and is read whole: a load mask that varies along the
+            # token axis would stop V (token-contiguous) from vectorising.
+            # Tokens past seq_len are zeroed in registers below.
             tok_mask = tile * PAGE + offs_t < seq_len
             valid = tok_mask
-            if D == D_PAD:
-                kv_mask = tok_mask[:, None]
-            else:
-                kv_mask = tok_mask[:, None] & d_mask[None, :]
+            load_mask = d_mask[None, :]
+            logical_page_mask = tile >= 0
         else:
             next_pages = (tile + 1) * PAGES + offs_p
             page_next = tl.load(
@@ -245,10 +257,11 @@ def _split_kv_decode_kernel(
             logical_page = tile * PAGES + offs_p
             tok_mask = logical_page[:, None] * PAGE + offs_t[None, :] < seq_len
             valid = tl.reshape(tok_mask, (BLOCK_N,))
-            if D == D_PAD:
-                kv_mask = tok_mask[:, :, None]
-            else:
-                kv_mask = tok_mask[:, :, None] & d_mask[None, None, :]
+            # Page-granular load mask (constant along tokens and head_dim).
+            logical_page_mask = logical_page * PAGE < seq_len
+            load_mask = (
+                logical_page_mask[:, None, None] & (d_mask[None, None, :])
+            )
 
         k = _load_page_tile(
             k_ptr,
@@ -257,7 +270,8 @@ def _split_kv_decode_kernel(
             kv_head,
             offs_t,
             k_d,
-            kv_mask,
+            load_mask,
+            D == D_PAD and PAGES == 1,
             K_SH,
             K_ST,
             PAGES,
@@ -269,7 +283,8 @@ def _split_kv_decode_kernel(
             kv_head,
             offs_t,
             v_d,
-            kv_mask,
+            load_mask,
+            D == D_PAD and PAGES == 1,
             V_SH,
             V_ST,
             PAGES,
@@ -284,6 +299,7 @@ def _split_kv_decode_kernel(
                 kv_head,
                 offs_t,
                 tok_mask,
+                logical_page_mask,
                 KS_SH,
                 KS_ST,
                 PAGES,
@@ -305,12 +321,16 @@ def _split_kv_decode_kernel(
                 kv_head,
                 offs_t,
                 tok_mask,
+                logical_page_mask,
                 VS_SH,
                 VS_ST,
                 PAGES,
             )
             p = p * v_scale[None, :]
-        acc = acc * alpha[:, None] + tl.dot(p.to(dot_dtype), v.to(dot_dtype))
+        # Zero the rows of tokens past seq_len (their page tail may hold
+        # stale or non-finite values; p is 0 there but 0 * inf = nan).
+        v = tl.where(valid[:, None], v.to(dot_dtype), 0.0)
+        acc = acc * alpha[:, None] + tl.dot(p.to(dot_dtype), v)
 
     has = l_i > 0.0
     o = acc / tl.where(has, l_i, 1.0)[:, None]
@@ -401,18 +421,17 @@ def _sm_count(device: torch.device) -> int:
 # Per (padded head_dim, int8 KV): (tokens per tile, num_warps, resident
 # programs per SM the split count aims for, num_stages). Tuned on sm_120
 # (RTX PRO 6000, 188 SMs) against the size-matched read ceiling: bf16 KV uses
-# one 16-token page per tile with 2 warps for D >= 128 (low registers, 4
-# programs per SM for D = 128, 2 for D = 256); D = 64 moves few bytes per
-# page and uses 64-token tiles; int8 KV moves half the bytes per token and
-# also needs bigger tiles to keep enough bytes in flight. Software
-# pipelining (num_stages > 1) was slower in every configuration tried.
+# one 16-token page per tile with 2 warps for D >= 128 (3 programs per SM for
+# D = 128, 2 for D = 256); D = 64 moves few bytes per page and uses 64-token
+# tiles; int8 KV moves half the bytes per token and uses 32-token tiles.
+# Software pipelining (num_stages > 1) was slower in every configuration.
 _TILE_CONFIG = {
     (64, False): (64, 4, 2, 1),
-    (128, False): (16, 2, 4, 1),
+    (128, False): (16, 2, 3, 1),
     (256, False): (16, 2, 2, 1),
     (64, True): (32, 2, 4, 1),
     (128, True): (32, 2, 4, 1),
-    (256, True): (32, 2, 3, 1),
+    (256, True): (32, 4, 3, 1),
 }
 _MERGE_WARPS = 2
 
@@ -580,7 +599,7 @@ def split_kv_decode_attention(
         ks = vs = key_cache
         ks_page = vs_page = ks_sh = ks_st = vs_sh = vs_st = 0
 
-    _split_kv_decode_kernel[(splits, num_kv_heads, batch)](
+    _split_kv_decode_kernel[(num_kv_heads, splits, batch)](
         query,
         key_cache,
         value_cache,
