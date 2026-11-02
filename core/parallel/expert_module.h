@@ -9,6 +9,7 @@
 #include "model/model_topology.h"
 #include "store/tensor_store.h"
 #include "prefetch/expert_residency.h"
+#include "kernel/v4_fp4/gptoss_expert.h"
 
 // Expert type enum
 enum class ExpertType {
@@ -215,6 +216,7 @@ struct MoEMLP : public torch::nn::Module {
   std::vector<torch::Tensor> buffer_;
   std::vector<torch::Tensor> param_;
   std::vector<torch::Tensor> gpt_oss_param_;
+  GptOssExpertScratch gpt_oss_scratch_;
 
   at::cuda::CUDAGraph graph_;
   int warmup_count_ = 5;

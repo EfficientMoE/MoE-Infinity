@@ -7,10 +7,7 @@
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
 #include "kernel/fused_moe_mlp.h"
-
-void mxfp4_dequant_cuda(const void* packed, const void* scales, void* output,
-                        int rows, int packed_cols, int scale_cols,
-                        int block_size, cudaStream_t stream);
+#include "kernel/v4_fp4/mxfp4_gptoss_moe.h"
 extern void fp8_dequant_blockwise_cuda(const void* weight, const void* scale,
                                        void* out, int N, int K,
                                        cudaStream_t stream);
@@ -172,7 +169,11 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
     data_shapes.push_back({kMaxTokens, hdim});  // input buffer
     data_shapes.push_back({kMaxTokens, hdim});  // output buffer
 
-    for (size_t i = 0; i < tensor_shapes.size(); i++) {
+    // GPT-OSS needs one intermediate (the SwiGLU output); the MXFP4 kernels
+    // keep their own scratch (GptOssExpertScratch).
+    const size_t n_intermediate =
+        expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE ? 1 : tensor_shapes.size();
+    for (size_t i = 0; i < n_intermediate; i++) {
       data_shapes.push_back({kMaxTokens, idim});  // intermediate buffers
     }
 
@@ -194,31 +195,34 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
   param_set_ = true;
 }
 
+// Binds the stored MXFP4 tensors (gate_up blocks/scales/bias, down
+// blocks/scales/bias). ForwardHelper consumes them directly; the BF16
+// de-quantisation only runs on the fallback path.
 void MoEMLP::DequantMxfp4Params(cudaStream_t stream) {
   if (expert_type_ != GPT_OSS_MOE_DENSE_ACT_DENSE) return;
   int device = at::cuda::current_device();
   gpt_oss_param_.clear();
-  for (auto pair : {std::pair<int, int>{0, 1}, {3, 4}}) {
-    auto packed = param_[pair.first].to(CUDA_DEVICE(device)).contiguous();
-    auto scales = param_[pair.second].to(CUDA_DEVICE(device)).contiguous();
-    DLOG_FATAL_IF(packed.scalar_type() != torch::kUInt8 ||
-                      scales.scalar_type() != torch::kUInt8,
-                  "GPT-OSS MXFP4 blocks/scales must be uint8");
-    int rows = packed.size(0);
-    int packed_cols = packed.size(1);
-    int scale_cols = scales.size(1);
-    int block_size = packed_cols * 2 / scale_cols;
-    auto output =
-        torch::empty({rows, packed_cols * 2}, torch::TensorOptions()
-                                                  .dtype(torch::kBFloat16)
-                                                  .device(CUDA_DEVICE(device)));
-    mxfp4_dequant_cuda(packed.data_ptr(), scales.data_ptr(), output.data_ptr(),
-                       rows, packed_cols, scale_cols, block_size, stream);
-    gpt_oss_param_.push_back(output);
+  for (int i = 0; i < 6; ++i) {
+    gpt_oss_param_.push_back(param_[i].to(CUDA_DEVICE(device)));
   }
-  gpt_oss_param_.insert(gpt_oss_param_.begin() + 1,
-                        param_[2].to(CUDA_DEVICE(device)));
-  gpt_oss_param_.push_back(param_[5].to(CUDA_DEVICE(device)));
+  DLOG_FATAL_IF(gpt_oss_param_[0].scalar_type() != torch::kUInt8 ||
+                    gpt_oss_param_[1].scalar_type() != torch::kUInt8 ||
+                    gpt_oss_param_[3].scalar_type() != torch::kUInt8 ||
+                    gpt_oss_param_[4].scalar_type() != torch::kUInt8,
+                "GPT-OSS MXFP4 blocks/scales must be uint8");
+}
+
+static torch::Tensor DequantMxfp4(const torch::Tensor& blocks,
+                                  const torch::Tensor& scales,
+                                  cudaStream_t stream) {
+  auto packed = blocks.contiguous();
+  auto sc = scales.contiguous();
+  auto output = torch::empty({packed.size(0), packed.size(1) * 2},
+                             packed.options().dtype(torch::kBFloat16));
+  mxfp4_dequant_cuda(packed.data_ptr(), sc.data_ptr(), output.data_ptr(),
+                     packed.size(0), packed.size(1), sc.size(1),
+                     packed.size(1) * 2 / sc.size(1), stream);
+  return output;
 }
 
 torch::Tensor MoEMLP::forward(torch::Tensor hidden_states, cudaStream_t stream,
@@ -293,12 +297,18 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
   auto& output = buffer_[1];
 
   if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
-    auto& gate_up_weight = gpt_oss_param_[0];
-    auto& gate_up_bias = gpt_oss_param_[1];
-    auto& down_weight = gpt_oss_param_[2];
-    auto& down_bias = gpt_oss_param_[3];
+    const auto& p = gpt_oss_param_;
+    auto& act = buffer_[2];
+    // MXFP4 tensor-core kernels on the stored blocks/scales: 2 launches with
+    // bias, interleaved gate/up split and clamped SwiGLU-OAI fused.
+    if (gptoss_mxfp4_expert_forward(input, p[0], p[1], p[2], p[3], p[4], p[5],
+                                    act, output, gpt_oss_scratch_, stream)) {
+      return;
+    }
+    // Fallback (layouts the kernels do not cover): BF16 reference math.
     auto gate_up =
-        torch::matmul(input, gate_up_weight.transpose(0, 1)) + gate_up_bias;
+        torch::matmul(input, DequantMxfp4(p[0], p[1], stream).transpose(0, 1)) +
+        p[2];
     auto gate =
         gate_up.index({torch::indexing::Slice(),
                        torch::indexing::Slice(0, torch::indexing::None, 2)});
@@ -308,8 +318,10 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
     gate = torch::clamp_max(gate, 7.0);
     up = torch::clamp(up, -7.0, 7.0);
     auto activated = (up + 1.0) * (gate * torch::sigmoid(gate * 1.702));
-    output.copy_(torch::matmul(activated, down_weight.transpose(0, 1)) +
-                 down_bias);
+    output.copy_(
+        torch::matmul(activated,
+                      DequantMxfp4(p[3], p[4], stream).transpose(0, 1)) +
+        p[5]);
     return;
   }
 
