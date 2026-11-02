@@ -393,6 +393,12 @@ class CudaGraphRunner:
                     return None
                 except (RuntimeError, ValueError) as exc:
                     self._quarantined[decision.key] = type(exc).__name__
+                    first_line = str(exc).strip().splitlines()[:1]
+                    self._fallback_details["capture_failed"] = (
+                        f"b{decision.key.batch_size}@{decision.key.context_size}"
+                        f": {type(exc).__name__}: "
+                        f"{first_line[0][:200] if first_line else ''}"
+                    )
                     self._stats.capture_failures += 1
                     self._record_fallback("capture_failed")
                     return None

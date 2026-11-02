@@ -32,7 +32,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--experts-impl",
         choices=("batched_mm", "grouped_mm"),
         default="batched_mm",
-        help="resident mode: HF experts implementation (capture-safe ones)",
+        help=(
+            "resident mode: HF experts implementation; batched_mm is "
+            "capture-safe, grouped_mm (transformers 5.12) is not"
+        ),
     )
     parser.add_argument("--num-layers", type=int, default=None)
     parser.add_argument("--rtol", type=float, default=1e-4)
@@ -213,15 +216,16 @@ def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
     fixture = _build_fixture(args, batch_sizes, context_sizes)
     runner = fixture.model_runner
     points: list[dict[str, object]] = []
+    profiled: list[tuple[dict[str, object], Callable, Callable]] = []
     try:
         for batch_size in batch_sizes:
             for context_size in context_sizes:
                 batch = fixture.make_batch(batch_size, context_size)
 
-                def eager_step() -> torch.Tensor:
+                def eager_step(batch=batch) -> torch.Tensor:
                     return runner.execute(batch)
 
-                def graph_step() -> torch.Tensor | None:
+                def graph_step(batch=batch) -> torch.Tensor | None:
                     return fixture.graph_runner.try_execute(batch)
 
                 for _ in range(args.warmup_iters):
@@ -237,8 +241,6 @@ def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
 
                 eager_us: list[float] = []
                 replay_us: list[float] = []
-                eager_host_us: list[float] = []
-                replay_host_us: list[float] = []
                 eager_output = eager_step()
                 for iteration in range(args.measure_iters):
                     operations = ("eager", "graph")
@@ -246,18 +248,26 @@ def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
                         operations = tuple(reversed(operations))
                     for operation in operations:
                         if operation == "eager":
-                            elapsed, host, eager_output = _time_cuda(eager_step)
+                            elapsed, _, eager_output = _time_cuda(eager_step)
                             eager_us.append(elapsed)
-                            eager_host_us.append(host)
                         else:
-                            elapsed, host, replayed = _time_cuda(graph_step)
+                            elapsed, _, replayed = _time_cuda(graph_step)
                             if replayed is None:
                                 raise RuntimeError(
                                     "fixture graph unexpectedly fell back"
                                 )
                             graph_output = replayed
                             replay_us.append(elapsed)
-                            replay_host_us.append(host)
+
+                # Host cost per step, measured in runs of the same step so
+                # the eager path's large temporaries do not make the caching
+                # allocator release memory inside a timed replay.
+                eager_host_us = [
+                    _time_cuda(eager_step)[1] for _ in range(args.measure_iters)
+                ]
+                replay_host_us = [
+                    _time_cuda(graph_step)[1] for _ in range(args.measure_iters)
+                ]
 
                 assert graph_output is not None and eager_output is not None
                 torch.testing.assert_close(
@@ -303,10 +313,9 @@ def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
                 )
                 launch_profile: dict[str, object] = {}
                 if args.profile_launches:
-                    launch_profile = {
-                        "eager": _profile_cuda_operation(eager_step),
-                        "replay": _profile_cuda_operation(graph_step),
-                    }
+                    # Profiled after every timing: CUPTI stays attached once
+                    # the profiler ran and slows later host launches.
+                    profiled.append((launch_profile, eager_step, graph_step))
                 replay_gpu_p50 = statistics.median(replay_us)
                 replay_host_p50 = statistics.median(replay_host_us)
                 points.append(
@@ -350,6 +359,9 @@ def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
                         },
                     )
                 )
+        for launch_profile, eager_step, graph_step in profiled:
+            launch_profile["eager"] = _profile_cuda_operation(eager_step)
+            launch_profile["replay"] = _profile_cuda_operation(graph_step)
     finally:
         fixture.close()
     return {"schema_version": 1, "mode": args.mode, "results": points}
