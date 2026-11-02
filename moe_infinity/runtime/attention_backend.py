@@ -19,10 +19,40 @@ from moe_infinity.kernel.paged_attention_ops import (
     paged_attention_fwd,
     probe_native_int8_binding,
 )
+from moe_infinity.kernel.paged_kv_write import (
+    flashinfer_kv_scatter_,
+    paged_kv_scatter_,
+)
 from moe_infinity.runtime import flashinfer_utils
 from moe_infinity.runtime.attention_types import (
     AttentionMetadata as RuntimeAttentionMetadata,
 )
+
+
+def _same_device(t: torch.Tensor, device: torch.device) -> bool:
+    if t.device == device:
+        return True
+    return (
+        device.type == "cuda"
+        and device.index is None
+        and t.is_cuda
+        and t.device.index == torch.cuda.current_device()
+    )
+
+
+def _slots_on(slot_mapping: torch.Tensor, device: torch.device) -> torch.Tensor:
+    if slot_mapping.dtype not in (torch.int32, torch.int64):
+        slot_mapping = slot_mapping.to(dtype=torch.long)
+    if not _same_device(slot_mapping, device):
+        slot_mapping = slot_mapping.to(device=device)
+    return slot_mapping
+
+
+def _on(t: torch.Tensor, device: torch.device, dtype: torch.dtype):
+    # Skip the no-op ``.to`` call: it costs ~1 us of host time per tensor.
+    if t.dtype is dtype and _same_device(t, device):
+        return t
+    return t.to(device=device, dtype=dtype)
 
 
 def _allocate_resize_tensor(
@@ -686,33 +716,15 @@ class PagedAttentionBackend:
         if head_dim != self.spec.head_dim:
             raise ValueError("head_dim mismatch with cache spec")
 
-        block_size = self.spec.block_size
         k_store = self._k_store(layer_idx)
         v_store = self._v_store(layer_idx)
-        x = k_store.shape[-1]
-
-        k_src = key.to(device=self.device, dtype=k_store.dtype)
-        v_src = value.to(device=self.device, dtype=v_store.dtype)
-        slots = slot_mapping.to(device=self.device, dtype=torch.long)
-
-        for i in range(num_tokens):
-            slot = int(slots[i].item())
-            if slot < 0:
-                raise ValueError("slot_mapping contains negative slot index")
-
-            block_id = slot // block_size
-            token_offset = slot % block_size
-            if block_id >= self.num_gpu_blocks:
-                raise ValueError(
-                    "slot_mapping points past allocated GPU blocks"
-                )
-
-            k_store[block_id, :, :, token_offset, :] = k_src[i].reshape(
-                self.spec.num_kv_heads,
-                self.spec.head_dim // x,
-                x,
-            )
-            v_store[block_id, :, :, token_offset] = v_src[i]
+        paged_kv_scatter_(
+            k_store,
+            v_store,
+            _on(key, self.device, k_store.dtype),
+            _on(value, self.device, v_store.dtype),
+            _slots_on(slot_mapping, self.device),
+        )
 
     def _k_store(self, layer_idx: int) -> torch.Tensor:
         if self._block_store is not None:
@@ -763,25 +775,12 @@ class PagedAttentionBackend:
         if head_dim != self.spec.head_dim:
             raise ValueError("head_dim mismatch with cache spec")
 
-        k_src = key.to(device=self.device, dtype=self.spec.dtype)
-        v_src = value.to(device=self.device, dtype=self.spec.dtype)
-        slots = slot_mapping.to(device=self.device, dtype=torch.long)
-
-        block_size = self.spec.block_size
-        for i in range(num_tokens):
-            slot = int(slots[i].item())
-            if slot < 0:
-                raise ValueError("slot_mapping contains negative slot index")
-
-            block_id = slot // block_size
-            token_offset = slot % block_size
-            if block_id >= self.num_gpu_blocks:
-                raise ValueError(
-                    "slot_mapping points past allocated GPU blocks"
-                )
-
-            fi_store[block_id, 0, token_offset] = k_src[i]
-            fi_store[block_id, 1, token_offset] = v_src[i]
+        flashinfer_kv_scatter_(
+            fi_store,
+            _on(key, self.device, self.spec.dtype),
+            _on(value, self.device, self.spec.dtype),
+            _slots_on(slot_mapping, self.device),
+        )
 
     def forward(
         self,
