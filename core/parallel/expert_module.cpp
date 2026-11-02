@@ -211,66 +211,75 @@ void MoEMLP::DequantMxfp4Params(cudaStream_t stream) {
 torch::Tensor MoEMLP::forward(torch::Tensor hidden_states, cudaStream_t stream,
                               cudaEvent_t kernel_start,
                               cudaEvent_t kernel_stop) {
-  DLOG_FATAL_IF(param_set_ == false, "param_set_ should be true");
-  DLOG_FATAL_IF(param_init_ == false, "param_init_ should be true");
+  // Whatever happens below, the parameters are consumed and the staging
+  // buffers return to kMaxTokens rows, so a failed call (TORCH_CHECK or a
+  // kernel error) leaves the module usable for the next expert.
+  struct Restore {
+    MoEMLP* self;
+    ~Restore() {
+      self->param_set_ = false;
+      try {
+        self->ResizeStaging(kMaxTokens);
+      } catch (const std::exception& e) {
+        DLOG_ERROR("MoEMLP::forward: failed to restore staging buffers: ",
+                   e.what());
+      }
+    }
+  } restore{this};
+
+  TORCH_CHECK(param_set_, "MoEMLP::forward called before SetTensors");
+  TORCH_CHECK(param_init_, "MoEMLP::forward: staging buffers not allocated");
 
   auto& input_ = buffer_[0];
   auto& output_ = buffer_[1];
 
+  TORCH_CHECK(hidden_states.dim() == 2,
+              "hidden_states must be 2-D [tokens, hidden], got ",
+              hidden_states.sizes());
   int64_t batch_size = hidden_states.size(0);
-  int64_t hdim = hidden_states.size(1);
-
-  DLOG_FATAL_IF(batch_size > kMaxTokens || batch_size <= 0,
-                "batch_size should be (0,", kMaxTokens, "] , but got",
-                batch_size);
+  TORCH_CHECK(batch_size > 0, "MoEMLP::forward: batch_size must be > 0");
+  TORCH_CHECK(hidden_states.size(1) == input_.size(1),
+              "hidden_states hidden dim ", hidden_states.size(1),
+              " does not match expert hidden dim ", input_.size(1));
   TORCH_CHECK(hidden_states.scalar_type() == input_.scalar_type(),
               "hidden_states dtype must match expert input dtype");
+  hidden_states = hidden_states.contiguous();
 
-  CUDA_CHECK(
-      cudaMemcpyAsync(input_.data_ptr(), hidden_states.data_ptr(),
-                      hidden_states.numel() * hidden_states.element_size(),
-                      cudaMemcpyDeviceToDevice, stream));
+  const int64_t in_row_bytes = input_.size(1) * input_.element_size();
+  const int64_t out_row_bytes = output_.size(1) * output_.element_size();
+  // Experts that receive more than kMaxTokens tokens (long prefills, routing
+  // skew) run in chunks of at most kMaxTokens rows through the same buffers.
+  const bool chunked = batch_size > kMaxTokens;
+  torch::Tensor output;
+  if (chunked) {
+    output = torch::empty({batch_size, output_.size(1)}, output_.options());
+  }
 
-  for (auto& buffer : buffer_) {
-    auto shape_vec = buffer.sizes().vec();
-    if (shape_vec.size() != 2) continue;
-    int64_t row = buffer.size(0);
-    int64_t col = buffer.size(1);
-    auto dtype = buffer.dtype();
-    if (row == kMaxTokens) {
-      buffer.set_data(torch::from_blob(
-          buffer.data_ptr(), {batch_size, col}, DoNothingDeleter<void>{},
-          torch::TensorOptions().dtype(dtype).device(
-              CUDA_DEVICE(at::cuda::current_device()))));
+  for (int64_t start = 0; start < batch_size; start += kMaxTokens) {
+    const int64_t rows = std::min(kMaxTokens, batch_size - start);
+    CUDA_CHECK(
+        cudaMemcpyAsync(input_.data_ptr(),
+                        static_cast<const char*>(hidden_states.data_ptr()) +
+                            start * in_row_bytes,
+                        rows * in_row_bytes, cudaMemcpyDeviceToDevice, stream));
+    ResizeStaging(rows);
+    if (start == 0 && kernel_start != nullptr) {
+      cudaEventRecord(kernel_start, stream);
+    }
+    ForwardHelper(stream);
+    if (chunked) {
+      CUDA_CHECK(cudaMemcpyAsync(
+          static_cast<char*>(output.data_ptr()) + start * out_row_bytes,
+          output_.data_ptr(), rows * out_row_bytes, cudaMemcpyDeviceToDevice,
+          stream));
     }
   }
-
-  if (kernel_start != nullptr) {
-    cudaEventRecord(kernel_start, stream);
-  }
-  ForwardHelper(stream);
   if (kernel_stop != nullptr) {
     cudaEventRecord(kernel_stop, stream);
   }
-  param_set_ = false;
-  auto output = output_.clone();
-
-  // Restore buffers to kMaxTokens shape for next invocation
-  for (auto& buffer : buffer_) {
-    auto shape_vec = buffer.sizes().vec();
-    if (shape_vec.size() != 2) continue;
-    int64_t row = buffer.size(0);
-    int64_t col = buffer.size(1);
-    auto dtype = buffer.dtype();
-
-    if (row == batch_size && batch_size != kMaxTokens) {
-      buffer.set_data(torch::from_blob(
-          buffer.data_ptr(), {kMaxTokens, col}, DoNothingDeleter<void>{},
-          torch::TensorOptions().dtype(dtype).device(
-              CUDA_DEVICE(at::cuda::current_device()))));
-    }
+  if (!chunked) {
+    output = output_.clone();
   }
-
   return output;
 }
 
