@@ -255,6 +255,7 @@ _STORE_SOURCES = [
     "extensions/kernel/topk_softmax_kernels.cu",
     "extensions/kernel/v4_fp4/mxfp4_dequant.cu",
     "extensions/kernel/v4_fp4/fp8_dequant.cu",
+    "extensions/kernel/fp8_moe/fp8_moe.cu",
     # Python binding
     "core/python/py_archer_prefetch.cpp",
     "core/python/py_tensor_store.cpp",
@@ -369,8 +370,16 @@ if cuda_available:
     _cuda_arch_flags = ["-gencode=arch=compute_80,code=sm_80"]
     if os.environ.get("MOE_ENABLE_SM90", "1") == "1":
         _cuda_arch_flags.append("-gencode=arch=compute_90,code=sm_90")
+    _store_arch_flags = []
     if os.environ.get("MOE_ENABLE_SM120", "0") == "1":
         _cuda_arch_flags.append("-gencode=arch=compute_120,code=sm_120")
+        # Native FP8 experts (extensions/kernel/fp8_moe) use the sm_120a-only
+        # CUTLASS blockwise FP8 MMA; the driver prefers the sm_120a cubin on
+        # sm_120 devices, so the plain sm_120 cubin stays for other kernels.
+        _store_arch_flags = [
+            "-gencode=arch=compute_120a,code=sm_120a",
+            "-DMOE_ENABLE_SM120_FP8=1",
+        ]
         _warn_if_sm120_torch_untested()
 
     # _store extension: IO and prefetch
@@ -382,7 +391,7 @@ if cuda_available:
             library_dirs=_STORE_LIBRARY_DIRS,
             extra_compile_args={
                 "cxx": COMMON_CXX_ARGS,
-                "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags,
+                "nvcc": COMMON_NVCC_ARGS + _cuda_arch_flags + _store_arch_flags,
             },
             extra_link_args=_STORE_EXTRA_LINK_ARGS,
         )
