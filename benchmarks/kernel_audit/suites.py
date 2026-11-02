@@ -537,22 +537,17 @@ def _sdpa_shim_builder(T, H, KVH, d):
     """PagedAttentionBackend._prefill_forward without FlashInfer."""
 
     def build():
+        from moe_infinity.runtime.attention_backend import causal_prefill_sdpa
+
         query = torch.randn(T, H, d, device="cuda", dtype=torch.bfloat16)
         key = torch.randn(T, KVH, d, device="cuda", dtype=torch.bfloat16)
         value = torch.randn(T, KVH, d, device="cuda", dtype=torch.bfloat16)
-        F = torch.nn.functional
-        ratio = H // KVH
 
         def run():
             q = query.transpose(0, 1).unsqueeze(0)
             k = key.transpose(0, 1).unsqueeze(0)
             v = value.transpose(0, 1).unsqueeze(0)
-            if ratio > 1:
-                k = k.repeat_interleave(ratio, dim=1)
-                v = v.repeat_interleave(ratio, dim=1)
-            out = F.scaled_dot_product_attention(
-                q, k, v, scale=d**-0.5, is_causal=True
-            )
+            out = causal_prefill_sdpa(q, k, v, d**-0.5)
             return out.squeeze(0).transpose(0, 1)
 
         return run
