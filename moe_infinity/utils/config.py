@@ -43,12 +43,14 @@ class ArcherConfig:
             "help": "When True, fire speculative prefetch BEFORE the layer-L barrier in dispatch_local so PCIe transfers overlap with layer-L compute. When False (default), prefetch fires after the barrier (legacy behavior). Requires speculative_prefetch=True. Currently exposes a cache-pressure failure mode (see .sisyphus/findings/ibp-feasibility/SUMMARY.md) when device_memory_ratio is high; lower device_memory_ratio if you enable this and observe 'All cached expert locked' warnings."
         },
     )
-    gpu_only_expert_routing: bool = field(
-        default=False,
+    gpu_only_expert_routing: Optional[bool] = field(
+        default=None,
         metadata={
             "help": (
                 "Use native CUDA active-expert discovery for single-host local "
-                "dispatch. Falls back to eager Python routing when unavailable."
+                "dispatch (no per-layer host sync). Falls back to eager Python "
+                "routing when unavailable. Default (None) = on unless an "
+                "overlap-prefetch mode that conflicts with it is enabled."
             )
         },
     )
@@ -414,6 +416,15 @@ class ArcherConfig:
         return config
 
     def __post_init__(self):
+        if self.gpu_only_expert_routing is None:
+            # Auto: sync-free native routing unless an overlap-prefetch mode
+            # that owns expert correction is enabled.
+            self.gpu_only_expert_routing = not (
+                self.speculative_prefetch_overlap
+                or getattr(self, "overlap_prefetch_mode", "off")
+                in {"observe", "enforce"}
+                or getattr(self, "overlap_prefetch_policy", "off") != "off"
+            )
         self._validate_gpu_routing_overlap(
             self.gpu_only_expert_routing,
             self.speculative_prefetch_overlap,

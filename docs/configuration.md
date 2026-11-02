@@ -39,7 +39,7 @@ config layer with names like `offload_dir`, `device_memory_ratio`, and
 | `prefetch` | `bool` | `False` | `True` / `False` | No current production consumer. | Legacy or reserved knob. Reserved. |
 | `speculative_prefetch` | `bool` | `False` | `True` / `False` | Enables expert prefetch driven by router logits. | Used by `DistributedExpertExecutor` and `ExpertPrefetcher`. Experimental. |
 | `speculative_prefetch_overlap` | `bool` | `False` | `True` / `False` | Issues speculative prefetch before the dispatch barrier so PCIe copies can overlap compute. | Requires `speculative_prefetch=True`. Can increase cache pressure and trigger `All cached expert locked` warnings when `device_memory_ratio` is high. Experimental. |
-| `gpu_only_expert_routing` | `false` | Opt in to native CUDA active-expert discovery for single-host `dispatch_local`. First release: mutually exclusive with `speculative_prefetch_overlap=true` and overlap-prefetch `observe`/`enforce`; invalid combinations raise before engine construction. CPU masks, older native extensions, and active DFlash route-ahead contexts use eager routing. Routing IDs, weights, output accumulation, and RPC `dispatch()` are unchanged. |
+| `gpu_only_expert_routing` | auto (`true` unless an overlap-prefetch mode is on) | Native CUDA active-expert discovery for single-host `dispatch_local`: no per-layer host sync; with the fused router (`moe_infinity._router`) the routing kernel writes the active-expert flags to pinned memory and the dispatcher only enqueues a host callback. Set `false` to opt out. First release: mutually exclusive with `speculative_prefetch_overlap=true` and overlap-prefetch `observe`/`enforce`; invalid combinations raise before engine construction. CPU masks, older native extensions, and active DFlash route-ahead contexts use eager routing. Routing IDs, weights, output accumulation, and RPC `dispatch()` are unchanged. |
 | `device_memory_ratio` | `float` | `0.9` | `[0.0, 1.0]` | Fraction of GPU memory reserved for expert cache and native-engine budgeting. | Pairs with `kv_cache_memory_ratio`. If the native zero-KV heuristic kicks in and the sum would exceed `1.0`, `device_memory_ratio` is reduced to fit. Stable. |
 | `num_threads` | `int` | `4` | any integer accepted by the parser, positive values make sense in practice | Number of expert compute threads per GPU. | Passed to the expert dispatcher. Stable. |
 | `host_memory_ratio` | `float` | `0.9` | any float accepted by the parser, no explicit validation | Reserved host-memory fraction. | No current production consumer. Reserved. |
@@ -54,7 +54,7 @@ config layer with names like `offload_dir`, `device_memory_ratio`, and
 | `overlap_prefetch_cold_start_experts` | `int` | `1` | `>= 0` | Max experts admitted before both a compute and a transfer sample exist. | Cold start still enforces `overlap_prefetch_max_inflight_bytes`. |
 | `overlap_prefetch_max_window_bytes` | `int` | `256*1024*1024` | `>= 0` | Upper bound on the per-layer admitted prefetch window in bytes. | Must be `<= overlap_prefetch_max_inflight_bytes` when policy is `enforce`. |
 | `overlap_prefetch_max_inflight_bytes` | `int` | `512*1024*1024` | `>= 0` | Upper bound on outstanding speculative prefetch bytes. | Enforced by native backpressure under `enforce`. |
-| `gpu_only_expert_routing` | `bool` | `False` | `True` / `False` | Shared field for the GPU-only expert routing plan; not implemented here. | Rejected together with `overlap_prefetch_policy=observe|enforce` in the first release (see compatibility table below). |
+| `gpu_only_expert_routing` | `bool \| None` | `None` (auto) | `True` / `False` / `None` | GPU-only expert routing; `None` resolves to `True` unless overlap prefetch is enabled. | Rejected together with `overlap_prefetch_policy=observe|enforce` in the first release (see compatibility table below). |
 
 ## Overlap-aware expert prefetch
 
@@ -100,6 +100,7 @@ First-release compatibility is deliberately fail-closed:
 | `False` | `off`, `observe`, or `enforce` | Valid eager-routing configuration |
 | `True` | `off` | Valid GPU-routing configuration; this plan is inactive |
 | `True` | `observe` or `enforce` | `ValueError` during `ArcherConfig` construction/loading |
+| unset (auto) | `off` / `observe` / `enforce` | resolves to `True` / `False` / `False` |
 
 ### Rollout and rollback
 

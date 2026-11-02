@@ -174,7 +174,7 @@ def test_overlap_prefetch_defaults_are_safe(monkeypatch):
     assert c.overlap_prefetch_cold_start_experts == 1
     assert c.overlap_prefetch_max_window_bytes == 256 * 1024 * 1024
     assert c.overlap_prefetch_max_inflight_bytes == 512 * 1024 * 1024
-    assert c.gpu_only_expert_routing is False
+    assert c.gpu_only_expert_routing is True
 
 
 @pytest.mark.parametrize(
@@ -211,9 +211,37 @@ def test_overlap_prefetch_rejects_gpu_only_routing(monkeypatch, policy):
         )
 
 
-def test_gpu_only_expert_routing_defaults_off(monkeypatch):
+def test_gpu_only_expert_routing_defaults_on(monkeypatch):
     monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
     config = ArcherConfig(offload_path="/tmp", use_native_engine=False)
+    assert config.gpu_only_expert_routing is True
+
+
+def test_gpu_only_expert_routing_explicit_off(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    config = ArcherConfig.load_from_json(
+        {
+            "offload_path": "/tmp",
+            "use_native_engine": False,
+            "gpu_only_expert_routing": False,
+        }
+    )
+    assert config.gpu_only_expert_routing is False
+
+
+@pytest.mark.parametrize(
+    "overlap",
+    [
+        {"speculative_prefetch_overlap": True, "speculative_prefetch": True},
+        {"overlap_prefetch_policy": "observe"},
+        {"overlap_prefetch_policy": "enforce"},
+    ],
+)
+def test_gpu_only_expert_routing_auto_yields_to_overlap(monkeypatch, overlap):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    config = ArcherConfig(
+        offload_path="/tmp", use_native_engine=False, **overlap
+    )
     assert config.gpu_only_expert_routing is False
 
 
