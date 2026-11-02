@@ -877,17 +877,16 @@ __global__ void __launch_bounds__(kDecThreads, 1)
   asm volatile("griddepcontrol.wait;" ::: "memory");
   const int ntiles = *a.num_tiles;
   const int U1 = a.I / (kDecRows / 2), U2 = a.H / kDecRows;
-  // When every down-projection weight of the layer fits comfortably in L2,
-  // gate|up units also pull a 1/U1 slice of their tile's w2 into L2, so the
-  // down units (which must wait for h) read from L2 and DRAM never idles at
-  // the phase boundary.
   // lag (in tiles) between a tile's gate|up units and its down units
   const int lag = min(ntiles, (int)((gridDim.x + U1 - 1) / U1));
-  // Gate|up units also pull a 1/U1 slice of their tile's w2 into L2, so the
-  // down units (which must wait for h) read from L2. The lag bounds the
-  // prefetched footprint to about lag + 1 tiles of w2.
+  // When all down-projection weights of the layer fit comfortably in L2
+  // (few active experts, e.g. batch 1), gate|up units also pull a 1/U1 slice
+  // of their tile's w2 into L2, so the last down units (which must wait for
+  // h) read from L2 instead of extending the layer after the gate|up stream.
+  // With more experts the down units overlap the stream anyway and the
+  // prefetch only competes with it (measured: b1 -3 %, b4 +3 % time).
   const long long w2_bytes = (long long)a.H * a.I / 2;
-  const bool pf_w2 = (long long)(lag + 2) * w2_bytes <= kDecL2Budget;
+  const bool pf_w2 = (long long)ntiles * w2_bytes <= kDecL2Budget;
 
   // ---- producer state
   int p_count = 0;  // units dequeued so far

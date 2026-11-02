@@ -122,41 +122,50 @@ std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
   const int64_t n = T * topk;
   const int bt = v4_moe_choose_bt(n, (int)E);
   const int bound = v4_moe_tile_bound(n, (int)E, bt);
-  auto u8 = x.options().dtype(torch::kUInt8);
-  auto i32 = x.options().dtype(torch::kInt32);
-  auto xq = torch::empty({T * H}, u8);
-  auto xs = torch::empty({T * (H / 128)}, u8);
-  auto sorted = torch::empty({std::max<int64_t>(n, 1)}, i32);
-  auto tiles = torch::empty({(int64_t)bound * 3 + 1}, i32);
   const bool decode = v4_moe_use_decode(bt, (int)H, (int)I);
-  // decode path: BF16 h scratch + work-queue / completion counters
+  const int64_t n1 = std::max<int64_t>(n, 1);
   const int64_t n_counters = v4_moe_decode_counters(bound, (int)H);
-  auto counters = torch::empty({decode ? n_counters : 1}, i32);
-  auto hbuf = decode ? torch::empty({std::max<int64_t>(n, 1), I}, x.options())
-                     : torch::Tensor();
-  // decode path: one 96-byte TileExt record per tile
-  auto tile_ext = torch::empty({decode ? (int64_t)bound * 24 : 1}, i32);
-  auto hq = torch::empty({decode ? 1 : std::max<int64_t>(n, 1) * I}, u8);
-  auto hs =
-      torch::empty({decode ? 1 : std::max<int64_t>(n, 1) * (I / 128)}, u8);
-  auto ybuf = torch::empty({n, H}, x.options());
-  torch::Tensor out;
-  if (combine) out = torch::empty({T, H}, x.options().dtype(torch::kFloat32));
+  // One scratch allocation: the host time of every allocation before the
+  // first launch shows up as GPU idle time in a decode layer.
+  int64_t off = 0;
+  auto carve = [&](int64_t bytes) {
+    const int64_t o = off;
+    off += (bytes + 255) / 256 * 256;
+    return o;
+  };
+  const int64_t o_xq = carve(T * H), o_xs = carve(T * (H / 128));
+  const int64_t o_sorted = carve(n1 * 4);
+  const int64_t o_tiles = carve(((int64_t)bound * 3 + 1) * 4);
+  const int64_t o_ctr = carve(decode ? n_counters * 4 : 0);
+  const int64_t o_ext = carve(decode ? (int64_t)bound * 96 : 0);
+  const int64_t o_hbuf = carve(decode ? n1 * I * 2 : 0);
+  const int64_t o_hq = carve(decode ? 0 : n1 * I);
+  const int64_t o_hs = carve(decode ? 0 : n1 * (I / 128));
+  // ybuf is the result of the single-expert call; otherwise scratch too
+  const int64_t o_ybuf = carve(combine ? n * H * 2 : 0);
+  auto ws = torch::empty({off}, x.options().dtype(torch::kUInt8));
+  uint8_t* base = ws.data_ptr<uint8_t>();
+  torch::Tensor ybuf, out;
+  if (combine)
+    out = torch::empty({T, H}, x.options().dtype(torch::kFloat32));
+  else
+    ybuf = torch::empty({n, H}, x.options());
   if (T == 0) {
     if (combine) out.zero_();
     return {ybuf, out};
   }
   auto stream = at::cuda::getCurrentCUDAStream(x.device().index());
+  int* tiles = reinterpret_cast<int*>(base + o_tiles);
   v4_moe_forward_cuda(
       x.data_ptr(), topk_ids.data_ptr(),
       topk_ids.scalar_type() == torch::kInt64, topk_w.data_ptr<float>(),
       table.data_ptr<int64_t>(), (int)T, (int)topk, (int)E, (int)H, (int)I,
-      (float)swiglu_limit, bt, xq.data_ptr<uint8_t>(), xs.data_ptr<uint8_t>(),
-      sorted.data_ptr<int>(), tiles.data_ptr<int>() + 1, tiles.data_ptr<int>(),
-      hq.data_ptr<uint8_t>(), hs.data_ptr<uint8_t>(), ybuf.data_ptr(),
+      (float)swiglu_limit, bt, base + o_xq, base + o_xs,
+      reinterpret_cast<int*>(base + o_sorted), tiles + 1, tiles, base + o_hq,
+      base + o_hs, combine ? (void*)(base + o_ybuf) : ybuf.data_ptr(),
       combine ? out.data_ptr<float>() : nullptr,
-      decode ? hbuf.data_ptr() : nullptr, counters.data_ptr<int>(),
-      (int)n_counters, tile_ext.data_ptr(), stream);
+      decode ? base + o_hbuf : nullptr, reinterpret_cast<int*>(base + o_ctr),
+      (int)n_counters, base + o_ext, stream);
   return {ybuf, out};
 }
 
