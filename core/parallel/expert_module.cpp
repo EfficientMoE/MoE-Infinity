@@ -98,100 +98,87 @@ void MoEMLP::PrepareRepresentation(cudaStream_t stream) {
 }
 
 void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
-  if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
-    DLOG_FATAL_IF(tensor_ids.size() != 6,
-                  "GPT-OSS expert requires blocks/scales/bias for two "
-                  "projections");
+  // Safety: exec_state is FETCHING/EXECUTING throughout forward(), so the
+  // expert's GPU memory cannot be evicted until OutputFunc resets to IDLE.
+  std::vector<torch::Tensor> tensors;
+  tensors.reserve(tensor_ids.size());
+  for (auto tensor_id : tensor_ids) {
+    tensors.push_back(GetTensorStore()->index().find(tensor_id)->second.tensor);
   }
+  SetTensors(tensors);
+}
+
+void MoEMLP::SetTensors(const std::vector<torch::Tensor>& tensors) {
+  if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
+    TORCH_CHECK(tensors.size() == 6,
+                "GPT-OSS expert requires blocks/scales/bias for two "
+                "projections");
+  }
+  TORCH_CHECK(!tensors.empty() && tensors.size() <= param_.size(),
+              "MoEMLP expects 1..", param_.size(), " parameter tensors, got ",
+              tensors.size());
+  for (size_t i = 0; i < tensors.size(); i++) {
+    param_[i].set_data(tensors[i]);
+  }
+
+  if (!param_init_) {
+    // MLP weight is [intermediate, hidden]; GPT-OSS gate_up blocks are
+    // [2 * intermediate, hidden / 2] packed MXFP4.
+    const auto& shape = tensors[0].sizes();
+    int64_t hdim;
+    int64_t idim;
+    if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
+      hdim = shape[1] * 2;
+      idim = shape[0] / 2;
+    } else {
+      hdim = shape[1];
+      idim = shape[0];
+    }
+    AllocateStaging(hdim, idim, tensors.size());
+    param_init_ = true;
+  }
+
+  assert(param_set_ == false);
+  param_set_ = true;
+}
+
+void MoEMLP::AllocateStaging(int64_t hdim, int64_t idim,
+                             std::size_t num_inter) {
+  // Staging buffers (input, output, intermediates) are allocated once at
+  // kMaxTokens rows and reused across expert invocations; forward() processes
+  // larger batches in chunks of at most kMaxTokens rows.
   int device = at::cuda::current_device();
   auto options = torch::TensorOptions()
                      .dtype(dtype_to_torch(dtype_))
                      .device(CUDA_DEVICE(device));
+  auto allocator = c10::DeviceCachingAllocator::get(device);
 
-  // Safety: exec_state is FETCHING/EXECUTING throughout forward(), so the
-  // expert's GPU memory cannot be evicted until OutputFunc resets to IDLE.
-  std::vector<std::vector<int64_t>> tensor_shapes;
-  for (size_t i = 0; i < tensor_ids.size(); i++) {
-    auto& tensor = GetTensorStore()->index().find(tensor_ids[i])->second.tensor;
-    tensor_shapes.push_back(tensor.sizes().vec());
-    param_[i].set_data(tensor);
+  staging_cols_.assign({hdim, hdim});
+  staging_cols_.insert(staging_cols_.end(), num_inter, idim);
+  TORCH_CHECK(staging_cols_.size() <= buffer_.size(),
+              "MoEMLP staging slot count exceeds buffer_ size");
+
+  for (size_t i = 0; i < staging_cols_.size(); i++) {
+    std::vector<int64_t> data_shape = {kMaxTokens, staging_cols_[i]};
+    auto data_size = torch_shape_size(data_shape, dtype_);
+    void* buffer_ptr = allocator->allocate(data_size);
+    buffer_[i].set_data(torch::from_blob(buffer_ptr, data_shape,
+                                         DoNothingDeleter<void>{}, options));
+    DLOG_TRACE("MoEMLP::AllocateStaging: buffer_ tensor", i, "data_shape",
+               data_shape, "data_size", data_size, "device",
+               buffer_[i].device().str());
   }
+}
 
-  if (!param_init_) {
-    auto allocator = c10::DeviceCachingAllocator::get(device);
-
-    int64_t hdim;
-    int64_t idim;
-    if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
-      hdim = tensor_shapes[0][1] * 2;
-      idim = tensor_shapes[0][0] / 2;
-    } else {
-      hdim = tensor_shapes[0][1];
-      idim = tensor_shapes[0][0];
-    }
-
-    std::vector<std::vector<int64_t>> data_shapes;
-    data_shapes.push_back({kMaxTokens, hdim});
-    data_shapes.push_back({kMaxTokens, hdim});
-
-    for (size_t i = 0; i < tensor_shapes.size(); i++) {
-      data_shapes.push_back({kMaxTokens, idim});
-    }
-
-    for (size_t i = 0; i < data_shapes.size(); i++) {
-      auto data_shape = data_shapes[i];
-      auto data_size = torch_shape_size(data_shape, dtype_);
-      void* buffer_ptr = allocator->allocate(data_size);
-      buffer_[i].set_data(torch::from_blob(buffer_ptr, data_shape,
-                                           DoNothingDeleter<void>{}, options));
-      DLOG_TRACE("MoEMLP::SetTensorsFromIds: buffer_ tensor", i, "data_shape",
-                 data_shape, "data_size", data_size, "device",
-                 buffer_[i].device().str());
-    }
-    param_init_ = true;
+void MoEMLP::ResizeStaging(int64_t rows) {
+  auto device = CUDA_DEVICE(at::cuda::current_device());
+  for (size_t i = 0; i < staging_cols_.size(); i++) {
+    auto& buffer = buffer_[i];
+    if (buffer.size(0) == rows) continue;
+    buffer.set_data(torch::from_blob(
+        buffer.data_ptr(), {rows, staging_cols_[i]}, DoNothingDeleter<void>{},
+        torch::TensorOptions().dtype(buffer.dtype()).device(device)));
   }
-
-  if (!param_init_) {
-    // Allocate computation buffers (input, output, intermediates) once.
-    // These are reused across expert invocations.
-    auto allocator = c10::DeviceCachingAllocator::get(device);
-
-    // MLP tensor shape: weight is [intermediate, hidden], so
-    //   hdim = tensor_shapes[0][1], idim = tensor_shapes[0][0]
-    int64_t hdim;
-    int64_t idim;
-    if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
-      hdim = tensor_shapes[0][1] * 2;
-      idim = tensor_shapes[0][0] / 2;
-    } else {
-      hdim = tensor_shapes[0][1];
-      idim = tensor_shapes[0][0];
-    }
-
-    std::vector<std::vector<int64_t>> data_shapes;
-    data_shapes.push_back({kMaxTokens, hdim});  // input buffer
-    data_shapes.push_back({kMaxTokens, hdim});  // output buffer
-
-    for (size_t i = 0; i < tensor_shapes.size(); i++) {
-      data_shapes.push_back({kMaxTokens, idim});  // intermediate buffers
-    }
-
-    for (size_t i = 0; i < data_shapes.size(); i++) {
-      auto data_shape = data_shapes[i];
-      auto data_size = torch_shape_size(data_shape, dtype_);
-      void* buffer_ptr = allocator->allocate(data_size);
-      buffer_[i].set_data(torch::from_blob(buffer_ptr, data_shape,
-                                           DoNothingDeleter<void>{}, options));
-      DLOG_TRACE("MoEMLP::SetTensorsFromIds: buffer_ tensor", i, "data_shape",
-                 data_shape, "data_size", data_size, "device",
-                 buffer_[i].device().str());
-    }
-    param_init_ = true;
-  }
-
-  assert(param_init_ == true);
-  assert(param_set_ == false);
-  param_set_ = true;
 }
 
 void MoEMLP::DequantMxfp4Params(cudaStream_t stream) {

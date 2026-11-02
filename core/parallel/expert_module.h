@@ -202,6 +202,9 @@ struct MoEMLP : public torch::nn::Module {
                         cudaEvent_t kernel_stop = nullptr);
 
   void SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids);
+  // Binds expert parameters directly (SetTensorsFromIds resolves ids from the
+  // tensor store and forwards here).
+  void SetTensors(const std::vector<torch::Tensor>& tensors);
   void DequantMxfp4Params(cudaStream_t stream);
   void SetFp8Scales(const std::vector<torch::Tensor>& scales);
   void DequantFp8Params(cudaStream_t stream);
@@ -210,9 +213,13 @@ struct MoEMLP : public torch::nn::Module {
 
  private:
   void ForwardHelper(cudaStream_t stream);
+  void AllocateStaging(int64_t hdim, int64_t idim, std::size_t num_inter);
+  void ResizeStaging(int64_t rows);
 
  private:
   std::vector<torch::Tensor> buffer_;
+  // Column count of each staging slot in buffer_ (rows are kMaxTokens).
+  std::vector<int64_t> staging_cols_;
   std::vector<torch::Tensor> param_;
   std::vector<torch::Tensor> gpt_oss_param_;
 

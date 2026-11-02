@@ -87,6 +87,28 @@ def _cutlass_builder(M: int, H: int, I: int):
     return build
 
 
+_MOE_MLP_MODULES: dict = {}
+
+
+def _moemlp_native_builder(M: int, H: int, I: int):
+    """Full C++ MoEMLP::forward (staging copies + CUTLASS FFN + output clone),
+    chunked in kMaxTokens rows for M > 8192."""
+
+    def build():
+        from moe_infinity import _store
+
+        # Staging buffers are sized on first use and never freed, so reuse
+        # one module per expert shape.
+        mlp = _MOE_MLP_MODULES.get((H, I))
+        if mlp is None:
+            mlp = _MOE_MLP_MODULES[(H, I)] = _store._moe_mlp_for_test(0, 5)
+        x = _rand(M, H, scale=1.0)
+        params = [_rand(I, H), _rand(I, H), _rand(H, I)]
+        return lambda: mlp.forward(x, params)
+
+    return build
+
+
 def _cublas_ref_builder(M: int, H: int, I: int):
     """Same math as the CUTLASS path through cuBLAS with gate|up concatenated."""
 
@@ -251,6 +273,7 @@ def _v4_fp4_builder(M: int, H: int, I: int):
 # weight bytes per element of one expert in each storage format
 _W_BYTES = {
     "cutlass_fused": BF16,
+    "moemlp_native": BF16,
     "cublas_ref": BF16,
     "gptoss_bf16cached": BF16,
     "fp8_prod": 1 + 4 / (128 * 128),
@@ -278,6 +301,7 @@ def _expert_impls(m: MoEModel):
         impls.append(("v4_fp4_prod", _v4_fp4_builder))
     impls += [
         ("cutlass_fused", _cutlass_builder),
+        ("moemlp_native", _moemlp_native_builder),
         ("cublas_ref", _cublas_ref_builder),
     ]
     return impls

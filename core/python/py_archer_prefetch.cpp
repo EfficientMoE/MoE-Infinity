@@ -11,7 +11,31 @@
 
 void BindTensorStoreSurface(py::class_<ArcherPrefetchHandle>& cls);
 
+// Test/benchmark-only handle that runs the production MoEMLP::forward on
+// caller-provided weights, bypassing the tensor store and dispatcher. Staging
+// buffers live for the process lifetime (as in ExpertDispatcher), so reuse one
+// instance per expert shape.
+struct MoEMLPForTest {
+  MoEMLPForTest(int dtype, int expert_type)
+      : module(std::make_unique<MoEMLP>(dtype, expert_type)) {}
+
+  torch::Tensor Forward(torch::Tensor hidden_states,
+                        const std::vector<torch::Tensor>& params) {
+    py::gil_scoped_release release;
+    module->SetTensors(params);
+    return module->forward(hidden_states,
+                           at::cuda::getCurrentCUDAStream().stream());
+  }
+
+  std::unique_ptr<MoEMLP> module;
+};
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  py::class_<MoEMLPForTest>(m, "_moe_mlp_for_test")
+      .def(py::init<int, int>(), py::arg("dtype"), py::arg("expert_type"))
+      .def("forward", &MoEMLPForTest::Forward, py::arg("hidden_states"),
+           py::arg("params"));
+
   m.def("init_moe_layer", InitMoELayer,
         "Initialize the MoE layer with the specified parameters.");
   m.def("topk_softmax", TopKSoftmax,
