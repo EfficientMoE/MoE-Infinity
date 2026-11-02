@@ -6,10 +6,11 @@ issues the same kernels MoE-Infinity issues for that op on sm_120
 
 Impl names:
   production paths   cutlass_fused, fp8_prod, gptoss_resident, gptoss_offload,
-                     v4_fp4_prod, sdpa_shim, hf_eager, paged_v1,
+                     triton_mxfp4, v4_fp4_prod, sdpa_shim, hf_eager, paged_v1,
                      sdpa_fallback, hf_eager_decode, router_*, gdn_torch,
                      kv_write_loop
-  references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode
+  references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode,
+                     read_ceiling
 """
 
 from __future__ import annotations
@@ -1256,8 +1257,100 @@ def gptoss_loop_cases(model_keys: list[str] | None = None) -> list[Case]:
     return out
 
 
+def _mxfp4_gemm_builder(M: int, N: int, K: int):
+    """One `fused_mxfp4_gemm` launch (GPT-OSS resident path, #312)."""
+
+    def build():
+        from moe_infinity.kernel.mxfp4_gemm import fused_mxfp4_gemm
+
+        x = _rand(M, K, scale=1.0)
+        w = torch.randint(0, 255, (N, K // 2), device="cuda", dtype=torch.uint8)
+        s = torch.randint(
+            118, 124, (N, K // 32), device="cuda", dtype=torch.uint8
+        )
+        b = _rand(N)
+        return lambda: fused_mxfp4_gemm(x, w, s, b)
+
+    return build
+
+
+_read_kernel = None
+
+
+def _read_ceiling_builder(M: int, N: int, K: int):
+    """Streaming read of the same MXFP4 weight bytes (no math): the DRAM
+    bandwidth one cold-L2 launch of this size can reach on this GPU."""
+
+    def build():
+        global _read_kernel
+        import triton
+        import triton.language as tl
+
+        if _read_kernel is None:
+
+            @triton.jit
+            def _read(p, o, n, BLOCK: tl.constexpr):
+                offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+                v = tl.load(p + offs, mask=offs < n, other=0)
+                tl.store(o + tl.program_id(0), tl.xor_sum(v, axis=0))
+
+            _read_kernel = _read
+
+        n = (N * (K // 2) + N * (K // 32)) // 4
+        buf = torch.randint(0, 255, (n,), device="cuda", dtype=torch.int32)
+        grid = (triton.cdiv(n, 512),)
+        out = torch.empty(grid[0], device="cuda", dtype=torch.int32)
+        return lambda: _read_kernel[grid](buf, out, n, BLOCK=512, num_warps=8)
+
+    return build
+
+
+def mxfp4_gemm_cases(model_keys: list[str] | None = None) -> list[Case]:
+    """Single GPT-OSS MXFP4 GEMMs (gate_up: N=2I, K=H; down: N=H, K=I) at the
+    per-expert token counts of every expert-suite point."""
+    cases: list[Case] = []
+    for key in ("gpt-oss-20b", "gpt-oss-120b"):
+        if model_keys and key not in model_keys:
+            continue
+        m = MODELS[key]
+        H, I = m.hidden, m.inter
+        for phase, lbl, n in _expert_points(m):
+            M, A = expert_tokens(m, n)
+            for proj, N, K in (("gate_up", 2 * I, H), ("down", H, I)):
+                w_bytes = N * K * _W_BYTES["gptoss_resident"]
+                for impl, builder, flops, act in (
+                    (
+                        "triton_mxfp4",
+                        _mxfp4_gemm_builder,
+                        2.0 * M * N * K,
+                        M * (K + N) * BF16,
+                    ),
+                    ("read_ceiling", _read_ceiling_builder, 0.0, 0),
+                ):
+                    if impl == "read_ceiling" and phase != "decode":
+                        continue
+                    cases.append(
+                        Case(
+                            f"{key}|{lbl}|{proj}|{impl}",
+                            suite="mxfp4_gemm",
+                            model=key,
+                            phase=phase,
+                            size=f"{lbl}/{proj}",
+                            impl=impl,
+                            flops=flops,
+                            bytes_min=w_bytes + act,
+                            build=builder(M, N, K),
+                            per_layer=A,
+                            layers=m.moe_layers,
+                            meta={"M": M, "N": N, "K": K, "tokens": n},
+                        )
+                    )
+    return cases
+
+
 SUITES: dict[str, Callable[..., list[Case]]] = {
     "expert": expert_cases,
+    "mxfp4_gemm": mxfp4_gemm_cases,
     "gptoss_loop": gptoss_loop_cases,
     "expert_layer": expert_layer_cases,
     "expert_layer_graph": expert_layer_graph_cases,
