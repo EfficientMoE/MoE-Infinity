@@ -367,6 +367,206 @@ def _moe_gemm2_kernel(
                 tl.store(out_ptr + o, v.to(tl.bfloat16), mask=o < n)
 
 
+@triton.jit
+def _e2m1_to_f32(w):
+    """4 packed bytes -> (lo, hi) nibbles as exact fp32 E2M1 values.
+
+    From #312: the sm_100a/sm_120a ``cvt.rn.f16x2.e2m1x2`` (one instruction
+    per byte), widened to fp32.
+    """
+    return tl.inline_asm_elementwise(
+        asm="""
+        {
+        .reg .b8 b0, b1, b2, b3;
+        .reg .b16 l0, l1, l2, l3, h0, h1, h2, h3;
+        .reg .b32 p0, p1, p2, p3;
+        mov.b32 {b0, b1, b2, b3}, $8;
+        cvt.rn.f16x2.e2m1x2 p0, b0;
+        cvt.rn.f16x2.e2m1x2 p1, b1;
+        cvt.rn.f16x2.e2m1x2 p2, b2;
+        cvt.rn.f16x2.e2m1x2 p3, b3;
+        mov.b32 {l0, h0}, p0;
+        mov.b32 {l1, h1}, p1;
+        mov.b32 {l2, h2}, p2;
+        mov.b32 {l3, h3}, p3;
+        cvt.f32.f16 $0, l0;
+        cvt.f32.f16 $1, l1;
+        cvt.f32.f16 $2, l2;
+        cvt.f32.f16 $3, l3;
+        cvt.f32.f16 $4, h0;
+        cvt.f32.f16 $5, h1;
+        cvt.f32.f16 $6, h2;
+        cvt.f32.f16 $7, h3;
+        }
+        """,
+        constraints="=r,=r,=r,=r,=r,=r,=r,=r,r",
+        args=[w],
+        dtype=(tl.float32, tl.float32),
+        is_pure=True,
+        pack=4,
+    )
+
+
+@triton.jit
+def _moe_gemv_kernel(
+    a_ptr,  # int32 view (bf16 pairs): x [T, K/2] (GATHER_TOK) or inter rows
+    sorted_ids_ptr,
+    block_expert_ptr,
+    topk_w_ptr,
+    w_ptr,
+    s_ptr,
+    b_ptr,
+    out_ptr,
+    ws_ptr,
+    counter_ptr,
+    TK,
+    N,
+    K,
+    stride_am,
+    stride_we,
+    stride_wn,
+    stride_se,
+    stride_sn,
+    stride_be,
+    stride_om,
+    alpha,
+    limit,
+    TOP_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_G: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    SWIGLU: tl.constexpr,
+    USE_PDL: tl.constexpr,
+):
+    """Small-batch grouped MXFP4 GEMV (row blocks of 1-4 tokens).
+
+    Register-only weight streaming in the per-thread layout of #312's
+    ``_mxfp4_gemv_kernel``: each thread decodes 4-byte slices of 16-byte
+    scale groups with ``cvt.rn.f16x2.e2m1x2`` and FMAs the matching bf16
+    activation pairs of every row of its block.
+
+    SWIGLU: GEMM1 (gate/up interleaved rows) -> bias, clamped SwiGLU, store
+    ``inter[row]``. Otherwise GEMM2 -> bias, routing weight, scatter-add into
+    ``out[token]`` (fp32 workspace + last-CTA conversion when SPLIT_K > 1).
+    """
+    if USE_PDL:
+        gdc_wait()
+        gdc_launch_dependents()
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    pid_k = tl.program_id(2)
+    e32 = tl.load(block_expert_ptr + pid_m)
+    if e32 >= 0:
+        e = e32.to(tl.int64)
+        rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        aid = tl.load(sorted_ids_ptr + rows)
+        valid = aid < TK
+        tok = (aid // TOP_K).to(tl.int64)
+        if SWIGLU:
+            arow = tok
+        else:
+            arow = rows.to(tl.int64)
+
+        R: tl.constexpr = BLOCK_N * BLOCK_G
+        r = tl.arange(0, R)
+        rn = pid_n * BLOCK_N + r // BLOCK_G
+        rn_c = tl.minimum(rn, N - 1).to(tl.int64)
+        rg = r % BLOCK_G
+        num_g = K // 32
+        g_per = tl.cdiv(tl.cdiv(num_g, BLOCK_G), SPLIT_K) * BLOCK_G
+        g_lo = pid_k * g_per
+        g_hi = tl.minimum(g_lo + g_per, num_g)
+        j = tl.arange(0, 16)
+        j4 = (j // 4) * 4 + j % 4
+        w_row = w_ptr + e * stride_we + rn_c * stride_wn
+        s_row = s_ptr + e * stride_se + rn_c * stride_sn
+        a_row = a_ptr + arow * stride_am
+        acc = tl.zeros((BLOCK_M, R, 16), dtype=tl.float32)
+        for g0 in range(g_lo, g_hi, BLOCK_G):
+            g = g0 + rg
+            gm = g < g_hi
+            w = tl.load(
+                w_row[:, None] + (g * 16)[:, None] + j4[None, :],
+                mask=gm[:, None],
+                other=0,
+            )
+            sc = tl.load(s_row + g, mask=gm, other=0)
+            scale = (sc.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+            lo, hi = _e2m1_to_f32(w)
+            lo = lo * scale[:, None]
+            hi = hi * scale[:, None]
+            xp = tl.load(
+                a_row[:, None, None]
+                + (g * 16)[None, :, None]
+                + j[None, None, :],
+                mask=valid[:, None, None] & gm[None, :, None],
+                other=0,
+            )
+            x_even = (xp << 16).to(tl.float32, bitcast=True)
+            x_odd = (xp & -65536).to(tl.float32, bitcast=True)
+            acc += lo[None, :, :] * x_even + hi[None, :, :] * x_odd
+        acc_n = tl.sum(
+            tl.sum(acc, axis=2).reshape(BLOCK_M, BLOCK_N, BLOCK_G), 2
+        )
+
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        n_mask = offs_n < N
+        if SWIGLU:
+            bias = tl.load(
+                b_ptr + e * stride_be + offs_n, mask=n_mask, other=0.0
+            ).to(tl.float32)
+            gu = (acc_n + bias[None, :]).to(tl.bfloat16).to(tl.float32)
+            gate, up = tl.split(tl.reshape(gu, (BLOCK_M, BLOCK_N // 2, 2)))
+            gate = tl.minimum(gate, limit)
+            up = tl.minimum(tl.maximum(up, -limit), limit)
+            act = (up + 1.0) * (gate * tl.sigmoid(gate * alpha))
+            offs_i = pid_n * (BLOCK_N // 2) + tl.arange(0, BLOCK_N // 2)
+            tl.store(
+                out_ptr
+                + rows[:, None].to(tl.int64) * stride_om
+                + offs_i[None, :],
+                act.to(tl.bfloat16),
+                mask=valid[:, None] & (offs_i < N // 2)[None, :],
+            )
+        else:
+            rw = tl.load(topk_w_ptr + aid, mask=valid, other=0.0).to(tl.float32)
+            if pid_k == 0:
+                bias = tl.load(
+                    b_ptr + e * stride_be + offs_n, mask=n_mask, other=0.0
+                )
+                acc_n += bias.to(tl.float32)[None, :]
+            o_off = tok[:, None] * N + offs_n[None, :]
+            o_mask = valid[:, None] & n_mask[None, :]
+            if SPLIT_K == 1:
+                y = acc_n.to(tl.bfloat16).to(tl.float32)
+                contrib = (rw[:, None] * y).to(tl.bfloat16)
+                tl.atomic_add(
+                    out_ptr + o_off, contrib, mask=o_mask, sem="relaxed"
+                )
+            else:
+                tl.atomic_add(
+                    ws_ptr + o_off,
+                    rw[:, None] * acc_n,
+                    mask=o_mask,
+                    sem="relaxed",
+                )
+
+    if not SWIGLU and SPLIT_K > 1:
+        tl.debug_barrier()
+        total = tl.num_programs(0) * tl.num_programs(1) * SPLIT_K
+        done = tl.atomic_add(counter_ptr, 1, sem="acq_rel", scope="gpu")
+        if done == total - 1:
+            n = (TK // TOP_K) * N
+            offs = tl.arange(0, 1024)
+            for start in range(0, n, 1024):
+                o = start + offs
+                v = tl.load(
+                    ws_ptr + o, mask=o < n, other=0.0, cache_modifier=".cg"
+                )
+                tl.store(out_ptr + o, v.to(tl.bfloat16), mask=o < n)
+
+
 @functools.lru_cache(maxsize=None)
 def _use_pdl(device_index: int) -> bool:
     # Programmatic dependent launch (griddepcontrol) needs sm_90+: each
@@ -381,6 +581,135 @@ def _block_m(tk: int, num_experts: int) -> int:
     if rows_per_expert <= 32:
         return 32
     return 64
+
+
+# Decode batches where experts see about one token each (up to this many
+# routed assignments) use the register GEMV kernels (sm_100a+ native e2m1
+# decode) instead of the tensor-core path.
+GEMV_MAX_TK = 8
+
+
+@functools.lru_cache(maxsize=None)
+def _native_e2m1(device_index: int) -> bool:
+    return _HAS_GDC and torch.cuda.get_device_capability(device_index)[0] >= 10
+
+
+def _gemv_block_m(tk: int, num_experts: int) -> int:
+    rows_per_expert = tk / max(1, min(num_experts, tk))
+    return min(4, triton.next_power_of_2(max(1, round(rows_per_expert))))
+
+
+def _gemv_configs(tk: int, block_m: int):
+    """((BLOCK_N, BLOCK_G, warps, split) gemm1, (...) gemm2)."""
+    return (8, 16, 4, 1), (8, 16, 4, 1)
+
+
+def _fused_moe_gemv(
+    x,
+    topk_ids,
+    topk_weights,
+    gate_up_blocks,
+    gate_up_scales,
+    gate_up_bias,
+    down_blocks,
+    down_scales,
+    down_bias,
+    out,
+    top_k,
+    alpha,
+    limit,
+    configs=None,
+):
+    T, H = x.shape
+    E = gate_up_blocks.shape[0]
+    inter = gate_up_blocks.shape[1] // 2
+    tk = T * top_k
+    block_m = configs[2] if configs and len(configs) > 2 else None
+    block_m = block_m or _gemv_block_m(tk, E)
+    (bn1, bg1, w1, _), (bn2, bg2, w2, split) = (
+        configs[:2] if configs else _gemv_configs(tk, block_m)
+    )
+    if split > 1:
+        ws = torch.empty(T * H + 1, dtype=torch.float32, device=x.device)
+        counter = ws[T * H :].view(torch.int32)
+        zero = ws
+    else:
+        ws = counter = zero = out
+    sorted_ids, block_expert = moe_align_mxfp4(topk_ids, E, block_m, zero)
+    max_blocks = block_expert.numel()
+    pdl = _use_pdl(x.device.index or 0)
+    inter_buf = torch.empty(
+        max_blocks * block_m, inter, dtype=torch.bfloat16, device=x.device
+    )
+    common = dict(
+        TOP_K=top_k,
+        BLOCK_M=block_m,
+        USE_PDL=pdl,
+        launch_pdl=pdl,
+    )
+    _moe_gemv_kernel[(max_blocks, triton.cdiv(2 * inter, bn1), 1)](
+        x.view(torch.int32),
+        sorted_ids,
+        block_expert,
+        topk_weights,
+        gate_up_blocks,
+        gate_up_scales,
+        gate_up_bias,
+        inter_buf,
+        inter_buf,
+        inter_buf,
+        tk,
+        2 * inter,
+        H,
+        x.stride(0) // 2,
+        gate_up_blocks.stride(0),
+        gate_up_blocks.stride(1),
+        gate_up_scales.stride(0),
+        gate_up_scales.stride(1),
+        gate_up_bias.stride(0),
+        inter_buf.stride(0),
+        float(alpha),
+        float(limit),
+        BLOCK_N=bn1,
+        BLOCK_G=bg1,
+        SPLIT_K=1,
+        SWIGLU=True,
+        num_warps=w1,
+        num_stages=1,
+        **common,
+    )
+    _moe_gemv_kernel[(max_blocks, triton.cdiv(H, bn2), split)](
+        inter_buf.view(torch.int32),
+        sorted_ids,
+        block_expert,
+        topk_weights,
+        down_blocks,
+        down_scales,
+        down_bias,
+        out,
+        ws,
+        counter,
+        tk,
+        H,
+        inter,
+        inter_buf.stride(0) // 2,
+        down_blocks.stride(0),
+        down_blocks.stride(1),
+        down_scales.stride(0),
+        down_scales.stride(1),
+        down_bias.stride(0),
+        out.stride(0),
+        float(alpha),
+        float(limit),
+        BLOCK_N=bn2,
+        BLOCK_G=bg2,
+        SPLIT_K=split,
+        SWIGLU=False,
+        num_warps=w2,
+        num_stages=1,
+        **common,
+    )
+    return out
 
 
 # Small batches split K of the down projection (fp32 workspace) up to this
@@ -508,6 +837,27 @@ def fused_moe_mxfp4(
     out = torch.empty_like(x)
     if tk == 0:
         return out.zero_()
+    if (
+        tk <= GEMV_MAX_TK
+        and _gemv_block_m(tk, E) == 1
+        and _native_e2m1(x.device.index or 0)
+    ):
+        return _fused_moe_gemv(
+            x,
+            topk_ids,
+            topk_weights,
+            gate_up_blocks,
+            gate_up_scales,
+            gate_up_bias,
+            down_blocks,
+            down_scales,
+            down_bias,
+            out,
+            top_k,
+            alpha,
+            limit,
+            configs,
+        )
     block_m = _block_m(tk, E)
     (bn1, bk1, w1, st1), (bn2, bk2, w2, st2, split) = configs or _configs(
         tk, block_m

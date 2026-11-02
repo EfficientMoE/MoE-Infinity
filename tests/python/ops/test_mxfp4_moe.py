@@ -111,13 +111,15 @@ def _fp32_reference(x, ids, w, wt):
         (64, 32, 4, 2880, 2880),
     ],
 )
-@pytest.mark.parametrize("path", ["auto", "nosplit"])
+@pytest.mark.parametrize("path", ["auto", "nosplit", "mma"])
 def test_matches_resident_loop(T, E, k, H, I, path, monkeypatch):
     import moe_infinity.kernel.mxfp4_moe as mm
     from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
 
     if path == "nosplit":
         monkeypatch.setattr(mm, "SPLIT_MAX_TK", 0)
+    if path in ("nosplit", "mma"):
+        monkeypatch.setattr(mm, "GEMV_MAX_TK", 0)
 
     wt = _weights(E, H, I)
     x, ids, w = _route(T, H, E, k)
@@ -248,3 +250,24 @@ def test_sync_gpt_oss_mlp_grouped_vs_loop(T, monkeypatch):
     scale = ref.float().abs().max()
     diff = ((out.float() - ref.float()).abs().max() / scale).item()
     assert diff < 2e-2, diff
+
+
+@pytest.mark.parametrize("T", [1, 16, 300])
+def test_cuda_graph_replay_matches_eager(T):
+    """Rule D: the sync-free forward captures in a CUDA graph and replays."""
+    from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
+
+    E, k, H, I = 32, 4, 256, 128
+    wt = _weights(E, H, I)
+    x, ids, w = _route(T, H, E, k)
+    eager = fused_moe_mxfp4(x, ids, w, **wt)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = fused_moe_mxfp4(x, ids, w, **wt)
+    graph.replay()
+    torch.cuda.synchronize()
+    # Equal up to the order of the k atomic bf16 adds per output element.
+    scale = eager.float().abs().max()
+    diff = ((out.float() - eager.float()).abs().max() / scale).item()
+    assert diff < 1e-2, diff
