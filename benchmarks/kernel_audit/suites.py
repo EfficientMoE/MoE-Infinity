@@ -869,7 +869,12 @@ def _moe_gqa_decode_builder(B, L, H, KVH, dqk, dv, sinks, masked):
             if sinks
             else None
         )
-        mask = torch.rand(B, 1, 1, L, device="cuda") > 0.5 if masked else None
+        # All-visible mask: prices the mask path itself (no skipped keys).
+        mask = (
+            torch.ones(B, 1, 1, L, device="cuda", dtype=torch.bool)
+            if masked
+            else None
+        )
         return _moe_gqa_call(q, k, v, mask, dqk**-0.5, snk)
 
     return build
