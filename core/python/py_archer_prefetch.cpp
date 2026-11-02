@@ -3,11 +3,13 @@
 
 // EfficientMoE Team
 
+#include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 #include "parallel/expert_dispatcher.h"
 #include "prefetch/archer_prefetch_handle.h"
 #include "model/moe.h"
 #include "kernel/ops.h"
+#include "kernel/fused_moe_mlp.h"
 
 void BindTensorStoreSurface(py::class_<ArcherPrefetchHandle>& cls);
 
@@ -156,6 +158,28 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gelu_and_mul", &gelu_and_mul, "Fused GeLU(gate) * up");
   m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul, "Fused GeLU-tanh(gate) * up");
   m.def("fatrelu_and_mul", &fatrelu_and_mul, "Fused FatReLU(gate) * up");
+  m.def(
+      "fused_moe_ffn_into",
+      [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
+         torch::Tensor down_proj, torch::Tensor gate_buf,
+         torch::Tensor fused_buf, torch::Tensor output) {
+        fused_moe_ffn_into(hidden, gate_proj, up_proj, down_proj, gate_buf,
+                           fused_buf, output,
+                           at::cuda::getCurrentCUDAStream().stream());
+      },
+      "BF16 expert FFN (CUTLASS) on the current stream");
+  m.def(
+      "fused_moe_ffn_tuned",
+      [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
+         torch::Tensor down_proj, torch::Tensor fused_buf, torch::Tensor output,
+         int dual_cfg, int dual_splits, int down_cfg, int down_splits) {
+        fused_moe_ffn_tuned(hidden, gate_proj, up_proj, down_proj, fused_buf,
+                            output, at::cuda::getCurrentCUDAStream().stream(),
+                            dual_cfg, dual_splits, down_cfg, down_splits);
+      },
+      "fused_moe_ffn_into with an explicit tile config per GEMM (tests)");
+  m.def("fused_moe_ffn_num_configs", &fused_moe_ffn_num_configs,
+        "(gate/up configs, down configs) of fused_moe_ffn_tuned");
 
   py::class_<ExpertDispatcher::ResizeToken>(m, "expert_resize_token")
       .def_readonly("id", &ExpertDispatcher::ResizeToken::id)
