@@ -314,3 +314,213 @@ def test_cuda_write_kv_has_no_host_sync():
     finally:
         torch.cuda.set_sync_debug_mode("default")
     torch.cuda.synchronize()
+
+
+# Rule D (gate v2): every write_kv variant is sync-free and CUDA-graph
+# capturable with byte-identical cache contents.
+
+
+def _loop_int8(store, layer_idx, key, value, slots):
+    """The pre-#305 ``FormatLayeredKVStore.write_chunk`` body (int8_sym)."""
+    from moe_infinity.runtime.kv_cache_format import (
+        quantize_tokenwise_symmetric,
+    )
+
+    slots = slots.to(torch.long)
+    pages, offsets = slots // store.block_size, slots % store.block_size
+    key_q, key_scale = quantize_tokenwise_symmetric(key)
+    value_q, value_scale = quantize_tokenwise_symmetric(value)
+    store.payload[layer_idx, pages, 0, offsets] = key_q
+    store.payload[layer_idx, pages, 1, offsets] = value_q
+    store.scales[layer_idx, pages, 0, offsets] = key_scale
+    store.scales[layer_idx, pages, 1, offsets] = value_scale
+
+
+def _variant(name, H, D, block_size, num_blocks):
+    """-> (write(key, value, slots), reference(key, value, slots), caches)"""
+    dev = torch.device("cuda")
+    if name == "backend_bf16":
+        spec = KVCacheSpec(
+            num_kv_heads=H, head_dim=D, dtype=torch.bfloat16, block_size=16
+        )
+        be = PagedAttentionBackend(spec, num_blocks, dev, num_layers=2)
+        k_ref = torch.zeros_like(be._k_cache[1])
+        v_ref = torch.zeros_like(be._v_cache[1])
+
+        def write(k, v, s):
+            be.write_kv(k, v, s, layer_idx=1)
+
+        def ref(k, v, s):
+            _loop_native(k_ref, v_ref, k, v, s, block_size)
+
+        return write, ref, [(be._k_cache[1], k_ref), (be._v_cache[1], v_ref)]
+    if name == "storage":
+        storage = PagedKVStorage(
+            PagedKVStorageSpec(
+                num_layers=2,
+                num_blocks=num_blocks,
+                block_size=block_size,
+                num_kv_heads=H,
+                head_dim=D,
+                dtype=torch.bfloat16,
+                device=dev,
+            )
+        )
+        k_ref = torch.zeros_like(storage.key_cache[1])
+        v_ref = torch.zeros_like(storage.value_cache[1])
+
+        def write(k, v, s):
+            storage.write_kv(layer_idx=1, key=k, value=v, slot_mapping=s)
+
+        def ref(k, v, s):
+            _loop_native(k_ref, v_ref, k, v, s, block_size)
+
+        return (
+            write,
+            ref,
+            [(storage.key_cache[1], k_ref), (storage.value_cache[1], v_ref)],
+        )
+    if name == "flashinfer":
+        spec = KVCacheSpec(
+            num_kv_heads=H, head_dim=D, dtype=torch.bfloat16, block_size=16
+        )
+        be = PagedAttentionBackend(spec, num_blocks, dev, num_layers=2)
+        be._fi_kv_cache = torch.zeros(
+            2, num_blocks, 2, block_size, H, D, dtype=torch.bfloat16, device=dev
+        )
+        fi_ref = torch.zeros_like(be._fi_kv_cache[1])
+
+        def write(k, v, s):
+            be.write_kv_flashinfer(k, v, s, layer_idx=1)
+
+        def ref(k, v, s):
+            _loop_flashinfer(fi_ref, k, v, s, block_size)
+
+        return write, ref, [(be._fi_kv_cache[1], fi_ref)]
+    assert name == "int8"
+    from moe_infinity.runtime.kv_cache_format import (
+        allocate_layered_paged_kv_store,
+    )
+
+    def alloc():
+        return allocate_layered_paged_kv_store(
+            owner_id="t",
+            format_name="int8_sym",
+            num_layers=2,
+            num_blocks=num_blocks,
+            block_size=block_size,
+            num_kv_heads=H,
+            head_dim=D,
+            execution_dtype=torch.bfloat16,
+            device=dev,
+        )
+
+    store, store_ref = alloc(), alloc()
+
+    def write(k, v, s):
+        store.write_chunk(
+            layer_idx=1, key_chunk=k, value_chunk=v, slot_mapping=s
+        )
+
+    def ref(k, v, s):
+        _loop_int8(store_ref, 1, k, v, s)
+
+    return (
+        write,
+        ref,
+        [(store.payload, store_ref.payload), (store.scales, store_ref.scales)],
+    )
+
+
+_VARIANTS = ["backend_bf16", "int8", "flashinfer", "storage"]
+
+
+def _variant_inputs(T, H, D, block_size, num_blocks, pattern, seed):
+    gen = torch.Generator().manual_seed(seed)
+    key, value, slots = _inputs(
+        T,
+        H,
+        D,
+        torch.bfloat16,
+        "cuda",
+        gen,
+        contiguous=False,
+        slot_dtype=torch.int64,
+        nslots=num_blocks * block_size,
+        block_size=block_size,
+        pattern=pattern,
+    )
+    return key, value, slots
+
+
+@requires_cuda
+@pytest.mark.parametrize("variant", _VARIANTS)
+@pytest.mark.parametrize(
+    ("T", "pattern"), [(1, "perm"), (256, "perm"), (1100, "prefill")]
+)
+def test_write_variants_sync_free_byte_identical(
+    variant, T, pattern, monkeypatch
+):
+    monkeypatch.delenv("MOE_INFINITY_KV_WRITE_CHECK", raising=False)
+    H, D, block_size = 4, 128, 16
+    num_blocks = -(-T // block_size) + T + 2
+    write, ref, caches = _variant(variant, H, D, block_size, num_blocks)
+    key, value, slots = _variant_inputs(
+        T, H, D, block_size, num_blocks, pattern, seed=T
+    )
+    write(key, value, slots)  # compile outside the sync check
+    torch.cuda.synchronize()
+    key2, value2, _ = _variant_inputs(
+        T, H, D, block_size, num_blocks, pattern, seed=T + 1
+    )
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        write(key2, value2, slots)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    ref(key2, value2, slots)
+    torch.cuda.synchronize()
+    for got, want in caches:
+        assert _bytes_equal(got, want)
+
+
+@requires_cuda
+@pytest.mark.parametrize("variant", _VARIANTS)
+@pytest.mark.parametrize(
+    ("T", "pattern"), [(1, "perm"), (256, "perm"), (1100, "prefill")]
+)
+def test_write_variants_cuda_graph_replay_byte_identical(
+    variant, T, pattern, monkeypatch
+):
+    monkeypatch.delenv("MOE_INFINITY_KV_WRITE_CHECK", raising=False)
+    H, D, block_size = 4, 128, 16
+    num_blocks = -(-T // block_size) + T + 2
+    write, ref, caches = _variant(variant, H, D, block_size, num_blocks)
+    key, value, slots = _variant_inputs(
+        T, H, D, block_size, num_blocks, pattern, seed=7 * T
+    )
+    # Static graph inputs: K/V buffers and the slot mapping.
+    k_in, v_in, s_in = key.clone(), value.clone(), slots.clone()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        write(k_in, v_in, s_in)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        write(k_in, v_in, s_in)
+
+    # New K/V and a new slot mapping, written in place, then replayed.
+    key2, value2, slots2 = _variant_inputs(
+        T, H, D, block_size, num_blocks, pattern, seed=7 * T + 1
+    )
+    k_in.copy_(key2)
+    v_in.copy_(value2)
+    s_in.copy_(slots2)
+    for got, _ in caches:
+        got.zero_()
+    graph.replay()
+    ref(key2, value2, slots2)
+    torch.cuda.synchronize()
+    for got, want in caches:
+        assert _bytes_equal(got, want)
