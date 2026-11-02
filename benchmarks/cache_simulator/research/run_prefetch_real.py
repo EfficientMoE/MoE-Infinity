@@ -237,16 +237,18 @@ def _row(job, pol: PrefetchCachePolicy, hits, misses, slots, secs):
             tokens=tokens,
         )
         row[f"stall_ms_{name}"] = rep.stall_per_token_s * 1e3
-        row[f"time_ms_{name}"] = rep.time_per_token_s * 1e3
         row[f"xfer_per_tok_{name}"] = rep.transfers_per_token
-        row[f"pf_xfer_per_tok_{name}"] = rep.prefetch_transfers / tokens
         row[f"wasted_xfer_per_tok_{name}"] = rep.wasted_transfers / tokens
-        row[f"cancelled_per_tok_{name}"] = rep.prefetch_cancelled / tokens
-        row[f"late_per_tok_{name}"] = rep.covered_late / tokens
-        row[f"promoted_per_tok_{name}"] = rep.prefetch_promoted / tokens
         if belady_hits is not None:
             floor = stall_floor_s(n - belady_hits, pol.visits, link)
             row[f"stall_floor_ms_{name}"] = floor / tokens * 1e3
+        if name != NOMINAL:
+            continue
+        row[f"time_ms_{name}"] = rep.time_per_token_s * 1e3
+        row[f"pf_xfer_per_tok_{name}"] = rep.prefetch_transfers / tokens
+        row[f"cancelled_per_tok_{name}"] = rep.prefetch_cancelled / tokens
+        row[f"late_per_tok_{name}"] = rep.covered_late / tokens
+        row[f"promoted_per_tok_{name}"] = rep.prefetch_promoted / tokens
     return row
 
 
@@ -509,10 +511,33 @@ EXPERIMENTS_HEADER = (
 )
 
 
+def experiment_rows(rows) -> List[Dict[str, object]]:
+    """Compact log: per capacity each evictor alone, the best online pair
+    per admission mode and the best oracle pair (full set in the CSV)."""
+    key = f"stall_ms_{NOMINAL}"
+    out = []
+    for cap in sorted({r["capacity"] for r in rows}):
+        sub = [r for r in rows if r["capacity"] == cap]
+        out += [r for r in sub if r["prefetcher"] == "none"]
+        online = [r for r in sub if r["prefetcher"] != "none"]
+        for adm in ADMISSION_MODES:
+            pick = [
+                r
+                for r in online
+                if parse_spec(r["admission"])[0] == adm and not r["is_oracle"]
+            ]
+            if pick:
+                out.append(min(pick, key=lambda r: r[key]))
+        oracle = [r for r in online if r["is_oracle"]]
+        if oracle:
+            out.append(min(oracle, key=lambda r: r[key]))
+    return out
+
+
 def append_experiments(rows, path: Path, model, dataset, commit, command, env):
     with open(path, "a") as handle:
         handle.write("\n" + EXPERIMENTS_HEADER)
-        for r in rows:
+        for r in experiment_rows(rows):
             handle.write(
                 f"| {r['evictor']} | {r['prefetcher']} | {r['admission']} "
                 f"| {model} | {dataset} | {r['capacity']} "
