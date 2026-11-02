@@ -118,6 +118,17 @@ def _e2m1_to_bf16(w, s):
 
 
 @triton.jit
+def _e2m1_bits_f32(n):
+    """Portable decode: E2M1 nibble (int32, 0..15) -> fp32 bit pattern."""
+    v = n & 7
+    # v >= 2: 2^(e-1) * (1 + m/2) is fp32 exponent 126 + e, mantissa MSB m.
+    bits = (v << 22) + (126 << 23)
+    bits = tl.where(v == 1, 126 << 23, bits)  # 0.5
+    bits = tl.where(v == 0, 0, bits)
+    return bits | ((n & 8) << 28)
+
+
+@triton.jit
 def _epilogue(
     acc,
     offs_m,
@@ -177,6 +188,7 @@ def _mxfp4_gemv_kernel(
     BLOCK_G: tl.constexpr,  # scale groups (32 values / 16 bytes) per step
     SPLIT_K: tl.constexpr,
     G_PER_SPLIT: tl.constexpr,
+    NATIVE_E2M1: tl.constexpr,  # sm_100a+ cvt.rn.f16x2.e2m1x2
 ):
     pid_n = tl.program_id(0)
     pid_k = tl.program_id(1)
@@ -202,7 +214,12 @@ def _mxfp4_gemv_kernel(
         )
         s = tl.load(s_ptr + rn * stride_sn + g, mask=gm, other=0)
         scale = (s.to(tl.int32) << 23).to(tl.float32, bitcast=True)
-        lo, hi = _e2m1_to_f32(w)
+        if NATIVE_E2M1:
+            lo, hi = _e2m1_to_f32(w)
+        else:
+            w32 = w.to(tl.int32)
+            lo = _e2m1_bits_f32(w32).to(tl.float32, bitcast=True)
+            hi = _e2m1_bits_f32(w32 >> 4).to(tl.float32, bitcast=True)
         xp = tl.load(
             x_ptr + (g * 16)[:, None] + j[None, :], mask=gm[:, None], other=0
         )
@@ -252,6 +269,7 @@ def _mxfp4_mma_kernel(
     BLOCK_K: tl.constexpr,
     SPLIT_K: tl.constexpr,
     K_PER_SPLIT: tl.constexpr,
+    NATIVE_BF16X2: tl.constexpr,  # sm_90+ packed bf16 multiply
 ):
     pid = tl.program_id(0)
     pid_k = tl.program_id(1)
@@ -290,7 +308,15 @@ def _mxfp4_mma_kernel(
             mask=kk[None, :] < k_hi,
             other=0.0,
         )
-        lo, hi = _e2m1_to_bf16(w, s)
+        if NATIVE_BF16X2:
+            lo, hi = _e2m1_to_bf16(w, s)
+        else:
+            w32 = w.to(tl.int32)
+            scale = (s.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+            lo = _e2m1_bits_f32(w32).to(tl.float32, bitcast=True) * scale
+            hi = _e2m1_bits_f32(w32 >> 4).to(tl.float32, bitcast=True) * scale
+            lo = lo.to(tl.bfloat16)
+            hi = hi.to(tl.bfloat16)
         wb = tl.join(lo, hi).reshape(BLOCK_N, BLOCK_K)
         acc = tl.dot(x, tl.trans(wb), acc)
     _epilogue(
@@ -393,6 +419,18 @@ _CONFIG_CACHE: Dict[Tuple[int, int, int, int], dict] = {}
 # Per (device, stream) split-K arrival counters; the kernels reset them to 0.
 _COUNTERS: Dict[Tuple[int, int], torch.Tensor] = {}
 _WARM: set = set()
+_CAPABILITY: Dict[int, Tuple[int, int]] = {}
+# Tests flip this to exercise the portable (non-inline-asm) decode on sm_120.
+_FORCE_PORTABLE_DECODE = False
+
+
+def _capability(device: torch.device) -> Tuple[int, int]:
+    idx = device.index or 0
+    cap = _CAPABILITY.get(idx)
+    if cap is None:
+        cap = torch.cuda.get_device_capability(device)
+        _CAPABILITY[idx] = cap
+    return (0, 0) if _FORCE_PORTABLE_DECODE else cap
 
 
 def _get_config(M: int, N: int, K: int, device: torch.device) -> dict:
@@ -463,6 +501,7 @@ def _launch(
             BLOCK_G=cfg["BLOCK_G"],
             SPLIT_K=split,
             G_PER_SPLIT=g_per_split,
+            NATIVE_E2M1=_capability(x_2d.device)[0] >= 10,
             num_warps=cfg["num_warps"],
             num_stages=1,
         )
@@ -491,6 +530,7 @@ def _launch(
             BLOCK_K=cfg["BLOCK_K"],
             SPLIT_K=split,
             K_PER_SPLIT=k_per_split,
+            NATIVE_BF16X2=_capability(x_2d.device)[0] >= 9,
             num_warps=cfg["num_warps"],
             num_stages=cfg["num_stages"],
         )

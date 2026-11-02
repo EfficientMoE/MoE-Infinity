@@ -87,6 +87,24 @@ def test_fused_mxfp4_gemm_every_e2m1_code_and_scale():
 
 @requires_cuda
 @requires_triton
+@pytest.mark.parametrize("M", [1, 3, 300])
+def test_portable_decode_matches_reference(monkeypatch, M):
+    """The pure-Triton E2M1 decode used below sm_90 / sm_100."""
+    from moe_infinity.kernel import mxfp4_gemm as mg
+
+    monkeypatch.setattr(mg, "_FORCE_PORTABLE_DECODE", True)
+    N, K = 192, 2880
+    packed, scales = _weights(N, K, lo=32, hi=224)
+    bias = torch.randn(N, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    _check(
+        mg.fused_mxfp4_gemm(x, packed, scales, bias),
+        _reference(x, packed, scales, bias),
+    )
+
+
+@requires_cuda
+@requires_triton
 def test_fused_mxfp4_gemm_batched_and_unaligned_input():
     from moe_infinity.kernel.mxfp4_gemm import fused_mxfp4_gemm
 
