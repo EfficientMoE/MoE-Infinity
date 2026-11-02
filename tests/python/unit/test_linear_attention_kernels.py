@@ -221,3 +221,53 @@ def test_device_safe_dispatch_routes_cpu_to_torch(monkeypatch):
     ref = ref * norm.weight * torch.nn.functional.silu(g)
     torch.testing.assert_close(norm(x, g), ref)
     assert type(norm).__name__ == "FusedRMSNormGated"
+
+
+def test_make_fused_routes_unsupported_calls_to_fallback(monkeypatch):
+    from moe_infinity.kernel import linear_attention_fused as fused_mod
+
+    calls = []
+
+    def fallback(q, k, v, g=None, beta=None, **kw):
+        calls.append(sorted(kw))
+        return "fallback"
+
+    fallback.__module__ = "fla.ops.gated_delta_rule"
+    fn = fused_mod.make_fused("gdn", fallback)
+    assert la._backend_of(fn) == "fused"
+    x = torch.zeros(1, 4, 2, 128)  # CPU: never the fused path
+    out = fn(
+        x,
+        x,
+        x,
+        g=torch.zeros(1, 4, 2),
+        beta=torch.zeros(1, 4, 2),
+        cu_seqlens=None,
+    )
+    assert out == "fallback" and calls == [["cu_seqlens"]]
+
+    monkeypatch.setenv(fused_mod.ENV_DISABLE, "0")
+    assert not fused_mod.fused_enabled()
+
+
+def test_install_fused_wraps_only_fla_globals(monkeypatch):
+    mod = types.ModuleType("_fake_qwen3_5_modeling_fused")
+    mod.chunk_gated_delta_rule = _fla_fn("chunk_gated_delta_rule")
+    mod.chunk_kimi_delta_attention = lambda *a, **k: None  # torch: untouched
+    monkeypatch.setitem(sys.modules, mod.__name__, mod)
+    monkeypatch.setattr(la, "_HF_MODULES", (mod.__name__,))
+
+    assert la.install_fused_linear_attention() == [
+        f"{mod.__name__}.chunk_gated_delta_rule"
+    ]
+    assert la.install_fused_linear_attention() == []  # idempotent
+    assert la._backend_of(mod.chunk_gated_delta_rule) == "fused"
+    assert la._backend_of(mod.chunk_kimi_delta_attention) == "torch"
+
+    layer = FakeGatedDeltaNet(True)
+    layer.__class__.__module__ = mod.__name__
+    try:
+        assert la._bind_instances(torch.nn.Sequential(layer)) == 1
+    finally:
+        layer.__class__.__module__ = __name__
+    assert layer.chunk_gated_delta_rule is mod.chunk_gated_delta_rule

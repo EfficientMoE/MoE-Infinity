@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from moe_infinity.kernel.linear_attention import (
-    check_linear_attention_kernels,
+    enable_linear_attention_kernels,
     linear_attention_kernels,
 )
 
@@ -155,6 +155,82 @@ def test_gdn_decode_matches_torch_reference_and_is_o1_launches():
     assert 1 <= len(launches) <= 3, [e.name for e in launches]
 
 
+@pytest.mark.parametrize("T", [64, 1000, 4096])
+@pytest.mark.parametrize("norm", [True, False])
+def test_gdn_fused_matches_torch_reference(T, norm):
+    """Kernel-level parity (the call-site threshold MIN_FUSED_TOKENS does
+    not apply to the direct entry point)."""
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        torch_chunk_gated_delta_rule,
+    )
+
+    from moe_infinity.kernel.linear_attention_fused import (
+        chunk_gated_delta_rule_fused,
+    )
+
+    q, k, v, g, beta, h0 = _gdn_inputs(1, T, 32, 128, 128)
+    if not norm:  # the kernels assume unit-norm q / k
+        q = torch.nn.functional.normalize(q.float(), dim=-1).bfloat16()
+        k = torch.nn.functional.normalize(k.float(), dim=-1).bfloat16()
+    kw = dict(
+        initial_state=h0, output_final_state=True, use_qk_l2norm_in_kernel=norm
+    )
+    o, ht = chunk_gated_delta_rule_fused(q, k, v, g, beta, **kw)
+    ref = inspect.unwrap(torch_chunk_gated_delta_rule)
+    o_ref, ht_ref = ref(q, k, v, g=g, beta=beta, **kw)
+    assert o.dtype == torch.bfloat16 and o.shape == o_ref.shape
+    _assert_close(o, o_ref, atol=2e-2, rtol=2e-2, frac=0.999)
+    _assert_close(ht, ht_ref, atol=2e-2, rtol=2e-2, frac=0.999)
+
+
+def test_gdn_fused_is_deterministic():
+    """Bitwise-identical outputs over repeated calls at a 9K, 128-CTA launch
+    (the shape class of the sm_100/103 tl.dot recurrence race)."""
+    from moe_infinity.kernel.linear_attention_fused import (
+        chunk_gated_delta_rule_fused,
+    )
+
+    q, k, v, g, beta, h0 = _gdn_inputs(1, 9216, 32, 128, 128)
+    kw = dict(
+        initial_state=h0, output_final_state=True, use_qk_l2norm_in_kernel=True
+    )
+    o0, h_0 = chunk_gated_delta_rule_fused(q, k, v, g, beta, **kw)
+    for _ in range(10):
+        o, ht = chunk_gated_delta_rule_fused(q, k, v, g, beta, **kw)
+        assert torch.equal(o, o0) and torch.equal(ht, h_0)
+
+
+def test_fused_wrapper_falls_back_to_fla_for_grad_and_varlen():
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+
+    from moe_infinity.kernel.linear_attention_fused import make_fused
+
+    calls = []
+
+    def fallback(*a, **kw):
+        calls.append(kw.get("cu_seqlens"))
+        return chunk_gated_delta_rule(*a, **kw)
+
+    fn = make_fused("gdn", fallback)
+    q, k, v, g, beta, _ = _gdn_inputs(1, 4096, 4, 128, 128)
+    cu = torch.tensor([0, 1000, 4096], device="cuda")
+    fn(q, k, v, g=g, beta=beta, cu_seqlens=cu, use_qk_l2norm_in_kernel=True)
+    fn(q.requires_grad_(), k, v, g=g, beta=beta, use_qk_l2norm_in_kernel=True)
+    assert len(calls) == 2
+    with torch.no_grad():  # inference, >= MIN_FUSED_TOKENS: fused
+        fn(q, k, v, g=g, beta=beta, use_qk_l2norm_in_kernel=True)
+        assert len(calls) == 2
+        fn(
+            q[:, :1000],
+            k[:, :1000],
+            v[:, :1000],
+            g=g[:, :1000],
+            beta=beta[:, :1000],
+            use_qk_l2norm_in_kernel=True,
+        )
+    assert len(calls) == 3
+
+
 # --------------------------------------------------------------------------
 # KDA ops (GLM-5.3-Flash shapes: 64 heads, head_dim 128, safe gate >= -5)
 # --------------------------------------------------------------------------
@@ -184,6 +260,26 @@ def test_kda_chunk_matches_torch_reference(T):
     o_ref, ht_ref = ref(q, k, v, g=g, beta=beta, **kw)
     _assert_close(o, o_ref, atol=2e-2, rtol=2e-2, frac=0.999)
     _assert_close(ht, ht_ref, atol=2e-2, rtol=2e-2, frac=0.999)
+
+
+@requires_glm5_next
+@pytest.mark.parametrize("T", [64, 1000])
+def test_kda_fused_matches_torch_reference(T):
+    from transformers.models.glm5_next import modeling_glm5_next as mg
+
+    from moe_infinity.kernel.linear_attention_fused import chunk_kda_fused
+
+    q, k, v, g, beta, h0 = _kda_inputs(T)
+    kw = dict(
+        initial_state=h0, output_final_state=True, use_qk_l2norm_in_kernel=True
+    )
+    o, ht = chunk_kda_fused(q, k, v, g, beta, **kw)
+    ref = inspect.unwrap(mg.chunk_kimi_delta_attention)
+    o_ref, ht_ref = ref(q, k, v, g=g, beta=beta, **kw)
+    _assert_close(o, o_ref, atol=2e-2, rtol=2e-2, frac=0.999)
+    _assert_close(ht, ht_ref, atol=2e-2, rtol=2e-2, frac=0.999)
+    o2, _ = chunk_kda_fused(q, k, v, g, beta, **kw)
+    assert torch.equal(o, o2)
 
 
 @requires_glm5_next
@@ -285,13 +381,14 @@ def _glm5_next_layer():
         ),
     ],
 )
-def test_layer_binds_fla_and_matches_torch(build, cls):
+def test_layer_binds_fused_kernels_and_matches_torch(build, cls):
     layer = build()
-    report = check_linear_attention_kernels(torch.nn.Sequential(layer))
-    assert report[cls]["chunk"] == "fla", report
+    report = enable_linear_attention_kernels(torch.nn.Sequential(layer))
+    assert report[cls]["chunk"] == "fused", report
     assert report[cls]["recurrent"] == "fla", report
 
-    x = torch.randn(1, 777, layer.hidden_size, device="cuda").bfloat16()
+    # > MIN_FUSED_TOKENS so the GDN layer takes the fused path
+    x = torch.randn(1, 4200, layer.hidden_size, device="cuda").bfloat16()
     with torch.no_grad():
         out = layer(x)
         with _force_torch(layer):
