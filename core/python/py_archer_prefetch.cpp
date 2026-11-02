@@ -8,6 +8,9 @@
 #include "prefetch/archer_prefetch_handle.h"
 #include "model/moe.h"
 #include "kernel/ops.h"
+#include "kernel/grouped_moe_decode.h"
+
+#include <ATen/cuda/CUDAContext.h>
 
 void BindTensorStoreSurface(py::class_<ArcherPrefetchHandle>& cls);
 
@@ -156,6 +159,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gelu_and_mul", &gelu_and_mul, "Fused GeLU(gate) * up");
   m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul, "Fused GeLU-tanh(gate) * up");
   m.def("fatrelu_and_mul", &fatrelu_and_mul, "Fused FatReLU(gate) * up");
+  m.def(
+      "grouped_moe_decode",
+      [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
+         const torch::Tensor& router_weight, const torch::Tensor& expert_table,
+         int64_t inter, int64_t kcap, torch::Tensor out, bool zero_out) {
+        grouped_moe_decode(hidden, router_mask, router_weight, expert_table,
+                           inter, kcap, out, zero_out,
+                           at::cuda::getCurrentCUDAStream().stream());
+      },
+      py::arg("hidden"), py::arg("router_mask"), py::arg("router_weight"),
+      py::arg("expert_table"), py::arg("inter"), py::arg("kcap"),
+      py::arg("out"), py::arg("zero_out") = false,
+      "Grouped decode MoE layer: out += sum_e w[:, e] * FFN_e(hidden) over "
+      "the experts in expert_table (int64 [n, 4]: gate*, up*, down*, id).");
 
   py::class_<ExpertDispatcher::ResizeToken>(m, "expert_resize_token")
       .def_readonly("id", &ExpertDispatcher::ResizeToken::id)
@@ -217,6 +234,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("dispatch_experts", &ExpertDispatcher::DispatchExperts)
       .def("take_last_active_experts", &ExpertDispatcher::TakeLastActiveExperts)
       .def("get_routing_stats", &ExpertDispatcher::GetRoutingStats)
+      .def("set_grouped_decode", &ExpertDispatcher::SetGroupedDecode,
+           py::arg("enabled"), py::arg("top_k") = 0)
       .def("_set_dispatch_fault_for_test",
            &ExpertDispatcher::SetDispatchFaultForTest)
       .def("_fail_dispatch_for_test", &ExpertDispatcher::FailDispatchForTest)
