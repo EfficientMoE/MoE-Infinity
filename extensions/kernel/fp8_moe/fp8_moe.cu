@@ -18,6 +18,11 @@
 #include <mutex>
 
 #if defined(MOE_ENABLE_SM120_FP8)
+  // griddepcontrol (programmatic dependent launch) in the CUTLASS sm_120
+  // kernels; a no-op unless the launch carries the PDL attribute.
+  #ifndef CUTLASS_ENABLE_GDC_FOR_SM100
+    #define CUTLASS_ENABLE_GDC_FOR_SM100 1
+  #endif
   #include "cute/tensor.hpp"
   #include "cutlass/cutlass.h"
   #include "cutlass/detail/blockwise_scale_layout.hpp"
@@ -37,26 +42,50 @@ constexpr int kE4M3Max = 448;  // largest finite e4m3fn value
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Programmatic dependent launch: kernels of one expert are chained so the
+// next kernel's CTAs launch (and set up) while the previous one drains.
+// pdl_wait() must precede the first global access to the predecessor's data.
+__device__ __forceinline__ void pdl_wait() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+}
+
+__device__ __forceinline__ void pdl_launch_dependents() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
+}
+
+// Drops a dead 128-byte L2 line without writing it back to DRAM.
+__device__ __forceinline__ void discard_l2_line(const void* p) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm volatile("discard.global.L2 [%0], 128;" ::"l"(p) : "memory");
+#endif
+}
+
+template <class Kernel, class... Args>
+void launch_kernel(Kernel kernel, dim3 grid, dim3 block, bool pdl,
+                   cudaStream_t stream, Args... args) {
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = grid;
+  cfg.blockDim = block;
+  cfg.dynamicSmemBytes = 0;
+  cfg.stream = stream;
+  cudaLaunchAttribute attr[1];
+  attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attr[0].val.programmaticStreamSerializationAllowed = 1;
+  cfg.attrs = attr;
+  cfg.numAttrs = pdl ? 1 : 0;
+  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kernel, args...));
+}
+
 __device__ __forceinline__ uint4 ld_stream_u4(const void* p) {
   uint4 v;
   asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
                : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
                : "l"(p));
   return v;
-}
-
-// 4 packed e4m3 bytes (byte 0 = lowest element) -> 4 floats, exact.
-__device__ __forceinline__ void e4m3x4_to_float(uint32_t v, float* f) {
-  __half2_raw lo = __nv_cvt_fp8x2_to_halfraw2(
-      static_cast<__nv_fp8x2_storage_t>(v & 0xFFFFu), __NV_E4M3);
-  __half2_raw hi = __nv_cvt_fp8x2_to_halfraw2(
-      static_cast<__nv_fp8x2_storage_t>(v >> 16), __NV_E4M3);
-  float2 a = __half22float2(*reinterpret_cast<__half2*>(&lo));
-  float2 b = __half22float2(*reinterpret_cast<__half2*>(&hi));
-  f[0] = a.x;
-  f[1] = a.y;
-  f[2] = b.x;
-  f[3] = b.y;
 }
 
 // 8 packed bf16 -> 8 floats.
@@ -74,31 +103,56 @@ __device__ __forceinline__ float silu(float x) {
 }
 
 // ---------------------------------------------------------------------------
-// Weight-only FP8 GEMV (decode, M <= kFp8GemvMaxTokens)
+// Tensor-core weight-only FP8 GEMV (decode, M <= 8 tokens)
 //
-// out[m, n] = act(sum_k x[m, k] * W0[n, k] * S0[n/128, k/128], same for W1)
-// One warp owns R output rows of each of the NMAT weight matrices and streams
-// them along K with 16-byte loads (lane l covers k = l*16 .. l*16+15 of every
-// 512-wide step); U steps are loaded before any math so each lane keeps
-// U*NMAT*R*16 bytes in flight. NMAT == 2 fuses silu(W0 x) * (W1 x).
+// Same math as fp8_gemv_kernel (exact e4m3 -> bf16 weights, BF16 activations,
+// fp32 accumulation, block scale per 128-K step) on mma.m16n8k16 bf16: the
+// weight tile is the A operand (16 output rows), the tokens are the 8 columns
+// of B (zero-padded past M), so the FMA work leaves the CUDA cores and the
+// kernel stays memory-bound up to 8 tokens. K is consumed in 64-wide chunks
+// that each lane loads as 16 contiguous bytes per row; inside a chunk the K
+// order is permuted identically for A and B (a dot product does not care),
+// so no shuffles are needed to build fragments. Each CTA owns 16 rows and
+// splits K over kTcWarps warps, reduced through shared memory.
 // ---------------------------------------------------------------------------
 
-constexpr int kGemvWarps = 4;
+constexpr int kTcWarps = 8;
 
-template <int M, int NMAT, int R, int U>
-__global__ void __launch_bounds__(kGemvWarps * 32)
-    fp8_gemv_kernel(const __nv_bfloat16* __restrict__ x, int64_t ldx,
-                    const uint8_t* __restrict__ w0,
-                    const float* __restrict__ s0,
-                    const uint8_t* __restrict__ w1,
-                    const float* __restrict__ s1,
-                    __nv_bfloat16* __restrict__ out, int64_t ldo, int N,
-                    int K) {
+__device__ __forceinline__ uint32_t e4m3x2_to_bf16x2(uint32_t v16) {
+  const __half2_raw h = __nv_cvt_fp8x2_to_halfraw2(
+      static_cast<__nv_fp8x2_storage_t>(v16 & 0xFFFFu), __NV_E4M3);
+  const float2 f = __half22float2(*reinterpret_cast<const __half2*>(&h));
+  const __nv_bfloat162 b = __floats2bfloat162_rn(f.x, f.y);
+  return *reinterpret_cast<const uint32_t*>(&b);
+}
+
+__device__ __forceinline__ void mma_bf16_16816(float* d, const uint32_t* a,
+                                               uint32_t b0, uint32_t b1) {
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+template <int NMAT, int U, int WARPS>
+__global__ void __launch_bounds__(WARPS * 32)
+    fp8_gemv_tc_kernel(const __nv_bfloat16* __restrict__ x, int64_t ldx, int M,
+                       const uint8_t* __restrict__ w0,
+                       const float* __restrict__ s0,
+                       const uint8_t* __restrict__ w1,
+                       const float* __restrict__ s1,
+                       __nv_bfloat16* __restrict__ out, int64_t ldo, int N,
+                       int K) {
+  __shared__ float red[WARPS][NMAT][32][4];
+  pdl_wait();
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
-  const int row0 = (blockIdx.x * kGemvWarps + warp) * R;
-  if (row0 >= N) return;
+  const int g = lane >> 2;  // fragment row / token
+  const int c = lane & 3;   // 16-byte slot inside a 64-wide K chunk
+  const int row0 = blockIdx.x * 16;
   const int KB = K / kBlock;
+  const int chunks = K / 64;
 
   const uint8_t* wp[NMAT];
   const float* sp[NMAT];
@@ -108,62 +162,59 @@ __global__ void __launch_bounds__(kGemvWarps * 32)
     wp[1] = w1;
     sp[1] = s1;
   }
+  const int64_t r_lo = min(row0 + g, N - 1);
+  const int64_t r_hi = min(row0 + g + 8, N - 1);
+  const int sblk = (row0 / kBlock) * KB;
+  const bool tok = g < M;
 
-  float acc[NMAT][R][M];
+  float acc[NMAT][4];
 #pragma unroll
   for (int a = 0; a < NMAT; ++a)
 #pragma unroll
-    for (int r = 0; r < R; ++r)
-#pragma unroll
-      for (int m = 0; m < M; ++m) acc[a][r][m] = 0.f;
+    for (int i = 0; i < 4; ++i) acc[a][i] = 0.f;
 
-  for (int kbase = 0; kbase < K; kbase += 512 * U) {
-    uint4 wv[U][NMAT][R];
-    float sc[U][NMAT][R];
+  for (int base = warp; base < chunks; base += WARPS * U) {
+    uint4 wlo[U][NMAT], whi[U][NMAT], xv[U][2];
+    float sc[U][NMAT];
 #pragma unroll
     for (int u = 0; u < U; ++u) {
-      const int k = kbase + u * 512 + lane * 16;
-      const bool ok = k < K;
+      const int ch = base + u * WARPS;
+      const bool ok = ch < chunks;
+      const int k = ch * 64 + c * 16;
 #pragma unroll
-      for (int a = 0; a < NMAT; ++a)
-#pragma unroll
-        for (int r = 0; r < R; ++r) {
-          const int n = min(row0 + r, N - 1);
-          wv[u][a][r] = ok ? ld_stream_u4(wp[a] + (int64_t)n * K + k)
-                           : make_uint4(0, 0, 0, 0);
-          sc[u][a][r] =
-              ok ? __ldg(sp[a] + (n / kBlock) * KB + k / kBlock) : 0.f;
-        }
+      for (int a = 0; a < NMAT; ++a) {
+        wlo[u][a] =
+            ok ? ld_stream_u4(wp[a] + r_lo * K + k) : make_uint4(0, 0, 0, 0);
+        whi[u][a] =
+            ok ? ld_stream_u4(wp[a] + r_hi * K + k) : make_uint4(0, 0, 0, 0);
+        sc[u][a] = ok ? __ldg(sp[a] + sblk + ch / 2) : 0.f;
+      }
+      const uint4* xp = reinterpret_cast<const uint4*>(x + g * ldx + k);
+      xv[u][0] = ok && tok ? __ldg(xp) : make_uint4(0, 0, 0, 0);
+      xv[u][1] = ok && tok ? __ldg(xp + 1) : make_uint4(0, 0, 0, 0);
     }
 #pragma unroll
     for (int u = 0; u < U; ++u) {
-      const int k = kbase + u * 512 + lane * 16;
-      if (k >= K) continue;
+      const uint32_t xb[8] = {xv[u][0].x, xv[u][0].y, xv[u][0].z, xv[u][0].w,
+                              xv[u][1].x, xv[u][1].y, xv[u][1].z, xv[u][1].w};
 #pragma unroll
-      for (int h = 0; h < 2; ++h) {
-        float xf[M][8];
+      for (int a = 0; a < NMAT; ++a) {
+        const uint32_t lo[4] = {wlo[u][a].x, wlo[u][a].y, wlo[u][a].z,
+                                wlo[u][a].w};
+        const uint32_t hi[4] = {whi[u][a].x, whi[u][a].y, whi[u][a].z,
+                                whi[u][a].w};
+        float t[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
-        for (int m = 0; m < M; ++m) {
-          const uint4 xv =
-              __ldg(reinterpret_cast<const uint4*>(x + m * ldx + k + h * 8));
-          bf16x8_to_float(xv, xf[m]);
+        for (int j = 0; j < 4; ++j) {
+          // bytes 4j..4j+3 of this lane's 16: (p, p+1) -> k {2c, 2c+1},
+          // (p+2, p+3) -> k {2c+8, 2c+9} of MMA j.
+          const uint32_t afr[4] = {
+              e4m3x2_to_bf16x2(lo[j]), e4m3x2_to_bf16x2(hi[j]),
+              e4m3x2_to_bf16x2(lo[j] >> 16), e4m3x2_to_bf16x2(hi[j] >> 16)};
+          mma_bf16_16816(t, afr, xb[2 * j], xb[2 * j + 1]);
         }
 #pragma unroll
-        for (int a = 0; a < NMAT; ++a)
-#pragma unroll
-          for (int r = 0; r < R; ++r) {
-            float wf[8];
-            const uint4& v = wv[u][a][r];
-            e4m3x4_to_float(h == 0 ? v.x : v.z, wf);
-            e4m3x4_to_float(h == 0 ? v.y : v.w, wf + 4);
-#pragma unroll
-            for (int m = 0; m < M; ++m) {
-              float p = 0.f;
-#pragma unroll
-              for (int j = 0; j < 8; ++j) p = fmaf(wf[j], xf[m][j], p);
-              acc[a][r][m] = fmaf(p, sc[u][a][r], acc[a][r][m]);
-            }
-          }
+        for (int i = 0; i < 4; ++i) acc[a][i] = fmaf(t[i], sc[u][a], acc[a][i]);
       }
     }
   }
@@ -171,73 +222,42 @@ __global__ void __launch_bounds__(kGemvWarps * 32)
 #pragma unroll
   for (int a = 0; a < NMAT; ++a)
 #pragma unroll
-    for (int r = 0; r < R; ++r)
+    for (int i = 0; i < 4; ++i) red[warp][a][lane][i] = acc[a][i];
+  __syncthreads();
+  pdl_launch_dependents();
+  if (warp != 0) return;
 #pragma unroll
-      for (int m = 0; m < M; ++m) {
-        float v = acc[a][r][m];
+  for (int a = 0; a < NMAT; ++a)
 #pragma unroll
-        for (int o = 16; o > 0; o >>= 1)
-          v += __shfl_xor_sync(0xffffffffu, v, o);
-        acc[a][r][m] = v;
-      }
-
-      // Spread the R*M stores over lanes.
+    for (int i = 0; i < 4; ++i) {
+      float v = 0.f;
 #pragma unroll
-  for (int r = 0; r < R; ++r)
-#pragma unroll
-    for (int m = 0; m < M; ++m) {
-      if (lane == (r * M + m) % 32 && row0 + r < N) {
-        float o = acc[0][r][m];
-        if constexpr (NMAT == 2) o = silu(o) * acc[1][r][m];
-        out[m * ldo + row0 + r] = __float2bfloat16(o);
-      }
+      for (int w = 0; w < WARPS; ++w) v += red[w][a][lane][i];
+      acc[a][i] = v;
     }
+    // C fragment: (row g, tokens 2c, 2c+1), (row g+8, tokens 2c, 2c+1).
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const int row = row0 + g + (i >= 2 ? 8 : 0);
+    const int t = 2 * c + (i & 1);
+    if (t < M && row < N) {
+      float o = acc[0][i];
+      if constexpr (NMAT == 2) o = silu(o) * acc[1][i];
+      out[t * ldo + row] = __float2bfloat16(o);
+    }
+  }
 }
 
-template <int M, int NMAT, int R, int U>
-void launch_gemv(const __nv_bfloat16* x, int64_t ldx, const uint8_t* w0,
-                 const float* s0, const uint8_t* w1, const float* s1,
-                 __nv_bfloat16* out, int64_t ldo, int N, int K,
-                 cudaStream_t stream) {
-  const int rows_per_cta = kGemvWarps * R;
-  const int grid = (N + rows_per_cta - 1) / rows_per_cta;
-  fp8_gemv_kernel<M, NMAT, R, U><<<grid, kGemvWarps * 32, 0, stream>>>(
-      x, ldx, w0, s0, w1, s1, out, ldo, N, K);
-}
-
-// (rows per warp R, unrolled 512-wide K steps U) per token count, from a
-// sweep of 8-32 GLM-5.x experts on 4 streams (RTX PRO 6000): the gate/up
-// kernel wants fewer registers as M grows, the down GEMV (K = I is short)
-// wants more rows per warp.
 template <int NMAT>
-void dispatch_gemv(int M, const __nv_bfloat16* x, int64_t ldx,
-                   const uint8_t* w0, const float* s0, const uint8_t* w1,
-                   const float* s1, __nv_bfloat16* out, int64_t ldo, int N,
-                   int K, cudaStream_t stream) {
-#define FP8_GEMV_CASE(MM, R2, U2, R1, U1)                                   \
-  case MM:                                                                  \
-    if constexpr (NMAT == 2) {                                              \
-      launch_gemv<MM, NMAT, R2, U2>(x, ldx, w0, s0, w1, s1, out, ldo, N, K, \
-                                    stream);                                \
-    } else {                                                                \
-      launch_gemv<MM, NMAT, R1, U1>(x, ldx, w0, s0, w1, s1, out, ldo, N, K, \
-                                    stream);                                \
-    }                                                                       \
-    break;
-  switch (M) {
-    FP8_GEMV_CASE(1, 2, 4, 4, 1)
-    FP8_GEMV_CASE(2, 2, 4, 4, 1)
-    FP8_GEMV_CASE(3, 2, 2, 4, 1)
-    FP8_GEMV_CASE(4, 2, 2, 4, 1)
-    FP8_GEMV_CASE(5, 1, 1, 4, 1)
-    FP8_GEMV_CASE(6, 1, 1, 4, 1)
-    FP8_GEMV_CASE(7, 1, 1, 4, 1)
-    FP8_GEMV_CASE(8, 1, 1, 4, 1)
-    default:
-      TORCH_CHECK(false, "fp8 gemv: unsupported token count ", M);
-  }
-#undef FP8_GEMV_CASE
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+void launch_gemv_tc(int M, const __nv_bfloat16* x, int64_t ldx,
+                    const uint8_t* w0, const float* s0, const uint8_t* w1,
+                    const float* s1, __nv_bfloat16* out, int64_t ldo, int N,
+                    int K, cudaStream_t stream) {
+  // 4 chunks in flight per warp, 8 warps per 16 rows: best of a sweep over
+  // (U, warps) in {1,2,4} x {4,8} on GLM-5.3 / GLM-5.3-Flash shapes.
+  launch_kernel(fp8_gemv_tc_kernel<NMAT, 4, kTcWarps>, dim3((N + 15) / 16),
+                dim3(kTcWarps * 32), NMAT == 1, stream, x, ldx, M, w0, s0, w1,
+                s1, out, ldo, N, K);
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +277,12 @@ struct ScaleCopy {
   int KB;
 };
 
+// Dead workspace whose dirty L2 lines are dropped instead of written back.
+struct DeadRegion {
+  const uint8_t* ptr = nullptr;  // 128-byte aligned
+  int64_t bytes = 0;
+};
+
 constexpr int kQuantThreads = 256;
 constexpr int kQuantGroupsPerBlock = kQuantThreads / 16;
 
@@ -266,7 +292,9 @@ __global__ void __launch_bounds__(kQuantThreads)
                          int gate_off, int up_off, uint8_t* __restrict__ q,
                          int64_t ldq, float* __restrict__ sf, int M, int K,
                          int quant_blocks, ScaleCopy c0, ScaleCopy c1,
-                         ScaleCopy c2) {
+                         ScaleCopy c2, DeadRegion dead) {
+  pdl_wait();
+  pdl_launch_dependents();
   if ((int)blockIdx.x >= quant_blocks) {
     const int tid = (blockIdx.x - quant_blocks) * blockDim.x + threadIdx.x;
     const int stride = (gridDim.x - quant_blocks) * blockDim.x;
@@ -315,6 +343,22 @@ __global__ void __launch_bounds__(kQuantThreads)
 #pragma unroll
   for (int o = 8; o > 0; o >>= 1)
     amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+
+  if constexpr (SILU_MUL) {
+    // The [M, 2I] gate/up intermediate is dead once read (the shuffle above
+    // orders it after every lane's load), and so is the FP8 copy of x the
+    // gate/up GEMM consumed: drop their dirty lines rather than writing them
+    // back to DRAM.
+    if (active && sub % 8 == 0) {
+      discard_l2_line(in + m * ldi + gate_off + k);
+      discard_l2_line(in + m * ldi + up_off + k);
+    }
+    const int64_t lines = dead.bytes / 128;
+    for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < lines;
+         i += int64_t(gridDim.x) * blockDim.x) {
+      discard_l2_line(dead.ptr + i * 128);
+    }
+  }
   if (!active) return;
 
   const float inv = amax > 0.f ? kE4M3Max / amax : 1.f;
@@ -336,7 +380,7 @@ __global__ void __launch_bounds__(kQuantThreads)
 template <bool SILU_MUL>
 void launch_quant(const __nv_bfloat16* in, int64_t ldi, int gate_off,
                   int up_off, uint8_t* q, int64_t ldq, float* sf, int M, int K,
-                  ScaleCopy c0, ScaleCopy c1, ScaleCopy c2,
+                  ScaleCopy c0, ScaleCopy c1, ScaleCopy c2, DeadRegion dead,
                   cudaStream_t stream) {
   const int groups = M * (K / kBlock);
   const int quant_blocks =
@@ -344,11 +388,12 @@ void launch_quant(const __nv_bfloat16* in, int64_t ldi, int gate_off,
   const int copy_elems = c0.NB * c0.KB + c1.NB * c1.KB + c2.NB * c2.KB;
   const int copy_blocks =
       copy_elems > 0 ? std::min(16, (copy_elems + 255) / 256) : 0;
-  fp8_quant_act_kernel<SILU_MUL>
-      <<<quant_blocks + copy_blocks, kQuantThreads, 0, stream>>>(
-          in, ldi, gate_off, up_off, q, ldq, sf, M, K, quant_blocks, c0, c1,
-          c2);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  // The input quantisation opens the expert (no PDL edge); the silu*up
+  // quantisation overlaps the gate/up GEMM tail.
+  launch_kernel(fp8_quant_act_kernel<SILU_MUL>,
+                dim3(quant_blocks + copy_blocks), dim3(kQuantThreads), SILU_MUL,
+                stream, in, ldi, gate_off, up_off, q, ldq, sf, M, K,
+                quant_blocks, c0, c1, c2, dead);
 }
 
 // ---------------------------------------------------------------------------
@@ -453,27 +498,41 @@ void run_gemm(const GemmProblem& p, cudaStream_t stream) {
   args.epilogue.thread.alpha = 1.0f;
   args.epilogue.thread.beta = 0.0f;
 
-  Gemm gemm;
-  TORCH_CHECK(gemm.can_implement(args) == cutlass::Status::kSuccess,
+  using Kernel = typename Gemm::GemmKernel;
+  TORCH_CHECK(Kernel::can_implement(args),
               "fp8 blockwise gemm: unsupported problem M=", p.M, " N=", p.N,
               " K=", p.K, " L=", p.L);
-  const size_t ws_bytes = Gemm::get_workspace_size(args);
+  // GemmUniversalAdapter::initialize() would set the smem attribute on every
+  // call; on the decode/short-prefill path that host cost is comparable to
+  // the kernel, so set it once per device and launch from Params directly.
+  static std::once_flag smem_once[64];
+  std::call_once(smem_once[at::cuda::current_device()], [] {
+    C10_CUDA_CHECK(
+        cudaFuncSetAttribute(cutlass::device_kernel<Kernel>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             Kernel::SharedStorageSize));
+  });
+  const size_t ws_bytes = Kernel::get_workspace_size(args);
   at::Tensor ws;
   if (ws_bytes > 0) {
     ws = at::empty({static_cast<int64_t>(ws_bytes)},
                    at::TensorOptions().dtype(at::kByte).device(at::kCUDA));
+    TORCH_CHECK(Kernel::initialize_workspace(args, ws.data_ptr(), stream) ==
+                    cutlass::Status::kSuccess,
+                "fp8 blockwise gemm: workspace init failed");
   }
-  TORCH_CHECK(gemm.initialize(args, ws_bytes ? ws.data_ptr() : nullptr,
-                              stream) == cutlass::Status::kSuccess,
-              "fp8 blockwise gemm: initialize failed");
-  TORCH_CHECK(gemm.run(stream) == cutlass::Status::kSuccess,
+  auto params =
+      Kernel::to_underlying_arguments(args, ws_bytes ? ws.data_ptr() : nullptr);
+  TORCH_CHECK(Gemm::run(params, stream, nullptr,
+                        /*launch_with_pdl=*/true) == cutlass::Status::kSuccess,
               "fp8 blockwise gemm: launch failed");
 }
 
 // Tile configs picked from a sweep of the GLM-5.x expert shapes on RTX PRO
 // 6000 (188 SMs). `exclusive` = the call is chained to run alone on the
-// device (see DeviceChain); otherwise several exec streams usually run
-// experts concurrently, where persistent stream-K kernels interfere (measured
+// device (see DeviceChain) or no other stream has an FP8 expert in flight;
+// otherwise several exec streams run experts concurrently, where persistent
+// stream-K kernels interfere (measured
 // on the 4-stream expert_layer harness: 128x128 tiles beat both stream-K and
 // 64x128 ping-pong above 256 tokens, ping-pong wins below).
 void blockwise_gemm(const GemmProblem& p, bool exclusive, cudaStream_t stream) {
@@ -485,7 +544,7 @@ void blockwise_gemm(const GemmProblem& p, bool exclusive, cudaStream_t stream) {
   } else if (exclusive && p.K >= 4864) {
     // Long-K gate/up with only a few waves of tiles: stream-K splits K.
     run_gemm<StreamKGemm>(p, stream);
-  } else if (p.M <= 256) {
+  } else if (p.M <= (exclusive ? 2048 : 256)) {
     run_gemm<PingGemm>(p, stream);
   } else {
     run_gemm<CoopGemm>(p, stream);
@@ -544,6 +603,55 @@ struct ChainScope {
     if (chain != nullptr) chain->Exit(stream);
   }
 };
+// Tracks the GEMM-path expert calls in flight per device. Persistent
+// stream-K kernels are the fastest choice when an expert owns the GPU, but
+// interfere when several exec streams run experts at once; a call checks
+// whether another stream still has one in flight (non-blocking queries).
+class InflightRegistry {
+ public:
+  bool OtherStreamBusy(cudaStream_t stream) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto& slot : slots_) {
+      if (slot.stream == nullptr || slot.stream == stream) continue;
+      const cudaError_t q = cudaEventQuery(slot.event);
+      if (q == cudaErrorNotReady) return true;
+      if (q != cudaSuccess) (void)cudaGetLastError();
+    }
+    return false;
+  }
+  void Record(cudaStream_t stream, int device) {
+    std::lock_guard<std::mutex> lock(mu_);
+    Slot& slot = slots_[next_++ % kSlots];
+    if (slot.event == nullptr) {
+      c10::cuda::CUDAGuard guard(device);
+      C10_CUDA_CHECK(
+          cudaEventCreateWithFlags(&slot.event, cudaEventDisableTiming));
+    }
+    C10_CUDA_CHECK(cudaEventRecord(slot.event, stream));
+    slot.stream = stream;
+  }
+
+ private:
+  static constexpr int kSlots = 16;
+  struct Slot {
+    cudaEvent_t event = nullptr;
+    cudaStream_t stream = nullptr;
+  };
+  std::mutex mu_;
+  Slot slots_[kSlots];
+  unsigned next_ = 0;
+};
+
+InflightRegistry& inflight(int device) {
+  static InflightRegistry registries[64];
+  return registries[device];
+}
+
+bool is_capturing(cudaStream_t stream) {
+  cudaStreamCaptureStatus status;
+  return cudaStreamIsCapturing(stream, &status) != cudaSuccess ||
+         status != cudaStreamCaptureStatusNone;
+}
 #endif  // MOE_ENABLE_SM120_FP8
 
 const uint8_t* weight_ptr(const torch::Tensor& w) {
@@ -609,11 +717,11 @@ void fused_fp8_moe_ffn_into(
   if (M <= kFp8GemvMaxTokens) {
     at::Tensor inter = at::empty({M, I}, hidden.options());
     auto* ip = reinterpret_cast<__nv_bfloat16*>(inter.data_ptr());
-    dispatch_gemv<2>(M, x, H, weight_ptr(gate_w), gate_s.data_ptr<float>(),
-                     weight_ptr(up_w), up_s.data_ptr<float>(), ip, I, I, H,
-                     stream);
-    dispatch_gemv<1>(M, ip, I, weight_ptr(down_w), down_s.data_ptr<float>(),
-                     nullptr, nullptr, out, H, H, I, stream);
+    launch_gemv_tc<2>(M, x, H, weight_ptr(gate_w), gate_s.data_ptr<float>(),
+                      weight_ptr(up_w), up_s.data_ptr<float>(), ip, I, I, H,
+                      stream);
+    launch_gemv_tc<1>(M, ip, I, weight_ptr(down_w), down_s.data_ptr<float>(),
+                      nullptr, nullptr, out, H, H, I, stream);
     return;
   }
 
@@ -663,7 +771,10 @@ void fused_fp8_moe_ffn_into(
     chain_scope.chain = &device_chain(device);
     chain_scope.stream = stream;
   }
-  const bool exclusive = chain_scope.chain != nullptr;
+  const bool capturing = is_capturing(stream);
+  const bool exclusive =
+      chain_scope.chain != nullptr ||
+      (!capturing && !inflight(device).OtherStreamBusy(stream));
 
   launch_quant<false>(x, H, 0, 0, xq, H, sfx, M, H,
                       {gate_s.data_ptr<float>(), gate_first ? sfb_gate : sfb_up,
@@ -671,7 +782,7 @@ void fused_fp8_moe_ffn_into(
                       {up_s.data_ptr<float>(), gate_first ? sfb_up : sfb_gate,
                        (int)IB, (int)HB},
                       {down_s.data_ptr<float>(), sfb_down, (int)HB, (int)IB},
-                      stream);
+                      DeadRegion{}, stream);
 
   // Column halves of gu: batch 0 -> [0, I), batch 1 -> [I, 2I).
   if (batched) {
@@ -691,11 +802,13 @@ void fused_fp8_moe_ffn_into(
   const int up_off = gate_first ? (int)I : 0;
   launch_quant<true>(gu, 2 * I, gate_off, up_off, aq, I, sfa, M, I,
                      {nullptr, nullptr, 0, 0}, {nullptr, nullptr, 0, 0},
-                     {nullptr, nullptr, 0, 0}, stream);
+                     {nullptr, nullptr, 0, 0}, DeadRegion{xq, sz_xq}, stream);
 
   blockwise_gemm({(int)M, (int)H, (int)I, 1, aq, I, 0, weight_ptr(down_w), I, 0,
                   sfa, 0, sfb_down, 0, out, H, 0},
                  exclusive, stream);
+
+  if (!capturing) inflight(device).Record(stream, device);
 
   const c10::cuda::CUDAStream cur = c10::cuda::getCurrentCUDAStream();
   if (cur.stream() != stream) {

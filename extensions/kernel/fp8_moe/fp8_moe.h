@@ -8,8 +8,9 @@
 // The FP8 weights are read once in their storage format and the block scales
 // are applied inside the kernels; no BF16 weight copy is materialised.
 //
-//   M <= kFp8GemvMaxTokens : weight-only FP8 GEMV (BF16 activations, fp32
-//                            accumulation; exact weight de-quantisation).
+//   M <= kFp8GemvMaxTokens : weight-only FP8 GEMV on bf16 mma.sync (exact
+//                            weight de-quantisation in registers, BF16
+//                            activations, fp32 accumulation).
 //   M >  kFp8GemvMaxTokens : CUTLASS sm_120 blockwise-scaled FP8 GEMM; the
 //                            activations are quantised per token and per 128
 //                            channels to e4m3 with an fp32 scale (W8A8-block).
