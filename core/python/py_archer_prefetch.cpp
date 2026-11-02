@@ -8,6 +8,9 @@
 #include "prefetch/archer_prefetch_handle.h"
 #include "model/moe.h"
 #include "kernel/ops.h"
+#include "kernel/fused_moe_mlp.h"
+
+#include <ATen/cuda/CUDAContext.h>
 
 void BindTensorStoreSurface(py::class_<ArcherPrefetchHandle>& cls);
 
@@ -153,6 +156,34 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   //    &ArcherPrefetchHandle::SetNodeCachePriority);
 
   m.def("silu_and_mul", &silu_and_mul, "Fused SiLU(gate) * up");
+  m.def(
+      "fused_moe_ffn_into",
+      [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
+         torch::Tensor down_proj, torch::Tensor gate_buf,
+         torch::Tensor fused_buf, torch::Tensor output, py::object stream,
+         int activation, float alpha, float limit) {
+        TORCH_CHECK(
+            activation >= static_cast<int>(MoEActivationKind::kSiLU) &&
+                activation <= static_cast<int>(MoEActivationKind::kSwiGLUOAI),
+            "fused_moe_ffn_into: unknown activation kind ", activation);
+        cudaStream_t cuda_stream =
+            stream.is_none()
+                ? at::cuda::getCurrentCUDAStream().stream()
+                : reinterpret_cast<cudaStream_t>(
+                      py::hasattr(stream, "cuda_stream")
+                          ? stream.attr("cuda_stream").cast<std::intptr_t>()
+                          : stream.cast<std::intptr_t>());
+        MoEActivation act{static_cast<MoEActivationKind>(activation), alpha,
+                          limit};
+        fused_moe_ffn_into(hidden, gate_proj, up_proj, down_proj, gate_buf,
+                           fused_buf, output, act, cuda_stream);
+      },
+      "CUTLASS expert FFN: output = act(x @ gate^T, x @ up^T) @ down^T",
+      py::arg("hidden"), py::arg("gate_proj"), py::arg("up_proj"),
+      py::arg("down_proj"), py::arg("gate_buf"), py::arg("fused_buf"),
+      py::arg("output"), py::arg("stream") = py::none(),
+      py::arg("activation") = 0, py::arg("alpha") = 1.0f,
+      py::arg("limit") = 0.0f);
   m.def("gelu_and_mul", &gelu_and_mul, "Fused GeLU(gate) * up");
   m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul, "Fused GeLU-tanh(gate) * up");
   m.def("fatrelu_and_mul", &fatrelu_and_mul, "Fused FatReLU(gate) * up");
@@ -309,5 +340,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            &ExpertDispatcher::InjectTransitionFailureOnceForTest)
 #endif
       .def("set_scales", &ExpertDispatcher::SetScales,
-           "Store fp8 block scales for dequant-on-copy (fp8-in-store path)");
+           "Store fp8 block scales for dequant-on-copy (fp8-in-store path)")
+      .def("set_expert_activation", &ExpertDispatcher::SetExpertActivation,
+           py::arg("kind"), py::arg("alpha") = 1.0f, py::arg("limit") = 0.0f,
+           "Set the routed-expert gated activation (0=silu, 1=clamped_silu, "
+           "2=swiglu_oai); call before the first dispatch");
 }

@@ -305,6 +305,9 @@ class ExpertDispatcher : public base::noncopyable {
   }
 
   void SetScales(const std::map<std::string, torch::Tensor>& scales);
+  // Gated activation of the routed experts (kind = MoEActivationKind). Must be
+  // called before the first dispatch; exec workers read it without locking.
+  void SetExpertActivation(int kind, float alpha, float limit);
   bool RegisterExpertVariant(
       int layer_idx, int expert_idx, const std::string& format,
       std::uint64_t generation, const std::string& execution,

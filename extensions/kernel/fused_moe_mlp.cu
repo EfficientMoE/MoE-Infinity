@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Fused MoE MLP with CUTLASS: replaces 5 separate PyTorch ops with 3 CUTLASS
-// GEMMs, fusing silu(gate) * up into the epilogue of the up-projection GEMM.
+// GEMMs, fusing the gated activation act(gate, up) (SiLU, clamped SiLU or
+// SwiGLU-OAI, see kernel/moe_activation.h) into the epilogue of the
+// up-projection GEMM.
 
 #include "kernel/epilogue_utils.h"
 #include "kernel/fused_moe_mlp.h"
@@ -34,12 +36,13 @@ using StdEpilogue = cutlass::epilogue::thread::LinearCombination<
     float                                             // compute type
     >;
 
-// SiLU-Mul epilogue: D[i] = silu(C[i]) * accum[i]
+// Gated-activation epilogue: D[i] = act(C[i], accum[i])
 // C = gate_out (passed as the "source" matrix), accum = up-projection result.
-using SiLUMulEpilogue =
-    SiLUAndMulEpilogue<ElementInput,
-                       128 / cutlass::sizeof_bits<ElementInput>::value,
-                       ElementAccumulator, float>;
+template <MoEActivationKind Kind>
+using GatedEpilogue =
+    GatedActEpilogue<ElementInput,
+                     128 / cutlass::sizeof_bits<ElementInput>::value,
+                     ElementAccumulator, float, Kind>;
 
 // ---------------------------------------------------------------------------
 // Small-K path (K-tile=32): best for H≤2048
@@ -57,16 +60,17 @@ using GemmGate = cutlass::gemm::device::Gemm<
     ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
     MoEThreadblockShape, MoEWarpShape, MoEInstructionShape, StdEpilogue>;
 
-// GEMM1: fused_buf = silu(gate_buf) * (input @ up_proj^T)
+// GEMM1: fused_buf = act(gate_buf, input @ up_proj^T)
 //   A: [M, H] RowMajor   B: up_proj [I,H]→ColMajor [H,I]
-//   C: gate_buf [M,I]  (SiLU source in epilogue)    D: fused_buf [M,I]
+//   C: gate_buf [M,I]  (gate source in epilogue)    D: fused_buf [M,I]
+template <MoEActivationKind Kind>
 using GemmUpFused = cutlass::gemm::device::Gemm<
     ElementInput, LayoutA,  // A
     ElementInput, LayoutB,  // B
-    ElementInput, LayoutC,  // C (gate_out, read by SiLU epilogue)
+    ElementInput, LayoutC,  // C (gate_out, read by the epilogue)
     ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
     MoEThreadblockShape, MoEWarpShape, MoEInstructionShape,
-    SiLUMulEpilogue  // D = silu(C) * accum
+    GatedEpilogue<Kind>  // D = act(C, accum)
     >;
 
 // GEMM2: output = fused_buf @ down_proj^T
@@ -89,11 +93,12 @@ using GemmGateLK = cutlass::gemm::device::Gemm<
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
     /*Stages=*/3>;
 
+template <MoEActivationKind Kind>
 using GemmUpFusedLK = cutlass::gemm::device::Gemm<
     ElementInput, LayoutA, ElementInput, LayoutB, ElementInput, LayoutC,
     ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
     LargeKThreadblockShape, LargeKWarpShape, MoEInstructionShape,
-    SiLUMulEpilogue,
+    GatedEpilogue<Kind>,
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
     /*Stages=*/3>;
 
@@ -104,6 +109,75 @@ using GemmDownLK = cutlass::gemm::device::Gemm<
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
     /*Stages=*/3>;
 
+namespace {
+
+// GEMM1 launcher: fused_buf = act(gate_buf, input @ up_proj^T).
+// beta=1 makes the epilogue load C (= gate_buf).
+template <typename Gemm>
+void run_up_fused(int M, int I, int H, ElementInput* input_ptr,
+                  ElementInput* up_ptr, ElementInput* gate_buf_ptr,
+                  ElementInput* fused_ptr, const MoEActivation& act,
+                  cudaStream_t stream) {
+  Gemm gemm;
+  typename Gemm::Arguments args{
+      {M, I, H},          // problem size
+      {input_ptr, H},     // ref_A
+      {up_ptr, H},        // ref_B: [H, I] ColMajor, ldb = K = H
+      {gate_buf_ptr, I},  // ref_C: gate_buf (activation source)
+      {fused_ptr, I},     // ref_D: fused_buf output
+      typename Gemm::EpilogueOutputOp::Params(1.0f, 1.0f, act.alpha,
+                                              act.limit)};
+  cutlass::Status status = gemm(args, nullptr, stream);
+  TORCH_CHECK(status == cutlass::Status::kSuccess,
+              "fused_moe_ffn_into GEMM1 (up+gated-act) failed: ",
+              cutlassGetStatusString(status));
+}
+
+template <template <MoEActivationKind> class Gemm>
+void dispatch_up_fused(int M, int I, int H, ElementInput* input_ptr,
+                       ElementInput* up_ptr, ElementInput* gate_buf_ptr,
+                       ElementInput* fused_ptr, const MoEActivation& act,
+                       cudaStream_t stream) {
+  switch (act.kind) {
+    case MoEActivationKind::kSiLU:
+      run_up_fused<Gemm<MoEActivationKind::kSiLU>>(
+          M, I, H, input_ptr, up_ptr, gate_buf_ptr, fused_ptr, act, stream);
+      return;
+    case MoEActivationKind::kClampedSiLU:
+      run_up_fused<Gemm<MoEActivationKind::kClampedSiLU>>(
+          M, I, H, input_ptr, up_ptr, gate_buf_ptr, fused_ptr, act, stream);
+      return;
+    case MoEActivationKind::kSwiGLUOAI:
+      run_up_fused<Gemm<MoEActivationKind::kSwiGLUOAI>>(
+          M, I, H, input_ptr, up_ptr, gate_buf_ptr, fused_ptr, act, stream);
+      return;
+  }
+  TORCH_CHECK(false, "fused_moe_ffn_into: unknown activation kind ",
+              static_cast<int>(act.kind));
+}
+
+}  // namespace
+
+void check_moe_activation(const MoEActivation& act) {
+  switch (act.kind) {
+    case MoEActivationKind::kSiLU:
+      return;
+    case MoEActivationKind::kClampedSiLU:
+      TORCH_CHECK(act.limit > 0.0f,
+                  "clamped_silu activation requires limit > 0, got ",
+                  act.limit);
+      return;
+    case MoEActivationKind::kSwiGLUOAI:
+      TORCH_CHECK(act.limit > 0.0f && act.alpha > 0.0f,
+                  "swiglu_oai activation requires alpha > 0 and limit > 0, "
+                  "got alpha=",
+                  act.alpha, ", limit=", act.limit);
+      return;
+  }
+  TORCH_CHECK(false, "unknown MoE activation kind ",
+              static_cast<int>(act.kind));
+}
+
 void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
                         torch::Tensor& gate_proj,  // [I, H]
                         torch::Tensor& up_proj,    // [I, H]
@@ -112,8 +186,21 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
                         torch::Tensor& fused_buf,  // [M, I]
                         torch::Tensor& output,     // [M, H]
                         cudaStream_t stream) {
+  fused_moe_ffn_into(hidden, gate_proj, up_proj, down_proj, gate_buf, fused_buf,
+                     output, MoEActivation{}, stream);
+}
+
+void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
+                        torch::Tensor& gate_proj,  // [I, H]
+                        torch::Tensor& up_proj,    // [I, H]
+                        torch::Tensor& down_proj,  // [H, I]
+                        torch::Tensor& gate_buf,   // [M, I]
+                        torch::Tensor& fused_buf,  // [M, I]
+                        torch::Tensor& output,     // [M, H]
+                        const MoEActivation& activation, cudaStream_t stream) {
   TORCH_CHECK(hidden.scalar_type() == at::kBFloat16,
               "fused_moe_ffn_into: BF16 only");
+  check_moe_activation(activation);
 
   const int M = static_cast<int>(hidden.size(0));
   const int H = static_cast<int>(hidden.size(1));
@@ -161,23 +248,10 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
     }
 
     // ------------------------------------------------------------------
-    // GEMM1 (large-K): fused_buf = silu(gate_buf) * (input @ up_proj^T)
+    // GEMM1 (large-K): fused_buf = act(gate_buf, input @ up_proj^T)
     // ------------------------------------------------------------------
-    {
-      GemmUpFusedLK gemm;
-      GemmUpFusedLK::Arguments args{
-          {M, I, H},          // problem size
-          {input_ptr, H},     // ref_A
-          {up_ptr, H},        // ref_B: [H, I] ColMajor, ldb = K = H
-          {gate_buf_ptr, I},  // ref_C: gate_buf (SiLU source)
-          {fused_ptr, I},     // ref_D: fused_buf output
-          {1.0f, 1.0f}        // {alpha, beta} — beta=1 causes C to be loaded
-      };
-      cutlass::Status status = gemm(args, nullptr, stream);
-      TORCH_CHECK(status == cutlass::Status::kSuccess,
-                  "fused_moe_ffn_into GEMM1-LK (up+silu-mul) failed: ",
-                  cutlassGetStatusString(status));
-    }
+    dispatch_up_fused<GemmUpFusedLK>(M, I, H, input_ptr, up_ptr, gate_buf_ptr,
+                                     fused_ptr, activation, stream);
 
     // ------------------------------------------------------------------
     // GEMM2 (large-K): output = fused_buf @ down_proj^T
@@ -224,28 +298,14 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
     }
 
     // ------------------------------------------------------------------
-    // GEMM1: fused_buf = silu(gate_buf) * (input @ up_proj^T)
+    // GEMM1: fused_buf = act(gate_buf, input @ up_proj^T)
     //
     //   Same A/B shapes as GEMM0 but uses up_proj
-    //   C = gate_buf [M, I]: read as the "source" in SiLUMulEpilogue
-    //   D = fused_buf [M, I]: D[i] = silu(C[i]) * accum[i]
-    //   beta=1 → C is loaded by the epilogue
+    //   C = gate_buf [M, I]: read as the "source" in GatedActEpilogue
+    //   D = fused_buf [M, I]: D[i] = act(C[i], accum[i])
     // ------------------------------------------------------------------
-    {
-      GemmUpFused gemm;
-      GemmUpFused::Arguments args{
-          {M, I, H},          // problem size
-          {input_ptr, H},     // ref_A
-          {up_ptr, H},        // ref_B: [H, I] ColMajor, ldb = K = H
-          {gate_buf_ptr, I},  // ref_C: gate_buf (SiLU source)
-          {fused_ptr, I},     // ref_D: fused_buf output
-          {1.0f, 1.0f}        // {alpha, beta} — beta=1 causes C to be loaded
-      };
-      cutlass::Status status = gemm(args, nullptr, stream);
-      TORCH_CHECK(status == cutlass::Status::kSuccess,
-                  "fused_moe_ffn_into GEMM1 (up+silu-mul) failed: ",
-                  cutlassGetStatusString(status));
-    }
+    dispatch_up_fused<GemmUpFused>(M, I, H, input_ptr, up_ptr, gate_buf_ptr,
+                                   fused_ptr, activation, stream);
 
     // ------------------------------------------------------------------
     // GEMM2: output = fused_buf @ down_proj^T

@@ -10,6 +10,8 @@
 #include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>
 
+#include "kernel/moe_activation.h"
+
 // Data type
 using ElementInput = cutlass::bfloat16_t;
 using ElementOutput = cutlass::bfloat16_t;
@@ -42,21 +44,25 @@ using FusedGemmSiLU = cutlass::gemm::device::Gemm<
     EpilogueOutputOp  // Fused epilogue with SiLU
     >;
 
-// Custom SiLU-Mul epilogue: D[i] = silu(source[i]) * accum[i]
+// Gated-activation epilogue: D[i] = act(source[i], accum[i])
 //
 // Used as the epilogue for the up-projection GEMM in fused MoE MLP:
 //   accum  = input @ up_proj^T     (result of this GEMM)
 //   source = gate_out              (result of prior gate GEMM, passed as C)
-//   D      = silu(gate_out) * up_accum   -> written to fused_buf
+//   D      = act(gate_out, up_accum)  -> written to fused_buf
+// where act is selected by Kind (see kernel/moe_activation.h); alpha / limit of
+// the clamped and SwiGLU-OAI variants are runtime parameters.
 template <typename ElementOutput_, int Count,
           typename ElementAccumulator_ = float,
-          typename ElementCompute_ = float>
-struct SiLUAndMulEpilogue {
+          typename ElementCompute_ = float,
+          MoEActivationKind Kind = MoEActivationKind::kSiLU>
+struct GatedActEpilogue {
   using ElementOutput = ElementOutput_;
   using ElementAccumulator = ElementAccumulator_;
   using ElementCompute = ElementCompute_;
 
   static int const kCount = Count;
+  static MoEActivationKind const kKind = Kind;
 
   using FragmentOutput = cutlass::Array<ElementOutput, kCount>;
   using FragmentAccumulator = cutlass::Array<ElementAccumulator, kCount>;
@@ -65,17 +71,25 @@ struct SiLUAndMulEpilogue {
   struct Params {
     ElementCompute alpha;
     ElementCompute beta;
+    float act_alpha;
+    float act_limit;
     CUTLASS_HOST_DEVICE Params()
-        : alpha(ElementCompute(1)), beta(ElementCompute(1)) {}
+        : alpha(ElementCompute(1)),
+          beta(ElementCompute(1)),
+          act_alpha(1.0f),
+          act_limit(0.0f) {}
     CUTLASS_HOST_DEVICE Params(ElementCompute a, ElementCompute b)
-        : alpha(a), beta(b) {}
+        : alpha(a), beta(b), act_alpha(1.0f), act_limit(0.0f) {}
+    CUTLASS_HOST_DEVICE Params(ElementCompute a, ElementCompute b,
+                               float act_alpha_, float act_limit_)
+        : alpha(a), beta(b), act_alpha(act_alpha_), act_limit(act_limit_) {}
   };
 
  private:
   Params params_;
 
  public:
-  CUTLASS_HOST_DEVICE SiLUAndMulEpilogue(Params const& params)
+  CUTLASS_HOST_DEVICE GatedActEpilogue(Params const& params)
       : params_(params) {}
 
   // Source (C matrix = gate_out) is always needed
@@ -84,25 +98,21 @@ struct SiLUAndMulEpilogue {
   // No-op for split-K (not used)
   CUTLASS_HOST_DEVICE void set_k_partition(int, int) {}
 
-  // D[i] = silu(source[i]) * accum[i]
+  // D[i] = act(source[i], accum[i])
   // source = gate_out, accum = up-projection result
   CUTLASS_HOST_DEVICE FragmentOutput operator()(
       FragmentAccumulator const& accum, FragmentOutput const& source) const {
-    cutlass::NumericConverter<ElementCompute, ElementAccumulator> to_compute_a;
-    cutlass::NumericConverter<ElementCompute, ElementOutput> to_compute_s;
-    cutlass::NumericConverter<ElementOutput, ElementCompute> to_output;
+    cutlass::NumericConverter<float, ElementAccumulator> to_float_a;
+    cutlass::NumericConverter<float, ElementOutput> to_float_s;
+    cutlass::NumericConverter<ElementOutput, float> to_output;
 
     FragmentOutput result;
 
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < kCount; ++i) {
-      ElementCompute x = to_compute_s(source[i]);
-      ElementCompute u = to_compute_a(accum[i]);
-      // SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
-      ElementCompute silu_x =
-          x * (ElementCompute(1) /
-               (ElementCompute(1) + expf(-static_cast<float>(x))));
-      result[i] = to_output(silu_x * u);
+      result[i] = to_output(
+          moe_gated_act<Kind>(to_float_s(source[i]), to_float_a(accum[i]),
+                              params_.act_alpha, params_.act_limit));
     }
 
     return result;
@@ -124,3 +134,11 @@ struct SiLUAndMulEpilogue {
     return result;
   }
 };
+
+// D[i] = silu(source[i]) * accum[i]
+template <typename ElementOutput_, int Count,
+          typename ElementAccumulator_ = float,
+          typename ElementCompute_ = float>
+using SiLUAndMulEpilogue =
+    GatedActEpilogue<ElementOutput_, Count, ElementAccumulator_,
+                     ElementCompute_, MoEActivationKind::kSiLU>;
