@@ -63,13 +63,17 @@ _warned: set[str] = set()
 
 
 def _backend_of(fn: Callable | None, depth: int = 0) -> str:
-    """Package that implements ``fn``: ``fla``, ``causal_conv1d`` or ``torch``.
+    """What implements ``fn``: ``fused`` (MoE-Infinity fused kernels, which
+    fall back to fla), ``fla``, ``causal_conv1d`` or ``torch``.
 
     Follows ``functools.wraps`` chains and closure cells, which is where
     ``use_kernel_func_from_hub_with_fallback`` keeps the implementation.
     """
     if fn is None:
         return "torch"
+    tag = getattr(fn, "_moe_backend", None)
+    if tag:
+        return tag
     mod = getattr(fn, "__module__", None) or ""
     for pkg in ("fla", "causal_conv1d"):
         if mod == pkg or mod.startswith(pkg + "."):
@@ -236,6 +240,71 @@ def make_linear_attention_device_safe() -> list[str]:
             mod.FusedRMSNormGated = _device_safe_norm(norm)
             patched.append(f"{mod_name}.FusedRMSNormGated")
     return patched
+
+
+# chunk-kernel globals -> fused kind (GDN scalar gate / KDA per-channel gate)
+_FUSED_GLOBALS = {
+    "chunk_gated_delta_rule": "gdn",  # transformers <= 5.12
+    "torch_chunk_gated_delta_rule": "gdn",  # transformers >= 5.16
+    "chunk_kimi_delta_attention": "kda",
+}
+
+
+def install_fused_linear_attention() -> list[str]:
+    """Route the fla-bound chunked GDN / KDA prefill kernels of the
+    transformers linear-attention modules through the fused sm_120 path
+    (``linear_attention_fused``); unsupported calls still reach fla.
+
+    Only globals that already resolve to fla are wrapped, so without fla
+    installed nothing changes. Idempotent. ``MOE_LINEAR_ATTN_FUSED=0``
+    disables the fused path at call time.
+    """
+    from moe_infinity.kernel.linear_attention_fused import make_fused
+
+    patched: list[str] = []
+    for mod_name in _HF_MODULES:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:  # noqa: BLE001 - model family absent
+            continue
+        for name, kind in _FUSED_GLOBALS.items():
+            fn = getattr(mod, name, None)
+            if fn is None or _backend_of(fn) != "fla":
+                continue
+            setattr(mod, name, make_fused(kind, fn))
+            patched.append(f"{mod_name}.{name}")
+    return patched
+
+
+def _bind_instances(model: torch.nn.Module) -> int:
+    """transformers <= 5.12 binds ``self.chunk_gated_delta_rule`` in
+    ``__init__``: point existing layers at the (now fused) module global."""
+    n = 0
+    for module in model.modules():
+        fn = vars(module).get("chunk_gated_delta_rule")
+        if fn is None or _backend_of(fn) != "fla":
+            continue
+        new = getattr(
+            sys.modules.get(type(module).__module__),
+            "chunk_gated_delta_rule",
+            None,
+        )
+        if new is not None and _backend_of(new) == "fused":
+            module.chunk_gated_delta_rule = new
+            n += 1
+    return n
+
+
+def enable_linear_attention_kernels(model: torch.nn.Module) -> dict[str, dict]:
+    """Install the fused path on ``model``'s linear-attention layers, then
+    report the bound kernels (warning once on a torch fallback)."""
+    if torch.cuda.is_available():
+        try:
+            install_fused_linear_attention()
+            _bind_instances(model)
+        except Exception as exc:  # noqa: BLE001 - keep fla / torch path
+            logger.warning("fused linear-attention path unavailable: %s", exc)
+    return check_linear_attention_kernels(model)
 
 
 def check_linear_attention_kernels(model: torch.nn.Module) -> dict[str, dict]:
