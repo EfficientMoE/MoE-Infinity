@@ -21,6 +21,7 @@ def register_engine_ops() -> None:
     if _registered:
         return
 
+    from moe_store.hooks import ops as _ops
     from moe_store.hooks import register_engine_ops as _register
 
     from moe_infinity.kernel import topk_softmax
@@ -38,6 +39,12 @@ def register_engine_ops() -> None:
         nvtx_phase=nvtx_phase,
         route_ahead_ctx=_route_ahead_ctx,
     )
+
+    if hasattr(_ops, "fused_moe_mxfp4"):
+        # Older moe-store releases lack this op and keep the expert loop.
+        from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
+
+        _register(fused_moe_mxfp4=fused_moe_mxfp4)
 
     try:
         from moe_infinity import _v4_fp4
