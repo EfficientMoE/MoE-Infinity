@@ -56,6 +56,8 @@ struct ExpertComputeSample {
   std::int64_t output_delay_ns = 0;
 };
 
+struct GroupedExecBatch;
+
 class ExpertDispatcher : public base::noncopyable {
  public:
   typedef struct {
@@ -90,6 +92,9 @@ class ExpertDispatcher : public base::noncopyable {
     bool pending_counted_down = false;
     std::uint64_t execution_lease_id = 0;
     ResidencyVariantKey execution_key;
+    // Set on the single exec item that runs a whole group of resident experts
+    // with the grouped decode kernels (expert_node is then nullptr).
+    std::shared_ptr<GroupedExecBatch> group;
   } ExecArgs;
   typedef std::tuple<torch::Tensor, int, int, int> CallResult;
 
@@ -147,6 +152,12 @@ class ExpertDispatcher : public base::noncopyable {
     std::uint64_t execution_lease_id = 0;
     ResidencyVariantKey execution_key;
   } ExpertRetireArgs;
+
+  struct GroupRetireArgs {
+    ExpertDispatcher* dispatcher = nullptr;
+    std::uint64_t generation = 0;
+    std::vector<ExpertRetireArgs> items;
+  };
 
   struct CompletionEventRecord {
     cudaEvent_t event = nullptr;
@@ -345,6 +356,11 @@ class ExpertDispatcher : public base::noncopyable {
   std::map<std::string, std::int64_t> GetFusedDropStats() const;
   std::map<int, std::int64_t> GetFusedDropStatsByLayer() const;
   std::map<std::string, std::int64_t> GetRoutingStats() const;
+  // Grouped decode path (#306): resident experts of a layer run as one group
+  // (two kernel launches) when the batch has <= kGroupedMoeMaxTokens tokens.
+  // MOE_GROUPED_DECODE=0 disables it at construction. top_k bounds the routed
+  // experts per token and sizes the activation workspace (0 = num_experts).
+  void SetGroupedDecode(bool enabled, int top_k);
   void SetDispatchFaultForTest(const std::string& stage);
   void FailDispatchForTest(std::uint64_t generation,
                            const std::string& message);
@@ -387,7 +403,17 @@ class ExpertDispatcher : public base::noncopyable {
       std::vector<CompletionEventRecord> records) noexcept;
 
   static void CUDART_CB ExpertReadyToRetireCallback(void* opaque);
+  static void CUDART_CB GroupReadyToRetireCallback(void* opaque);
   void RetirementFunc();
+
+  // Grouped decode path. GroupedEligible is evaluated on the cache-hit
+  // enqueue path; eligible experts are parked per device until
+  // FlushGroupedExperts (NotifyFetchStart / Wait*) hands each device's group
+  // to an exec worker as one item, which GroupedExec runs.
+  bool GroupedEligible(const ExpertNodePtr& expert_node, int gpu_id,
+                       bool remote);
+  void FlushGroupedExperts();
+  void GroupedExec(ExecArgs& args, int gpu_id, cudaStream_t stream);
 
   class DispatchSubmissionGuard {
    public:
@@ -513,6 +539,16 @@ class ExpertDispatcher : public base::noncopyable {
   std::optional<std::pair<std::uint64_t, ExpertFormat>> fail_transition_once_;
 #endif
 
+  std::mutex grouped_mutex_;
+  std::vector<std::vector<ExecArgs>> grouped_pending_;  // per device
+  std::atomic<bool> grouped_enabled_{true};
+  std::atomic<int> grouped_top_k_{0};
+  std::atomic<std::int64_t> grouped_batches_{0};
+  std::atomic<std::int64_t> grouped_experts_{0};
+  // Per-device [1] int64 zero index: the single-token accumulate uses an
+  // atomic index_add_ so it can run next to the grouped kernel's atomics.
+  std::unordered_map<int, torch::Tensor> zero_index_;
+
   std::atomic<bool> overlap_timing_enabled_{false};
   std::atomic<std::uint64_t> invocation_counter_{0};
   std::uint64_t current_invocation_id_{0};
@@ -580,6 +616,10 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::int64_t> completion_events_retired_{0};
   std::atomic<std::int64_t> completion_events_outstanding_{0};
   std::atomic<std::int64_t> stale_failures_quarantined_{0};
+};
+
+struct GroupedExecBatch {
+  std::vector<ExpertDispatcher::ExecArgs> members;
 };
 
 #define SET_TENSORS_AND_MODULE_FROM_BLOB(cls, module, node, device, \

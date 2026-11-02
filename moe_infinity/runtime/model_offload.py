@@ -1450,6 +1450,15 @@ class OffloadEngine(object):
                 self.expert_prefetcher.expert_dispatcher = (
                     self.expert_dispatcher
                 )
+                if hasattr(self.expert_dispatcher, "set_grouped_decode"):
+                    # top-k sizes the grouped decode kernel's workspace.
+                    top_k = getattr(
+                        moe_text_config(self.config), "num_experts_per_tok", 0
+                    )
+                    self.expert_dispatcher.set_grouped_decode(
+                        os.environ.get("MOE_GROUPED_DECODE", "1") != "0",
+                        int(top_k or 0),
+                    )
 
                 for name, param in model.named_parameters(recurse=True):
                     # remove base_model_prefix from self.name_id_map

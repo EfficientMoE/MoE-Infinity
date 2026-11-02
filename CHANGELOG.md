@@ -8,6 +8,12 @@ All notable changes to MoE-Infinity will be documented in this file.
 - Expert-cache simulator: `extract_access_sequence` / `vectorized_access_sequence` with `include_prefill=False` now drop every non-decode record (by SGLang `forward_mode`), not just `records[0]`. Merged multi-request streams (`convert_sglang_traces --merge`) previously leaked one prefill pass per request into the "decode" stream — 52% of the accesses of the published Qwen3-30B-A3B and Qwen3-235B real-trace sweeps — which inflated LRU and Belady at small capacities (e.g. Qwen3-30B-A3B at 256 entries: LRU 0.4565 -> 0.0000, Belady 0.7028 -> 0.5013 on the decode-only stream). Records without `forward_mode` keep the old behaviour. Corrected tables: `benchmarks/cache_simulator/research/decode_policy_study.md`.
 
 ### Changed
+- Decode-sized MoE layers (<= 256 tokens) run every GPU-resident BF16
+  gated-SiLU expert in one grouped kernel pair instead of one CUTLASS call per
+  expert (routing-weight multiply and scatter-add fused, no per-expert host
+  sync); experts still being fetched keep the per-expert path. 1.3-3.9x
+  faster MoE layers at decode for the Qwen3 / Qwen3.5 family on sm_120.
+  `MOE_GROUPED_DECODE=0` restores per-expert execution.
 - The non-MLA paged KV cache now allocates one plane per decoder layer
   (previously all layers aliased one plane). Memory use for the paged KV
   cache grows by the layer count; deployments tuned to the undersized cache
