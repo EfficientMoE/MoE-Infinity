@@ -66,13 +66,13 @@ __device__ __forceinline__ void mma_bf16_16816(float (&c)[4],
 
 template <int WARPS, int MAXU, int MT>
 __global__ void __launch_bounds__(WARPS * 32)
-    mxfp4_gemv_mma_kernel(const __nv_bfloat16* __restrict__ x,
-                          const uint8_t* __restrict__ w,
-                          const uint8_t* __restrict__ s,
-                          const __nv_bfloat16* __restrict__ bias,
-                          __nv_bfloat16* __restrict__ out, int M, int N, int K,
-                          int64_t stride_xm, int64_t stride_wn,
-                          int64_t stride_sn, int64_t stride_om) {
+    mxfp4_gemv_sm120_kernel(const __nv_bfloat16* __restrict__ x,
+                            const uint8_t* __restrict__ w,
+                            const uint8_t* __restrict__ s,
+                            const __nv_bfloat16* __restrict__ bias,
+                            __nv_bfloat16* __restrict__ out, int M, int N,
+                            int K, int64_t stride_xm, int64_t stride_wn,
+                            int64_t stride_sn, int64_t stride_om) {
   // MT m16 tiles (16 * MT weight rows) per CTA share each B fragment.
   constexpr int RH = 2 * MT;  // row halves: rows r + 8 * h, h < RH
   const int lane = threadIdx.x & 31;
@@ -179,7 +179,7 @@ __global__ void __launch_bounds__(WARPS * 32)
 
 // Returns false (and launches nothing) when the shape / alignment is outside
 // what the kernel supports; the caller then uses the Triton path.
-bool mxfp4_gemv_small_launch(const void* x, const void* w, const void* s,
+bool mxfp4_gemv_sm120_launch(const void* x, const void* w, const void* s,
                              const void* bias, void* out, int M, int N, int K,
                              int64_t stride_xm, int64_t stride_wn,
                              int64_t stride_sn, int64_t stride_om, int variant,
@@ -194,7 +194,7 @@ bool mxfp4_gemv_small_launch(const void* x, const void* w, const void* s,
   const auto* bb = static_cast<const __nv_bfloat16*>(bias);
   auto* ob = static_cast<__nv_bfloat16*>(out);
 #define MXFP4_GEMV_LAUNCH(W, U, T)                                      \
-  mxfp4_gemv_mma_kernel<W, U, T>                                        \
+  mxfp4_gemv_sm120_kernel<W, U, T>                                      \
       <<<(N + 16 * T - 1) / (16 * T), W * 32, 0, stream>>>(             \
           xb, wb, sb, bb, ob, M, N, K, stride_xm, stride_wn, stride_sn, \
           stride_om)

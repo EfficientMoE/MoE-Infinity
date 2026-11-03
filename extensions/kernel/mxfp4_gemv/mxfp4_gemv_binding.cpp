@@ -6,7 +6,9 @@
 
 #include <optional>
 
-bool mxfp4_gemv_small_launch(const void* x, const void* w, const void* s,
+#include "../hw_profile.h"
+
+bool mxfp4_gemv_sm120_launch(const void* x, const void* w, const void* s,
                              const void* bias, void* out, int M, int N, int K,
                              int64_t stride_xm, int64_t stride_wn,
                              int64_t stride_sn, int64_t stride_om, int variant,
@@ -25,6 +27,11 @@ bool mxfp4_gemv_small(const torch::Tensor& x, const torch::Tensor& w,
       s.dim() != 2 || x.stride(1) != 1 || w.stride(1) != 1 ||
       s.stride(1) != 1 || out.stride(1) != 1)
     return false;
+  // SM120 instructions + RTX PRO 6000 tuning: decline everywhere else.
+  const int dev = x.get_device();
+  if (!moe_infinity::hw::Supports(moe_infinity::hw::Gate::kSm120, dev) ||
+      !moe_infinity::hw::Supports(moe_infinity::hw::Gate::kRtxPro6000, dev))
+    return false;
   const int64_t M = x.size(0), K = x.size(1), N = w.size(0);
   if (w.size(1) * 2 != K || s.size(0) != N || s.size(1) * 32 != K ||
       out.size(0) != M || out.size(1) != N)
@@ -37,7 +44,7 @@ bool mxfp4_gemv_small(const torch::Tensor& x, const torch::Tensor& w,
     b = bias->data_ptr();
   }
   const at::cuda::CUDAGuard guard(x.device());
-  return mxfp4_gemv_small_launch(
+  return mxfp4_gemv_sm120_launch(
       x.data_ptr(), w.data_ptr(), s.data_ptr(), b, out.data_ptr(), (int)M,
       (int)N, (int)K, x.stride(0), w.stride(0), s.stride(0), out.stride(0),
       (int)variant, at::cuda::getCurrentCUDAStream());
@@ -46,5 +53,6 @@ bool mxfp4_gemv_small(const torch::Tensor& x, const torch::Tensor& w,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("mxfp4_gemv_small", &mxfp4_gemv_small, py::arg("x"), py::arg("w"),
         py::arg("s"), py::arg("bias"), py::arg("out"), py::arg("variant") = 1,
-        "Small-M (<= 8) MXFP4 x BF16 GEMM, full-K strip per CTA (sm_120a)");
+        "Small-M (<= 8) MXFP4 x BF16 GEMM, full-K strip per CTA; SM120 + "
+        "RTX_PRO_6000 gated, returns false elsewhere");
 }

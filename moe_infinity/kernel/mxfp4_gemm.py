@@ -1,5 +1,13 @@
 """Fused MXFP4 dequantization + GEMM Triton kernels.
 
+HARDWARE-GATED (SM120 + RTX_PRO_6000, docs/hardware-gated-kernels.md). The
+kernels below use the sm_120a-only ``cvt.rn.f16x2.e2m1x2`` E2M1 conversion,
+and every launch table (``_pro6000_config``: tiles, split-K, stream-K grid,
+small-M CUDA variant) was tuned on the RTX PRO 6000 Blackwell (188 SMs,
+128 MiB L2, 99 KiB shared memory per block). ``fused_mxfp4_gemm`` runs them
+only when ``hw_profile.supports`` passes both gates; every other GPU runs the
+previous implementation, ``mxfp4_gemm_generic.fused_mxfp4_gemm_generic``.
+
 Ported from BatchGen (EfficientMoE/BatchGen) for MoE-Infinity expert offloading,
 reworked for sm_120 (EfficientMoE/MoE-Infinity#312).
 
@@ -14,11 +22,11 @@ Two kernels, picked per call from a static table keyed on a bucketed M (no
 autotuning on the request path; ``warmup_mxfp4_gemm`` pre-compiles every
 bucket):
 
-    * ``_mxfp4_gemv_kernel`` (M == 1): register-only weight streaming. Each
+    * ``_mxfp4_gemv_sm120_kernel`` (M == 1): register-only weight streaming. Each
       thread owns 4-byte slices of 16-byte scale groups, decodes E2M1 with the
       native ``cvt.rn.f16x2.e2m1x2`` into fp32 and FMAs against the bf16
       activation pairs read in the same per-thread layout.
-    * ``_mxfp4_mma_kernel`` (M > 1): tensor-core GEMM with BLOCK_K >= 64 (one
+    * ``_mxfp4_mma_sm120_kernel`` (M > 1): tensor-core GEMM with BLOCK_K >= 64 (one
       scale per 32 broadcast in registers), bit-trick E2M1 -> BF16 decode and an
       N-fastest program order so every M band of activations is read from DRAM
       once while the (L2-resident) weights are swept.
@@ -34,6 +42,9 @@ from typing import Dict, Optional, Tuple
 import torch
 import triton
 import triton.language as tl
+
+from moe_infinity.kernel.mxfp4_gemm_generic import fused_mxfp4_gemm_generic
+from moe_infinity.utils.hw_profile import RTX_PRO_6000, SM120, supports
 
 
 @triton.jit
@@ -164,17 +175,6 @@ def _e2m1_to_bf16_cvt(w, s):
 
 
 @triton.jit
-def _e2m1_bits_f32(n):
-    """Portable decode: E2M1 nibble (int32, 0..15) -> fp32 bit pattern."""
-    v = n & 7
-    # v >= 2: 2^(e-1) * (1 + m/2) is fp32 exponent 126 + e, mantissa MSB m.
-    bits = (v << 22) + (126 << 23)
-    bits = tl.where(v == 1, 126 << 23, bits)  # 0.5
-    bits = tl.where(v == 0, 0, bits)
-    return bits | ((n & 8) << 28)
-
-
-@triton.jit
 def _epilogue(
     acc,
     offs_m,
@@ -215,7 +215,7 @@ def _epilogue(
 
 
 @triton.jit(do_not_specialize=["M"])
-def _mxfp4_gemv_kernel(
+def _mxfp4_gemv_sm120_kernel(
     x_ptr,  # [1, K//2] int32 view of the bf16 activations (pairs)
     w_ptr,  # [N, K//2] uint8
     s_ptr,  # [N, K//32] uint8
@@ -234,7 +234,6 @@ def _mxfp4_gemv_kernel(
     BLOCK_G: tl.constexpr,  # scale groups (32 values / 16 bytes) per step
     SPLIT_K: tl.constexpr,
     G_PER_SPLIT: tl.constexpr,
-    NATIVE_E2M1: tl.constexpr,  # sm_100a+ cvt.rn.f16x2.e2m1x2
 ):
     pid_n = tl.program_id(0)
     pid_k = tl.program_id(1)
@@ -260,12 +259,7 @@ def _mxfp4_gemv_kernel(
         )
         s = tl.load(s_ptr + rn * stride_sn + g, mask=gm, other=0)
         scale = (s.to(tl.int32) << 23).to(tl.float32, bitcast=True)
-        if NATIVE_E2M1:
-            lo, hi = _e2m1_to_f32(w)
-        else:
-            w32 = w.to(tl.int32)
-            lo = _e2m1_bits_f32(w32).to(tl.float32, bitcast=True)
-            hi = _e2m1_bits_f32(w32 >> 4).to(tl.float32, bitcast=True)
+        lo, hi = _e2m1_to_f32(w)
         xp = tl.load(
             x_ptr + (g * 16)[:, None] + j[None, :], mask=gm[:, None], other=0
         )
@@ -308,7 +302,7 @@ def _mma_k_range(
     stride_sn,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    NATIVE_BF16X2: tl.constexpr,
+    CVT_DECODE: tl.constexpr,
 ):
     """acc += x[rm, k_lo:k_hi] @ dequant(w[rn, k_lo:k_hi]).T"""
     BKH: tl.constexpr = BLOCK_K // 2
@@ -335,24 +329,17 @@ def _mma_k_range(
             mask=kk[None, :] < k_hi,
             other=0.0,
         )
-        if NATIVE_BF16X2 == 2:
+        if CVT_DECODE:
             lo, hi = _e2m1_to_bf16_cvt(w, s)
-        elif NATIVE_BF16X2:
-            lo, hi = _e2m1_to_bf16(w, s)
         else:
-            w32 = w.to(tl.int32)
-            scale = (s.to(tl.int32) << 23).to(tl.float32, bitcast=True)
-            lo = _e2m1_bits_f32(w32).to(tl.float32, bitcast=True) * scale
-            hi = _e2m1_bits_f32(w32 >> 4).to(tl.float32, bitcast=True) * scale
-            lo = lo.to(tl.bfloat16)
-            hi = hi.to(tl.bfloat16)
+            lo, hi = _e2m1_to_bf16(w, s)
         wb = tl.join(lo, hi).reshape(BLOCK_N, BLOCK_K)
         acc = tl.dot(x, tl.trans(wb), acc)
     return acc
 
 
 @triton.jit(do_not_specialize=["M"])
-def _mxfp4_mma_kernel(
+def _mxfp4_mma_sm120_kernel(
     x_ptr,  # [M, K]    bf16
     w_ptr,  # [N, K//2] uint8
     s_ptr,  # [N, K//32] uint8
@@ -373,7 +360,7 @@ def _mxfp4_mma_kernel(
     BLOCK_K: tl.constexpr,
     SPLIT_K: tl.constexpr,
     K_PER_SPLIT: tl.constexpr,
-    NATIVE_BF16X2: tl.constexpr,  # sm_90+ packed bf16 multiply
+    CVT_DECODE: tl.constexpr,  # cvt.rn.f16x2.e2m1x2 vs bit-trick decode
 ):
     pid = tl.program_id(0)
     pid_k = tl.program_id(1)
@@ -400,7 +387,7 @@ def _mxfp4_mma_kernel(
         stride_sn,
         BLOCK_N,
         BLOCK_K,
-        NATIVE_BF16X2,
+        CVT_DECODE,
     )
     _epilogue(
         acc,
@@ -427,7 +414,7 @@ def _first_cta(i, T, G):
 
 
 @triton.jit(do_not_specialize=["M", "DP_TILES"])
-def _mxfp4_mma_streamk_kernel(
+def _mxfp4_mma_streamk_sm120_kernel(
     x_ptr,
     w_ptr,
     s_ptr,
@@ -447,7 +434,7 @@ def _mxfp4_mma_streamk_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    NATIVE_BF16X2: tl.constexpr,
+    CVT_DECODE: tl.constexpr,
 ):
     """Persistent stream-K schedule: the tiles * k_steps iterations are cut
     into one equal, contiguous range per resident CTA, so the last wave is
@@ -498,7 +485,7 @@ def _mxfp4_mma_streamk_kernel(
             stride_sn,
             BLOCK_N,
             BLOCK_K,
-            NATIVE_BF16X2,
+            CVT_DECODE,
         )
         mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
         if (ks0 != 0) or (ks1 != KS):
@@ -555,10 +542,10 @@ def _split_for(tiles: int, k_steps: int, target_ctas: int) -> int:
     return max(1, min(round(target_ctas / tiles), k_steps // 2, 16))
 
 
-def _config(bucket: int, N: int, K: int, num_sms: int) -> dict:
-    """Launch config for an M bucket. Tuned on GPT-OSS shapes (N in {2880,
-    5760}, K = 2880) on a 188-SM RTX PRO 6000 Blackwell; the rules scale the
-    split-K factor with the SM count for other GPUs / shapes."""
+def _pro6000_config(bucket: int, N: int, K: int, num_sms: int) -> dict:
+    """Launch config for an M bucket (RTX_PRO_6000 table). Tuned on GPT-OSS
+    shapes (N in {2880, 5760}, K = 2880) on the 188-SM RTX PRO 6000
+    Blackwell; only used behind ``_pro6000_sm120``."""
     if bucket == 1:
         # Weight streaming: many small CTAs, one K pass each when it fits.
         many = triton.cdiv(N, 2) >= 2048
@@ -646,25 +633,13 @@ _CONFIG_CACHE: Dict[Tuple[int, int, int, int], dict] = {}
 # Per (device, stream) split-K arrival counters; the kernels reset them to 0.
 _COUNTERS: Dict[Tuple[int, int], torch.Tensor] = {}
 _WARM: set = set()
-_CAPABILITY: Dict[int, Tuple[int, int]] = {}
-# Tests flip this to exercise the portable (non-inline-asm) decode on sm_120.
-_FORCE_PORTABLE_DECODE = False
-
-
-def _capability(device: torch.device) -> Tuple[int, int]:
-    idx = device.index or 0
-    cap = _CAPABILITY.get(idx)
-    if cap is None:
-        cap = torch.cuda.get_device_capability(device)
-        _CAPABILITY[idx] = cap
-    return (0, 0) if _FORCE_PORTABLE_DECODE else cap
 
 
 def _get_config(M: int, N: int, K: int, device: torch.device) -> dict:
     key = (_m_bucket(M), N, K, device.index or 0)
     cfg = _CONFIG_CACHE.get(key)
     if cfg is None:
-        cfg = _config(key[0], N, K, _num_sms(device))
+        cfg = _pro6000_config(key[0], N, K, _num_sms(device))
         _CONFIG_CACHE[key] = cfg
     return cfg
 
@@ -705,9 +680,7 @@ def _launch_streamk(
     bm, bn = cfg["BLOCK_M"], cfg["BLOCK_N"]
     tiles = triton.cdiv(M, bm) * triton.cdiv(N, bn)
     iters = tiles * triton.cdiv(K, cfg["BLOCK_K"])
-    native = int(_capability(device)[0] >= 9)
-    if native and cfg.get("CVT", False) and _capability(device)[0] >= 10:
-        native = 2
+    native = bool(cfg.get("CVT", False))
     key = (
         bm,
         bn,
@@ -720,7 +693,9 @@ def _launch_streamk(
         device.index,
     )
     resident = _RESIDENT.get(key)
-    launch = _mxfp4_mma_streamk_kernel.warmup if resident is None else None
+    launch = (
+        _mxfp4_mma_streamk_sm120_kernel.warmup if resident is None else None
+    )
     grid = (
         1
         if resident is None
@@ -765,7 +740,7 @@ def _launch_streamk(
         BLOCK_M=bm,
         BLOCK_N=bn,
         BLOCK_K=cfg["BLOCK_K"],
-        NATIVE_BF16X2=native,
+        CVT_DECODE=native,
         num_warps=cfg["num_warps"],
         num_stages=cfg["num_stages"],
     )
@@ -780,7 +755,7 @@ def _launch_streamk(
             x_2d, weight_packed, weight_scales, bias_arg, output, cfg, has_bias
         )
         return
-    _mxfp4_mma_streamk_kernel[(grid,)](*args, **meta)
+    _mxfp4_mma_streamk_sm120_kernel[(grid,)](*args, **meta)
 
 
 def _launch(
@@ -818,7 +793,7 @@ def _launch(
             triton.cdiv(triton.cdiv(num_g, cfg["BLOCK_G"]), split)
             * cfg["BLOCK_G"]
         )
-        _mxfp4_gemv_kernel[(tiles, split)](
+        _mxfp4_gemv_sm120_kernel[(tiles, split)](
             x_2d.view(torch.int32),
             weight_packed,
             weight_scales,
@@ -837,7 +812,6 @@ def _launch(
             BLOCK_G=cfg["BLOCK_G"],
             SPLIT_K=split,
             G_PER_SPLIT=g_per_split,
-            NATIVE_E2M1=_capability(x_2d.device)[0] >= 10,
             num_warps=cfg["num_warps"],
             num_stages=1,
         )
@@ -845,7 +819,7 @@ def _launch(
         k_per_split = (
             triton.cdiv(triton.cdiv(K, cfg["BLOCK_K"]), split) * cfg["BLOCK_K"]
         )
-        _mxfp4_mma_kernel[(tiles, split)](
+        _mxfp4_mma_sm120_kernel[(tiles, split)](
             x_2d,
             weight_packed,
             weight_scales,
@@ -866,41 +840,39 @@ def _launch(
             BLOCK_K=cfg["BLOCK_K"],
             SPLIT_K=split,
             K_PER_SPLIT=k_per_split,
-            NATIVE_BF16X2=(
-                2
-                if cfg.get("CVT", False) and _capability(x_2d.device)[0] >= 10
-                else int(_capability(x_2d.device)[0] >= 9)
-            ),
+            CVT_DECODE=bool(cfg.get("CVT", False)),
             num_warps=cfg["num_warps"],
             num_stages=cfg["num_stages"],
         )
 
 
-_SMALL_M_EXT = None  # moe_infinity._mxfp4_gemv, False when unavailable
+_SMALL_M_SM120_EXT = None  # moe_infinity._mxfp4_gemv, False when unavailable
 # Tests flip this to force the Triton path for M = 2..8.
-_DISABLE_SMALL_M_CUDA = False
+_DISABLE_SMALL_M_SM120 = False
 
 
-def _small_m_ext():
-    global _SMALL_M_EXT
-    if _SMALL_M_EXT is None:
+def _small_m_sm120_ext():
+    global _SMALL_M_SM120_EXT
+    if _SMALL_M_SM120_EXT is None:
         try:
             from moe_infinity import _mxfp4_gemv  # sm_120a build only
 
-            _SMALL_M_EXT = _mxfp4_gemv
+            _SMALL_M_SM120_EXT = _mxfp4_gemv
         except ImportError:
-            _SMALL_M_EXT = False
-    return _SMALL_M_EXT
+            _SMALL_M_SM120_EXT = False
+    return _SMALL_M_SM120_EXT
 
 
-def _small_m_cuda(x_2d, weight_packed, weight_scales, bias, output) -> bool:
+def _small_m_sm120_cuda(
+    x_2d, weight_packed, weight_scales, bias, output
+) -> bool:
     """M = 2..8 decode: CUDA kernel with a full-K weight strip per CTA (warps
     split K and reduce in shared memory), so there is no cross-CTA split-K
     fix-up. Returns False when the extension is missing or the call is
     outside its contract; the Triton kernels then run."""
-    if _DISABLE_SMALL_M_CUDA or _capability(x_2d.device)[0] < 10:
+    if _DISABLE_SMALL_M_SM120:
         return False
-    ext = _small_m_ext()
+    ext = _small_m_sm120_ext()
     if not ext:
         return False
     # variant (see mxfp4_gemv.cu): 1 = 8 warps x 16 rows, 2 = 16 warps x 16
@@ -909,6 +881,22 @@ def _small_m_cuda(x_2d, weight_packed, weight_scales, bias, output) -> bool:
     return ext.mxfp4_gemv_small(
         x_2d, weight_packed, weight_scales, bias, output, variant
     )
+
+
+_GATED: Dict[int, bool] = {}
+
+
+def _pro6000_sm120(device: torch.device) -> bool:
+    """SM120 + RTX_PRO_6000 gate for this module's kernels, evaluated once per
+    device and cached."""
+    if device.type != "cuda":
+        return False
+    idx = torch.cuda.current_device() if device.index is None else device.index
+    ok = _GATED.get(idx)
+    if ok is None:
+        ok = supports(SM120, idx) and supports(RTX_PRO_6000, idx)
+        _GATED[idx] = ok
+    return ok
 
 
 def warmup_mxfp4_gemm(
@@ -926,6 +914,8 @@ def warmup_mxfp4_gemm(
     device = torch.device(device or "cuda")
     if device.index is None:
         device = torch.device("cuda", torch.cuda.current_device())
+    if not _pro6000_sm120(device):
+        return  # the generic kernel autotunes on its own
     key = (N, K, device.index, has_bias)
     if key in _WARM:
         return
@@ -969,6 +959,8 @@ def fused_mxfp4_gemm(
     Returns:
         Output ``[*, N]`` bf16
     """
+    if not _pro6000_sm120(x.device):
+        return fused_mxfp4_gemm_generic(x, weight_packed, weight_scales, bias)
     orig_shape = x.shape
     x_2d = x.reshape(-1, x.shape[-1]).contiguous()
     M, K = x_2d.shape
@@ -998,7 +990,7 @@ def fused_mxfp4_gemm(
     if M == 0:
         return output.reshape(*orig_shape[:-1], N)
 
-    if 2 <= M <= 8 and _small_m_cuda(
+    if 2 <= M <= 8 and _small_m_sm120_cuda(
         x_2d, weight_packed, weight_scales, bias, output
     ):
         return output.reshape(*orig_shape[:-1], N)

@@ -7,6 +7,20 @@ from tests.python.ops.conftest import requires_cuda, requires_triton
 torch = pytest.importorskip("torch")
 
 
+def _gated():
+    from moe_infinity.kernel import mxfp4_gemm as mg
+
+    return torch.cuda.is_available() and mg._pro6000_sm120(torch.device("cuda"))
+
+
+# Tests of the SM120 / RTX PRO 6000 kernels themselves (the public entry
+# point is covered on every GPU by the parity tests below).
+requires_pro6000 = pytest.mark.skipif(
+    not _gated(),
+    reason="needs an RTX PRO 6000 Blackwell (SM120 + PRO6000 gate)",
+)
+
+
 def _weights(N, K, lo=118, hi=136, device="cuda"):
     packed = torch.randint(
         0, 256, (N, K // 2), dtype=torch.uint8, device=device
@@ -87,24 +101,6 @@ def test_fused_mxfp4_gemm_every_e2m1_code_and_scale():
 
 @requires_cuda
 @requires_triton
-@pytest.mark.parametrize("M", [1, 3, 300])
-def test_portable_decode_matches_reference(monkeypatch, M):
-    """The pure-Triton E2M1 decode used below sm_90 / sm_100."""
-    from moe_infinity.kernel import mxfp4_gemm as mg
-
-    monkeypatch.setattr(mg, "_FORCE_PORTABLE_DECODE", True)
-    N, K = 192, 2880
-    packed, scales = _weights(N, K, lo=32, hi=224)
-    bias = torch.randn(N, dtype=torch.bfloat16, device="cuda")
-    x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
-    _check(
-        mg.fused_mxfp4_gemm(x, packed, scales, bias),
-        _reference(x, packed, scales, bias),
-    )
-
-
-@requires_cuda
-@requires_triton
 def test_fused_mxfp4_gemm_batched_and_unaligned_input():
     from moe_infinity.kernel.mxfp4_gemm import fused_mxfp4_gemm
 
@@ -124,6 +120,7 @@ def test_fused_mxfp4_gemm_batched_and_unaligned_input():
     assert fused_mxfp4_gemm(x3[:0], packed, scales).shape == (0, 3, N)
 
 
+@requires_pro6000
 @requires_cuda
 @requires_triton
 @pytest.mark.parametrize("M", [1, 5, 40])
@@ -146,6 +143,7 @@ def test_split_k_is_deterministic_and_reusable(M):
     assert torch.equal(again, first)
 
 
+@requires_pro6000
 @requires_cuda
 @requires_triton
 @pytest.mark.parametrize(
@@ -157,20 +155,23 @@ def test_small_m_cuda_kernel_matches_triton_and_reference(monkeypatch, N, K, M):
     CTA) agrees with the reference and with the Triton fallback."""
     from moe_infinity.kernel import mxfp4_gemm as mg
 
-    if not mg._small_m_ext() or torch.cuda.get_device_capability()[0] < 10:
+    if (
+        not mg._small_m_sm120_ext()
+        or torch.cuda.get_device_capability()[0] < 10
+    ):
         pytest.skip("moe_infinity._mxfp4_gemv needs an sm_100a+ build")
     packed, scales = _weights(N, K, lo=100, hi=150)
     bias = torch.randn(N, dtype=torch.bfloat16, device="cuda")
     x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
     out = torch.empty(M, N, dtype=torch.bfloat16, device="cuda")
-    assert mg._small_m_cuda(x, packed, scales, bias, out)
+    assert mg._small_m_sm120_cuda(x, packed, scales, bias, out)
     ref = _reference(x, packed, scales, bias)
     _check(out, ref)
-    monkeypatch.setattr(mg, "_DISABLE_SMALL_M_CUDA", True)
+    monkeypatch.setattr(mg, "_DISABLE_SMALL_M_SM120", True)
     _check(mg.fused_mxfp4_gemm(x, packed, scales, bias), ref)
     # outside the contract -> declines without launching
     big = torch.randn(9, K, dtype=torch.bfloat16, device="cuda")
-    assert not mg._small_m_ext().mxfp4_gemv_small(
+    assert not mg._small_m_sm120_ext().mxfp4_gemv_small(
         big,
         packed,
         scales,
@@ -180,6 +181,7 @@ def test_small_m_cuda_kernel_matches_triton_and_reference(monkeypatch, N, K, M):
     )
 
 
+@requires_pro6000
 @requires_cuda
 @requires_triton
 @pytest.mark.parametrize("dp", ["full", "minus1", "none"])
@@ -212,6 +214,7 @@ def test_stream_k_schedules_match_reference(dp, M):
     assert torch.equal(again, out)
 
 
+@requires_pro6000
 @requires_cuda
 @requires_triton
 def test_no_compile_or_autotune_for_unseen_m_after_warmup():
@@ -226,9 +229,9 @@ def test_no_compile_or_autotune_for_unseen_m_after_warmup():
         return sum(
             len(cache)
             for kern in (
-                mg._mxfp4_gemv_kernel,
-                mg._mxfp4_mma_kernel,
-                mg._mxfp4_mma_streamk_kernel,
+                mg._mxfp4_gemv_sm120_kernel,
+                mg._mxfp4_mma_sm120_kernel,
+                mg._mxfp4_mma_streamk_sm120_kernel,
             )
             for cache, *_ in kern.device_caches.values()
         )
@@ -239,7 +242,7 @@ def test_no_compile_or_autotune_for_unseen_m_after_warmup():
         mg.fused_mxfp4_gemm(x, packed, scales, bias)
     torch.cuda.synchronize()
     assert n_compiled() == before
-    assert not hasattr(mg._mxfp4_mma_kernel, "configs")  # not autotuned
+    assert not hasattr(mg._mxfp4_mma_sm120_kernel, "configs")  # not autotuned
 
 
 def test_m_bucket_and_configs_cpu():
@@ -255,7 +258,7 @@ def test_m_bucket_and_configs_cpu():
     ]
     for bucket in (1 << i for i in range(13)):
         for N, K in ((5760, 2880), (2880, 2880), (64, 128)):
-            cfg = mg._config(bucket, N, K, 188)
+            cfg = mg._pro6000_config(bucket, N, K, 188)
             if bucket == 1:
                 assert cfg["kind"] == "gemv"
             elif bucket >= 1024 and N < 4096:
@@ -263,3 +266,85 @@ def test_m_bucket_and_configs_cpu():
             else:
                 assert cfg["kind"] == "mma"
             assert cfg["SPLIT_K"] >= 1
+
+
+@requires_cuda
+@requires_triton
+@pytest.mark.parametrize("M", [1, 5, 300])
+def test_generic_path_matches_reference(M):
+    """The previous kernel, which every non-RTX-PRO-6000 GPU runs."""
+    from moe_infinity.kernel.mxfp4_gemm_generic import fused_mxfp4_gemm_generic
+
+    N, K = 96, 256
+    packed, scales = _weights(N, K)
+    bias = torch.randn(N, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    _check(
+        fused_mxfp4_gemm_generic(x, packed, scales, bias),
+        _reference(x, packed, scales, bias),
+    )
+
+
+_FAKE_GPUS = {
+    "rtx_pro_6000": dict(mp=188, l2=128, cap=(12, 0)),
+    "rtx_5090": dict(mp=170, l2=96, cap=(12, 0)),
+    "h100": dict(mp=132, l2=50, cap=(9, 0)),
+}
+
+
+@pytest.mark.parametrize("name", list(_FAKE_GPUS))
+def test_dispatch_is_hardware_gated_cpu(monkeypatch, name):
+    """Only the RTX PRO 6000 (SM120 + RTX_PRO_6000) takes the new kernels;
+    an H100 and an RTX 5090 run the previous (generic) implementation."""
+    from types import SimpleNamespace
+
+    from moe_infinity.kernel import mxfp4_gemm as mg
+    from moe_infinity.utils import hw_profile
+
+    g = _FAKE_GPUS[name]
+    props = SimpleNamespace(
+        major=g["cap"][0],
+        minor=g["cap"][1],
+        multi_processor_count=g["mp"],
+        L2_cache_size=g["l2"] * 1024 * 1024,
+        shared_memory_per_block_optin=99 * 1024
+        if g["cap"][0] == 12
+        else 227 * 1024,
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda i: props)
+    monkeypatch.delenv("MOE_INFINITY_UNVALIDATED_HW", raising=False)
+    monkeypatch.setattr(mg, "_GATED", {})
+    hw_profile._gates.cache_clear()
+    try:
+        calls = []
+        monkeypatch.setattr(
+            mg,
+            "fused_mxfp4_gemm_generic",
+            lambda *a, **k: calls.append("generic") or "generic",
+        )
+        monkeypatch.setattr(
+            mg, "warmup_mxfp4_gemm", lambda *a, **k: calls.append("gated")
+        )
+        monkeypatch.setattr(
+            mg, "_launch", lambda *a, **k: calls.append("launch")
+        )
+        monkeypatch.setattr(mg, "_small_m_sm120_cuda", lambda *a, **k: False)
+        x = torch.zeros(3, 64, dtype=torch.bfloat16)
+        monkeypatch.setattr(
+            mg,
+            "_pro6000_sm120",
+            lambda d, f=mg._pro6000_sm120: f(torch.device("cuda", 0)),
+        )
+        w = torch.zeros(16, 32, dtype=torch.uint8)
+        s = torch.zeros(16, 2, dtype=torch.uint8)
+        out = mg.fused_mxfp4_gemm(x, w, s)
+        gated = name == "rtx_pro_6000"
+        assert mg._GATED[0] is gated
+        if gated:
+            assert calls[:2] == ["gated", "launch"]
+        else:
+            assert calls == ["generic"] and out == "generic"
+    finally:
+        hw_profile._gates.cache_clear()
