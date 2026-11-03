@@ -991,15 +991,21 @@ def _gdn_fla_builder(T, Hv, dk, dv, fused=False):
         v = torch.randn(1, T, Hv, dv, device="cuda", dtype=torch.bfloat16)
         g = -torch.rand(1, T, Hv, device="cuda", dtype=torch.float32)
         beta = torch.rand(1, T, Hv, device="cuda", dtype=torch.bfloat16)
-        return lambda: chunk_gated_delta_rule(
-            q,
-            k,
-            v,
-            g=g,
-            beta=beta,
-            output_final_state=True,
-            use_qk_l2norm_in_kernel=True,
-        )
+
+        def run():
+            # opt-in CUDA recurrence path is chosen per call
+            os.environ["MOE_LINEAR_ATTN_CUDA"] = "1" if fused == "cuda" else "0"
+            return chunk_gated_delta_rule(
+                q,
+                k,
+                v,
+                g=g,
+                beta=beta,
+                output_final_state=True,
+                use_qk_l2norm_in_kernel=True,
+            )
+
+        return run
 
     return build
 
@@ -1092,6 +1098,10 @@ def gdn_cases(model_keys: list[str] | None = None) -> list[Case]:
                 ("gdn_torch", _gdn_builder),
                 ("gdn_fla", _gdn_fla_builder),
                 ("gdn_fused", functools.partial(_gdn_fla_builder, fused=True)),
+                (
+                    "gdn_fused_cuda",
+                    functools.partial(_gdn_fla_builder, fused="cuda"),
+                ),
             ):
                 if impl == "gdn_torch" and T > 9216:
                     continue

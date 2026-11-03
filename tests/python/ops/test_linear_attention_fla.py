@@ -196,6 +196,44 @@ def test_gdn_fused_matches_torch_reference(T, norm, decay):
     _assert_close(ht, ht_ref, atol=2e-2, rtol=2e-2, frac=0.999)
 
 
+@pytest.mark.parametrize("use_cuda", [False, True])
+@pytest.mark.parametrize("T", [1000, 9216])
+def test_gdn_blocked_matches_torch_reference(T, use_cuda):
+    """L2-blocked GDN (prep / aux / recurrence per 2048-token block), Triton
+    or JIT-built CUDA recurrence, slow decay so state crosses the blocks."""
+    import shutil
+
+    from fla.ops.utils import chunk_local_cumsum
+    from fla.ops.utils.constant import RCP_LN2
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        torch_chunk_gated_delta_rule,
+    )
+
+    from moe_infinity.kernel.gdn_blocked import chunk_gated_delta_rule_blocked
+
+    if use_cuda:
+        from moe_infinity.kernel import gdn_recur_cuda
+
+        if shutil.which("nvcc") is None or not gdn_recur_cuda.available():
+            pytest.skip("nvcc / CUDA recurrence build unavailable")
+    q, k, v, g, beta, h0 = _gdn_inputs(1, T, 32, 128, 128, decay=0.005)
+    gc = chunk_local_cumsum(g, chunk_size=64, scale=RCP_LN2)
+    o, ht = chunk_gated_delta_rule_blocked(
+        q, k, v, gc, beta, 128**-0.5, h0, True, True, 2048, use_cuda=use_cuda
+    )
+    kw = dict(
+        initial_state=h0, output_final_state=True, use_qk_l2norm_in_kernel=True
+    )
+    ref = inspect.unwrap(torch_chunk_gated_delta_rule)
+    o_ref, ht_ref = ref(q, k, v, g=g, beta=beta, **kw)
+    _assert_close(o, o_ref, atol=2e-2, rtol=2e-2, frac=0.999)
+    _assert_close(ht, ht_ref, atol=2e-2, rtol=2e-2, frac=0.999)
+    o2, _ = chunk_gated_delta_rule_blocked(
+        q, k, v, gc, beta, 128**-0.5, h0, True, True, 2048, use_cuda=use_cuda
+    )
+    assert torch.equal(o, o2)
+
+
 def test_gdn_fused_is_deterministic():
     """Bitwise-identical outputs over repeated calls at a 9K, 128-CTA launch
     (the shape class of the sm_100/103 tl.dot recurrence race)."""

@@ -23,6 +23,9 @@ from typing import Callable
 import torch
 
 ENV_DISABLE = "MOE_LINEAR_ATTN_FUSED"
+# Opt-in: L2-blocked GDN prefill with the JIT-built CUDA recurrence
+# (gdn_blocked / csrc/gdn_recur.cu). First use compiles with nvcc (~1 min).
+ENV_CUDA = "MOE_LINEAR_ATTN_CUDA"
 # Below this many tokens per call the fused GDN path is not faster than fla
 # on sm_120 (2K: 209 vs 198 us; 9K: 861 vs 1128 us), so leave short
 # prefills on fla.
@@ -89,6 +92,27 @@ def chunk_gated_delta_rule_fused(
         scale = k.shape[-1] ** -0.5
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
     gc = chunk_local_cumsum(g.float(), chunk_size=64, scale=RCP_LN2)
+    if os.environ.get(ENV_CUDA, "0") == "1":
+        from moe_infinity.kernel import gdn_recur_cuda
+        from moe_infinity.kernel.gdn_blocked import (
+            chunk_gated_delta_rule_blocked,
+        )
+
+        if gdn_recur_cuda.available():
+            return chunk_gated_delta_rule_blocked(
+                q,
+                k,
+                v,
+                gc,
+                beta.contiguous(),
+                scale,
+                initial_state=None
+                if initial_state is None
+                else initial_state.contiguous(),
+                output_final_state=output_final_state,
+                norm_qk=use_qk_l2norm_in_kernel,
+                use_cuda=True,
+            )
     if use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q)[0]
     w, u, kn = gdn_fwd_prep(
