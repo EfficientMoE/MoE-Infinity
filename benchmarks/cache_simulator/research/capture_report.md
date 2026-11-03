@@ -1321,3 +1321,11 @@ and the three disclosed failed design iterations: `exp673-moei-costfit3/PREREG.m
 **Verdict: SAFETY-BROKEN** — the BO point (HL=160975, 4.9x center) degrades the mean hit rate vs center (-0.1234pp) and violates the no-harm barrier on the synthetic grid (see ADDENDUM21.md same-day correction). The center calibration stands; the BO objective overfit the worst case to two real traces.
 
 ## Addendum 22 (exp676 drift): DRIFT-SAFE — center bounds harm through mid-stream regime change (worst trans 0.781pp < 1.0 bar, post 0.264pp, max 1 switch/window, 16/16 cells, det + accounting clean). See ADDENDUM22.md.
+## Addendum 23 (exp677 W-sweep): W-SWEEP-SAFE — drift bounded at fast transitions
+
+W {1024..8192} locality-drop sweep: 12/12 cells inside bars; only nonzero
+transition deficit is W=4096/cap=4096 = 0.439pp. Monotonicity REFUTED —
+exposure peaks at W=RESEGMENT alignment (mid-transition arbitration on stale
+mass), faster blockwise shifts fully absorbed. Blockwise drift now bounded
+both sides (slow 0.781pp exp676 / fast 0.439pp exp677). Residual axis:
+sub-block intra-window shifts.
