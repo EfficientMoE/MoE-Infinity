@@ -40,21 +40,66 @@ points of each other.
 - **Batched decode** (several tokens per layer visit) weakens the cyclic-scan
   effect; the study did not measure it.
 
-## Prefetch is a separate decision
+## Prefetch: a separate policy, joined by an admission rule
 
-Giving LCNU the true routing of the current and next 8 layers adds at most
-0.7 points of hit rate: cross-layer routing prediction does not help pick
-eviction victims. Use it to prefetch, and choose the eviction policy
-independently. Which prefetcher pairs best with which evictor is open; see
-[`../auto_research_prefetch_eviction.md`](../auto_research_prefetch_eviction.md).
+From the round-2 study, [`prefetch_eviction_study.md`](./prefetch_eviction_study.md),
+on held-out requests with a PCIe 5.0 timing model:
+
+- **Choose the evictor and the prefetcher independently.** The best
+  evictor alone plus the best prefetcher alone is within 1.6% (Qwen3-30B-A3B)
+  and 1.0% (Qwen3-235B) of the jointly best pair on decode. Prefetch does not
+  change which evictor is best: keep LCNU.
+- **Prefetcher: cross-layer co-activation, one layer ahead.** Score the
+  experts of layer `L+1` by `P(e' at L+1 | experts just routed at L)`,
+  learned online from routing. The `hybrid` variant adds previous-token and
+  EMA terms with weights 1/1/16. Its recall@8 is 0.61 / 0.56, against 0.44 /
+  0.39 for previous-token reuse. Budget per layer: 4 below ~1.5x the working
+  set, 8 up to ~1/3 of the key space, 16 above.
+- **Do not use the same-expert-id rule** (today's `speculative_prefetch`).
+  Expert ids carry no meaning across layers; its precision is chance (0.06),
+  and it adds 5-27% stall.
+- **Admit prefetched experts outside the evictor.**
+  - `probation` for LCNU, LRU and LFU: stage them, drop them at the target
+    layer's gate if not routed, evict them first under pressure.
+  - A fixed `buffer` for W-TinyLFU and S3-FIFO.
+  - `do_no_harm` when the pair was not tuned together.
+  - Never same-queue with LCNU or LFU: they evict the prefetch before it is
+    used.
+- **Expect modest gains.** LCNU + co-activation cuts stall per token by
+  3-12% against LCNU alone (10-40% against LFU). One serial link can only
+  hide the per-token compute (9 / 21 ms). A perfect predictor would remove
+  54-94% at 5-8x the working set, where routing statistics capture under 10%
+  of it.
+- **Link scheduling matters as much as the policy.** Demand fetches must
+  overtake queued prefetches. Queued prefetches go earliest layer first and
+  are dropped once their layer has run.
+
+| Cache size | Evictor | Prefetcher (h, budget) | Admission |
+| --- | --- | --- | --- |
+| below the working set | LCNU | co-activation / hybrid (1, 4) | probation |
+| 1-3x the working set | LCNU | co-activation / hybrid (1, 4-8) | probation |
+| 5x the working set to 1/2 of the key space | LCNU | co-activation / hybrid (1-2, 8-16) | probation or pin |
+| prefill-heavy, above 1/3 of the key space | W-TinyLFU or LFU | previous-token / hybrid (1, 8-16) | probation, pin or buffer |
 
 ## In the simulator
 
 ```python
 from benchmarks.cache_simulator.policies import build_policy, simulate
+from benchmarks.cache_simulator.prefetchers import build_composed, build_prefetcher
 
 policy = build_policy("lcnu", 1024, num_layers=48, prior=8 / 128)
 hits, misses, hit_rate = simulate(policy, accesses)
+
+prefetcher = build_prefetcher(
+    "hybrid", horizon=1, budget=8, num_layers=48, num_experts=128,
+    alpha=0.4, weights=(1, 1, 16),
+)
+composed = build_composed(
+    "lcnu", 1024, prefetcher, admission="probation", num_layers=48, prior=8 / 128
+)
+simulate(composed, accesses)  # demand hits; composed.prefetch_covered, ...
 ```
 
-Sweeps: `research/run_policies_real.py --policies lcnu lru lirs ...`.
+Stall per token: `research/timing_model.py` (`replay_policy`). Sweeps:
+`research/run_policies_real.py --policies lcnu lru lirs ...` (eviction) and
+`research/run_prefetch_real.py` (prefetch x eviction x admission).

@@ -1472,3 +1472,334 @@ processes on the 128-core host.
 | activation_matrix | qwen3-235b | mmlu100-greedy64/decode+prefill-union | 8192 | 0.9750 | 0.9788 | real | a44b9bd+dirty |
 
 <!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model qwen3-235b --dataset mmlu100-greedy64 --ignore-layers 0 --prefill union | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: a44b9bd+dirty -->
+
+## Round 2 — prefetch x eviction composition (#289)
+
+Provenance `real` throughout: SGLang 0.5.20 `per_token` captures, decode-only
+(`/decode`) or prefill-union (`/decode+prefill-union`) streams, request files
+split in capture order into a tuning half and a held-out half (`/tune`,
+`/held`). Stall = timing-model stall per decode token (ms), nominal scenario
+(measured PCIe 5.0 link 57.1 GB/s, measured per-layer compute, demand
+priority). Study: `prefetch_eviction_study.md`.
+
+Setup runs (commands in the study's Reproduce section):
+
+| run | model | dataset | result | provenance | commit |
+| --- | --- | --- | --- | --- | --- |
+| composition identity (`--mode identity`, 7 evictors x {256, 1024}) | qwen3-30b-a3b | mmlu150-greedy64/decode/all | all 14 hit counts bit-identical (`results_prefetch_qwen3_30b_identity.md`) | real | db1ef24 |
+| predictor stage 0 (`--mode predict`) | qwen3-30b-a3b | mmlu150-greedy64/decode/tune | topk_ema alpha=0.4, hybrid weights=1/1/16 (`results_prefetch_qwen3_30b_tune_predict.csv`) | real | db1ef24 |
+| tuning grid (`--mode tune`, 3,972 runs, LRU + LCNU) | qwen3-30b-a3b | mmlu150-greedy64/decode/tune | `tuned_prefetch_qwen3_30b.json`, `results_prefetch_qwen3_30b_tune_grid.csv` | real | 1a64e8c |
+| predictor accuracy (`--mode predict`) | qwen3-30b-a3b | mmlu150-greedy64/decode/held | `results_prefetch_qwen3_30b_held_predict.csv` | real | db1ef24 |
+| predictor accuracy (`--mode predict`) | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | `results_prefetch_qwen3_235b_held_predict.csv` | real | db1ef24 |
+
+Held-out sweeps below: compact rows (per capacity, every evictor alone, the
+best online pair per admission mode, the best oracle pair); full rows in
+`results_prefetch_<tag>.csv`.
+
+| evictor | prefetcher | admission | model | dataset | capacity | hit_rate | covered | stall_ms_tok | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.0000 | 0.0000 | 63.47 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.1303 | 0.0000 | 55.20 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.1859 | 0.0000 | 51.67 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.0000 | 0.0000 | 63.47 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.1721 | 0.0000 | 52.54 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.0157 | 0.0000 | 62.47 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2179 | 0.0000 | 49.64 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=2,horizon=1,weights=1/1/16 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2175 | 0.0351 | 48.14 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2148 | 0.1951 | 45.62 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2148 | 0.1951 | 45.62 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2126 | 0.1965 | 45.75 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2155 | 0.1656 | 45.65 | real | db1ef24 |
+| lcnu | oracle:horizon=1 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2095 | 0.7905 | 41.09 | real | db1ef24 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.0000 | 0.0000 | 63.47 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.2251 | 0.0000 | 49.18 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3066 | 0.0000 | 44.01 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.0469 | 0.0000 | 60.49 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.2760 | 0.0000 | 45.95 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.0840 | 0.0000 | 58.13 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3461 | 0.0000 | 41.50 | real | db1ef24 |
+| lcnu | coactivation:budget=2,horizon=1 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3459 | 0.0208 | 40.57 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3459 | 0.1263 | 38.22 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3459 | 0.1263 | 38.22 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3429 | 0.1274 | 38.40 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3460 | 0.1069 | 38.31 | real | db1ef24 |
+| lcnu | oracle:horizon=1 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3432 | 0.6568 | 32.63 | real | db1ef24 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4398 | 0.0000 | 35.56 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.3577 | 0.0000 | 40.76 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4481 | 0.0000 | 35.03 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4245 | 0.0000 | 36.52 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4042 | 0.0000 | 37.81 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4472 | 0.0000 | 35.09 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4976 | 0.0000 | 31.89 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4977 | 0.0269 | 30.94 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4986 | 0.0877 | 29.34 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4986 | 0.0877 | 29.34 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4957 | 0.0881 | 29.52 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4986 | 0.0732 | 29.48 | real | db1ef24 |
+| lcnu | oracle:horizon=2 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4965 | 0.5035 | 22.90 | real | db1ef24 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6432 | 0.0000 | 22.65 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.5488 | 0.0000 | 28.64 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6138 | 0.0000 | 24.51 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6222 | 0.0000 | 23.98 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.5875 | 0.0000 | 26.18 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6426 | 0.0000 | 22.68 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6697 | 0.0000 | 20.96 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6695 | 0.0161 | 20.13 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6716 | 0.0972 | 18.52 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6716 | 0.0972 | 18.52 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6677 | 0.0978 | 18.77 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6712 | 0.0716 | 18.78 | real | db1ef24 |
+| lcnu | oracle:horizon=4 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6705 | 0.3295 | 11.98 | real | db1ef24 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8490 | 0.0000 | 9.58 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8025 | 0.0000 | 12.53 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8347 | 0.0000 | 10.49 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8609 | 0.0000 | 8.83 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8377 | 0.0000 | 10.30 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8387 | 0.0000 | 10.24 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8662 | 0.0000 | 8.49 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8658 | 0.0101 | 7.98 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8664 | 0.0173 | 7.79 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8664 | 0.0173 | 7.79 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8651 | 0.0177 | 7.87 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8664 | 0.0149 | 7.84 | real | db1ef24 |
+| lcnu | oracle:horizon=4 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8664 | 0.1336 | 1.92 | real | db1ef24 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9506 | 0.0000 | 3.14 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9314 | 0.0000 | 4.36 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9551 | 0.0000 | 2.85 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9590 | 0.0000 | 2.60 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9536 | 0.0000 | 2.94 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9401 | 0.0000 | 3.80 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9558 | 0.0000 | 2.80 | real | db1ef24 |
+| s3fifo | hybrid:alpha=0.4,budget=16,horizon=4,weights=1/1/16 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9507 | 0.0133 | 2.57 | real | db1ef24 |
+| s3fifo | hybrid:alpha=0.4,budget=16,horizon=1,weights=1/1/16 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9589 | 0.0057 | 2.58 | real | db1ef24 |
+| lcnu | coactivation:budget=16,horizon=2 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9558 | 0.0065 | 2.53 | real | db1ef24 |
+| s3fifo | prev_token:budget=2,horizon=1 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9589 | 0.0000 | 2.61 | real | db1ef24 |
+| s3fifo | topk_ema:alpha=0.4,budget=32,horizon=1 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9590 | 0.0002 | 2.59 | real | db1ef24 |
+| s3fifo | oracle:horizon=4 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9589 | 0.0410 | 0.15 | real | db1ef24 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-30b-a3b --split held --prefill skip --tag qwen3_30b_held | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: db1ef24 -->
+
+| evictor | prefetcher | admission | model | dataset | capacity | hit_rate | covered | stall_ms_tok | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.0000 | 0.0000 | 248.57 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.1586 | 0.0000 | 209.15 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.1749 | 0.0000 | 205.10 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.0000 | 0.0000 | 248.57 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.1704 | 0.0000 | 206.21 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.0171 | 0.0000 | 244.31 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2064 | 0.0000 | 197.26 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=2,horizon=1,weights=1/1/16 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2062 | 0.0325 | 196.01 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2052 | 0.1709 | 188.09 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2052 | 0.1709 | 188.09 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2040 | 0.1714 | 188.35 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2056 | 0.1439 | 188.19 | real | db1ef24 |
+| lcnu | oracle:horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2028 | 0.7972 | 177.35 | real | db1ef24 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.0000 | 0.0000 | 248.57 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.2579 | 0.0000 | 184.46 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.2859 | 0.0000 | 177.52 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.1325 | 0.0000 | 215.63 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.2757 | 0.0000 | 180.03 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.0872 | 0.0000 | 226.90 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3295 | 0.0000 | 166.67 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=2,horizon=1,weights=1/1/16 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3293 | 0.0168 | 166.31 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3295 | 0.1074 | 159.94 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3295 | 0.1074 | 159.94 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3279 | 0.1078 | 160.30 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3295 | 0.0896 | 160.20 | real | db1ef24 |
+| lcnu | oracle:horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3285 | 0.6715 | 146.12 | real | db1ef24 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.3884 | 0.0000 | 152.02 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.3971 | 0.0000 | 149.87 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4348 | 0.0000 | 140.50 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4139 | 0.0000 | 145.68 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4026 | 0.0000 | 148.49 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4001 | 0.0000 | 149.11 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4842 | 0.0000 | 128.21 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4846 | 0.0198 | 128.15 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4852 | 0.0703 | 123.44 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4852 | 0.0703 | 123.44 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4832 | 0.0705 | 123.93 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4851 | 0.0568 | 123.90 | real | db1ef24 |
+| lcnu | oracle:horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4863 | 0.5137 | 107.04 | real | db1ef24 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6206 | 0.0000 | 94.32 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.5848 | 0.0000 | 103.21 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6149 | 0.0000 | 95.73 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6163 | 0.0000 | 95.38 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.5755 | 0.0000 | 105.52 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6228 | 0.0000 | 93.76 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6643 | 0.0000 | 83.45 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6645 | 0.0119 | 82.98 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6663 | 0.0932 | 78.50 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6663 | 0.0932 | 78.50 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6632 | 0.0936 | 79.26 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6659 | 0.0645 | 79.37 | real | db1ef24 |
+| lcnu | oracle:horizon=4 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6662 | 0.3338 | 62.22 | real | db1ef24 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8378 | 0.0000 | 40.33 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8190 | 0.0000 | 44.99 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8242 | 0.0000 | 43.71 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8458 | 0.0000 | 38.34 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8076 | 0.0000 | 47.82 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8329 | 0.0000 | 41.54 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8637 | 0.0000 | 33.87 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=2,weights=1/1/16 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8636 | 0.0069 | 33.27 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8639 | 0.0131 | 32.63 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=2,weights=1/1/16 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8639 | 0.0130 | 32.53 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8632 | 0.0132 | 32.80 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=2,weights=1/1/16 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8639 | 0.0109 | 32.64 | real | db1ef24 |
+| lcnu | oracle:horizon=4 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8643 | 0.1357 | 15.69 | real | db1ef24 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9377 | 0.0000 | 15.48 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9352 | 0.0000 | 16.10 | real | db1ef24 |
+| lirs | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9370 | 0.0000 | 15.66 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9470 | 0.0000 | 13.19 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9317 | 0.0000 | 16.98 | real | db1ef24 |
+| layer_lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9315 | 0.0000 | 17.03 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9527 | 0.0000 | 11.75 | real | db1ef24 |
+| lcnu | coactivation:budget=16,horizon=4 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9523 | 0.0053 | 11.35 | real | db1ef24 |
+| lcnu | coactivation:budget=16,horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9528 | 0.0047 | 11.31 | real | db1ef24 |
+| lcnu | coactivation:budget=16,horizon=2 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9528 | 0.0063 | 11.13 | real | db1ef24 |
+| lcnu | coactivation:budget=16,horizon=1 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9523 | 0.0048 | 11.43 | real | db1ef24 |
+| lcnu | coactivation:budget=16,horizon=1 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9528 | 0.0031 | 11.43 | real | db1ef24 |
+| lcnu | oracle:horizon=4 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9528 | 0.0472 | 2.47 | real | db1ef24 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-235b-a22b-fp8 --split held --prefill skip --tag qwen3_235b_held | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: db1ef24 -->
+
+| evictor | prefetcher | admission | model | dataset | capacity | hit_rate | covered | stall_ms_tok | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.0000 | 0.0000 | 71.84 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1189 | 0.0000 | 63.30 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.0000 | 0.0000 | 71.84 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1556 | 0.0000 | 60.66 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1973 | 0.0000 | 57.67 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=2,horizon=1,weights=1/1/16 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1970 | 0.0323 | 56.13 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1946 | 0.1738 | 53.60 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1946 | 0.1738 | 53.60 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1926 | 0.1750 | 53.73 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1951 | 0.1505 | 53.62 | real | db1ef24 |
+| lcnu | oracle:horizon=1 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1877 | 0.8017 | 49.14 | real | db1ef24 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.0000 | 0.0000 | 71.84 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.2062 | 0.0000 | 57.03 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.0450 | 0.0000 | 68.61 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.2537 | 0.0000 | 53.62 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3144 | 0.0000 | 49.26 | real | db1ef24 |
+| lcnu | coactivation:budget=2,horizon=1 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3143 | 0.0196 | 48.28 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3140 | 0.1121 | 45.95 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3140 | 0.1121 | 45.95 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3114 | 0.1130 | 46.12 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3141 | 0.0975 | 46.01 | real | db1ef24 |
+| lcnu | oracle:horizon=1 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3091 | 0.6908 | 40.44 | real | db1ef24 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.3877 | 0.0000 | 43.99 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.3301 | 0.0000 | 48.13 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.3873 | 0.0000 | 44.02 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.3715 | 0.0000 | 45.16 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4530 | 0.0000 | 39.30 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4528 | 0.0252 | 38.34 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4537 | 0.0801 | 36.71 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4537 | 0.0801 | 36.71 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4514 | 0.0804 | 36.88 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4537 | 0.0696 | 36.81 | real | db1ef24 |
+| lcnu | oracle:horizon=2 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4500 | 0.5499 | 30.32 | real | db1ef24 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.5714 | 0.0000 | 30.79 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.5141 | 0.0000 | 34.91 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.5706 | 0.0000 | 30.85 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.5467 | 0.0000 | 32.57 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6121 | 0.0000 | 27.87 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6111 | 0.0155 | 27.06 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6134 | 0.0834 | 25.49 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6134 | 0.0834 | 25.49 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6102 | 0.0840 | 25.72 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6132 | 0.0668 | 25.66 | real | db1ef24 |
+| lcnu | oracle:horizon=4 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6127 | 0.3870 | 18.75 | real | db1ef24 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.7699 | 0.0000 | 16.53 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.7688 | 0.0000 | 16.61 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8012 | 0.0000 | 14.28 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.7977 | 0.0000 | 14.53 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8087 | 0.0000 | 13.74 | real | db1ef24 |
+| s3fifo | coactivation:budget=8,horizon=1 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.7943 | 0.0337 | 13.35 | real | db1ef24 |
+| w_tinylfu | hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8066 | 0.0209 | 13.17 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8088 | 0.0133 | 13.19 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8076 | 0.0135 | 13.27 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8088 | 0.0117 | 13.22 | real | db1ef24 |
+| w_tinylfu | oracle:horizon=4 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8075 | 0.1921 | 7.15 | real | db1ef24 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.8919 | 0.0000 | 7.77 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9094 | 0.0000 | 6.51 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9262 | 0.0000 | 5.30 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9353 | 0.0000 | 4.65 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9174 | 0.0000 | 5.93 | real | db1ef24 |
+| w_tinylfu | prev_token:budget=2,horizon=1 | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9350 | 0.0011 | 4.60 | real | db1ef24 |
+| w_tinylfu | prev_token:budget=2,horizon=1 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9367 | 0.0005 | 4.51 | real | db1ef24 |
+| w_tinylfu | prev_token:budget=2,horizon=1 | pin | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9367 | 0.0005 | 4.51 | real | db1ef24 |
+| w_tinylfu | prev_token:budget=2,horizon=1 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9350 | 0.0010 | 4.61 | real | db1ef24 |
+| w_tinylfu | prev_token:budget=2,horizon=1 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9367 | 0.0005 | 4.51 | real | db1ef24 |
+| w_tinylfu | oracle:horizon=4 | buffer | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9294 | 0.0702 | 2.00 | real | db1ef24 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-30b-a3b --split held --prefill union --tag qwen3_30b_held_union | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: db1ef24 -->
+
+| evictor | prefetcher | admission | model | dataset | capacity | hit_rate | covered | stall_ms_tok | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.0000 | 0.0000 | 281.60 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1444 | 0.0000 | 240.94 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.0000 | 0.0000 | 281.60 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1533 | 0.0000 | 238.42 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1873 | 0.0000 | 228.86 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=2,horizon=1,weights=1/1/16 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1871 | 0.0296 | 227.45 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1862 | 0.1492 | 219.82 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1862 | 0.1492 | 219.82 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1851 | 0.1496 | 220.08 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1865 | 0.1291 | 219.88 | real | db1ef24 |
+| lcnu | oracle:horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1824 | 0.8176 | 209.11 | real | db1ef24 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.0000 | 0.0000 | 281.60 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2362 | 0.0000 | 215.09 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.1215 | 0.0000 | 247.37 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2530 | 0.0000 | 210.36 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2997 | 0.0000 | 197.20 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=2,horizon=1,weights=1/1/16 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2995 | 0.0151 | 196.72 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2995 | 0.0919 | 190.72 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2995 | 0.0919 | 190.72 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2983 | 0.0922 | 191.05 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2996 | 0.0794 | 190.89 | real | db1ef24 |
+| lcnu | oracle:horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2976 | 0.7024 | 176.67 | real | db1ef24 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.3424 | 0.0000 | 185.18 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.3671 | 0.0000 | 178.22 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.3771 | 0.0000 | 175.40 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.3704 | 0.0000 | 177.30 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4408 | 0.0000 | 157.48 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4409 | 0.0183 | 157.32 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4414 | 0.0608 | 152.96 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4414 | 0.0608 | 152.96 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4399 | 0.0610 | 153.36 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4412 | 0.0515 | 153.29 | real | db1ef24 |
+| lcnu | oracle:horizon=2 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4418 | 0.5581 | 136.05 | real | db1ef24 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.5511 | 0.0000 | 126.40 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.5488 | 0.0000 | 127.05 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.5668 | 0.0000 | 121.98 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.5373 | 0.0000 | 130.29 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6052 | 0.0000 | 111.17 | real | db1ef24 |
+| lcnu | coactivation:budget=4,horizon=1 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6053 | 0.0107 | 110.68 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6067 | 0.0805 | 106.44 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6067 | 0.0805 | 106.44 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6042 | 0.0808 | 107.13 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6064 | 0.0605 | 107.04 | real | db1ef24 |
+| lcnu | oracle:horizon=4 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6087 | 0.3912 | 89.12 | real | db1ef24 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7593 | 0.0000 | 67.77 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7872 | 0.0000 | 59.91 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7883 | 0.0000 | 59.62 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7705 | 0.0000 | 64.62 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7988 | 0.0000 | 56.66 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=2,weights=1/1/16 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7984 | 0.0057 | 56.11 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7989 | 0.0106 | 55.59 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=2,weights=1/1/16 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7989 | 0.0093 | 55.55 | real | db1ef24 |
+| lcnu | coactivation:budget=8,horizon=1 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7982 | 0.0107 | 55.77 | real | db1ef24 |
+| lcnu | hybrid:alpha=0.4,budget=8,horizon=2,weights=1/1/16 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7989 | 0.0083 | 55.60 | real | db1ef24 |
+| lcnu | oracle:horizon=4 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.8008 | 0.1987 | 37.81 | real | db1ef24 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.8777 | 0.0000 | 34.43 | real | db1ef24 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9149 | 0.0000 | 23.96 | real | db1ef24 |
+| s3fifo | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9097 | 0.0000 | 25.43 | real | db1ef24 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9083 | 0.0000 | 25.82 | real | db1ef24 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9047 | 0.0000 | 26.83 | real | db1ef24 |
+| lfu | hybrid:alpha=0.4,budget=16,horizon=4,weights=1/1/16 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9149 | 0.0046 | 23.71 | real | db1ef24 |
+| lfu | hybrid:alpha=0.4,budget=16,horizon=1,weights=1/1/16 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9149 | 0.0037 | 23.54 | real | db1ef24 |
+| lfu | hybrid:alpha=0.4,budget=16,horizon=2,weights=1/1/16 | pin | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9149 | 0.0048 | 23.35 | real | db1ef24 |
+| lfu | hybrid:alpha=0.4,budget=16,horizon=1,weights=1/1/16 | buffer | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9141 | 0.0038 | 23.74 | real | db1ef24 |
+| lfu | hybrid:alpha=0.4,budget=16,horizon=1,weights=1/1/16 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9149 | 0.0022 | 23.67 | real | db1ef24 |
+| lfu | oracle:horizon=4 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9147 | 0.0853 | 12.79 | real | db1ef24 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-235b-a22b-fp8 --split held --prefill union --tag qwen3_235b_held_union | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: db1ef24 -->

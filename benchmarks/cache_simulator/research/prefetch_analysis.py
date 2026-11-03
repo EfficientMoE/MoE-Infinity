@@ -530,7 +530,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     text = "\n".join(
         report(sub, args.title or f"{model} / {dataset}")
         for (model, dataset), sub in sorted(groups.items())
-    )
+    ).rstrip("\n")
     print(text)
     if args.out:
         with open(args.out, "w") as handle:
