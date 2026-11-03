@@ -934,7 +934,10 @@ void launch_fused(const at::Tensor& x, const at::Tensor& w, int H,
   const int n_e = (E + Tile<BT>::kBE - 1) / Tile<BT>::kBE;
   constexpr int kHC = Tile<BT>::kHC;
   const int max_split = std::max(1, H / kHC);
-  int split = std::max(1, std::min({max_split, kMaxSplit, sms / (n_t * n_e)}));
+  // Wide rows (E > 320): fewer partial planes keep the single-token
+  // reduction short; measured ~1 us faster for E = 384 / 512 decode.
+  const int split_cap = E > 320 ? kMaxSplit / 2 : kMaxSplit;
+  int split = std::max(1, std::min({max_split, split_cap, sms / (n_t * n_e)}));
   int h_per_split = ((H + split - 1) / split + kHC - 1) / kHC * kHC;
   split = (H + h_per_split - 1) / h_per_split;
   const int n_items = n_t * n_e * split;
