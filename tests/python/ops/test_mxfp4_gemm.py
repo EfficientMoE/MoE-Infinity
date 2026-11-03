@@ -148,6 +148,40 @@ def test_split_k_is_deterministic_and_reusable(M):
 
 @requires_cuda
 @requires_triton
+@pytest.mark.parametrize(
+    "N,K", [(5760, 2880), (2880, 2880), (40, 64), (100, 4128)]
+)
+@pytest.mark.parametrize("M", [2, 3, 5, 8])
+def test_small_m_cuda_kernel_matches_triton_and_reference(monkeypatch, N, K, M):
+    """M = 2..8 decode kernel (moe_infinity._mxfp4_gemv, full-K strip per
+    CTA) agrees with the reference and with the Triton fallback."""
+    from moe_infinity.kernel import mxfp4_gemm as mg
+
+    if not mg._small_m_ext() or torch.cuda.get_device_capability()[0] < 10:
+        pytest.skip("moe_infinity._mxfp4_gemv needs an sm_100a+ build")
+    packed, scales = _weights(N, K, lo=100, hi=150)
+    bias = torch.randn(N, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    out = torch.empty(M, N, dtype=torch.bfloat16, device="cuda")
+    assert mg._small_m_cuda(x, packed, scales, bias, out)
+    ref = _reference(x, packed, scales, bias)
+    _check(out, ref)
+    monkeypatch.setattr(mg, "_DISABLE_SMALL_M_CUDA", True)
+    _check(mg.fused_mxfp4_gemm(x, packed, scales, bias), ref)
+    # outside the contract -> declines without launching
+    big = torch.randn(9, K, dtype=torch.bfloat16, device="cuda")
+    assert not mg._small_m_ext().mxfp4_gemv_small(
+        big,
+        packed,
+        scales,
+        bias,
+        torch.empty(9, N, dtype=torch.bfloat16, device="cuda"),
+        2,
+    )
+
+
+@requires_cuda
+@requires_triton
 @pytest.mark.parametrize("dp", ["full", "minus1", "none"])
 @pytest.mark.parametrize("M", [1600, 2900])
 def test_stream_k_schedules_match_reference(dp, M):

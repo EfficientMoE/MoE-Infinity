@@ -876,6 +876,40 @@ def _launch(
         )
 
 
+_SMALL_M_EXT = None  # moe_infinity._mxfp4_gemv, False when unavailable
+# Tests flip this to force the Triton path for M = 2..8.
+_DISABLE_SMALL_M_CUDA = False
+
+
+def _small_m_ext():
+    global _SMALL_M_EXT
+    if _SMALL_M_EXT is None:
+        try:
+            from moe_infinity import _mxfp4_gemv  # sm_120a build only
+
+            _SMALL_M_EXT = _mxfp4_gemv
+        except ImportError:
+            _SMALL_M_EXT = False
+    return _SMALL_M_EXT
+
+
+def _small_m_cuda(x_2d, weight_packed, weight_scales, bias, output) -> bool:
+    """M = 2..8 decode: CUDA kernel with a full-K weight strip per CTA (warps
+    split K and reduce in shared memory), so there is no cross-CTA split-K
+    fix-up. Returns False when the extension is missing or the call is
+    outside its contract; the Triton kernels then run."""
+    if _DISABLE_SMALL_M_CUDA or _capability(x_2d.device)[0] < 10:
+        return False
+    ext = _small_m_ext()
+    if not ext:
+        return False
+    # variant: 2 = 16 warps x 16 rows (narrow N), 5 = 16 warps x 32 rows.
+    variant = 5 if weight_packed.shape[0] >= 4096 else 2
+    return ext.mxfp4_gemv_small(
+        x_2d, weight_packed, weight_scales, bias, output, variant
+    )
+
+
 def warmup_mxfp4_gemm(
     N: int,
     K: int,
@@ -963,6 +997,10 @@ def fused_mxfp4_gemm(
     if M == 0:
         return output.reshape(*orig_shape[:-1], N)
 
+    if 2 <= M <= 8 and _small_m_cuda(
+        x_2d, weight_packed, weight_scales, bias, output
+    ):
+        return output.reshape(*orig_shape[:-1], N)
     warmup_mxfp4_gemm(N, K, x_2d.device, bias is not None)
     cfg = _get_config(M, N, K, x_2d.device)
     _launch(x_2d, weight_packed, weight_scales, bias, output, cfg)

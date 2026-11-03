@@ -9,7 +9,7 @@
 bool mxfp4_gemv_small_launch(const void* x, const void* w, const void* s,
                              const void* bias, void* out, int M, int N, int K,
                              int64_t stride_xm, int64_t stride_wn,
-                             int64_t stride_sn, int64_t stride_om, int warps,
+                             int64_t stride_sn, int64_t stride_om, int variant,
                              cudaStream_t stream);
 
 // out[M, N] = x[M, K] @ dequant(w, s)^T (+ bias). Returns false without
@@ -18,7 +18,7 @@ bool mxfp4_gemv_small_launch(const void* x, const void* w, const void* s,
 bool mxfp4_gemv_small(const torch::Tensor& x, const torch::Tensor& w,
                       const torch::Tensor& s,
                       const std::optional<torch::Tensor>& bias,
-                      torch::Tensor& out, int64_t warps) {
+                      torch::Tensor& out, int64_t variant) {
   if (!x.is_cuda() || x.scalar_type() != at::kBFloat16 ||
       w.scalar_type() != at::kByte || s.scalar_type() != at::kByte ||
       out.scalar_type() != at::kBFloat16 || x.dim() != 2 || w.dim() != 2 ||
@@ -40,11 +40,11 @@ bool mxfp4_gemv_small(const torch::Tensor& x, const torch::Tensor& w,
   return mxfp4_gemv_small_launch(
       x.data_ptr(), w.data_ptr(), s.data_ptr(), b, out.data_ptr(), (int)M,
       (int)N, (int)K, x.stride(0), w.stride(0), s.stride(0), out.stride(0),
-      (int)warps, at::cuda::getCurrentCUDAStream());
+      (int)variant, at::cuda::getCurrentCUDAStream());
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("mxfp4_gemv_small", &mxfp4_gemv_small, py::arg("x"), py::arg("w"),
-        py::arg("s"), py::arg("bias"), py::arg("out"), py::arg("warps") = 8,
+        py::arg("s"), py::arg("bias"), py::arg("out"), py::arg("variant") = 1,
         "Small-M (<= 8) MXFP4 x BF16 GEMM, full-K strip per CTA (sm_120a)");
 }

@@ -458,6 +458,20 @@ if cuda_available:
                 },
             )
         )
+        ext_modules.append(
+            cpp_extension.CUDAExtension(
+                name="moe_infinity._mxfp4_gemv",
+                sources=[
+                    "extensions/kernel/mxfp4_gemv/mxfp4_gemv_binding.cpp",
+                    "extensions/kernel/mxfp4_gemv/mxfp4_gemv.cu",
+                ],
+                extra_compile_args={
+                    "cxx": ["-O3", "-std=c++20", "-fPIC"],
+                    "nvcc": ["-O3", "--use_fast_math", "-std=c++20"]
+                    + _v4fp4_arch_flags,
+                },
+            )
+        )
 
     ext_modules.append(
         cpp_extension.CUDAExtension(
