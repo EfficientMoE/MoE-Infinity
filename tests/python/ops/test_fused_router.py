@@ -364,3 +364,22 @@ def test_no_host_sync_and_graph_replay(T):
     torch.cuda.synchronize()
     assert torch.equal(cap[2], ref_mask)
     assert torch.equal(cap[3], ref_w)
+
+
+@pytest.mark.skipif(
+    not _has_cuda_ext(), reason="moe_infinity._router not built"
+)
+@pytest.mark.parametrize("E,k", [(32, 4), (8, 2)])
+def test_prefill_kernel_default_path_flags(E, k):
+    """Few-expert prefill takes the single Triton GEMM + top-k launch; its
+    pinned flags match the mask and selection matches torch."""
+    from moe_infinity.kernel.router import fused_route, take_active_flags
+
+    x, w = _int_inputs(4096, 2048, E, density=0.05)
+    out = fused_route(x, w, k, active_flags=True)
+    flags = take_active_flags(out.router_mask)
+    torch.cuda.synchronize()
+    assert flags is not None
+    assert torch.equal(flags, out.router_mask.any(0).cpu())
+    ref_idx, *_ = _softmax_ref(x, w, k)
+    assert _same_set(out.topk_ids, ref_idx).all()

@@ -456,9 +456,23 @@ PREFILL_GEMM_MIN_TOKENS = 4096
 # --------------------------------------------------------------------------
 
 _I64_MIN = -9223372036854775808
-# Token count from which fused_route / make_router use the Triton GEMM +
-# top-k kernel (Triton's launch cost is irrelevant at prefill sizes).
-PREFILL_FUSED_MIN_TOKENS = 1 << 30
+# The Triton GEMM + top-k kernel replaces cuBLASLt logits + routing (one
+# launch instead of two) where it measured faster on sm_120: few experts
+# (E <= 32: the op streams X) from 2K tokens. For E >= 128 the [BM, E]
+# full-row tile re-reads W per tile and the cuBLASLt path stays faster.
+PREFILL_FUSED_MIN_TOKENS = 2048
+PREFILL_FUSED_MAX_EXPERTS = 32
+
+
+def _use_prefill_kernel(x, weight, gemm_min_tokens) -> bool:
+    return (
+        not gemm_min_tokens
+        and x.is_cuda
+        and x.shape[0] >= PREFILL_FUSED_MIN_TOKENS
+        and weight.shape[0] <= PREFILL_FUSED_MAX_EXPERTS
+        and weight.dtype == x.dtype
+        and x.dtype in _LOW_PRECISION
+    )
 
 
 @triton.jit
@@ -563,16 +577,22 @@ def _gemm_route_kernel(
         )  # fmt: skip
         keys = tl.where(keep, keys, masked)
 
+    # int32 keys (value only) + a lowest-index pass per step: half the
+    # registers of a packed int64 key, so the [BM, E] epilogue doesn't spill.
+    k32 = (keys >> 32).to(tl.int32)
+    k32 = tl.where(valid_e[None, :], k32, -2147483648)
     selmask = tl.zeros([BM, BLOCK_E], tl.int1)
     offs_kk = tl.arange(0, K_PAD)
     ids_tile = tl.zeros([BM, K_PAD], tl.int32)
     for i in tl.static_range(K):
-        m = tl.max(keys, axis=1)
-        chosen = keys == m[:, None]
+        m = tl.max(k32, axis=1)
+        idx = tl.min(
+            tl.where(k32 == m[:, None], offs_e[None, :], BLOCK_E), axis=1
+        )
+        chosen = offs_e[None, :] == idx[:, None]
         selmask = selmask | chosen
-        keys = tl.where(chosen, -9223372036854775808, keys)
+        k32 = tl.where(chosen, -2147483648, k32)
         if WRITE_IDS:
-            idx = BLOCK_E - 1 - (m & 0xFFFFFFFF).to(tl.int32)
             ids_tile = tl.where(offs_kk[None, :] == i, idx[:, None], ids_tile)
 
     if SCORING == 0:
@@ -624,7 +644,15 @@ def _gemm_route_kernel(
         tl.store(done_ptr, seq)
 
 
-_GEMM_CFG: dict = {}
+# Measured best (BM, BK, num_warps, num_stages) per padded E on sm_120
+# (50K-token sweep); other sizes fall back to the formula below.
+_GEMM_CFG: dict = {
+    16: (128, 64, 8, 2),
+    32: (32, 128, 4, 2),
+    128: (64, 64, 8, 3),
+    256: (64, 64, 16, 3),
+    512: (64, 32, 8, 2),
+}
 
 
 def _gemm_config(T, H, E, block_e):
@@ -812,12 +840,7 @@ def fused_route(
     logits_dtype = xdt if softmax_lp else torch.float32
 
     if backend == "prefill" or (
-        backend == "auto"
-        and x.is_cuda
-        and x.shape[0] >= PREFILL_FUSED_MIN_TOKENS
-        and weight.dtype == xdt
-        and xdt in _LOW_PRECISION
-        and weight.shape[0] <= 512
+        backend == "auto" and _use_prefill_kernel(x, weight, gemm_min_tokens)
     ):
         return RouteOutput(*_route_prefill(
             x, weight, top_k, sc, bias, n_group, topk_group, renormalize,
@@ -905,6 +928,10 @@ def make_router(
         )  # fmt: skip
 
         def route(hidden_states):
+            if _use_prefill_kernel(hidden_states, weight, gemm_min_tokens):
+                return tuple(
+                    fused_route(hidden_states, weight, top_k, **kwargs)
+                )
             res = native(hidden_states)
             # empty: shape / alignment outside the CUDA kernel's envelope
             return (
