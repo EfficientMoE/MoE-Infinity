@@ -170,12 +170,13 @@ def test_align_groups_every_assignment_once():
         assert torch.equal(seen.cpu(), torch.arange(tk, dtype=torch.int32))
 
 
-def test_no_host_sync_and_three_launches():
+@pytest.mark.parametrize("T", [1, 16, 64])
+def test_no_host_sync_and_three_launches(T):
     from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
 
     E, H, I = 32, 2880, 2880
     wt = _weights(E, H, I)
-    x, ids, w = _route(1, H, E, 4)
+    x, ids, w = _route(T, H, E, 4)
     fused_moe_mxfp4(x, ids, w, **wt)  # compile
     torch.cuda.synchronize()
 

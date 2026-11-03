@@ -111,7 +111,13 @@ __device__ __forceinline__ uint32_t prmt(uint32_t a, uint32_t b, uint32_t s) {
 
 __device__ __forceinline__ uint32_t bf16x2_mul(uint32_t a, uint32_t b) {
   uint32_t r;
+#if __CUDA_ARCH__ >= 900
   asm("mul.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
+#else
+  asm("fma.rn.bf16x2 %0, %1, %2, %3;"
+      : "=r"(r)
+      : "r"(a), "r"(b), "r"(0x80008000u));
+#endif
   return r;
 }
 
