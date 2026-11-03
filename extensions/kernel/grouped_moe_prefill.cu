@@ -387,9 +387,9 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   };
   // Relative MMA rates of the configs on full tiles (sm_120 sweep); padding
   // of the last M tile of every expert decides between them.
-  static constexpr double kDualRate[] = {1.85, 1.68, 1.25};
+  static constexpr double kDualRate[] = {1.85, 1.68, 1.45};
   static constexpr int kDualTm[] = {128, 128, 64};
-  static constexpr double kDownRate[] = {1.70, 1.64, 1.25};
+  static constexpr double kDownRate[] = {1.70, 1.64, 1.40};
   static constexpr int kDownTm[] = {128, 128, 64};
   if (dual_cfg < 0) dual_cfg = pick(kDualRate, kDualTm, kNumDual);
   if (down_cfg < 0) down_cfg = pick(kDownRate, kDownTm, kNumDown);
