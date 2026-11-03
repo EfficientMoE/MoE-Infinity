@@ -1330,10 +1330,11 @@ void launch_decode(const DecodeArgs& a, cudaStream_t s) {
   }
 }
 
-// Weight rows per work unit of the batch-1 path, measured on the RTX PRO 6000
-// (188 CTAs; V4-Flash b1 75.4 -> 67.7 us with 256, V4.1-Flash 106.6 -> 90.8
-// us with 128): large units cut the per-unit setup and K-share reduction,
-// but must still give every CTA about one unit or more.
+// Weight rows per work unit of the batch-1 path (pro6000 table, measured on
+// the RTX PRO 6000's 188 CTAs, 64-row units before: V4-Flash 75.4 -> 67.0 us
+// with 256 rows x 2 stages, V4.1-Flash 106.6 -> 90.3 us with 128 rows x 5
+// stages; 256 rows measured 92.3 us there). Large units cut the per-unit
+// setup and K-share reduction, but every CTA must still get about one unit.
 inline int b1_rows_pro6000(int H, int I) {
   return (H == 4096 && I == 2048) ? 256 : 128;
 }
