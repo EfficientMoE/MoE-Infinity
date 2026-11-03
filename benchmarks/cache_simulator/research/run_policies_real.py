@@ -83,6 +83,7 @@ POLICY_ORDER = [
     "w_tinylfu",
     "layer_lru",
     "lcnu",
+    "rothead",
     "single_layer_ahead",
     "stride_prefetch",
     "multi_layer_ahead",
@@ -107,6 +108,7 @@ PRETTY = {
     "w_tinylfu": "W-TinyLFU",
     "layer_lru": "Per-layer LRU",
     "lcnu": "LCNU (layer-cycle next-use)",
+    "rothead": "RotHead (rotation-adaptive)",
     "single_layer_ahead": "1-layer-ahead*",
     "stride_prefetch": "Stride*",
     "multi_layer_ahead": "Multi-layer*",
@@ -218,7 +220,7 @@ def geometry_kwargs(name: str, stats: Dict[str, int]) -> Dict[str, float]:
         return {}
     kwargs: Dict[str, float] = {"num_layers": stats["num_layers"]}
     num_experts = stats["max_expert_id"] + 1
-    if name == "lcnu" and stats["top_k"] > 0 and num_experts > 0:
+    if name in ("lcnu", "rothead") and stats["top_k"] > 0 and num_experts > 0:
         kwargs["prior"] = min(1.0, stats["top_k"] / num_experts)
     return kwargs
 

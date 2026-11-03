@@ -1369,11 +1369,22 @@ POLICY_FACTORIES = {
     "w_tinylfu": lambda cap, **kw: WTinyLFUPolicy(cap, **kw),
     "layer_lru": lambda cap, **kw: LayerLRUPolicy(cap, **kw),
     "lcnu": lambda cap, **kw: LayerCycleNextUsePolicy(cap, **kw),
+    "rothead": lambda cap, **kw: _build_rothead(cap, **kw),
 }
+
+
+def _build_rothead(cap, **kw):
+    # Lazy import: policies_rothead imports this module (no import cycle at
+    # call time because policies.py is fully initialized by then).
+    from benchmarks.cache_simulator.research.policies_rothead import (
+        RotHeadPolicy,
+    )
+
+    return RotHeadPolicy(cap, **kw)
 
 #: Policies that accept the model geometry (``num_layers``; ``lcnu`` also
 #: ``prior = top_k / num_experts``) as keyword arguments.
-GEOMETRY_POLICIES = {"layer_lru", "lcnu"}
+GEOMETRY_POLICIES = {"layer_lru", "lcnu", "rothead"}
 
 
 # Keep a module-level INF for callers that compare against Belady.

@@ -3242,3 +3242,53 @@ processes on the 128-core host.
 | activation_matrix | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1792 | 0.7050 | 0.8715 | real | b094474 |
 
 <!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model qwen3-30b-a3b --dataset handcrafted8-greedy512 --ignore-layers 0 --prefill union | env: python 3.14.8, numpy 2.5.4, Darwin arm64 | commit: b094474 -->
+
+| policy | model | dataset | capacity | hit_rate | eff_hit_rate | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 128 | 0.3067 | 0.3067 | real | 647ed87+dirty |
+| rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 128 | 0.0019 | 0.0019 | real | 647ed87+dirty |
+| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 256 | 0.4977 | 0.4977 | real | 647ed87+dirty |
+| rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 256 | 0.0708 | 0.0708 | real | 647ed87+dirty |
+| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 384 | 0.6012 | 0.6012 | real | 647ed87+dirty |
+| rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 384 | 0.3602 | 0.3602 | real | 647ed87+dirty |
+| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 512 | 0.6722 | 0.6722 | real | 647ed87+dirty |
+| rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 512 | 0.4233 | 0.4233 | real | 647ed87+dirty |
+| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 768 | 0.7682 | 0.7682 | real | 647ed87+dirty |
+| rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 768 | 0.5428 | 0.5428 | real | 647ed87+dirty |
+| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.8327 | 0.8327 | real | 647ed87+dirty |
+| rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6547 | 0.6547 | real | 647ed87+dirty |
+| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.9124 | 0.9124 | real | 647ed87+dirty |
+| rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.8082 | 0.8082 | real | 647ed87+dirty |
+| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 2048 | 0.9532 | 0.9532 | real | 647ed87+dirty |
+| rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 2048 | 0.8955 | 0.8955 | real | 647ed87+dirty |
+| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 3072 | 0.9856 | 0.9856 | real | 647ed87+dirty |
+| rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 3072 | 0.9685 | 0.9685 | real | 647ed87+dirty |
+| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 4096 | 0.9935 | 0.9935 | real | 647ed87+dirty |
+| rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 4096 | 0.9889 | 0.9889 | real | 647ed87+dirty |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model qwen3-30b-a3b --dataset handcrafted8-greedy512 --ignore-layers 0 --prefill skip | env: python 3.14.8, numpy 2.5.4, Darwin arm64 | commit: 647ed87+dirty -->
+
+| policy | model | dataset | capacity | hit_rate | eff_hit_rate | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| belady | granite3.1-moe-3b | handcrafted8-greedy512/decode | 128 | 0.4219 | 0.4219 | real | 647ed87+dirty |
+| rothead | granite3.1-moe-3b | handcrafted8-greedy512/decode | 128 | 0.2353 | 0.2353 | real | 647ed87+dirty |
+| belady | granite3.1-moe-3b | handcrafted8-greedy512/decode | 256 | 0.6458 | 0.6458 | real | 647ed87+dirty |
+| rothead | granite3.1-moe-3b | handcrafted8-greedy512/decode | 256 | 0.4527 | 0.4527 | real | 647ed87+dirty |
+| belady | granite3.1-moe-3b | handcrafted8-greedy512/decode | 384 | 0.7709 | 0.7709 | real | 647ed87+dirty |
+| rothead | granite3.1-moe-3b | handcrafted8-greedy512/decode | 384 | 0.5957 | 0.5957 | real | 647ed87+dirty |
+| belady | granite3.1-moe-3b | handcrafted8-greedy512/decode | 512 | 0.8547 | 0.8547 | real | 647ed87+dirty |
+| rothead | granite3.1-moe-3b | handcrafted8-greedy512/decode | 512 | 0.7187 | 0.7187 | real | 647ed87+dirty |
+| belady | granite3.1-moe-3b | handcrafted8-greedy512/decode | 768 | 0.9501 | 0.9501 | real | 647ed87+dirty |
+| rothead | granite3.1-moe-3b | handcrafted8-greedy512/decode | 768 | 0.8845 | 0.8845 | real | 647ed87+dirty |
+| belady | granite3.1-moe-3b | handcrafted8-greedy512/decode | 1024 | 0.9897 | 0.9897 | real | 647ed87+dirty |
+| rothead | granite3.1-moe-3b | handcrafted8-greedy512/decode | 1024 | 0.9710 | 0.9710 | real | 647ed87+dirty |
+| belady | granite3.1-moe-3b | handcrafted8-greedy512/decode | 1536 | 0.9980 | 0.9980 | real | 647ed87+dirty |
+| rothead | granite3.1-moe-3b | handcrafted8-greedy512/decode | 1536 | 0.9980 | 0.9980 | real | 647ed87+dirty |
+| belady | granite3.1-moe-3b | handcrafted8-greedy512/decode | 2048 | 0.9980 | 0.9980 | real | 647ed87+dirty |
+| rothead | granite3.1-moe-3b | handcrafted8-greedy512/decode | 2048 | 0.9980 | 0.9980 | real | 647ed87+dirty |
+| belady | granite3.1-moe-3b | handcrafted8-greedy512/decode | 3072 | 0.9980 | 0.9980 | real | 647ed87+dirty |
+| rothead | granite3.1-moe-3b | handcrafted8-greedy512/decode | 3072 | 0.9980 | 0.9980 | real | 647ed87+dirty |
+| belady | granite3.1-moe-3b | handcrafted8-greedy512/decode | 4096 | 0.9980 | 0.9980 | real | 647ed87+dirty |
+| rothead | granite3.1-moe-3b | handcrafted8-greedy512/decode | 4096 | 0.9980 | 0.9980 | real | 647ed87+dirty |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model granite3.1-moe-3b --dataset handcrafted8-greedy512 --ignore-layers 0 --prefill skip | env: python 3.14.8, numpy 2.5.4, Darwin arm64 | commit: 647ed87+dirty -->

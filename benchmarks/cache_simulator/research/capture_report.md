@@ -835,3 +835,69 @@ MAGNITUDES — and any threshold calibrated on them — need the full serving
 window, and rotation speed itself drifts over generation. Also visible:
 30b's prefix J(d) is U-shaped (min at d~3, partial recovery by d~6),
 consistent with prompt-cycle periodicity rather than pure noise decay.
+
+## Addendum 11 — exp662: RotHead (rotation-adaptive eviction) — VERDICT: FAIL
+
+Prereg `477fadd4` frozen before the sweep. RotHead (`research/policies_rothead.py`)
+estimates adjacent-window set-Jaccard J(1) online (2048-access windows,
+re-evaluated every 4096 accesses, threshold 0.59 = midpoint of exp660's two
+full-stream J(1) values) and governs each segment with S3FIFO when J(1) is
+low (fast rotation) else LCNU. Both inner policies are simulated in parallel;
+hits are attributed per segment to the chosen inner (residency-migration cost
+at switches not modeled; switch counts reported). Decoded-arm canonical grid,
+frozen traces 30b `08732f27` / granite `7f8e4303`; baselines from the frozen
+decode CSVs. Smoke test at 30b/1280 disclosed in the prereg. All 15 re-simulated
+rothead rates reproduced the sweep CSVs to the last stored digit.
+
+**All three preregistered hypotheses refuted — verdict FAIL, no post-hoc rescue.**
+
+Qwen3-30B-A3B (hit rates %; Δ = rothead − max(lcnu, s3fifo)):
+
+| cap | LCNU | S3FIFO | RotHead | Δ |
+|---|---|---|---|---|
+| 128 | 20.83 | 0.00 | 0.19 | -20.65 |
+| 256 | 32.73 | 6.89 | 7.08 | -25.65 |
+| 384 | 41.48 | 35.98 | 36.02 | -5.46 |
+| 512 | 48.53 | 42.27 | 42.33 | -6.20 |
+| 768 | 59.05 | 54.24 | 54.28 | -4.76 |
+| 1024 | 66.85 | 65.47 | 65.47 | -1.38 |
+| 1536 | 78.71 | 80.83 | 80.82 | -0.02 |
+| 2048 | 86.48 | 89.56 | 89.55 | -0.01 |
+| 3072 | 94.45 | 96.85 | 96.85 | -0.00 |
+| 4096 | 97.80 | 98.89 | 98.89 | -0.00 |
+
+Granite3.1-MoE-3B (Δ = rothead − LCNU; frozen baseline grid overlaps at 5 caps):
+
+| cap | LCNU | S3FIFO | RotHead | Δ |
+|---|---|---|---|---|
+| 128 | 28.38 | 0.00 | 23.53 | -4.84 |
+| 256 | 46.82 | 37.89 | 45.27 | -1.55 |
+| 512 | 72.87 | 67.65 | 71.87 | -1.00 |
+| 768 | 88.64 | 87.93 | 88.45 | -0.20 |
+| 1024 | 97.08 | 97.32 | 97.10 | 0.01 |
+
+- **H1 refuted**: worst 30b deficit -25.65pp at cap 256 — the
+  probe locks onto S3FIFO at *every* capacity (5 switches, capacity-independent),
+  which is near-optimal at ≥10E (deficit ≤0.02pp at 1536–4096) but catastrophic
+  below it (S3FIFO is the *worst* baseline at low caps; at 128 it scores 0.00%).
+- **H2 refuted**: granite deficits up to -4.84pp (cap 128).
+- **H3 refuted**: granite oscillates — 48 switches (J(1) straddles the fixed
+  threshold; exp660's point estimates are full-stream averages, windowed J(1)
+  varies widely). 30b stays stable at 5.
+
+**Mechanism conclusion (post-hoc, clearly labeled):** rotation rate is a
+*stream* property and discriminates *models* (exp659/660), but the LCNU→S3FIFO
+flip is *capacity*-dependent within a fixed stream — governed by hot-set-vs-
+capacity fit, not rotation alone. A capacity-blind rotation probe therefore
+cannot arbitrate the choice; any future adaptive design must feed capacity
+(or hot-set fit) into the arbitration. Positive observation (post-hoc): in the
+≥10E regime the probe picks correctly and RotHead trails the best baseline by
+≤0.02pp while beating LCNU by up to 3.07pp (cap 2048) — the probe
+works exactly where its threshold was measured.
+
+Artifacts: `results_real_qwen3-30b-a3b-rothead.csv`,
+`results_real_granite3.1-moe-3b-rothead.csv`, `policies_rothead.py`
+(+ `rothead` registration in `policies.py` / `run_policies_real.py`);
+prereg + verdict JSON + artifact hashes in `exp662-moei-rothead/`. EXPERIMENTS.md
+rows carry `647ed87+dirty` provenance (run preceded this commit; policy sha
+frozen in ARTIFACT.sha256 before the run).
