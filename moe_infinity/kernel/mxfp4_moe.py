@@ -19,6 +19,17 @@ Launch grids are static upper bounds derived from shapes only; blocks past
 the real padded length exit immediately, so nothing is read back to the host
 and the whole forward is CUDA-graph capturable.
 
+Hardware specificity (docs/hardware-gated-kernels.md): every launch table
+here (``_pro6000_configs``, ``_pro6000_gemv_configs``, the ``PRO6000_*``
+dispatch thresholds) and the CUDA grouped decode kernel it dispatches to
+(``moe_infinity._gptoss_moe``) were tuned on the RTX PRO 6000 Blackwell
+(188 SMs, 128 MiB L2, 99 KiB smem/block, 300 W); the b1 GEMV
+(``_moe_gemv_sm120_kernel``) uses the sm_120a ``cvt.rn.f16x2.e2m1x2``. The op
+is gated with ``SM120 | RTX_PRO_6000`` (``fused_moe_mxfp4`` refuses other
+devices and ``runtime/engine_ops.py`` only registers it where the gate
+passes), so other GPUs keep the previous per-expert resident loop of the
+moe-store wrapper.
+
 Weight layout (as loaded by ``_load_resident_gpt_oss``): packed blocks
 ``[E, N, K // 2]`` uint8 (low nibble = even k), scales ``[E, N, K // 32]``
 uint8 (E8M0, bias 127), biases ``[E, N]``, ``gate_up`` rows interleaved
@@ -30,6 +41,8 @@ import functools
 import torch
 import triton
 import triton.language as tl
+
+from moe_infinity.utils.hw_profile import RTX_PRO_6000, SM120, supports
 
 try:
     from triton.language.extra.cuda import gdc_launch_dependents, gdc_wait
@@ -536,7 +549,7 @@ def _e2m1_to_f32(w):
 
 
 @triton.jit
-def _moe_gemv_kernel(
+def _moe_gemv_sm120_kernel(
     a_ptr,  # int32 view (bf16 pairs): x [T, K/2] (GATHER_TOK) or inter rows
     sorted_ids_ptr,
     block_expert_ptr,
@@ -697,6 +710,13 @@ def _moe_gemv_kernel(
 
 
 @functools.lru_cache(maxsize=None)
+def _pro6000_ok(device_index: int) -> bool:
+    return supports(SM120, device_index) and supports(
+        RTX_PRO_6000, device_index
+    )
+
+
+@functools.lru_cache(maxsize=None)
 def _use_pdl(device_index: int) -> bool:
     # Programmatic dependent launch (griddepcontrol) needs sm_90+: each
     # kernel's prologue/launch overlaps the previous kernel's tail.
@@ -715,10 +735,10 @@ def _block_m(tk: int, num_experts: int) -> int:
 # Decode batches where experts see about one token each (up to this many
 # routed assignments) use the register GEMV kernels (sm_100a+ native e2m1
 # decode) instead of the tensor-core path.
-GEMV_MAX_TK = 8
-# Decode batches (T * top_k in (GEMV_MAX_TK, CUDA_MAX_TK], <= 16 tokens per
+PRO6000_GEMV_MAX_TK = 8
+# Decode batches (T * top_k in (PRO6000_GEMV_MAX_TK, PRO6000_CUDA_MAX_TK], <= 16 tokens per
 # expert) use the CUDA grouped kernel (extensions/kernel/gptoss_moe) if built.
-CUDA_MAX_TK = 256
+PRO6000_CUDA_MAX_TK = 256
 
 
 @functools.lru_cache(maxsize=None)
@@ -734,7 +754,7 @@ def _use_cuda_grouped(tk, num_experts, top_k, hidden, inter, x) -> bool:
     ext = _cuda_ext()
     return (
         ext is not None
-        and GEMV_MAX_TK < tk <= CUDA_MAX_TK
+        and PRO6000_GEMV_MAX_TK < tk <= PRO6000_CUDA_MAX_TK
         and tk <= 16 * min(num_experts, tk)
         and ext.supported(tk // top_k, top_k, num_experts, hidden, inter)
         and x.stride(0) % 8 == 0
@@ -753,7 +773,8 @@ N_FASTEST = True
 
 @functools.lru_cache(maxsize=None)
 def _native_e2m1(device_index: int) -> bool:
-    return _HAS_GDC and torch.cuda.get_device_capability(device_index)[0] >= 10
+    # cvt.rn.f16x2.e2m1x2 (b1 GEMV, UPCAST=2) is sm_120a-only here.
+    return _HAS_GDC and supports(SM120, device_index)
 
 
 def _gemv_block_m(tk: int, num_experts: int) -> int:
@@ -761,7 +782,7 @@ def _gemv_block_m(tk: int, num_experts: int) -> int:
     return min(4, triton.next_power_of_2(max(1, round(rows_per_expert))))
 
 
-def _gemv_configs(tk: int, block_m: int):
+def _pro6000_gemv_configs(tk: int, block_m: int):
     """((BLOCK_N, BLOCK_G, warps, split) gemm1, (...) gemm2)."""
     return (8, 16, 4, 1), (4, 16, 2, 1)
 
@@ -789,7 +810,7 @@ def _fused_moe_gemv(
     block_m = configs[2] if configs and len(configs) > 2 else None
     block_m = block_m or _gemv_block_m(tk, E)
     (bn1, bg1, w1, _), (bn2, bg2, w2, split) = (
-        configs[:2] if configs else _gemv_configs(tk, block_m)
+        configs[:2] if configs else _pro6000_gemv_configs(tk, block_m)
     )
     if split > 1:
         ws = torch.empty(T * H + 1, dtype=torch.float32, device=x.device)
@@ -811,7 +832,7 @@ def _fused_moe_gemv(
         launch_pdl=pdl,
     )
     g1 = (max_blocks, triton.cdiv(2 * inter, bn1), 1)
-    _moe_gemv_kernel[(g1[1], g1[0], 1) if N_FASTEST else g1](
+    _moe_gemv_sm120_kernel[(g1[1], g1[0], 1) if N_FASTEST else g1](
         x.view(torch.int32),
         sorted_ids,
         block_expert,
@@ -843,7 +864,7 @@ def _fused_moe_gemv(
         **common,
     )
     g2 = (max_blocks, triton.cdiv(H, bn2), split)
-    _moe_gemv_kernel[(g2[1], g2[0], split) if N_FASTEST else g2](
+    _moe_gemv_sm120_kernel[(g2[1], g2[0], split) if N_FASTEST else g2](
         inter_buf.view(torch.int32),
         sorted_ids,
         block_expert,
@@ -879,10 +900,10 @@ def _fused_moe_gemv(
 
 # Small batches split K of the down projection (fp32 workspace) up to this
 # many routed (token, slot) assignments.
-SPLIT_MAX_TK = 8
+PRO6000_SPLIT_MAX_TK = 8
 
 
-def _configs(tk: int, block_m: int):
+def _pro6000_configs(tk: int, block_m: int):
     """((BN, BK, warps, stages) gemm1, (BN, BK, warps, stages, split) gemm2).
 
     Tuned on RTX PRO 6000 Blackwell (sm_120) with GPT-OSS shapes
@@ -890,7 +911,7 @@ def _configs(tk: int, block_m: int):
     """
     if block_m <= 16:
         g1 = (32, 256, 4, 3)
-        g2 = (64, 256, 4, 3, 3 if tk <= SPLIT_MAX_TK else 1)
+        g2 = (64, 256, 4, 3, 3 if tk <= PRO6000_SPLIT_MAX_TK else 1)
     elif block_m <= 32:
         g1 = (64, 128, 4, 2)
         g2 = (128, 128, 4, 2, 1)
@@ -975,12 +996,17 @@ def fused_moe_mxfp4(
         down_blocks:    ``[E, H, I // 2]`` uint8 (``[E, H, I//32, 16]`` ok)
         down_scales:    ``[E, H, I // 32]`` uint8
         down_bias:      ``[E, H]``
-        configs:        optional override of ``_configs`` (tuning)
+        configs:        optional override of ``_pro6000_configs`` (tuning)
 
     Returns:
         ``[T, H]`` bf16, ``sum_j w[t, j] * expert_{ids[t, j]}(x[t])``.
     """
     assert x.dim() == 2 and x.dtype == torch.bfloat16
+    if not _pro6000_ok(x.device.index or 0):
+        raise RuntimeError(
+            "fused_moe_mxfp4 is tuned for the RTX PRO 6000 (SM120 + "
+            "RTX_PRO_6000 gates); other GPUs use the per-expert expert loop"
+        )
     T, H = x.shape
     E = gate_up_blocks.shape[0]
     top_k = topk_ids.shape[-1]
@@ -1010,7 +1036,7 @@ def fused_moe_mxfp4(
         )
     ):
         # Hand-written mma.sync kernel: 2 launches, routing on device.
-        return _cuda_ext().grouped_mxfp4_moe(
+        return _cuda_ext().grouped_mxfp4_moe_pro6000(
             x,
             topk_ids.view(T, top_k).to(torch.int64),
             topk_weights.view(T, top_k).to(torch.bfloat16),
@@ -1024,7 +1050,7 @@ def fused_moe_mxfp4(
             float(limit),
         )
     if (
-        tk <= GEMV_MAX_TK
+        tk <= PRO6000_GEMV_MAX_TK
         and _gemv_block_m(tk, E) == 1
         and _native_e2m1(x.device.index or 0)
     ):
@@ -1045,8 +1071,8 @@ def fused_moe_mxfp4(
             configs,
         )
     block_m = _block_m(tk, E)
-    (bn1, bk1, w1, st1), (bn2, bk2, w2, st2, split) = configs or _configs(
-        tk, block_m
+    (bn1, bk1, w1, st1), (bn2, bk2, w2, st2, split) = (
+        configs or _pro6000_configs(tk, block_m)
     )
     if split > 1:
         # fp32 accumulator + int32 arrival counter (zero bits == 0).

@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 _registered = False
 
 
+def gptoss_grouped_pro6000_enabled(device=None) -> bool:
+    """Gate of the GPT-OSS grouped MXFP4 MoE op (kernel/mxfp4_moe.py).
+
+    Its launch configs (Triton GEMV / MMA tables, CUDA grouped decode kernel)
+    were tuned on the RTX PRO 6000 Blackwell (188 SMs, 128 MiB L2, 300 W) and
+    the b1 GEMV uses the sm_120a ``cvt.rn.f16x2.e2m1x2``; other GPUs keep the
+    previous resident expert loop.
+    """
+    from moe_infinity.utils.hw_profile import RTX_PRO_6000, SM120, supports
+
+    return supports(SM120, device) and supports(RTX_PRO_6000, device)
+
+
 def register_engine_ops() -> None:
     global _registered
     if _registered:
@@ -40,8 +53,10 @@ def register_engine_ops() -> None:
         route_ahead_ctx=_route_ahead_ctx,
     )
 
-    if hasattr(_ops, "fused_moe_mxfp4"):
-        # Older moe-store releases lack this op and keep the expert loop.
+    if hasattr(_ops, "fused_moe_mxfp4") and gptoss_grouped_pro6000_enabled():
+        # Older moe-store releases lack this op, and devices other than the
+        # RTX PRO 6000 it was tuned on leave it unregistered: either way the
+        # moe-store wrapper keeps its per-expert loop.
         from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
 
         _register(fused_moe_mxfp4=fused_moe_mxfp4)

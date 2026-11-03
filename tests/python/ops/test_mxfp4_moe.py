@@ -119,11 +119,11 @@ def test_matches_resident_loop(T, E, k, H, I, path, monkeypatch):
     from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
 
     if path == "nosplit":
-        monkeypatch.setattr(mm, "SPLIT_MAX_TK", 0)
+        monkeypatch.setattr(mm, "PRO6000_SPLIT_MAX_TK", 0)
     if path in ("nosplit", "mma", "bf16x2", "cvt", "cuda"):
-        monkeypatch.setattr(mm, "GEMV_MAX_TK", 0)
+        monkeypatch.setattr(mm, "PRO6000_GEMV_MAX_TK", 0)
     if path in ("nosplit", "mma", "bf16x2", "cvt"):
-        monkeypatch.setattr(mm, "CUDA_MAX_TK", 0)
+        monkeypatch.setattr(mm, "PRO6000_CUDA_MAX_TK", 0)
     if path == "cuda" and mm._cuda_ext() is None:
         pytest.skip("moe_infinity._gptoss_moe not built")
     if path in ("bf16x2", "cvt"):

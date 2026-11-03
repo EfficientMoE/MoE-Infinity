@@ -17,6 +17,6 @@ torch::Tensor gptoss_grouped_mxfp4(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("supported", &gptoss_grouped_mxfp4_supported,
         "Whether the grouped MXFP4 decode kernel covers this shape");
-  m.def("grouped_mxfp4_moe", &gptoss_grouped_mxfp4,
+  m.def("grouped_mxfp4_moe_pro6000", &gptoss_grouped_mxfp4,
         "GPT-OSS resident MoE (MXFP4 experts) in two launches, no host sync");
 }

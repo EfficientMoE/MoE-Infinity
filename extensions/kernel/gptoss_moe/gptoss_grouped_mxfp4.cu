@@ -1,6 +1,13 @@
 // Copyright (c) EfficientMoE.
 // SPDX-License-Identifier: Apache-2.0
 
+// Hardware specificity: launch configs and the dispatch window were tuned on
+// the RTX PRO 6000 Blackwell (188 SMs, 128 MiB L2, 300 W); the entry point
+// refuses other devices (hw::Gate::kRtxPro6000) and Python
+// (moe_infinity/kernel/mxfp4_moe.py, runtime/engine_ops.py) never calls it
+// there, so other GPUs keep the previous per-expert resident loop. The ISA
+// itself is generic (bf16 mma.sync sm_80+, mul.bf16x2 guarded to sm_90+).
+//
 // Grouped decode MoE for GPT-OSS resident MXFP4 experts (#313): every routed
 // expert of a layer in two launches, no host sync, CUDA-graph capturable.
 //
@@ -32,6 +39,8 @@
 //  * Down: out[t] += bf16(w * bf16(acc + bias)) with bf16 atomics into the
 //    bf16 output, zeroed by launch 1 (same rounding as the reference loop's
 //    final_hidden[mask] += w * y).
+
+#include "kernel/hw_profile.h"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -697,6 +706,9 @@ torch::Tensor gptoss_grouped_mxfp4(
                   d_bias.is_contiguous() && d_bias.numel() == E * H,
               "gptoss_grouped_mxfp4: biases must be contiguous bf16");
 
+  TORCH_CHECK(moe_infinity::hw::Supports(moe_infinity::hw::Gate::kRtxPro6000,
+                                         x.device().index()),
+              "gptoss_grouped_mxfp4: tuned for the RTX PRO 6000 only");
   c10::cuda::CUDAGuard guard(x.device());
   auto stream = at::cuda::getCurrentCUDAStream(x.device().index());
   auto out = torch::empty({T, H}, x.options());
@@ -740,7 +752,7 @@ torch::Tensor gptoss_grouped_mxfp4(
   // warps; ~8 tokens per expert, two n8 tiles and row-split warps.
   const int64_t m_avg = (TK + Y - 1) / Y;
   int nt = 1, nt_down = 1;
-  LaunchCfg up{1, 2, 4, 4};
+  LaunchCfg up{1, 2, 4, 4};  // pro6000 table
   LaunchCfg down{1, 1, 8, 2};
   if (m_avg > 4) {
     nt = nt_down = m_avg <= 16 ? 2 : m_avg <= 32 ? 4 : 8;

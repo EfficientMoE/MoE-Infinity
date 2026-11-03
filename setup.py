@@ -465,6 +465,7 @@ if cuda_available:
         ext_modules.append(
             cpp_extension.CUDAExtension(
                 name="moe_infinity._gptoss_moe",
+                include_dirs=[get_path("extensions")],
                 sources=[
                     "extensions/kernel/gptoss_moe/gptoss_moe_binding.cpp",
                     "extensions/kernel/gptoss_moe/gptoss_grouped_mxfp4.cu",
