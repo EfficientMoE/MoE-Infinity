@@ -23,7 +23,12 @@ import traceback
 
 import torch
 
-from benchmarks.kernel_audit.common import l2_flush, other_gpu_procs, time_cuda
+from benchmarks.kernel_audit.common import (
+    l2_flush,
+    other_gpu_procs,
+    time_cuda,
+    warm_gpu,
+)
 from benchmarks.kernel_audit.suites import all_cases
 
 
@@ -105,6 +110,8 @@ def main() -> None:
 
     out_f = open(args.out, "a") if args.out else None
     cudart = torch.cuda.cudart()
+    if args.mode == "time":
+        warm_gpu()
     for i, c in enumerate(cases):
         rec = {
             "cid": c.cid,

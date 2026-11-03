@@ -34,6 +34,27 @@ def l2_flush() -> None:
     _L2_FLUSH.zero_()
 
 
+def warm_gpu(ms: float = 200.0) -> None:
+    """Bring an idle GPU up to boost clocks before the first timed case.
+
+    The first case of a fresh process otherwise runs during the clock ramp
+    (~0.7 us slower on a 20 us op). 200 ms of copies is too short to heat the
+    card into its sustained power-capped state.
+    """
+    src = torch.empty(16 * 1024 * 1024, dtype=torch.int32, device="cuda")
+    dst = torch.empty_like(src)
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    while True:
+        for _ in range(20):
+            dst.copy_(src)
+        end.record()
+        end.synchronize()
+        if start.elapsed_time(end) >= ms:
+            break
+
+
 @dataclass
 class Timing:
     median_us: float

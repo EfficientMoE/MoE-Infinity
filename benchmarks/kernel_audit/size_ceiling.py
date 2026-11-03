@@ -42,7 +42,12 @@ import torch
 import triton
 import triton.language as tl
 
-from benchmarks.kernel_audit.common import RESULTS_DIR, gpu_identity, time_cuda
+from benchmarks.kernel_audit.common import (
+    RESULTS_DIR,
+    gpu_identity,
+    time_cuda,
+    warm_gpu,
+)
 
 _UNITS = {
     "": 1,
@@ -213,6 +218,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path, help="append JSON lines here")
     args = ap.parse_args()
     roofs = _roofs()
+    warm_gpu()
     print(json.dumps({"gpu": gpu_identity(), "roof_gbs": roofs}))
     for kind in ("read", "copy"):
         for item in filter(None, getattr(args, kind).split(",")):
