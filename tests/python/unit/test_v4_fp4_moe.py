@@ -133,6 +133,7 @@ def _no_tf32():
         (48, 4, 8, 512, 128),  # BT=32
         (100, 4, 8, 256, 384),  # BT=64
         (700, 6, 8, 512, 256),  # BT=128, multiple row tiles per expert
+        (8192, 6, 16, 256, 2048),  # h = 100 MB: expert-chunked GEMM1/GEMM2
     ],
 )
 def test_moe_matches_official_numerics(T, topk, E, H, I):
