@@ -29,6 +29,12 @@ def _has_cuda_ext():
     params=[
         "triton",
         pytest.param(
+            "prefill",
+            marks=pytest.mark.skipif(
+                not _has_cuda_ext(), reason="moe_infinity._router not built"
+            ),
+        ),
+        pytest.param(
             "cuda",
             marks=pytest.mark.skipif(
                 not _has_cuda_ext(), reason="moe_infinity._router not built"

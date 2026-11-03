@@ -1244,6 +1244,30 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("logits_dtype"), py::arg("return_logits"), py::arg("dense"),
         py::arg("active_flags"), py::arg("compact"),
         py::arg("gemm_min_tokens"));
+  m.def(
+      "acquire_flags",
+      [](int64_t device, int64_t E) {
+        // For kernels launched from Python (Triton prefill path): a zeroed
+        // pinned flag slot, the ring's completion word and this launch's
+        // sequence number (see FlagRing).
+        cudaStream_t stream =
+            at::cuda::getCurrentCUDAStream(static_cast<int>(device)).stream();
+        auto* ring =
+            moe_router::flag_ring_for(static_cast<int>(device), stream);
+        const auto slot = ring->acquire();
+        at::Tensor flags = ring->view(slot.first, E);
+        std::memset(flags.data_ptr(), 0, E);
+        at::Tensor done =
+            ring->buf
+                .narrow(0,
+                        static_cast<int64_t>(moe_router::kFlagSlots) *
+                            moe_router::kMaxE,
+                        8)
+                .view(at::kLong);
+        return py::make_tuple(flags, done, slot.second);
+      },
+      py::arg("device"), py::arg("E"));
+  m.def("remember_flags", &moe_router::remember_flags);
   m.def("take_active_flags", &moe_router::take_active_flags,
         "Pinned active-expert flags produced with this mask by the last "
         "routing call on this thread (consumed), or None");

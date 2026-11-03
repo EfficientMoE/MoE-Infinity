@@ -447,6 +447,243 @@ def _sm_count(device) -> int:
 PREFILL_GEMM_MIN_TOKENS = 4096
 
 
+# --------------------------------------------------------------------------
+# Prefill: one fused tensor-core GEMM + top-k launch. Each program owns a
+# [BM, E] logits tile (E <= 512 fits in one tile row), accumulates it over H
+# with tl.dot (bf16 operands, fp32 accumulate: exact products), and the
+# epilogue scores it, selects the top-k and writes the routing outputs. X is
+# read once, logits never leave the SM.
+# --------------------------------------------------------------------------
+
+_I64_MIN = -9223372036854775808
+# Token count from which fused_route / make_router use the Triton GEMM +
+# top-k kernel (Triton's launch cost is irrelevant at prefill sizes).
+PREFILL_FUSED_MIN_TOKENS = 1 << 30
+
+
+@triton.jit
+def _sel_keys(v, offs_e, valid, BLOCK_E: tl.constexpr):
+    # Monotone int64 key: (ordered float bits) << 32 | (BLOCK_E - 1 - e), so
+    # one max picks the largest value and, among equal values, the lowest
+    # expert index (torch's tie order).
+    u = v.to(tl.int32, bitcast=True)
+    o = u ^ ((u >> 31) & 0x7FFFFFFF)
+    key = (o.to(tl.int64) << 32) | (BLOCK_E - 1 - offs_e).to(tl.int64)[None, :]
+    return tl.where(valid, key, -9223372036854775808)
+
+
+@triton.jit
+def _gemm_route_kernel(
+    x_ptr, w_ptr, bias_ptr, mask_ptr, dw_ptr, ids_ptr, tw_ptr, logits_ptr,
+    flags_ptr, done_ptr, seq,
+    T, stride_xt, stride_we, scale, eps,
+    H: tl.constexpr, E: tl.constexpr, K: tl.constexpr, K_PAD: tl.constexpr,
+    BLOCK_E: tl.constexpr, BM: tl.constexpr, BK: tl.constexpr,
+    SCORING: tl.constexpr, HAS_BIAS: tl.constexpr, N_GROUP: tl.constexpr,
+    TOPK_GROUP: tl.constexpr, RENORM: tl.constexpr,
+    ROUND_LOGITS: tl.constexpr, WRITE_DENSE: tl.constexpr,
+    WRITE_IDS: tl.constexpr, WRITE_LOGITS: tl.constexpr,
+    WRITE_FLAGS: tl.constexpr,
+):  # fmt: skip
+    pid = tl.program_id(0)
+    offs_t = pid * BM + tl.arange(0, BM)
+    offs_e = tl.arange(0, BLOCK_E)
+    offs_k = tl.arange(0, BK)
+    valid_t = offs_t < T
+    valid_e = offs_e < E
+    x_ptrs = x_ptr + offs_t[:, None] * stride_xt + offs_k[None, :]
+    w_ptrs = w_ptr + offs_e[:, None] * stride_we + offs_k[None, :]
+    acc = tl.zeros([BM, BLOCK_E], dtype=tl.float32)
+    for k0 in range(0, H, BK):
+        if H % BK == 0:
+            a = tl.load(x_ptrs, mask=valid_t[:, None], other=0.0)
+            b = tl.load(w_ptrs, mask=valid_e[:, None], other=0.0)
+        else:
+            km = (k0 + offs_k) < H
+            a = tl.load(x_ptrs, mask=valid_t[:, None] & km[None, :], other=0.0)
+            b = tl.load(w_ptrs, mask=valid_e[:, None] & km[None, :], other=0.0)
+        acc = tl.dot(a, tl.trans(b), acc)
+        x_ptrs += BK
+        w_ptrs += BK
+
+    logits = acc
+    if ROUND_LOGITS:
+        logits = logits.to(tl.bfloat16).to(tl.float32)
+    io_mask = valid_t[:, None] & valid_e[None, :]
+    if WRITE_LOGITS:
+        tl.store(
+            logits_ptr + offs_t[:, None] * E + offs_e[None, :],
+            logits.to(logits_ptr.dtype.element_ty), mask=io_mask,
+        )  # fmt: skip
+    if SCORING == 0:
+        scores = logits  # softmax is monotone: select on the logits
+        sel = logits
+    else:
+        # IEEE-rounded ops in ATen's order, so selection matches torch.
+        if SCORING == 1:
+            scores = tl.div_rn(1.0, 1.0 + libdevice.exp(-logits))
+        else:
+            sp = tl.where(
+                logits > 20.0, logits, libdevice.log1p(libdevice.exp(logits))
+            )
+            scores = tl.sqrt_rn(sp)
+        sel = scores
+        if HAS_BIAS:
+            b = tl.load(bias_ptr + offs_e, mask=valid_e, other=0.0)
+            sel = scores + b[None, :]
+    keys = _sel_keys(sel, offs_e, valid_e[None, :], BLOCK_E)
+
+    if N_GROUP > 1:
+        # noaux_tc: group score = sum of its top-2 selection values; keep the
+        # TOPK_GROUP best groups (lowest index on ties).
+        GS: tl.constexpr = E // N_GROUP
+        gid = offs_e // GS
+        neg_inf = float("-inf")
+        gexp = tl.full(sel.shape, neg_inf, tl.float32)
+        for g in tl.static_range(N_GROUP):
+            in_g = (gid == g)[None, :] & valid_e[None, :]
+            kg = tl.where(in_g, keys, -9223372036854775808)
+            k1 = tl.max(kg, axis=1)
+            m1 = tl.max(tl.where(kg == k1[:, None], sel, neg_inf), axis=1)
+            kg2 = tl.where(kg == k1[:, None], -9223372036854775808, kg)
+            k2 = tl.max(kg2, axis=1)
+            m2 = tl.max(tl.where(kg2 == k2[:, None], sel, neg_inf), axis=1)
+            gexp = tl.where(in_g, (m1 + m2)[:, None], gexp)
+        keep = tl.zeros(sel.shape, tl.int1)
+        for _j in tl.static_range(TOPK_GROUP):
+            gk = _sel_keys(gexp, gid, valid_e[None, :], N_GROUP)
+            gm = tl.max(gk, axis=1)
+            gsel = N_GROUP - 1 - (gm & 0xFFFFFFFF).to(tl.int32)
+            chosen_g = gid[None, :] == gsel[:, None]
+            keep = keep | chosen_g
+            gexp = tl.where(chosen_g, neg_inf, gexp)
+        masked = _sel_keys(
+            tl.full(sel.shape, neg_inf, tl.float32), offs_e,
+            valid_e[None, :], BLOCK_E,
+        )  # fmt: skip
+        keys = tl.where(keep, keys, masked)
+
+    selmask = tl.zeros([BM, BLOCK_E], tl.int1)
+    offs_kk = tl.arange(0, K_PAD)
+    ids_tile = tl.zeros([BM, K_PAD], tl.int32)
+    for i in tl.static_range(K):
+        m = tl.max(keys, axis=1)
+        chosen = keys == m[:, None]
+        selmask = selmask | chosen
+        keys = tl.where(chosen, -9223372036854775808, keys)
+        if WRITE_IDS:
+            idx = BLOCK_E - 1 - (m & 0xFFFFFFFF).to(tl.int32)
+            ids_tile = tl.where(offs_kk[None, :] == i, idx[:, None], ids_tile)
+
+    if SCORING == 0:
+        top = tl.max(tl.where(selmask, logits, float("-inf")), axis=1)
+        num = tl.where(selmask, tl.exp(logits - top[:, None]), 0.0)
+        if RENORM:
+            inv = 1.0 / (tl.sum(num, axis=1) + eps)
+        else:
+            full = tl.where(
+                valid_e[None, :], tl.exp(logits - top[:, None]), 0.0
+            )
+            inv = 1.0 / tl.sum(full, axis=1)
+    else:
+        num = tl.where(selmask, scores, 0.0)
+        if RENORM:
+            inv = 1.0 / (tl.sum(num, axis=1) + eps)
+        else:
+            inv = tl.full([BM], 1.0, tl.float32)
+    dw = num * inv[:, None] * scale
+    if WRITE_DENSE:
+        tl.store(
+            mask_ptr + offs_t[:, None] * E + offs_e[None, :], selmask,
+            mask=io_mask,
+        )  # fmt: skip
+        tl.store(
+            dw_ptr + offs_t[:, None] * E + offs_e[None, :],
+            dw.to(dw_ptr.dtype.element_ty), mask=io_mask,
+        )  # fmt: skip
+    if WRITE_IDS:
+        tw_tile = tl.zeros([BM, K_PAD], tl.float32)
+        for i in tl.static_range(K):
+            idx_i = tl.sum(tl.where(offs_kk[None, :] == i, ids_tile, 0), axis=1)
+            w_i = tl.sum(
+                tl.where(offs_e[None, :] == idx_i[:, None], dw, 0.0), axis=1
+            )
+            tw_tile = tl.where(offs_kk[None, :] == i, w_i[:, None], tw_tile)
+        k_mask = valid_t[:, None] & (offs_kk[None, :] < K)
+        tl.store(
+            ids_ptr + offs_t[:, None] * K + offs_kk[None, :], ids_tile, k_mask
+        )
+        tl.store(
+            tw_ptr + offs_t[:, None] * K + offs_kk[None, :], tw_tile, k_mask
+        )
+    if WRITE_FLAGS:
+        # One write per (program, active expert) into pinned host memory
+        # (pre-zeroed by the host); then the completion word for the ring.
+        act = tl.max((selmask & valid_t[:, None]).to(tl.int32), axis=0)
+        tl.store(flags_ptr + offs_e, act.to(tl.int8), mask=(act > 0) & valid_e)
+        tl.store(done_ptr, seq)
+
+
+_GEMM_CFG: dict = {}
+
+
+def _gemm_config(T, H, E, block_e):
+    """(BM, BK, num_warps, num_stages) for the fused prefill kernel."""
+    cfg = _GEMM_CFG.get(block_e)
+    if cfg is not None:
+        return cfg
+    bm = 128 if block_e <= 128 else (64 if block_e <= 256 else 32)
+    bk = 64 if block_e <= 256 else 32
+    stage = (bm + block_e) * bk * 2
+    return (bm, bk, 8, max(2, min(4, (80 * 1024) // stage)))
+
+
+def _route_prefill(
+    x, w, top_k, sc, bias, n_group, topk_group, renormalize, scaling, eps,
+    round_logits, weights_dtype, logits_dtype, return_logits, dense,
+    active_flags, compact, cfg=None,
+):  # fmt: skip
+    T, H = x.shape
+    E = w.shape[0]
+    dev = x.device
+    block_e = max(16, triton.next_power_of_2(E))
+    BM, BK, nw, ns = cfg or _gemm_config(T, H, E, block_e)
+    mask = dw = ids = tw = logits = flags = None
+    if dense:
+        mask = torch.empty((T, E), dtype=torch.bool, device=dev)
+        dw = torch.empty((T, E), dtype=weights_dtype, device=dev)
+    if compact:
+        ids = torch.empty((T, top_k), dtype=torch.int32, device=dev)
+        tw = torch.empty((T, top_k), dtype=torch.float32, device=dev)
+    if return_logits:
+        logits = torch.empty((T, E), dtype=logits_dtype, device=dev)
+    done = seq = None
+    if active_flags and _CUDA_EXT is not None:
+        flags, done, seq = _CUDA_EXT.acquire_flags(dev.index or 0, E)
+    if bias is not None and (bias.dtype != torch.float32 or not bias.is_cuda):
+        bias = bias.to(device=dev, dtype=torch.float32)
+    dummy = x
+    _gemm_route_kernel[(triton.cdiv(T, BM),)](
+        x, w, bias if bias is not None else dummy,
+        mask if dense else dummy, dw if dense else dummy,
+        ids if compact else dummy, tw if compact else dummy,
+        logits if return_logits else dummy,
+        flags if flags is not None else dummy,
+        done if done is not None else dummy, seq or 0,
+        T, x.stride(0), w.stride(0), float(scaling), float(eps),
+        H=H, E=E, K=top_k, K_PAD=triton.next_power_of_2(top_k),
+        BLOCK_E=block_e, BM=BM, BK=BK, SCORING=sc,
+        HAS_BIAS=bias is not None, N_GROUP=n_group, TOPK_GROUP=topk_group,
+        RENORM=bool(renormalize), ROUND_LOGITS=bool(round_logits),
+        WRITE_DENSE=bool(dense), WRITE_IDS=bool(compact),
+        WRITE_LOGITS=bool(return_logits), WRITE_FLAGS=flags is not None,
+        num_warps=nw, num_stages=ns,
+    )  # fmt: skip
+    if flags is not None and dense:
+        _CUDA_EXT.remember_flags(mask, flags)
+    return (ids, tw, mask, dw, logits, flags)
+
+
 class RouteOutput(NamedTuple):
     topk_ids: torch.Tensor | None
     topk_weights: torch.Tensor | None
@@ -574,9 +811,22 @@ def fused_route(
         weights_dtype = xdt if sc == SCORING_SOFTMAX else torch.float32
     logits_dtype = xdt if softmax_lp else torch.float32
 
+    if backend == "prefill" or (
+        backend == "auto"
+        and x.is_cuda
+        and x.shape[0] >= PREFILL_FUSED_MIN_TOKENS
+        and weight.dtype == xdt
+        and xdt in _LOW_PRECISION
+        and weight.shape[0] <= 512
+    ):
+        return RouteOutput(*_route_prefill(
+            x, weight, top_k, sc, bias, n_group, topk_group, renormalize,
+            scaling, eps, round_logits, weights_dtype, logits_dtype,
+            return_logits, dense, active_flags, compact,
+        ))  # fmt: skip
     if (
         _CUDA_EXT is not None
-        and backend != "triton"
+        and backend not in ("triton", "prefill")
         and x.is_cuda
         and weight.dtype == xdt
         and xdt in _LOW_PRECISION
