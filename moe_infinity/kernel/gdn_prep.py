@@ -53,6 +53,21 @@ def _solve_diag(b_A, o_i, n, BC: tl.constexpr):
 
 
 @triton.jit
+def _solve_diag_neumann(b_A, o_i, BC: tl.constexpr):
+    """(I + A)^{-1} - I of a strictly lower [BC, BC] block by the Neumann
+    product: with M = -A (nilpotent, M^BC = 0),
+    (I + A)^{-1} = (I + M)(I + M^2)(I + M^4)(I + M^8) for BC = 16. Six small
+    fp32 matmuls replace BC - 2 dependent row-reduction steps."""
+    m_I = (o_i[:, None] == o_i[None, :]).to(tl.float32)
+    b_P = -b_A
+    b_X = m_I + b_P
+    for _ in tl.static_range(3):
+        b_P = tl.dot(b_P, b_P, input_precision="ieee")
+        b_X = tl.dot(b_X, m_I + b_P, input_precision="ieee")
+    return b_X - m_I
+
+
+@triton.jit
 def _gate(b_A, gi, gj, mi, mj, STRICT: tl.constexpr, o_i):
     m = mi[:, None] & mj[None, :]
     if STRICT:
@@ -80,6 +95,7 @@ def gdn_fwd_prep_pro6000_kernel(
     BK: tl.constexpr,
     NORM_K: tl.constexpr,
     BLOCK_OUT: tl.constexpr = False,
+    NEUMANN: tl.constexpr = False,
 ):
     """BLOCK_OUT: chunk i_t of the token block starting at ``t_base``; w / u
     go to block-local buffers ([B, TB, H, *]) and k_n is not written."""
@@ -208,10 +224,22 @@ def gdn_fwd_prep_pro6000_kernel(
 
     # ---- (I + A)^{-1}: diagonal forward substitution + block merge
     m_I = o_i[:, None] == o_i[None, :]
-    I00 = _solve_diag(A00, o_i, tl.minimum(BC, T - t0), BC) + m_I
-    I11 = _solve_diag(A11, o_i, tl.minimum(BC, T - t0 - BC), BC) + m_I
-    I22 = _solve_diag(A22, o_i, tl.minimum(BC, T - t0 - 2 * BC), BC) + m_I
-    I33 = _solve_diag(A33, o_i, tl.minimum(BC, T - t0 - 3 * BC), BC) + m_I
+    if NEUMANN:
+        I00 = _solve_diag_neumann(A00, o_i, BC) + m_I
+    else:
+        I00 = _solve_diag(A00, o_i, tl.minimum(BC, T - t0), BC) + m_I
+    if NEUMANN:
+        I11 = _solve_diag_neumann(A11, o_i, BC) + m_I
+    else:
+        I11 = _solve_diag(A11, o_i, tl.minimum(BC, T - t0 - BC), BC) + m_I
+    if NEUMANN:
+        I22 = _solve_diag_neumann(A22, o_i, BC) + m_I
+    else:
+        I22 = _solve_diag(A22, o_i, tl.minimum(BC, T - t0 - 2 * BC), BC) + m_I
+    if NEUMANN:
+        I33 = _solve_diag_neumann(A33, o_i, BC) + m_I
+    else:
+        I33 = _solve_diag(A33, o_i, tl.minimum(BC, T - t0 - 3 * BC), BC) + m_I
     P: tl.constexpr = "tf32"
     I10 = -tl.dot(tl.dot(I11, A10, input_precision=P), I00, input_precision=P)
     I21 = -tl.dot(tl.dot(I22, A21, input_precision=P), I11, input_precision=P)
@@ -438,6 +466,7 @@ def gdn_fwd_prep(
         BC=16,
         BK=K,
         NORM_K=norm_k,
+        NEUMANN=True,
         num_warps=2,
         num_stages=1,
     )
