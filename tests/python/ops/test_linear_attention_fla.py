@@ -57,7 +57,10 @@ def _assert_close(out, ref, atol, rtol=0.0, frac=1.0):
     assert ok >= frac, f"{(1 - ok) * 100:.3f}% outside tol, max err {err:.3e}"
 
 
-def _gdn_inputs(B, T, H, dk, dv, seed=0):
+def _gdn_inputs(B, T, H, dk, dv, seed=0, decay=0.5):
+    """``decay`` bounds the per-token log decay. 0.5 forgets the state within
+    a chunk (~e^-16 per 64 tokens); 0.005 carries it across many chunks, which
+    is what exercises the inter-chunk recurrence."""
     g = torch.Generator(device="cuda").manual_seed(seed)
 
     def r(*s):
@@ -66,7 +69,7 @@ def _gdn_inputs(B, T, H, dk, dv, seed=0):
     q = r(B, T, H, dk).bfloat16()
     k = r(B, T, H, dk).bfloat16()
     v = r(B, T, H, dv).bfloat16()
-    gate = -torch.rand(B, T, H, device="cuda", generator=g) * 0.5
+    gate = -torch.rand(B, T, H, device="cuda", generator=g) * decay
     beta = torch.rand(B, T, H, device="cuda", generator=g).bfloat16()
     h0 = r(B, H, dk, dv) * 0.1
     return q, k, v, gate, beta, h0
@@ -155,9 +158,19 @@ def test_gdn_decode_matches_torch_reference_and_is_o1_launches():
     assert 1 <= len(launches) <= 3, [e.name for e in launches]
 
 
-@pytest.mark.parametrize("T", [64, 1000, 4096])
-@pytest.mark.parametrize("norm", [True, False])
-def test_gdn_fused_matches_torch_reference(T, norm):
+@pytest.mark.parametrize(
+    "T, norm, decay",
+    [
+        (64, True, 0.5),
+        (1000, True, 0.5),
+        (1000, False, 0.5),
+        (1000, True, 0.005),
+        (4096, True, 0.005),
+        (9216, True, 0.005),
+        (51200, True, 0.005),
+    ],
+)
+def test_gdn_fused_matches_torch_reference(T, norm, decay):
     """Kernel-level parity (the call-site threshold MIN_FUSED_TOKENS does
     not apply to the direct entry point)."""
     from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
@@ -168,7 +181,7 @@ def test_gdn_fused_matches_torch_reference(T, norm):
         chunk_gated_delta_rule_fused,
     )
 
-    q, k, v, g, beta, h0 = _gdn_inputs(1, T, 32, 128, 128)
+    q, k, v, g, beta, h0 = _gdn_inputs(1, T, 32, 128, 128, decay=decay)
     if not norm:  # the kernels assume unit-norm q / k
         q = torch.nn.functional.normalize(q.float(), dim=-1).bfloat16()
         k = torch.nn.functional.normalize(k.float(), dim=-1).bfloat16()
@@ -236,10 +249,11 @@ def test_fused_wrapper_falls_back_to_fla_for_grad_and_varlen():
 # --------------------------------------------------------------------------
 
 
-def _kda_inputs(T, H=64, d=128, seed=0):
+def _kda_inputs(T, H=64, d=128, seed=0, bound=5.0):
+    """GLM-5.3-Flash safe gate: per-channel log decay in [-bound, 0]."""
     q, k, v, _, beta, h0 = _gdn_inputs(1, T, H, d, d, seed)
     gen = torch.Generator(device="cuda").manual_seed(seed + 1)
-    g = -5.0 * torch.sigmoid(
+    g = -bound * torch.sigmoid(
         torch.randn(1, T, H, d, device="cuda", generator=gen) - 4.0
     )
     return q, k, v, g, beta, h0
@@ -263,13 +277,13 @@ def test_kda_chunk_matches_torch_reference(T):
 
 
 @requires_glm5_next
-@pytest.mark.parametrize("T", [64, 1000])
-def test_kda_fused_matches_torch_reference(T):
+@pytest.mark.parametrize("T, bound", [(64, 5.0), (1000, 5.0), (1000, 0.05)])
+def test_kda_fused_matches_torch_reference(T, bound):
     from transformers.models.glm5_next import modeling_glm5_next as mg
 
     from moe_infinity.kernel.linear_attention_fused import chunk_kda_fused
 
-    q, k, v, g, beta, h0 = _kda_inputs(T)
+    q, k, v, g, beta, h0 = _kda_inputs(T, bound=bound)
     kw = dict(
         initial_state=h0, output_final_state=True, use_qk_l2norm_in_kernel=True
     )
@@ -280,6 +294,24 @@ def test_kda_fused_matches_torch_reference(T):
     _assert_close(ht, ht_ref, atol=2e-2, rtol=2e-2, frac=0.999)
     o2, _ = chunk_kda_fused(q, k, v, g, beta, **kw)
     assert torch.equal(o, o2)
+
+
+@pytest.mark.parametrize("T", [9216, 51200])
+def test_kda_fused_matches_fla_long(T):
+    """Long sequences, slow decay: the torch KDA reference materialises
+    O(T * 64 * d) fp32 temporaries, so compare against fla's chunk_kda."""
+    from fla.ops.kda import chunk_kda
+
+    from moe_infinity.kernel.linear_attention_fused import chunk_kda_fused
+
+    q, k, v, g, beta, h0 = _kda_inputs(T, bound=0.05)
+    kw = dict(
+        initial_state=h0, output_final_state=True, use_qk_l2norm_in_kernel=True
+    )
+    o, ht = chunk_kda_fused(q, k, v, g, beta, **kw)
+    o_ref, ht_ref = chunk_kda(q, k, v, g=g, beta=beta, **kw)
+    _assert_close(o, o_ref, atol=2e-2, rtol=2e-2, frac=0.999)
+    _assert_close(ht, ht_ref, atol=2e-2, rtol=2e-2, frac=0.999)
 
 
 @requires_glm5_next
