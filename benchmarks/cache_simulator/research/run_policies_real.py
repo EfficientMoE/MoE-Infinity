@@ -88,6 +88,7 @@ POLICY_ORDER = [
     "shadowfit",
     "decayfit",
     "costfit",
+    "costfit3",
     "single_layer_ahead",
     "stride_prefetch",
     "multi_layer_ahead",
@@ -117,6 +118,7 @@ PRETTY = {
     "shadowfit": "ShadowFit (cumulative-rate shadow arbitration)",
     "decayfit": "DecayFit (decayed-rate shadow arbitration)",
     "costfit": "CostFit (self-limiting switch-cost arbitration)",
+    "costfit3": "CostFit3 (3-candidate self-limiting arbitration)",
     "single_layer_ahead": "1-layer-ahead*",
     "stride_prefetch": "Stride*",
     "multi_layer_ahead": "Multi-layer*",
@@ -228,7 +230,7 @@ def geometry_kwargs(name: str, stats: Dict[str, int]) -> Dict[str, float]:
         return {}
     kwargs: Dict[str, float] = {"num_layers": stats["num_layers"]}
     num_experts = stats["max_expert_id"] + 1
-    if name in ("lcnu", "rothead", "hotfit", "shadowfit", "decayfit", "costfit") and stats["top_k"] > 0 and num_experts > 0:
+    if name in ("lcnu", "rothead", "hotfit", "shadowfit", "decayfit", "costfit", "costfit3") and stats["top_k"] > 0 and num_experts > 0:
         kwargs["prior"] = min(1.0, stats["top_k"] / num_experts)
     return kwargs
 
