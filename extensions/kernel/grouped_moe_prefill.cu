@@ -402,15 +402,20 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   visit<DownConfigs>(down_cfg, [&]<typename G>() {
     tile_m[1] = G::ThreadblockShape::kM;
     tiles_n[1] = (H + G::ThreadblockShape::kN - 1) / G::ThreadblockShape::kN;
-    // The scatter-add output is [T, H] fp32. Sweep it in passes of N panels
-    // whose slice (T x panels x kN x 4 B) stays in L2 instead of streaming
-    // the whole accumulator through L2 for every expert.
+    // The scatter-add output is [T, H] fp32 and every row receives kcap
+    // reductions from different experts. When it does not fit in L2 those
+    // reductions miss; sweeping it in P passes of N panels keeps one slice
+    // (T x H / P x 4 B) resident at the cost of reading the activations P
+    // times, which pays off for up to 4 passes.
     panels[1] = tiles_n[1];
-    while (panels[1] > 1 &&
-           (tiles_n[1] % panels[1] != 0 ||
-            double(T) * panels[1] * G::ThreadblockShape::kN * 4 >
-                double(kOutPassBytes)))
-      --panels[1];
+    for (int passes = 2; passes <= 4; ++passes) {
+      if (tiles_n[1] % passes != 0) continue;
+      if (double(T) * H * 4 <= double(kOutPassBytes)) break;
+      if (double(T) * H * 4 / passes <= double(kOutPassBytes)) {
+        panels[1] = tiles_n[1] / passes;
+        break;
+      }
+    }
   });
   // Routing grid: <= one block per SM so a cooperative launch always fits.
   int const blocks = std::max(1, std::min(sms, (T + 63) / 64));
