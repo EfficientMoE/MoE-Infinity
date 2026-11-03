@@ -170,8 +170,9 @@ struct RouteParams {
   int64_t ldo;
   int zero_out;
   // Combine mode: sorted rows of every token, ascending, count in tcount.
-  int* tcount;  // [T] or nullptr
-  int* rowmap;  // [T, kcap]
+  int* next_tile;  // [2] tile counters of the GEMM launches
+  int* tcount;     // [T] or nullptr
+  int* rowmap;     // [T, kcap]
   int kcap;
 };
 
@@ -310,8 +311,10 @@ __global__ void __launch_bounds__(256) route_kernel(RouteParams p) {
         [&](int e, int v) { p.tile_start[g][e] = v; });
   }
   __syncthreads();
-  if (b == 0)
+  if (b == 0) {
     for (int j = tid; j <= p.n; j += blockDim.x) p.offsets[j] = offs[j];
+    if (tid < 2) p.next_tile[tid] = 0;
+  }
   for (int j = tid; j < p.n; j += blockDim.x) cnt[j] = 0;
   __syncthreads();
 
@@ -472,28 +475,16 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   // decide between them.
   double const mean_rows = double(T) * kcap / n;
   int const rows_e = std::max(1, int(std::lround(mean_rows)));
-  // An expert's arithmetic intensity on its weights is about its row count
-  // (FLOP per weight byte). Below ~1.25x the ridge point (269 TF / 1641 GB/s
-  // = 164) the layer streams weights, and the 4-warp 64-row configs, with
-  // twice the CTAs in flight per SM, keep more loads outstanding than the
-  // 8-warp 128-row ones (deepseek-v4.1 9K gate/up: 15.9 vs 21.7 ms).
-  constexpr int kStreamRows = 208;
   struct Rate {
     double big, small;
-    bool streaming;  // a candidate when the layer streams weights
   };
-  static constexpr Rate kDualRate[] = {{1.85, 0, false},
-                                       {1.68, 0, false},
-                                       {1.45, 0, true},
-                                       {1.85, 1.45, false},
-                                       {1.45, 1.10, true}};
-  static constexpr Rate kDownRate[] = {{1.70, 0, false},    {1.64, 0, false},
-                                       {1.40, 0, true},     {1.70, 1.40, false},
-                                       {1.64, 1.40, false}, {1.40, 1.05, true},
-                                       {1.44, 1.08, true}};
+  static constexpr Rate kDualRate[] = {
+      {1.85, 0}, {1.68, 0}, {1.45, 0}, {1.85, 1.45}, {1.45, 1.10}};
+  static constexpr Rate kDownRate[] = {{1.70, 0},    {1.64, 0},    {1.40, 0},
+                                       {1.70, 1.40}, {1.64, 1.40}, {1.40, 1.05},
+                                       {1.44, 1.08}};
   static_assert(std::size(kDualRate) == kNumDual &&
                 std::size(kDownRate) == kNumDown);
-  bool const streaming = rows_e < kStreamRows;
   // A config's split: small tiles finish an expert while they cost less than
   // one more big tile.
   auto split_of = [](Rate r, int big_m, int small_m) {
@@ -504,18 +495,13 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   auto cost = [&](Rate r, moe_gemm::TileSplit sp) {
     int nb, ns;
     sp.split(rows_e, nb, ns);
-    // Mixed heights cost ~8 % more per tile than the padding predicts (the
-    // static tile stride hands the cheap tiles to every other CTA): at 1200
-    // rows per expert pure 128-row tiles win, at 288 the mixed ones do.
-    return ns ? 1.08 * (nb * sp.big_m / r.big + ns * sp.small_m / r.small)
-              : nb * sp.big_m / r.big;
+    return nb * sp.big_m / r.big + (ns ? ns * sp.small_m / r.small : 0.0);
   };
   auto pick = [&]<typename Configs>(Rate const* rate, int& cfg) {
     using Hm = Heights<Configs>;
     if (cfg < 0) {
       double best = 0;
       for (int c = 0; c < int(std::size(Hm::big)); ++c) {
-        if (streaming && !rate[c].streaming) continue;
         double t = cost(rate[c], split_of(rate[c], Hm::big[c], Hm::small[c]));
         if (cfg < 0 || t < best) {
           best = t;
@@ -580,6 +566,7 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   size_t const o_off = carve(sizeof(int) * (n + 1));
   size_t const o_ts0 = carve(sizeof(int) * (n + 1));
   size_t const o_ts1 = carve(sizeof(int) * (n + 1));
+  size_t const o_next = carve(sizeof(int) * 2);
   size_t const o_tok = carve(sizeof(int) * rows);
   size_t const o_w = carve(sizeof(float) * rows);
   size_t const o_act = carve(sizeof(Elem) * rows * I);
@@ -617,6 +604,7 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   rp.out = out.data_ptr<float>();
   rp.ldo = out.stride(0);
   rp.zero_out = zero_out && !combine ? 1 : 0;
+  rp.next_tile = reinterpret_cast<int*>(ws + o_next);
   rp.tcount = combine ? reinterpret_cast<int*>(ws + o_tc) : nullptr;
   rp.rowmap = combine ? reinterpret_cast<int*>(ws + o_rm) : nullptr;
   rp.kcap = int(kcap);
@@ -640,6 +628,7 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
     routing.tile_start = rp.tile_start[0];
     auto p = G::make_params(ms[0], n, I, H, int(hidden.stride(0)), experts,
                             routing, x, act, nullptr, 0);
+    p.next_tile = rp.next_tile;
     int const grid = sms * occupancy<G>(device);
     moe_gemm::grouped_expert_gemm_kernel<G>
         <<<grid, G::kThreads, G::kSmemBytes, stream>>>(p);
@@ -651,6 +640,7 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
     p.big.panels = panels[1];
     p.small.panels = panels[1];
     if (combine) p.big.y = p.small.y = reinterpret_cast<Elem*>(ws + o_y);
+    p.next_tile = rp.next_tile + 1;
     int const grid = sms * occupancy<G>(device);
     moe_gemm::grouped_expert_gemm_kernel<G>
         <<<grid, G::kThreads, G::kSmemBytes, stream>>>(p);

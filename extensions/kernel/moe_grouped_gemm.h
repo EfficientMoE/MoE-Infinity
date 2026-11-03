@@ -344,6 +344,7 @@ struct GroupedTiledGemm {
     typename Big::Params big;
     typename Small::Params small;
     TileSplit split;
+    int* next_tile;  // zeroed before the launch: CTAs claim tiles in order
   };
 
   template <typename... Args>
@@ -352,6 +353,7 @@ struct GroupedTiledGemm {
     p.big = Big::make_params(args...);
     p.small = Small::make_params(args...);
     p.split = {kBigM, kMixed ? kSmallM : kBigM, kMixed ? max_small : 0};
+    p.next_tile = nullptr;
     return p;
   }
   CUTLASS_DEVICE
@@ -363,7 +365,10 @@ struct GroupedTiledGemm {
     int const* start = pb.routing.tile_start;
     int const per_pass = start[pb.n];
     int const total = per_pass * (pb.tiles_n / pb.panels);
-    for (int t = blockIdx.x; t < total; t += gridDim.x) {
+    // Tiles of different heights take different times, so CTAs claim the
+    // next tile from a counter instead of a fixed stride.
+    __shared__ int claimed;
+    for (int t = blockIdx.x; t < total;) {
       int const pass = t / per_pass;
       int const tl = t - pass * per_pass;
       int lo = 0, hi = pb.n;  // largest e with start[e] <= tl
@@ -382,14 +387,17 @@ struct GroupedTiledGemm {
       int const local = tl - start[e];
       int const m = local % tiles_m;
       int const n = pass * pb.panels + local / tiles_m;
-      if constexpr (kMixed) {
-        if (m >= nbig) {
-          Small::run_tile(p.small, storage.small, e,
-                          nbig * (kBigM / kSmallM) + (m - nbig), n);
-          continue;
-        }
-      }
-      Big::run_tile(pb, storage.big, e, m, n);
+      if (kMixed && m >= nbig)
+        Small::run_tile(p.small, storage.small, e,
+                        nbig * (kBigM / kSmallM) + (m - nbig), n);
+      else
+        Big::run_tile(pb, storage.big, e, m, n);
+      // run_tile ends with a barrier, so every thread has read `claimed`.
+      if (threadIdx.x == 0)
+        claimed = p.next_tile ? atomicAdd(p.next_tile, 1) + int(gridDim.x)
+                              : t + int(gridDim.x);
+      __syncthreads();
+      t = claimed;
     }
   }
 };
