@@ -21,6 +21,10 @@
 // multiple of the resident-CTA count. Tiles are rasterised in groups so the
 // re-read operand stays in L2.
 
+//
+// RTX PRO 6000 only: launched by fused_moe_ffn_pro6000 behind the
+// RTX_PRO_6000 gate (fit_raster assumes that card's L2 budget, the configs its
+// 99 KiB of shared memory); other GPUs run fused_moe_ffn_into_generic.
 #pragma once
 
 #include <cutlass/cutlass.h>
@@ -407,7 +411,7 @@ struct ExpertGemm {
 
 template <typename Gemm>
 __global__ void __launch_bounds__(Gemm::kThreads)
-    expert_gemm_kernel(typename Gemm::Params params) {
+    expert_gemm_pro6000_kernel(typename Gemm::Params params) {
   extern __shared__ __align__(128) char smem[];
   Gemm::run(params, *reinterpret_cast<typename Gemm::KernelStorage*>(smem));
 }

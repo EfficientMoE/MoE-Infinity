@@ -158,7 +158,7 @@ def tune(keys, out_path, prior=None, grid=M_GRID, iters=5):
                             (cfg, s, num_down - 1, 1)
                             if kind == "dual"
                             else (num_dual - 1, 1, cfg, s)
-                        ): store.fused_moe_ffn_tuned(x, g, u, d, fb, out, *a)
+                        ): store.fused_moe_ffn_pro6000(x, g, u, d, fb, out, *a)
                     )
                     for cfg, s in keys_
                 ]
@@ -199,14 +199,16 @@ def emit(paths):
     )
     print("// Fastest (tile config, split-K) per GEMM measured on RTX PRO 6000")
     print("// Blackwell Max-Q (sm_120, 188 SMs), L2 flushed before each call.")
+    print("// RTX PRO 6000 only: fused_moe_ffn_into uses it behind the")
+    print("// RTX_PRO_6000 gate; other GPUs run fused_moe_ffn_into_generic.")
     print("#pragma once\n")
     print("struct TunedExpertGemm {")
     print("  bool dual;  // gate+up dual GEMM (else down GEMM)")
     print("  int n, k, m;")
     print("  int cfg, splits;")
     print("};\n")
-    print("constexpr int kTunedSms = 188;")
-    print("constexpr TunedExpertGemm kTunedExpertGemm[] = {")
+    print("constexpr int kTunedSmsPro6000 = 188;")
+    print("constexpr TunedExpertGemm kTunedExpertGemmPro6000[] = {")
     for e in sorted(entries):
         print(
             f"    {{{'true' if e[0] else 'false'}, {e[1]}, {e[2]}, {e[3]}, "

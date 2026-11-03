@@ -278,8 +278,8 @@ def test_fused_moe_mlp_batched_matches_reference(seed_everything):
 
 
 def _requires_tuned_binding():
-    if _STORE is None or not hasattr(_STORE, "fused_moe_ffn_tuned"):
-        pytest.skip("moe_infinity._store has no fused_moe_ffn_tuned binding")
+    if _STORE is None or not hasattr(_STORE, "fused_moe_ffn_pro6000"):
+        pytest.skip("moe_infinity._store has no fused_moe_ffn_pro6000 binding")
 
 
 def _expert_weights(tokens, hidden_dim, intermediate_dim):
@@ -306,7 +306,7 @@ def _run_tuned(
         x.size(0), gate_w.size(0), dtype=x.dtype, device=x.device
     )
     out = torch.full_like(x, float("nan"))
-    _STORE.fused_moe_ffn_tuned(
+    _STORE.fused_moe_ffn_pro6000(
         x,
         gate_w,
         up_w,
@@ -395,3 +395,25 @@ def test_fused_moe_ffn_concurrent_streams(seed_everything):
         torch.cuda.synchronize()
         for out, ref in zip(outs, refs):
             _assert_close_to_reference(out, ref)
+
+
+@requires_cuda
+@pytest.mark.parametrize("tokens,hidden_dim,intermediate_dim", _TUNED_SHAPES)
+def test_fused_moe_ffn_generic_fallback_matches_reference(
+    seed_everything, tokens, hidden_dim, intermediate_dim
+):
+    """The path fused_moe_ffn_into runs on GPUs other than the RTX PRO 6000."""
+    if _STORE is None or not hasattr(_STORE, "fused_moe_ffn_into_generic"):
+        pytest.skip("moe_infinity._store has no fused_moe_ffn_into_generic")
+    x, gate_w, up_w, down_w = _expert_weights(
+        tokens, hidden_dim, intermediate_dim
+    )
+    gate_buf = torch.empty(
+        tokens, intermediate_dim, dtype=x.dtype, device=x.device
+    )
+    fused_buf = torch.empty_like(gate_buf)
+    out = torch.full_like(x, float("nan"))
+    _STORE.fused_moe_ffn_into_generic(
+        x, gate_w, up_w, down_w, gate_buf, fused_buf, out
+    )
+    _assert_close_to_reference(out, _reference_fp32(x, gate_w, up_w, down_w))

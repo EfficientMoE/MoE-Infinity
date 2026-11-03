@@ -3,6 +3,10 @@
 
 // Grouped prefill MoE layer (see grouped_moe_prefill.h and moe_grouped_gemm.h).
 //
+// RTX PRO 6000 only (gate RTX_PRO_6000): tuned on the RTX PRO 6000 Blackwell
+// (188 SMs, 128 MiB L2, 99 KiB shared memory per block). Other GPUs run
+// grouped_moe_prefill_per_expert at the bottom of this file.
+//
 // Launch 1 (routing, cooperative): every block counts the routed (token,
 // expert) pairs of a token range, the grid agrees on per-expert offsets
 // (grid.sync), and every block writes its pairs into the sorted layout:
@@ -17,6 +21,8 @@
 // a fixed order (moe_sum), interleaved with the next pass's down tiles.
 
 #include "kernel/grouped_moe_prefill.h"
+#include "kernel/fused_moe_mlp.h"
+#include "kernel/hw_profile.h"
 #include "kernel/moe_grouped_gemm.h"
 
 #include <ATen/cuda/CUDAContext.h>
@@ -131,7 +137,7 @@ int occupancy(int device) {
   if (occ[device] > 0) return occ[device];
   std::lock_guard<std::mutex> lock(mutex);
   if (occ[device] > 0) return occ[device];
-  auto kernel = moe_gemm::grouped_expert_gemm_kernel<Gemm>;
+  auto kernel = moe_gemm::grouped_expert_gemm_pro6000_kernel<Gemm>;
   if (Gemm::kSmemBytes >= (48 << 10)) {
     TORCH_CHECK(cudaFuncSetAttribute(
                     kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -252,7 +258,8 @@ __device__ void for_each_routed(RouteParams const& p, int t0, int t1, F&& f) {
   }
 }
 
-__global__ void __launch_bounds__(256) route_kernel(RouteParams p) {
+__global__ void __launch_bounds__(256)
+    grouped_route_pro6000_kernel(RouteParams p) {
   cg::grid_group grid = cg::this_grid();
   extern __shared__ int sm[];
   int* map = sm;          // [E] expert id -> table row
@@ -380,13 +387,14 @@ bool grouped_moe_prefill_supported(int64_t tokens, int64_t hidden,
          inter % 8 == 0 && experts > 0 && experts <= 4096;
 }
 
-void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
-                             const torch::Tensor& router_mask,
-                             const torch::Tensor& router_weight,
-                             const torch::Tensor& expert_table, int64_t inter,
-                             int64_t kcap, torch::Tensor& out, bool zero_out,
-                             int dual_cfg, int down_cfg, int combine_mode,
-                             cudaStream_t stream) {
+namespace {
+
+// RTX PRO 6000 path: routing + grouped GEMMs (see the top of this file).
+void grouped_moe_prefill_pro6000(
+    const torch::Tensor& hidden, const torch::Tensor& router_mask,
+    const torch::Tensor& router_weight, const torch::Tensor& expert_table,
+    int64_t inter, int64_t kcap, torch::Tensor& out, bool zero_out,
+    int dual_cfg, int down_cfg, int combine_mode, cudaStream_t stream) {
   TORCH_CHECK(hidden.is_cuda() && hidden.scalar_type() == at::kBFloat16 &&
                   hidden.dim() == 2 && hidden.stride(1) == 1 &&
                   hidden.stride(0) % 8 == 0,
@@ -577,8 +585,8 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   {
     void* args[] = {&rp};
     cudaError_t err = cudaLaunchCooperativeKernel(
-        reinterpret_cast<void*>(route_kernel), dim3(blocks), dim3(256), args,
-        route_smem, stream);
+        reinterpret_cast<void*>(grouped_route_pro6000_kernel), dim3(blocks),
+        dim3(256), args, route_smem, stream);
     TORCH_CHECK(err == cudaSuccess, "grouped_moe_prefill routing launch: ",
                 cudaGetErrorString(err));
   }
@@ -595,7 +603,7 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
                             routing, x, act, nullptr, 0);
     p.next_tile = rp.next_tile;
     int const grid = sms * occupancy<G>(device);
-    moe_gemm::grouped_expert_gemm_kernel<G>
+    moe_gemm::grouped_expert_gemm_pro6000_kernel<G>
         <<<grid, G::kThreads, G::kSmemBytes, stream>>>(p);
   });
   visit<DownConfigs>(down_cfg, [&]<typename G>() {
@@ -622,12 +630,85 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
                    kCombineTokens};
     }
     int const grid = sms * occupancy<G>(device);
-    moe_gemm::grouped_expert_gemm_kernel<G>
+    moe_gemm::grouped_expert_gemm_pro6000_kernel<G>
         <<<grid, G::kThreads, G::kSmemBytes, stream>>>(p);
   });
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
               "grouped_moe_prefill launch failed: ", cudaGetErrorString(err));
+}
+
+}  // namespace
+
+// Previous execution, for every other GPU: one expert at a time through
+// fused_moe_ffn_into (the generic 3-GEMM path there) and a weighted fp32
+// index_add per expert. Reads the routing on the host, like the per-expert
+// dispatch it replaces.
+void grouped_moe_prefill_per_expert(const torch::Tensor& hidden,
+                                    const torch::Tensor& router_mask,
+                                    const torch::Tensor& router_weight,
+                                    const torch::Tensor& expert_table,
+                                    int64_t inter, torch::Tensor& out,
+                                    bool zero_out, cudaStream_t stream) {
+  int const device = hidden.get_device();
+  c10::cuda::CUDAGuard guard(device);
+  c10::cuda::CUDAStreamGuard stream_guard(
+      c10::cuda::getStreamFromExternal(stream, device));
+  int64_t const H = hidden.size(1);
+  int64_t const E = router_mask.size(1);
+  if (zero_out) out.zero_();
+  auto const table = expert_table.cpu();
+  auto const* rows = table.data_ptr<int64_t>();
+  auto const wopts = hidden.options().dtype(at::kBFloat16);
+  for (int64_t j = 0; j < table.size(0); ++j) {
+    int64_t const e = rows[4 * j + 3];
+    if (e < 0 || e >= E) continue;
+    auto tok = router_mask.select(1, e).nonzero().squeeze(1);
+    int64_t const m = tok.numel();
+    if (m == 0) continue;
+    auto x = hidden.index_select(0, tok).contiguous();
+    auto g = torch::from_blob(reinterpret_cast<void*>(rows[4 * j]), {inter, H},
+                              wopts);
+    auto u = torch::from_blob(reinterpret_cast<void*>(rows[4 * j + 1]),
+                              {inter, H}, wopts);
+    auto d = torch::from_blob(reinterpret_cast<void*>(rows[4 * j + 2]),
+                              {H, inter}, wopts);
+    auto gate_buf = torch::empty({m, inter}, wopts);
+    auto fused_buf = torch::empty({m, inter}, wopts);
+    auto y = torch::empty({m, H}, wopts);
+    fused_moe_ffn_into(x, g, u, d, gate_buf, fused_buf, y, stream);
+    auto w = router_weight.select(1, e).index_select(0, tok).to(at::kFloat);
+    out.index_add_(0, tok, y.to(at::kFloat) * w.unsqueeze(1));
+  }
+}
+
+bool grouped_moe_prefill_pro6000_enabled(int device) {
+  return moe_infinity::hw::Supports(moe_infinity::hw::Gate::kRtxPro6000,
+                                    device);
+}
+
+void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
+                             const torch::Tensor& router_mask,
+                             const torch::Tensor& router_weight,
+                             const torch::Tensor& expert_table, int64_t inter,
+                             int64_t kcap, torch::Tensor& out, bool zero_out,
+                             int dual_cfg, int down_cfg, int combine_mode,
+                             cudaStream_t stream) {
+  if (grouped_moe_prefill_pro6000_enabled(hidden.get_device())) {
+    grouped_moe_prefill_pro6000(hidden, router_mask, router_weight,
+                                expert_table, inter, kcap, out, zero_out,
+                                dual_cfg, down_cfg, combine_mode, stream);
+    return;
+  }
+  TORCH_CHECK(dual_cfg < 0 && down_cfg < 0 && combine_mode < 0,
+              "grouped_moe_prefill: tile configs exist only on the RTX PRO "
+              "6000 path");
+  TORCH_CHECK(hidden.is_cuda() && out.scalar_type() == at::kFloat &&
+                  expert_table.scalar_type() == at::kLong &&
+                  expert_table.dim() == 2 && expert_table.size(1) == 4,
+              "grouped_moe_prefill: bad arguments");
+  grouped_moe_prefill_per_expert(hidden, router_mask, router_weight,
+                                 expert_table, inter, out, zero_out, stream);
 }
 
 void grouped_moe_prefill(const torch::Tensor& hidden,

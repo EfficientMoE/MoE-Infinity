@@ -24,9 +24,27 @@
 //                 the [T * kcap, I] activation workspace.
 //   zero_out      zero `out` inside the first launch instead of accumulating.
 //
+// RTX PRO 6000 only (gate RTX_PRO_6000, docs/hardware-gated-kernels.md): the
+// grouped kernels, their tile tables, the persistent scheduler (grids sized to
+// 188 SMs) and the L2 pass / combine thresholds (128 MiB L2) were tuned on that
+// card. grouped_moe_prefill_pro6000_enabled(device) is evaluated once per
+// device; elsewhere the same entry points run the experts one at a time
+// through fused_moe_ffn_into (the previous per-expert execution).
+//
 // Rounding matches fused_moe_ffn_into + ExpertDispatcher's accumulate: the
 // gate/up accumulators stay fp32 into act(g)·u, the activation and the down
 // output are rounded to bf16, and the weighted sum is fp32.
+
+bool grouped_moe_prefill_pro6000_enabled(int device);
+
+// The fallback of grouped_moe_prefill on other GPUs (exported for tests): one
+// fused_moe_ffn_into per expert and a weighted fp32 index_add; syncs the host.
+void grouped_moe_prefill_per_expert(const torch::Tensor& hidden,
+                                    const torch::Tensor& router_mask,
+                                    const torch::Tensor& router_weight,
+                                    const torch::Tensor& expert_table,
+                                    int64_t inter, torch::Tensor& out,
+                                    bool zero_out, cudaStream_t stream);
 
 bool grouped_moe_prefill_supported(int64_t tokens, int64_t hidden,
                                    int64_t inter, int64_t experts);
@@ -40,7 +58,8 @@ void grouped_moe_prefill(const torch::Tensor& hidden,
 
 // As above with an explicit tile config per GEMM and combine mode (0 = fp32
 // scatter-add in the down epilogue, 1 = bf16 rows + per-token combine; -1 =
-// automatic for all three). For tests and tuning.
+// automatic for all three). For tests and tuning; explicit values need the
+// RTX PRO 6000 path.
 void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
                              const torch::Tensor& router_mask,
                              const torch::Tensor& router_weight,

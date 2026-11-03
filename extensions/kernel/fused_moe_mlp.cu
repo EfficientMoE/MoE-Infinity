@@ -3,6 +3,13 @@
 
 // Fused MoE expert FFN with CUTLASS: two launches per expert.
 //
+// RTX PRO 6000 only (gate RTX_PRO_6000, docs/hardware-gated-kernels.md): the
+// tile/split table, the cost model, the L2 persisting window and the L2-fit
+// rasterisation below were tuned on the RTX PRO 6000 Blackwell (188 SMs,
+// 128 MiB L2, 99 KiB shared memory per block). fused_moe_ffn_into checks the
+// gate once per device and runs fused_moe_ffn_into_generic
+// (fused_moe_mlp_generic.cu, the previous 3-GEMM path) everywhere else.
+//
 //   1. dual GEMM   fused_buf = silu(X · gate_projᵀ) ⊙ (X · up_projᵀ)   [M, I]
 //   2. GEMM        output    = fused_buf · down_projᵀ                    [M, H]
 //
@@ -13,6 +20,7 @@
 
 #include "kernel/fused_moe_mlp.h"
 #include "kernel/fused_moe_mlp_tuned.h"
+#include "kernel/hw_profile.h"
 #include "kernel/moe_expert_gemm.h"
 
 #include <ATen/cuda/CUDAContext.h>
@@ -152,7 +160,7 @@ int setup_kernel(int device) {
   if (occ > 0) return occ;
   std::lock_guard<std::mutex> lock(mutex);
   if (occ > 0) return occ;
-  auto kernel = moe_gemm::expert_gemm_kernel<Gemm>;
+  auto kernel = moe_gemm::expert_gemm_pro6000_kernel<Gemm>;
   int smem = Gemm::kSmemBytes;
   if (smem >= (48 << 10)) {
     TORCH_CHECK(cudaFuncSetAttribute(
@@ -216,7 +224,7 @@ void launch(int device, int sms, cutlass::gemm::GemmCoord problem, int splits,
       params.counters = ws.counters;
     }
   }
-  moe_gemm::expert_gemm_kernel<Gemm>
+  moe_gemm::expert_gemm_pro6000_kernel<Gemm>
       <<<Gemm::grid_dim(params), Gemm::kThreads, Gemm::kSmemBytes, stream>>>(
           params);
   cudaError_t err = cudaGetLastError();
@@ -368,10 +376,10 @@ Choice small_m_config(std::array<TileInfo, N> const& tiles, int M, int Nd,
 // cost model.
 bool tuned_config(bool dual, int sms, int M, int Nd, int K, int num_cfgs,
                   Choice& out) {
-  if (sms != kTunedSms) return false;
+  if (sms != kTunedSmsPro6000) return false;
   TunedExpertGemm const* lo = nullptr;
   TunedExpertGemm const* hi = nullptr;
-  for (auto const& e : kTunedExpertGemm) {
+  for (auto const& e : kTunedExpertGemmPro6000) {
     if (e.dual != dual || e.n != Nd || e.k != K || e.cfg >= num_cfgs) continue;
     if (e.m <= M && (!lo || e.m > lo->m)) lo = &e;
     if (e.m >= M && (!hi || e.m < hi->m)) hi = &e;
@@ -479,11 +487,14 @@ class IntermediateWindow {
   bool active_ = false;
 };
 
-void fused_moe_ffn_tuned(torch::Tensor& hidden, torch::Tensor& gate_proj,
-                         torch::Tensor& up_proj, torch::Tensor& down_proj,
-                         torch::Tensor& fused_buf, torch::Tensor& output,
-                         cudaStream_t stream, int dual_cfg, int dual_splits,
-                         int down_cfg, int down_splits) {
+void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
+                           torch::Tensor& up_proj, torch::Tensor& down_proj,
+                           torch::Tensor& fused_buf, torch::Tensor& output,
+                           cudaStream_t stream, int dual_cfg, int dual_splits,
+                           int down_cfg, int down_splits) {
+  TORCH_CHECK(fused_moe_ffn_pro6000_enabled(hidden.get_device()),
+              "fused_moe_ffn_pro6000: tuned for the RTX PRO 6000 only "
+              "(MOE_INFINITY_UNVALIDATED_HW=1 to re-tune elsewhere)");
   TORCH_CHECK(hidden.scalar_type() == at::kBFloat16,
               "fused_moe_ffn_into: BF16 only");
   const int M = static_cast<int>(hidden.size(0));
@@ -574,9 +585,18 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
                         torch::Tensor& fused_buf,  // [M, I]
                         torch::Tensor& output,     // [M, H]
                         cudaStream_t stream) {
-  (void)gate_buf;
-  fused_moe_ffn_tuned(hidden, gate_proj, up_proj, down_proj, fused_buf, output,
-                      stream, -1, 0, -1, 0);
+  if (fused_moe_ffn_pro6000_enabled(hidden.get_device())) {
+    fused_moe_ffn_pro6000(hidden, gate_proj, up_proj, down_proj, fused_buf,
+                          output, stream, -1, 0, -1, 0);
+  } else {
+    fused_moe_ffn_into_generic(hidden, gate_proj, up_proj, down_proj, gate_buf,
+                               fused_buf, output, stream);
+  }
+}
+
+bool fused_moe_ffn_pro6000_enabled(int device) {
+  return moe_infinity::hw::Supports(moe_infinity::hw::Gate::kRtxPro6000,
+                                    device);
 }
 
 std::pair<int, int> fused_moe_ffn_num_configs() { return {kNumDual, kNumDown}; }

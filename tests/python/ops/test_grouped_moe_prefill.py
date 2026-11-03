@@ -153,3 +153,31 @@ def test_grouped_moe_prefill_large_layer_passes(seed_everything):
     out = torch.empty(6000, 2048, device="cuda")
     _STORE.grouped_moe_prefill(x, mask, w, table, 256, 4, out, True)
     _assert_close(out, ref)
+
+
+@requires_cuda
+def test_grouped_moe_prefill_gate_matches_python(seed_everything):
+    """The C++ hardware gate and moe_infinity.utils.expert_ffn_paths agree."""
+    _requires_binding()
+    from moe_infinity.utils import expert_ffn_paths as paths
+
+    dev = torch.cuda.current_device()
+    assert _STORE.grouped_moe_prefill_pro6000_enabled(dev) == (
+        paths.grouped_prefill_path(dev) == paths.GROUPED_PRO6000
+    )
+    assert _STORE.fused_moe_ffn_pro6000_enabled(dev) == (
+        paths.expert_ffn_path(dev) == paths.CUTLASS_PRO6000
+    )
+
+
+@requires_cuda
+@pytest.mark.parametrize("zero_out", [True, False])
+def test_grouped_moe_prefill_per_expert_fallback(seed_everything, zero_out):
+    """The path other GPUs run (one generic expert FFN per expert)."""
+    _requires_binding()
+    x, mask, w, experts, ids, table = _layer(300, 64, 64, 4, 512, 256)
+    ref = _reference(x, mask, w, experts, ids)
+    base = torch.randn(300, 512, device="cuda")
+    out = base.clone()
+    _STORE.grouped_moe_prefill_per_expert(x, mask, w, table, 256, out, zero_out)
+    _assert_close(out if zero_out else out - base, ref)

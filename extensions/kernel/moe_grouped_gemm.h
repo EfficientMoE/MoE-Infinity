@@ -3,6 +3,10 @@
 
 // Grouped (all experts of one MoE layer per launch) prefill GEMMs.
 //
+// RTX PRO 6000 only: launched by grouped_moe_prefill behind the RTX_PRO_6000
+// gate (its configs, persistent grids and combine passes were tuned on that
+// card); other GPUs never instantiate a launch of these kernels.
+//
 //   GroupedExpertGemm<..., Dual=true>   act[r] = act(x[tok[r]]·Wgᵀ,
 //   x[tok[r]]·Wuᵀ) GroupedExpertGemm<..., Dual=false>  out[tok[r]] += w[r] ·
 //   bf16(act[r]·Wdᵀ)
@@ -555,7 +559,7 @@ struct GroupedTiledGemm {
 
 template <typename Gemm>
 __global__ void __launch_bounds__(Gemm::kThreads)
-    grouped_expert_gemm_kernel(typename Gemm::Params params) {
+    grouped_expert_gemm_pro6000_kernel(typename Gemm::Params params) {
   extern __shared__ __align__(128) char smem[];
   Gemm::run(params, *reinterpret_cast<typename Gemm::KernelStorage*>(smem));
 }
