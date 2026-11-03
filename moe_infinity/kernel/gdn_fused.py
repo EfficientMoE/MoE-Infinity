@@ -12,7 +12,15 @@
 # DRAM. sm_120 has no TMEM / tcgen05, so the Blackwell `tl.dot` recurrence
 # race that keeps fla at num_warps=2 (triton-lang/triton#10590, sm_100/103)
 # does not apply; tests check bitwise determinism at the 4-warp config.
-"""Fused chunked delta-rule recurrence + output (forward, inference)."""
+"""Fused chunked delta-rule recurrence + output (forward, inference).
+
+Hardware: RTX_PRO_6000 (tuned on the RTX PRO 6000 Blackwell Max-Q: 188 SMs,
+128 MiB L2, 99 KiB shared memory per block). Reached only through
+``install_pro6000_linear_attention``, which checks
+``hw_profile.supports(RTX_PRO_6000)``; every other GPU runs fla's kernels.
+Tuned here: BV giving one wave of 128 CTAs on 188 SMs, 4 warps (safe on
+sm_120, which has no TMEM), 2 stages for GDN / 1 for KDA to fit 99 KiB.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +30,7 @@ import triton.language as tl
 
 
 @triton.jit(do_not_specialize=["T"])
-def delta_rule_fwd_h_o_kernel(
+def delta_rule_fwd_h_o_pro6000_kernel(
     q,
     k,
     w,
@@ -175,7 +183,7 @@ def delta_rule_fwd_h_o(
         if output_final_state
         else None
     )
-    delta_rule_fwd_h_o_kernel[(V // BV * B * HV,)](
+    delta_rule_fwd_h_o_pro6000_kernel[(V // BV * B * HV,)](
         q,
         k,
         w,

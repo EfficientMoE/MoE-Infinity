@@ -15,6 +15,13 @@ block's prep writes stays in the 128 MB L2 until the recurrence reads it:
 The recurrence carries no h-independent work. It runs as a CUDA mma.sync
 kernel (csrc/gdn_recur.cu, JIT-built) or, without nvcc, as Triton. The block
 buffers are reused, so the intermediates stay in L2.
+
+Hardware: RTX_PRO_6000 (tuned on the RTX PRO 6000 Blackwell Max-Q: 188 SMs,
+128 MiB L2, 99 KiB shared memory per block). Reached only through
+``install_pro6000_linear_attention``, which checks
+``hw_profile.supports(RTX_PRO_6000)``; every other GPU runs fla's kernels.
+Tuned here: 2048-token blocks (72 MB of buffers) under a persisting-L2
+window of at most 80 MB (the card's max persisting size).
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ L2_PERSIST = True
 
 
 @triton.jit(do_not_specialize=["T", "t_base", "TB", "NC"])
-def blocked_recur_kernel(
+def blocked_recur_pro6000_kernel(
     qg,
     kd,
     w,
@@ -124,7 +131,7 @@ def _recur(
 
         gdn_recur_cuda.recur(qg, kd, w, u, S, g, o, h, t_base, nb)
         return
-    blocked_recur_kernel[(B * HV * (V // BV),)](
+    blocked_recur_pro6000_kernel[(B * HV * (V // BV),)](
         qg,
         kd,
         w,
@@ -168,8 +175,8 @@ def chunk_gated_delta_rule_blocked(
     ([B, T, H] fp32); q / k raw (``norm_qk``) or unit-norm; bf16 [B, T, H, 128].
     """
     from moe_infinity.kernel.gdn_prep import (
-        gdn_fwd_aux_kernel,
-        gdn_fwd_prep_kernel,
+        gdn_fwd_aux_pro6000_kernel,
+        gdn_fwd_prep_pro6000_kernel,
     )
 
     if use_cuda is None:
@@ -199,7 +206,7 @@ def chunk_gated_delta_rule_blocked(
         gdn_recur_cuda.l2_window(arena, arena.numel() * arena.element_size())
     for t_base in range(0, T, TB):
         nb = min(TB, T - t_base)
-        gdn_fwd_prep_kernel[(triton.cdiv(nb, 64), B * H)](
+        gdn_fwd_prep_pro6000_kernel[(triton.cdiv(nb, 64), B * H)](
             k,
             v,
             gc,
@@ -221,7 +228,7 @@ def chunk_gated_delta_rule_blocked(
             num_warps=2,
             num_stages=1,
         )
-        gdn_fwd_aux_kernel[(triton.cdiv(nb, 64), B * H)](
+        gdn_fwd_aux_pro6000_kernel[(triton.cdiv(nb, 64), B * H)](
             q,
             k,
             gc,

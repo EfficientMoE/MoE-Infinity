@@ -234,7 +234,7 @@ def test_make_fused_routes_unsupported_calls_to_fallback(monkeypatch):
 
     fallback.__module__ = "fla.ops.gated_delta_rule"
     fn = fused_mod.make_fused("gdn", fallback)
-    assert la._backend_of(fn) == "fused"
+    assert la._backend_of(fn) == "fused_pro6000"
     x = torch.zeros(1, 4, 2, 128)  # CPU: never the fused path
     out = fn(
         x,
@@ -250,18 +250,19 @@ def test_make_fused_routes_unsupported_calls_to_fallback(monkeypatch):
     assert not fused_mod.fused_enabled()
 
 
-def test_install_fused_wraps_only_fla_globals(monkeypatch):
+def test_install_fused_wraps_only_fla_globals(monkeypatch, fake_gpu):
+    fake_gpu("rtx_pro_6000")
     mod = types.ModuleType("_fake_qwen3_5_modeling_fused")
     mod.chunk_gated_delta_rule = _fla_fn("chunk_gated_delta_rule")
     mod.chunk_kimi_delta_attention = lambda *a, **k: None  # torch: untouched
     monkeypatch.setitem(sys.modules, mod.__name__, mod)
     monkeypatch.setattr(la, "_HF_MODULES", (mod.__name__,))
 
-    assert la.install_fused_linear_attention() == [
+    assert la.install_pro6000_linear_attention() == [
         f"{mod.__name__}.chunk_gated_delta_rule"
     ]
-    assert la.install_fused_linear_attention() == []  # idempotent
-    assert la._backend_of(mod.chunk_gated_delta_rule) == "fused"
+    assert la.install_pro6000_linear_attention() == []  # idempotent
+    assert la._backend_of(mod.chunk_gated_delta_rule) == "fused_pro6000"
     assert la._backend_of(mod.chunk_kimi_delta_attention) == "torch"
 
     layer = FakeGatedDeltaNet(True)
@@ -271,3 +272,108 @@ def test_install_fused_wraps_only_fla_globals(monkeypatch):
     finally:
         layer.__class__.__module__ = __name__
     assert layer.chunk_gated_delta_rule is mod.chunk_gated_delta_rule
+
+
+# --------------------------------------------------------------------------
+# Hardware gate: the fused kernels are RTX_PRO_6000-only (#304)
+# --------------------------------------------------------------------------
+
+_MIB, _KIB = 1024 * 1024, 1024
+_DEVICES = {
+    "rtx_pro_6000": types.SimpleNamespace(
+        major=12,
+        minor=0,
+        multi_processor_count=188,
+        L2_cache_size=128 * _MIB,
+        shared_memory_per_block_optin=99 * _KIB,
+    ),
+    "rtx_5090": types.SimpleNamespace(
+        major=12,
+        minor=0,
+        multi_processor_count=170,
+        L2_cache_size=96 * _MIB,
+        shared_memory_per_block_optin=99 * _KIB,
+    ),
+    "h100": types.SimpleNamespace(
+        major=9,
+        minor=0,
+        multi_processor_count=132,
+        L2_cache_size=50 * _MIB,
+        shared_memory_per_block_optin=227 * _KIB,
+    ),
+}
+
+
+@pytest.fixture
+def fake_gpu(monkeypatch):
+    from moe_infinity.utils import hw_profile
+
+    def use(name):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+        monkeypatch.setattr(
+            torch.cuda, "get_device_properties", lambda i: _DEVICES[name]
+        )
+        hw_profile._gates.cache_clear()
+
+    monkeypatch.delenv("MOE_INFINITY_UNVALIDATED_HW", raising=False)
+    yield use
+    hw_profile._gates.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "name, fused",
+    [("rtx_pro_6000", True), ("rtx_5090", False), ("h100", False)],
+)
+def test_fused_path_only_on_rtx_pro_6000(fake_gpu, monkeypatch, name, fused):
+    from moe_infinity.kernel import gdn_recur_cuda
+    from moe_infinity.kernel import linear_attention_fused as fused_mod
+
+    fake_gpu(name)
+    fused_mod._pro6000.cache_clear()
+    mod = types.ModuleType(f"_fake_qwen3_5_hw_{name}")
+    fla_fn = _fla_fn("chunk_gated_delta_rule")
+    mod.chunk_gated_delta_rule = fla_fn
+    monkeypatch.setitem(sys.modules, mod.__name__, mod)
+    monkeypatch.setattr(la, "_HF_MODULES", (mod.__name__,))
+    layer = FakeGatedDeltaNet(True)
+    layer.__class__.__module__ = mod.__name__
+    try:
+        report = la.enable_linear_attention_kernels(torch.nn.Sequential(layer))
+    finally:
+        layer.__class__.__module__ = __name__
+    want = "fused_pro6000" if fused else "fla"
+    assert la._backend_of(mod.chunk_gated_delta_rule) == want
+    assert la._backend_of(layer.chunk_gated_delta_rule) == want
+    assert report["FakeGatedDeltaNet"]["chunk"] == want
+    if not fused:
+        assert mod.chunk_gated_delta_rule is fla_fn
+        assert la.install_pro6000_linear_attention() == []
+        # the opt-in CUDA recurrence is gated too (no nvcc build attempted)
+        monkeypatch.setattr(
+            gdn_recur_cuda, "_module", lambda: pytest.fail("built off-gate")
+        )
+        assert gdn_recur_cuda.available() is False
+    fused_mod._pro6000.cache_clear()
+
+
+def test_installed_wrapper_routes_other_gpus_to_fla(fake_gpu):
+    """Globals are process-wide: on a mixed host, a non-RTX PRO 6000 device
+    must still get fla even after the wrapper was installed."""
+    from moe_infinity.kernel import linear_attention_fused as fused_mod
+
+    fake_gpu("rtx_5090")
+    fused_mod._pro6000.cache_clear()
+    calls = []
+
+    def fallback(q, k, v, g=None, beta=None, **kw):
+        calls.append(1)
+        return "fla"
+
+    fallback.__module__ = "fla.ops.gated_delta_rule"
+    fn = fused_mod.make_fused("gdn", fallback)
+    x = types.SimpleNamespace(
+        is_cuda=True, device=types.SimpleNamespace(index=0)
+    )
+    assert fn(x, x, x, g=None, beta=None) == "fla" and calls == [1]
+    fused_mod._pro6000.cache_clear()

@@ -242,7 +242,8 @@ def make_linear_attention_device_safe() -> list[str]:
     return patched
 
 
-# chunk-kernel globals -> fused kind (GDN scalar gate / KDA per-channel gate)
+# chunk-kernel globals -> fused kind (GDN scalar gate / KDA per-channel gate);
+# the fused kernels are RTX_PRO_6000-gated (see install_pro6000_linear_attention)
 _FUSED_GLOBALS = {
     "chunk_gated_delta_rule": "gdn",  # transformers <= 5.12
     "torch_chunk_gated_delta_rule": "gdn",  # transformers >= 5.16
@@ -250,17 +251,26 @@ _FUSED_GLOBALS = {
 }
 
 
-def install_fused_linear_attention() -> list[str]:
+def install_pro6000_linear_attention(device=None) -> list[str]:
     """Route the fla-bound chunked GDN / KDA prefill kernels of the
-    transformers linear-attention modules through the fused sm_120 path
+    transformers linear-attention modules through the fused path
     (``linear_attention_fused``); unsupported calls still reach fla.
 
+    Hardware gate RTX_PRO_6000: the fused kernels' grids (one wave of 128
+    CTAs on 188 SMs), stage counts (99 KiB shared memory), L2 block sizes and
+    persisting window, and the 4-warp recurrence (sm_100/103 have a tl.dot
+    TMEM race at 4 warps) were chosen on the RTX PRO 6000 Blackwell. On any
+    other device this returns [] and fla's kernels run as before.
+
     Only globals that already resolve to fla are wrapped, so without fla
-    installed nothing changes. Idempotent. ``MOE_LINEAR_ATTN_FUSED=0``
+    installed nothing changes. Idempotent. ``MOE_LINEAR_ATTN_PRO6000=0``
     disables the fused path at call time.
     """
     from moe_infinity.kernel.linear_attention_fused import make_fused
+    from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
 
+    if not supports(RTX_PRO_6000, device):
+        return []
     patched: list[str] = []
     for mod_name in _HF_MODULES:
         try:
@@ -289,7 +299,7 @@ def _bind_instances(model: torch.nn.Module) -> int:
             "chunk_gated_delta_rule",
             None,
         )
-        if new is not None and _backend_of(new) == "fused":
+        if new is not None and _backend_of(new) == "fused_pro6000":
             module.chunk_gated_delta_rule = new
             n += 1
     return n
@@ -300,8 +310,14 @@ def enable_linear_attention_kernels(model: torch.nn.Module) -> dict[str, dict]:
     report the bound kernels (warning once on a torch fallback)."""
     if torch.cuda.is_available():
         try:
-            install_fused_linear_attention()
-            _bind_instances(model)
+            from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
+
+            device = next(
+                (p.device for p in model.parameters() if p.is_cuda), None
+            )
+            if supports(RTX_PRO_6000, device):
+                install_pro6000_linear_attention(device)
+                _bind_instances(model)
         except Exception as exc:  # noqa: BLE001 - keep fla / torch path
             logger.warning("fused linear-attention path unavailable: %s", exc)
     return check_linear_attention_kernels(model)

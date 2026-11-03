@@ -10,7 +10,15 @@
 # `recompute_w_u_fwd_kernel` tail (w = A @ (beta * exp(g) * k),
 # u = A @ (beta * v)) so the solved 64x64 A block never leaves registers,
 # and with the k L2 norm folded in (kkt scaled by the row norms).
-"""Fused kkt + solve_tril + recompute_w_u (+ k L2 norm), forward only."""
+"""Fused kkt + solve_tril + recompute_w_u (+ k L2 norm), forward only.
+
+Hardware: RTX_PRO_6000 (tuned on the RTX PRO 6000 Blackwell Max-Q: 188 SMs,
+128 MiB L2, 99 KiB shared memory per block). Reached only through
+``install_pro6000_linear_attention``, which checks
+``hw_profile.supports(RTX_PRO_6000)``; every other GPU runs fla's kernels.
+Tuned here: 2 warps / BK = 128 (register budget), block-buffer outputs
+sized for the 128 MiB L2.
+"""
 
 from __future__ import annotations
 
@@ -53,7 +61,7 @@ def _gate(b_A, gi, gj, mi, mj, STRICT: tl.constexpr, o_i):
 
 
 @triton.jit(do_not_specialize=["T", "t_base", "TB"])
-def gdn_fwd_prep_kernel(
+def gdn_fwd_prep_pro6000_kernel(
     k,
     v,
     g,
@@ -334,7 +342,7 @@ def gdn_fwd_prep_kernel(
 
 
 @triton.jit(do_not_specialize=["T", "t_base", "TB"])
-def gdn_fwd_aux_kernel(
+def gdn_fwd_aux_pro6000_kernel(
     q,
     k,
     g,
@@ -412,7 +420,7 @@ def gdn_fwd_prep(
     w = torch.empty_like(k)
     u = torch.empty_like(v)
     kn = torch.empty_like(k) if norm_k else k
-    gdn_fwd_prep_kernel[(triton.cdiv(T, 64), B * H)](
+    gdn_fwd_prep_pro6000_kernel[(triton.cdiv(T, 64), B * H)](
         k,
         v,
         g,

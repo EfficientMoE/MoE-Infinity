@@ -13,19 +13,25 @@ KDA  fla's cumsum / intra (w, u, kg, Aqk) followed by the fused h+o.
 Calls the fused path only for inference on CUDA bf16 inputs with
 K = V = 128, H == HV and no ``cu_seqlens``; everything else goes to the
 original implementation (``fallback``).
+
+Hardware: RTX_PRO_6000 (tuned on the RTX PRO 6000 Blackwell Max-Q: 188 SMs,
+128 MiB L2, 99 KiB shared memory per block). Reached only through
+``install_pro6000_linear_attention``, which checks
+``hw_profile.supports(RTX_PRO_6000)``; every other GPU runs fla's kernels.
 """
 
 from __future__ import annotations
 
+import functools
 import os
 from typing import Callable
 
 import torch
 
-ENV_DISABLE = "MOE_LINEAR_ATTN_FUSED"
+ENV_DISABLE = "MOE_LINEAR_ATTN_PRO6000"
 # Opt-in: L2-blocked GDN prefill with the JIT-built CUDA recurrence
 # (gdn_blocked / csrc/gdn_recur.cu). First use compiles with nvcc (~1 min).
-ENV_CUDA = "MOE_LINEAR_ATTN_CUDA"
+ENV_CUDA = "MOE_LINEAR_ATTN_CUDA_PRO6000"
 # Below this many tokens per call the fused GDN path is not faster than fla
 # on sm_120 (2K: 209 vs 198 us; 9K: 861 vs 1128 us), so leave short
 # prefills on fla.
@@ -175,6 +181,13 @@ def chunk_kda_fused(
     )
 
 
+@functools.lru_cache(maxsize=None)
+def _pro6000(index: int) -> bool:
+    from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
+
+    return supports(RTX_PRO_6000, index)
+
+
 def make_fused(kind: str, fallback: Callable) -> Callable:
     """Wrap ``fallback`` (fla / transformers callable with the HF calling
     convention ``fn(q, k, v, g=..., beta=..., ...)``) with the fused path."""
@@ -185,6 +198,13 @@ def make_fused(kind: str, fallback: Callable) -> Callable:
         if args:
             return fallback(query, key, value, g, beta, *args, **kwargs)
         init = kwargs.get("initial_state")
+        # globals are process-wide: keep other GPUs of a mixed host on fla
+        if query.is_cuda and not _pro6000(
+            query.device.index
+            if query.device.index is not None
+            else torch.cuda.current_device()
+        ):
+            return fallback(query, key, value, g=g, beta=beta, **kwargs)
         if _supported(query, key, value, g, beta, init, kwargs, gate_dims):
             return fused(
                 query,
@@ -204,6 +224,6 @@ def make_fused(kind: str, fallback: Callable) -> Callable:
     fn.__name__ = f"moe_fused_{kind}_chunk"
     fn.__qualname__ = fn.__name__
     fn.__wrapped__ = fallback  # type: ignore[attr-defined]
-    fn._moe_backend = "fused"  # type: ignore[attr-defined]
+    fn._moe_backend = "fused_pro6000"  # type: ignore[attr-defined]
     fn._moe_device_safe = getattr(fallback, "_moe_device_safe", False)  # type: ignore[attr-defined]
     return fn
