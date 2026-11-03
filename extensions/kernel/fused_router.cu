@@ -97,6 +97,9 @@ struct alignas(16) RouteState {
   unsigned int tile_count;
   int flags[kMaxE];
   unsigned int bar_leave;
+  // Multi-router decode: launch tag (seq + 1) of the last launch that wrote
+  // each expert's pinned flag. Never needs re-zeroing.
+  int claimed[kMaxE];
 };
 
 struct EpilogueParams {
@@ -690,7 +693,8 @@ __device__ void logits_item(const DecodeArgs& a, const EpilogueParams& p,
 // order (deterministic) into smem, one warp routes each token.
 template <int VPL, int SC>
 __device__ void reduce_and_route(const DecodeArgs& a, const EpilogueParams& p,
-                                 int t_begin, int t_end, unsigned char* smem) {
+                                 int t_begin, int t_end, unsigned char* smem,
+                                 int n_routers) {
   const int T = p.T, E = p.E;
   float* st = reinterpret_cast<float*>(smem);                  // scores
   uint32_t* kt = reinterpret_cast<uint32_t*>(st + kRows * E);  // keys
@@ -734,9 +738,18 @@ __device__ void reduce_and_route(const DecodeArgs& a, const EpilogueParams& p,
                         want_flags ? sflags : nullptr);
   }
   // Host pre-zeroed the pinned flags; set the experts this CTA routed to.
+  // With many routers only the first to claim an expert in this launch
+  // (tagged seq + 1, so the claims never need re-zeroing) writes it to
+  // pinned memory: <= E PCIe writes instead of up to T * K.
+  // The claim costs one L2 round trip before the write, so it is only used
+  // when the picks repeat a lot (T * K >= 4 E: measured +1 us at b16 / b64,
+  // -1 to -2.8 us at b256).
+  const int tag = static_cast<int>(p.seq) + 1;
+  const bool claim = n_routers > 1 && p.T * p.K >= 4 * E;
   if (want_flags && t_begin < t_end)
     for (int e = threadIdx.x; e < E; e += kThreads)
-      if (sflags[e]) p.flags_host[e] = true;
+      if (sflags[e] && (!claim || atomicExch(&p.state->claimed[e], tag) != tag))
+        p.flags_host[e] = true;
   signal_done(p);
 }
 
@@ -785,7 +798,7 @@ __global__ void __launch_bounds__(kThreads)
     __syncthreads();
     if (!last) return;
     __threadfence();
-    reduce_and_route<VPL, SC>(a, q, 0, p.T, smem);
+    reduce_and_route<VPL, SC>(a, q, 0, p.T, smem, 1);
     if (threadIdx.x == 0) p.state->tile_count = 0;
   } else {
     const int R = min(p.T, static_cast<int>(gridDim.x));
@@ -793,7 +806,7 @@ __global__ void __launch_bounds__(kThreads)
     if (rank < 0) return;
     const int tpc = (p.T + R - 1) / R;
     const int t_begin = rank * tpc;
-    reduce_and_route<VPL, SC>(a, q, t_begin, min(p.T, t_begin + tpc), smem);
+    reduce_and_route<VPL, SC>(a, q, t_begin, min(p.T, t_begin + tpc), smem, R);
     leave_routers(p.state, R);
   }
 }

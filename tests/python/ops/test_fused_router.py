@@ -306,7 +306,7 @@ def test_cuda_graph_capture(route):
 @pytest.mark.skipif(
     not _has_cuda_ext(), reason="moe_infinity._router not built"
 )
-@pytest.mark.parametrize("T", [1, 16, 200, 3000])
+@pytest.mark.parametrize("T", [1, 16, 64, 200, 256, 3000])
 def test_active_flags_match_mask(T):
     from moe_infinity.kernel.router import fused_route, take_active_flags
 
