@@ -63,9 +63,7 @@ __device__ __forceinline__ void ldsm_x4_t(uint32_t& r0, uint32_t& r1,
 }
 __device__ __forceinline__ uint32_t movt(uint32_t x) {
   uint32_t y;
-  asm volatile("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;\n"
-               : "=r"(y)
-               : "r"(x));
+  asm("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;\n" : "=r"(y) : "r"(x));
   return y;
 }
 __device__ __forceinline__ uint32_t pack(float a, float b) {
@@ -75,8 +73,7 @@ __device__ __forceinline__ uint32_t pack(float a, float b) {
 __device__ __forceinline__ void mma(float* d, uint32_t a0, uint32_t a1,
                                     uint32_t a2, uint32_t a3, uint32_t b0,
                                     uint32_t b1) {
-  asm volatile(
-      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+  asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
       "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
       : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
       : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
@@ -197,17 +194,25 @@ __global__ void __launch_bounds__(NW * 32) recur_pro6000_kernel(
     float x[4][4] = {}, oo[4][4] = {};
     const __nv_bfloat16* tW = sW + buf * TILE;
     const __nv_bfloat16* tQ = sQ + buf * TILE;
+    // k-step outer, m-tile inner: 8 independent accumulator chains per
+    // k-step; the A fragments of a k-step are loaded together (ldmatrix is
+    // ordered, mma is not volatile, so the next loads overlap the MMAs).
 #pragma unroll
-    for (int j = 0; j < 4; ++j) {
+    for (int i = 0; i < 8; ++i) {
+      uint32_t aw[4][4], aq[4][4];
 #pragma unroll
-      for (int i = 0; i < 8; ++i) {
+      for (int j = 0; j < 4; ++j) {
         int r = 16 * j + (lane & 15);
         int cch = 2 * i + (lane >> 4);
-        uint32_t a0, a1, a2, a3;
-        ldsm_x4(a0, a1, a2, a3, smem_u32(tW + swz(r, cch, 16)));
-        mma(x[j], a0, a1, a2, a3, hb[i][0], hb[i][1]);
-        ldsm_x4(a0, a1, a2, a3, smem_u32(tQ + swz(r, cch, 16)));
-        mma(oo[j], a0, a1, a2, a3, hb[i][0], hb[i][1]);
+        ldsm_x4(aw[j][0], aw[j][1], aw[j][2], aw[j][3],
+                smem_u32(tW + swz(r, cch, 16)));
+        ldsm_x4(aq[j][0], aq[j][1], aq[j][2], aq[j][3],
+                smem_u32(tQ + swz(r, cch, 16)));
+      }
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        mma(x[j], aw[j][0], aw[j][1], aw[j][2], aw[j][3], hb[i][0], hb[i][1]);
+        mma(oo[j], aq[j][0], aq[j][1], aq[j][2], aq[j][3], hb[i][0], hb[i][1]);
       }
     }
 
@@ -260,16 +265,23 @@ __global__ void __launch_bounds__(NW * 32) recur_pro6000_kernel(
       hs[m][1] *= dl;
       hs[m][2] *= dl;
       hs[m][3] *= dl;
+    }
+    // k-step (16 tokens) outer, state-row tile inner: 8 independent chains
 #pragma unroll
-      for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 4; ++i) {
+      uint32_t ak[8][4];
+      const int mi = lane >> 3;  // which 8x8 matrix this lane addresses
+      const int t = 16 * i + (mi >> 1) * 8 + (lane & 7);
+#pragma unroll
+      for (int m = 0; m < 8; ++m) {
         // A[m=d][k=t] = kd[t][d]: 8x8 blocks (t, d) loaded transposed
-        int mi = lane >> 3;  // which 8x8 matrix this lane addresses
-        int t = 16 * i + (mi >> 1) * 8 + (lane & 7);
         int dch = 2 * m + (mi & 1);
-        uint32_t a0, a1, a2, a3;
-        ldsm_x4_t(a0, a1, a2, a3, smem_u32(sK + swz(t, dch, 16)));
-        mma(hs[m], a0, a1, a2, a3, vb[i][0], vb[i][1]);
+        ldsm_x4_t(ak[m][0], ak[m][1], ak[m][2], ak[m][3],
+                  smem_u32(sK + swz(t, dch, 16)));
       }
+#pragma unroll
+      for (int m = 0; m < 8; ++m)
+        mma(hs[m], ak[m][0], ak[m][1], ak[m][2], ak[m][3], vb[i][0], vb[i][1]);
     }
 
     __syncthreads();  // everyone is done with kd / S / u of chunk c
