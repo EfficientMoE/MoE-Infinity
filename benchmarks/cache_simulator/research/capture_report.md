@@ -773,3 +773,37 @@ exploits static structure while remaining online. This reframes the flip:
 what separates 30b from the non-flippers is rotation rate, not static
 skew — and it gives the static-vs-online gap (17pp vs 4.7pp) as a direct,
 model-comparable rotation-rate proxy.
+
+---
+
+## Addendum 9 — hot-set rotation half-life: direct measurement of the flip driver (exp660): SUPPORTED
+
+exp659 inferred rotation rate from static-vs-online gaps; this
+pre-registered analysis (sha 97c77dfd..., frozen in exp660 ARTIFACT.sha256)
+measures it directly. Decode streams windowed at W=64 records; hot set per
+window = top-N keys (N = each model's 10E capacity: 1280 / 400);
+J(d) = mean Jaccard(H_w, H_{w+d}).
+
+- qwen3-30b: J(1) = 0.5473, decay to 0.27 by d=8; **half-life 1.60 windows
+  = 102 decode steps**.
+- granite: J(1) = 0.6339, decay to 0.45 by d=8; **half-life 4.59 windows =
+  294 decode steps**.
+- All three pre-registered hypotheses hold: 30b rotates faster (H1),
+  half-life 2.9x shorter (H2), and rotation ordering matches the
+  static-vs-online gaps from addendum 8 (18.3pp vs 4.7pp, H3).
+
+**Mechanism, closed loop (addenda 2-9):** the s3fifo takeover at 10E is
+qwen3-30b-specific because its hot set at the flip capacity rotates ~3x
+faster than granite's — cheap global recency tracks fast rotation better
+than layer-fair accounting (LCNU), while under slow rotation LCNU's
+exploitation of persistent per-layer structure wins. Not E-scaling
+(addendum 3), not decode length (4), not prompt mix (6), not accounting
+mode (7), not static allocation structure (8): temporal rotation rate is
+the discriminating variable, now measured rather than inferred.
+
+Operational rule for practitioners: estimate your router's hot-set
+half-life from a short probe (the windowed-Jaccard method above needs only
+a few hundred decode steps, no labels); if it is short relative to
+capacity-refill time, prefer global-recency eviction (s3fifo/LRU) at
+>=10E; if long, LCNU-style layer-fair policies dominate at every capacity
+we tested.
