@@ -21,6 +21,7 @@ Operators are people who run the OpenAI server and need runtime controls for dep
 
 - [OpenAI serving](./serving.md)
 - [Environment variables](./environment-variables.md)
+- [Hardware-gated kernels](./hardware-gated-kernels.md)
 - [Single-server multi-GPU](./multi-gpu.md)
 - [Troubleshooting](./troubleshooting.md)
 

@@ -9,14 +9,18 @@ into the SAME number of launches, timed like `run_cases --mode time`
 point is judged as achieved bandwidth / size-matched ceiling.
 
 Each launch takes the best of several Triton grid / block / warp configs and
-the matching torch op (`sum` for reads, `copy_` for copies).
+the matching torch op (`sum` for reads, `copy_` for copies). The same bytes
+read at different addresses vary by up to ~12 %, so the ceiling is the median
+over `--allocs` freshly allocated buffer sets, each at a different address;
+`spread_pct` reports the range.
 
 Compare like with like: the ceiling's `mean_us` against the kernel's
 `t_mean_us` from `run_cases --mode time --iters 200`. CUDA events tick at
 ~1.024 us here and add ~3 us per launch, so medians of short kernels snap to
 tick multiples; both sides pay the same per-launch cost and the same L2-flush
 write-back, which is why the ceiling is timed with the harness's own
-`time_cuda`.
+`time_cuda`. For a gate decision, run the kernel and this tool alternately in
+one `gpu_run.sh` call (3 rounds) and use the median ratio.
 
 Usage:
   CUDA_VISIBLE_DEVICES=5 python -m benchmarks.kernel_audit.size_ceiling \\
@@ -29,8 +33,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 from pathlib import Path
+from statistics import median
 
 import torch
 import triton
@@ -92,13 +98,19 @@ def _candidates(n_elem: int, sms: int):
                 yield block, grid, warps
 
 
-def _best_launch(kind: str, nbytes: int, sms: int, iters: int) -> dict:
-    n_elem = max(1, nbytes // 4)
+def _buffers(kind: str, n_elem: int, sms: int, spacer_bytes: int) -> tuple:
+    # The spacer shifts the buffers to a new address; it stays alive with them.
+    spacer = torch.empty(max(1, spacer_bytes), dtype=torch.uint8, device="cuda")
     src = torch.zeros(n_elem, dtype=torch.int32, device="cuda")
     dst = torch.empty_like(src) if kind == "copy" else None
     out = torch.empty(
         sms * 16 + triton.cdiv(n_elem, 1024), dtype=torch.int32, device="cuda"
     )
+    return spacer, src, dst, out
+
+
+def _fns(kind: str, bufs: tuple, n_elem: int, sms: int) -> dict:
+    _, src, dst, out = bufs
     fns = {}
     for block, grid, warps in _candidates(n_elem, sms):
         if kind == "read":
@@ -113,39 +125,74 @@ def _best_launch(kind: str, nbytes: int, sms: int, iters: int) -> dict:
     fns["torch.sum" if kind == "read" else "torch.copy_"] = (
         (lambda: src.sum()) if kind == "read" else (lambda: dst.copy_(src))
     )
-    # Coarse pass over every config, then the full sample count on the top 4.
-    coarse = sorted(
-        fns, key=lambda k: time_cuda(fns[k], iters=20, warmup=2).mean_us
-    )
-    best = None
-    for name in coarse[:4]:
-        t = time_cuda(fns[name], iters=iters, warmup=2)
-        if best is None or t.mean_us < best["t"].mean_us:
-            best = {"cfg": name, "t": t, "fn": fns[name]}
-    best["bytes"] = n_elem * 4 * (2 if kind == "copy" else 1)
-    best["keep"] = (src, dst, out)
-    return best
+    return fns
 
 
-def measure(kind: str, parts: list[int], iters: int = 200) -> dict:
+def measure(
+    kind: str,
+    parts: list[int],
+    iters: int = 200,
+    allocs: int = 5,
+    seed: int = 0,
+) -> dict:
+    """Ceiling for one op whose launches move `parts` bytes each.
+
+    The 4 fastest configs per launch are picked on the first buffer set; every
+    buffer set then times them with `iters` calls and keeps the best. The
+    result is the median over the `allocs` buffer sets.
+    """
     sms = torch.cuda.get_device_properties(0).multi_processor_count
-    launches = [_best_launch(kind, b, sms, iters) for b in parts]
-    if len(launches) == 1:
-        t = launches[0]["t"]
-    else:
-        fns = [x["fn"] for x in launches]
-        t = time_cuda(lambda: [f() for f in fns], iters=iters, warmup=2)
-    total = sum(x["bytes"] for x in launches)
+    rng = random.Random(seed)
+    n_elems = [max(1, b // 4) for b in parts]
+    sets = [[_buffers(kind, n, sms, 0) for n in n_elems]]
+    for _ in range(allocs - 1):
+        sets.append(
+            [
+                _buffers(kind, n, sms, rng.randrange(1, 4096) * 64 * 1024)
+                for n in n_elems
+            ]
+        )
+    top = []
+    for n, bufs in zip(n_elems, sets[0]):
+        fns = _fns(kind, bufs, n, sms)
+        top.append(
+            sorted(
+                fns,
+                key=lambda k: time_cuda(fns[k], iters=20, warmup=2).mean_us,
+            )[:4]
+        )
+    timings, cfgs = [], None
+    for bufs_set in sets:
+        chosen, names, t = [], [], None
+        for n, bufs, cands in zip(n_elems, bufs_set, top):
+            fns = _fns(kind, bufs, n, sms)
+            ts = {c: time_cuda(fns[c], iters=iters, warmup=2) for c in cands}
+            name = min(ts, key=lambda c: ts[c].mean_us)
+            chosen.append(fns[name])
+            names.append(name)
+            t = ts[name]
+        if len(chosen) > 1:
+            t = time_cuda(
+                lambda fs=chosen: [f() for f in fs], iters=iters, warmup=2
+            )
+        timings.append(t)
+        cfgs = cfgs or names
+    mean_us = median(t.mean_us for t in timings)
+    median_us = median(t.median_us for t in timings)
+    total = sum(n * 4 * (2 if kind == "copy" else 1) for n in n_elems)
+    alloc_us = [t.mean_us for t in timings]
     return {
         "kind": kind,
-        "launches": len(launches),
-        "part_bytes": [x["bytes"] for x in launches],
+        "launches": len(parts),
+        "part_bytes": [n * 4 * (2 if kind == "copy" else 1) for n in n_elems],
         "bytes": total,
-        "mean_us": t.mean_us,
-        "median_us": t.median_us,
-        "gbs": total / t.mean_us / 1e3,
-        "gbs_median": total / t.median_us / 1e3,
-        "cfgs": [x["cfg"] for x in launches],
+        "mean_us": mean_us,
+        "median_us": median_us,
+        "alloc_us": alloc_us,
+        "spread_pct": 100 * (max(alloc_us) - min(alloc_us)) / mean_us,
+        "gbs": total / mean_us / 1e3,
+        "gbs_median": total / median_us / 1e3,
+        "cfgs": cfgs,
     }
 
 
@@ -162,6 +209,7 @@ def main() -> None:
     ap.add_argument("--read", default="", help="comma list; '+' joins launches")
     ap.add_argument("--copy", default="", help="comma list; '+' joins launches")
     ap.add_argument("--iters", type=int, default=200)
+    ap.add_argument("--allocs", type=int, default=5, help="buffer sets")
     ap.add_argument("--out", type=Path, help="append JSON lines here")
     args = ap.parse_args()
     roofs = _roofs()
@@ -169,7 +217,10 @@ def main() -> None:
     for kind in ("read", "copy"):
         for item in filter(None, getattr(args, kind).split(",")):
             rec = measure(
-                kind, [parse_bytes(t) for t in item.split("+")], args.iters
+                kind,
+                [parse_bytes(t) for t in item.split("+")],
+                args.iters,
+                args.allocs,
             )
             if kind in roofs:
                 rec["pct_of_roof"] = 100 * rec["gbs"] / roofs[kind]
