@@ -575,3 +575,45 @@ the same frozen trace (no recapture): decode arm at capacities 7E..14E step E
 | 1536 (12E) | 0.7878 | 0.7871 | **0.8083** | 0.9124 | s3fifo |
 | 1664 (13E) | 0.8172 | 0.8100 | **0.8354** | 0.9253 | s3fifo |
 | 1792 (14E) | 0.8449 | 0.8301 | **0.8581** | 0.9362 | s3fifo |
+
+---
+
+## Addendum 3 — cross-model replication of the crossover rule (exp653): PARTIAL, rule corrected
+
+Pre-registered transfer test (sha f21c10af…, frozen 2026-11-03T04:14:59Z) of
+exp652's 10E boundary to three more models — two captured on a different stack
+(SGLang) and two on different datasets (mixed20-greedy64, mmlu100-greedy64).
+Verdict PARTIAL: the transfer half holds everywhere, the flip half is refuted
+on all three models. This corrects addendum 2's deployable rule.
+
+- **Holds (all models):** LCNU strictly best online at 7E..9E (granite fine
+  sweep: +3.0 to +10.7pp over s3fifo at 280..360); lcnu > s3fifo at <= 8E on
+  a2.7b and 235b.
+- **Refuted:** no s3fifo takeover at 10E..14E on granite — LCNU stays strictly
+  best at every fine capacity (400=10E: 0.6291 vs 0.5399, +8.9pp) — and lcnu
+  > s3fifo through the full tested range on a2.7b (<= 17.1E) and 235b
+  (<= 16E; 12E: 0.5840 vs 0.5128).
+- **Where granite actually flips:** only at 1024 = 25E (0.9732 vs 0.9708,
+  +0.24pp) with everything else saturated at 32E (0.998) — a near-saturation
+  flip, unlike qwen3-30b's mid-curve flip at 10E (+0.92pp at 1280, growing to
+  +2.8pp by 14E).
+
+Corrected guidance: **LCNU remains the best online default across all four
+models and all three capture stacks**; the s3fifo takeover at 10E is a
+qwen3-30b-specific property, not a law. What makes that model's trace flip
+mid-curve (layer count? absolute working set? capture length?) is an open
+question — flagged as the next experiment in this series.
+
+Granite fine sweep (this addendum, decode arm, same frozen trace as #340):
+20 policies x 8 capacities, results below; EXPERIMENTS.md rows appended.
+
+| cap (=E×) | LRU | LCNU | s3fifo | belady | best online |
+|----:|----:|----:|----:|----:|:--|
+| 280 (7E) | 0.4677 | 0.4982 | 0.4049 | 0.6739 | lcnu |
+| 320 (8E) | 0.4691 | 0.5449 | 0.4475 | 0.7154 | lcnu |
+| 360 (9E) | 0.4826 | 0.5883 | 0.4914 | 0.7515 | lcnu |
+| 400 (10E) | 0.5244 | **0.6291** | 0.5399 | 0.7832 | lcnu |
+| 440 (11E) | 0.5659 | **0.6672** | 0.5895 | 0.8114 | lcnu |
+| 480 (12E) | 0.6113 | **0.7024** | 0.6393 | 0.8367 | lcnu |
+| 520 (13E) | 0.6431 | **0.7352** | 0.6856 | 0.8589 | lcnu |
+| 560 (14E) | 0.6848 | **0.7654** | 0.7265 | 0.8785 | lcnu |
