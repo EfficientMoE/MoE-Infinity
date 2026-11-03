@@ -685,8 +685,27 @@ _GEMM_CFG_PRO6000: dict = {
 }
 
 
+# T <= 16K (pro6000 sweep, round 6): smaller BM / longer BK so short prompts
+# put more CTAs on the 188 SMs (2K: 16-32 CTAs with the large-T table).
+def _small_t_config_pro6000(T, block_e):
+    if T > 16384:
+        return None
+    if block_e == 16:
+        return (64, 128, 8, 4)
+    if block_e == 32:
+        return (32, 128, 4, 4)
+    if block_e == 128:
+        if T <= 4096:
+            return (32, 128, 8, 3)
+        return (64, 128, 8, 3) if T <= 10240 else (128, 64, 8, 4)
+    return None
+
+
 def _gemm_config(T, H, E, block_e):
     """(BM, BK, num_warps, num_stages) for the fused prefill kernel."""
+    small = _small_t_config_pro6000(T, block_e)
+    if small is not None:
+        return small
     if block_e == 128 and H >= 6144:
         return (64, 64, 4, 3)  # MiniMax-M3 (H = 6144) sweep
     cfg = _GEMM_CFG_PRO6000.get(block_e)
