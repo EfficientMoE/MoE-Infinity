@@ -272,7 +272,7 @@ def _v4_fp4_native_builder(M: int, H: int, I: int):
         x = _rand(M, H, scale=1.0)
         w = _v4_fp4_expert_weights(H, I)
         args = [w[k] for k in ("w1", "s1", "w2", "s2", "w3", "s3")]
-        return lambda: v4.v4_expert_forward_fp4(x, *args, 10.0)
+        return lambda: v4.v4_expert_forward_fp4_sm120_pro6000(x, *args, 10.0)
 
     return build
 
@@ -301,7 +301,7 @@ def _v4_fp4_native_layer_builder(T: int, n_exp: int, H: int, I: int, k: int):
         x = _rand(T, H, scale=1.0)
 
         def run():
-            v4.v4_moe_forward(x, ids, wts, table, I, 10.0)
+            v4.v4_moe_forward_sm120_pro6000(x, ids, wts, table, I, 10.0)
 
         run.experts = experts  # keep the weights alive
         return run

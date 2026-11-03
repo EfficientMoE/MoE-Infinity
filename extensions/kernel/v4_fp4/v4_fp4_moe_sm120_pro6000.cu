@@ -5,6 +5,13 @@
 //
 // Native block-scaled FP4 routed-expert MoE for DeepSeek-V4 / V4.1 on sm_120a.
 //
+// Hardware: gated SM120 + RTX_PRO_6000 (docs/hardware-gated-kernels.md).
+// Every kernel here uses sm_120a-only block-scaled MMA (kind::mxf8f6f4), and
+// tile sizes, the 99 KiB shared-memory budget, the one-wave persistent decode
+// grid and the 128 MiB-L2 w2 prefetch budget were tuned on the RTX PRO 6000
+// Blackwell (188 SMs). The binding checks both gates (v4_moe_supported); other
+// devices run Path B: v4_expert_forward per expert (BF16 dequant + cuBLAS).
+//
 // Numerics follow the official DeepSeek-V4 inference (W4A8):
 //   x  -> act_quant (FP8 e4m3, one ue8m0 power-of-two scale per 128 along K)
 //   gate/up = fp4_gemm(x, w1/w3)  (FP32 accumulate, rounded to BF16)
@@ -29,8 +36,8 @@
 //   prep     : routing histogram/scan/scatter + tile list (block 0),
 //              FP8 quantisation of x (other blocks)
 // then, for <= 8 routed rows per expert on average (decode), one persistent
-// kernel (moe_decode_kernel, programmatic dependent launch) that streams
-// gate|up and down weights of all active experts; otherwise (prefill):
+// kernel (moe_decode_sm120_pro6000_kernel, programmatic dependent launch) that
+// streams gate|up and down weights of all active experts; otherwise (prefill):
 //   gemm<1>  : gate|up for 64/128 features x BT routed rows per CTA, fused
 //              clamp/SiLU*up/routing weight and FP8 re-quantisation of h
 //   gemm<2>  : down projection for 128/256 outputs x BT rows -> BF16
@@ -358,7 +365,7 @@ struct GemmArgs {
 
 template <int PHASE, int WM, int WN, int MT, int NT, int STAGES>
 __global__ void __launch_bounds__(WM* WN * 32)
-    moe_gemm_kernel(const GemmArgs args) {
+    moe_gemm_sm120_pro6000_kernel(const GemmArgs args) {
   using C = Cfg<WM, WN, MT, NT, STAGES>;
   constexpr int BT = C::BT;
   constexpr int ROWS = C::ROWS;
@@ -854,7 +861,7 @@ __device__ __forceinline__ DecUnit decode_unit(const DecodeArgs& a, int u,
 
 template <typename IdT>
 __global__ void __launch_bounds__(kDecThreads, 1)
-    moe_decode_kernel(const DecodeArgs a) {
+    moe_decode_sm120_pro6000_kernel(const DecodeArgs a) {
   extern __shared__ __align__(128) uint8_t smem[];
   // Bres is only touched by the consumer between units: single buffer.
   uint8_t* sBres = smem + kDecStage * kDecStages;  // [8][I + 16] FP8
@@ -1241,7 +1248,7 @@ __global__ void __launch_bounds__(kDecThreads, 1)
 template <int PHASE, int WM, int WN, int MT, int NT, int STAGES>
 void launch_gemm(const GemmArgs& a, int grid_x, int grid_y, cudaStream_t s) {
   using C = Cfg<WM, WN, MT, NT, STAGES>;
-  auto k = moe_gemm_kernel<PHASE, WM, WN, MT, NT, STAGES>;
+  auto k = moe_gemm_sm120_pro6000_kernel<PHASE, WM, WN, MT, NT, STAGES>;
   static bool init = false;  // per instantiation
   if (!init) {
     cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -1279,7 +1286,7 @@ void run_cfg(GemmArgs a1, GemmArgs a2, int T, int topk, int E, int H, int I,
 
 template <typename IdT>
 void launch_decode(const DecodeArgs& a, cudaStream_t s) {
-  auto k = moe_decode_kernel<IdT>;
+  auto k = moe_decode_sm120_pro6000_kernel<IdT>;
   static int sms = 0;
   if (sms == 0) {
     cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -1325,13 +1332,13 @@ int choose_bt(long long n, int E) {
 }  // namespace v4moe
 
 // Workspace pointers are carved by the caller (binding) from one allocation.
-void v4_moe_forward_cuda(const void* x, const void* topk_ids, bool ids_int64,
-                         const float* topk_w, const int64_t* table, int T,
-                         int topk, int E, int H, int I, float swiglu_limit,
-                         int bt, uint8_t* xq, uint8_t* xs, int* sorted,
-                         void* tiles, int* num_tiles, uint8_t* hq, uint8_t* hs,
-                         void* ybuf, float* out, void* hbuf, int* counters,
-                         int n_counters, void* tile_ext, cudaStream_t stream) {
+void v4_moe_forward_sm120_pro6000_cuda(
+    const void* x, const void* topk_ids, bool ids_int64, const float* topk_w,
+    const int64_t* table, int T, int topk, int E, int H, int I,
+    float swiglu_limit, int bt, uint8_t* xq, uint8_t* xs, int* sorted,
+    void* tiles, int* num_tiles, uint8_t* hq, uint8_t* hs, void* ybuf,
+    float* out, void* hbuf, int* counters, int n_counters, void* tile_ext,
+    cudaStream_t stream) {
   using namespace v4moe;
   const bool decode = hbuf != nullptr;
   const long long groups = (long long)T * (H / kBK);

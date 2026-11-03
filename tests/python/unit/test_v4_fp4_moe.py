@@ -1,6 +1,6 @@
 """Native W4A8 block-scaled FP4 MoE (DeepSeek-V4 routed experts, sm_120a).
 
-Checks `_v4_fp4.v4_moe_forward` / `v4_expert_forward_fp4` against a PyTorch
+Checks `_v4_fp4.v4_moe_forward_sm120_pro6000` / `v4_expert_forward_fp4_sm120_pro6000` against a PyTorch
 emulation of the official DeepSeek-V4 inference numerics (act_quant with
 per-128 ue8m0 FP8 activations, FP4 e2m1 weights with per-32 ue8m0 scales,
 BF16 gate/up, FP32 clamp + SiLU * up * routing weight, BF16 h, FP32 sum over
@@ -22,8 +22,10 @@ def _ext():
         from moe_infinity import _v4_fp4
     except ImportError:
         pytest.skip("moe_infinity._v4_fp4 extension not built")
-    if not hasattr(_v4_fp4, "v4_moe_forward"):
-        pytest.skip("_v4_fp4 built without v4_moe_forward")
+    if not hasattr(_v4_fp4, "v4_moe_forward_sm120_pro6000"):
+        pytest.skip("_v4_fp4 built without v4_moe_forward_sm120_pro6000")
+    if not _v4_fp4.v4_moe_supported(torch.cuda.current_device()):
+        pytest.skip("gated to the RTX PRO 6000 (SM120 + RTX_PRO_6000)")
     return _v4_fp4
 
 
@@ -144,7 +146,9 @@ def test_moe_matches_official_numerics(T, topk, E, H, I):
     scores = torch.rand(T, E, generator=gen)
     ids = scores.topk(topk, -1).indices.cuda()
     wts = torch.rand(T, topk, generator=gen).cuda() + 0.1
-    out = ext.v4_moe_forward(x, ids, wts, table_of(experts), I, 10.0)
+    out = ext.v4_moe_forward_sm120_pro6000(
+        x, ids, wts, table_of(experts), I, 10.0
+    )
     ref = moe_ref(x, ids, wts, experts, 10.0)
     assert out.dtype == torch.float32 and out.shape == (T, H)
     # Differences come only from FP32 accumulation order and the fast SiLU
@@ -174,7 +178,9 @@ def test_moe_int32_ids_skips_invalid_and_empty_experts():
         dtype=torch.int32,
     ).cuda()
     wts = torch.rand(T, 2, generator=gen).cuda()
-    out = ext.v4_moe_forward(x, ids, wts, table_of(experts), I, 0.0)
+    out = ext.v4_moe_forward_sm120_pro6000(
+        x, ids, wts, table_of(experts), I, 0.0
+    )
     ref = moe_ref(x, ids.long(), wts, experts, 0.0)
     assert torch.all(out[6] == 0)
     assert _rel(out, ref) < 2e-2
@@ -187,7 +193,7 @@ def test_single_expert_vs_bf16_dequant_path():
     p = make_expert(H, I, gen)
     x = torch.randn(M, H, generator=gen).bfloat16().cuda()
     args = (x, p["w1"], p["s1"], p["w2"], p["s2"], p["w3"], p["s3"], 10.0)
-    out = ext.v4_expert_forward_fp4(*args)
+    out = ext.v4_expert_forward_fp4_sm120_pro6000(*args)
     w = [
         dequant_fp4(p[k], p[s])
         for k, s in (("w1", "s1"), ("w3", "s3"), ("w2", "s2"))
@@ -212,21 +218,23 @@ def test_moe_no_host_sync_and_cuda_graph_replay(T):
     x = torch.randn(T, H, generator=gen).bfloat16().cuda()
     ids = torch.rand(T, E, generator=gen).topk(k, -1).indices.cuda()
     wts = torch.rand(T, k, generator=gen).cuda()
-    ref = ext.v4_moe_forward(x, ids, wts, table, I, 10.0)  # warm-up
+    ref = ext.v4_moe_forward_sm120_pro6000(
+        x, ids, wts, table, I, 10.0
+    )  # warm-up
     torch.cuda.synchronize()
     torch.cuda.set_sync_debug_mode("error")
     try:
-        eager = ext.v4_moe_forward(x, ids, wts, table, I, 10.0)
+        eager = ext.v4_moe_forward_sm120_pro6000(x, ids, wts, table, I, 10.0)
     finally:
         torch.cuda.set_sync_debug_mode("default")
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
-        ext.v4_moe_forward(x, ids, wts, table, I, 10.0)
+        ext.v4_moe_forward_sm120_pro6000(x, ids, wts, table, I, 10.0)
     torch.cuda.current_stream().wait_stream(s)
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
-        out = ext.v4_moe_forward(x, ids, wts, table, I, 10.0)
+        out = ext.v4_moe_forward_sm120_pro6000(x, ids, wts, table, I, 10.0)
     for _ in range(3):
         g.replay()
         torch.cuda.synchronize()

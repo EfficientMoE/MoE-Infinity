@@ -9,6 +9,8 @@
 #include <map>
 #include <string>
 
+#include "../hw_profile.h"
+
 void fp4_dequant_to_bf16(const void* packed, const void* scale_e8m0, void* out,
                          int N, int K, cudaStream_t stream);
 void mxfp4_dequant_cuda(const void* packed, const void* scales, void* output,
@@ -77,19 +79,30 @@ torch::Tensor v4_expert_forward(torch::Tensor x, torch::Tensor w1,
   return torch::matmul(h, dw2.transpose(0, 1));
 }
 
-void v4_moe_forward_cuda(const void* x, const void* topk_ids, bool ids_int64,
-                         const float* topk_w, const int64_t* table, int T,
-                         int topk, int E, int H, int I, float swiglu_limit,
-                         int bt, uint8_t* xq, uint8_t* xs, int* sorted,
-                         void* tiles, int* num_tiles, uint8_t* hq, uint8_t* hs,
-                         void* ybuf, float* out, void* hbuf, int* counters,
-                         int n_counters, void* tile_ext, cudaStream_t stream);
+void v4_moe_forward_sm120_pro6000_cuda(
+    const void* x, const void* topk_ids, bool ids_int64, const float* topk_w,
+    const int64_t* table, int T, int topk, int E, int H, int I,
+    float swiglu_limit, int bt, uint8_t* xq, uint8_t* xs, int* sorted,
+    void* tiles, int* num_tiles, uint8_t* hq, uint8_t* hs, void* ybuf,
+    float* out, void* hbuf, int* counters, int n_counters, void* tile_ext,
+    cudaStream_t stream);
 int v4_moe_choose_bt(long long n, int E);
 bool v4_moe_use_decode(int bt, int H, int I);
 int v4_moe_decode_counters(int bound, int H);
 int v4_moe_tile_bound(long long n, int E, int bt);
 
 namespace {
+
+// The grouped MoE kernels (v4_fp4_moe_sm120_pro6000.cu) use sm_120a
+// block-scaled MMA and are sized for the RTX PRO 6000 (99 KiB shared memory
+// per block, 188-CTA persistent decode grid, 128 MiB L2 prefetch budget).
+// Other devices use Path B, v4_expert_forward (BF16 dequant + cuBLAS).
+bool v4_moe_supported(int64_t device) {
+  using moe_infinity::hw::Gate;
+  using moe_infinity::hw::Supports;
+  return Supports(Gate::kSm120, (int)device) &&
+         Supports(Gate::kRtxPro6000, (int)device);
+}
 
 // Runs the native W4A8 block-scaled MoE. Returns the per-slot BF16 expert
 // outputs [T * topk, H] and, if `combine`, the FP32 per-token sum [T, H].
@@ -100,6 +113,10 @@ std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 &&
                   x.dim() == 2 && x.is_contiguous(),
               "x must be a contiguous CUDA bf16 [T, H] tensor");
+  TORCH_CHECK(v4_moe_supported(x.device().index()),
+              "v4_moe_*_sm120_pro6000 runs only on the RTX PRO 6000 "
+              "(sm_120, 188 SMs, 128 MiB L2, 99 KiB shared memory); use "
+              "v4_expert_forward (Path B) on this device");
   TORCH_CHECK(topk_ids.is_cuda() && topk_ids.dim() == 2 &&
                   topk_ids.is_contiguous() &&
                   (topk_ids.scalar_type() == torch::kInt64 ||
@@ -156,7 +173,7 @@ std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
   }
   auto stream = at::cuda::getCurrentCUDAStream(x.device().index());
   int* tiles = reinterpret_cast<int*>(base + o_tiles);
-  v4_moe_forward_cuda(
+  v4_moe_forward_sm120_pro6000_cuda(
       x.data_ptr(), topk_ids.data_ptr(),
       topk_ids.scalar_type() == torch::kInt64, topk_w.data_ptr<float>(),
       table.data_ptr<int64_t>(), (int)T, (int)topk, (int)E, (int)H, (int)I,
@@ -177,19 +194,20 @@ std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
 //   table [E, 6] int64 device pointers per expert: w1, s1, w3, s3, w2, s2
 //   (packed e2m1 [N, K/2] and ue8m0 [N, K/32], checkpoint layout).
 // Returns FP32 [T, H] = sum over the token's experts in ascending id order.
-torch::Tensor v4_moe_forward(torch::Tensor x, torch::Tensor topk_ids,
-                             torch::Tensor topk_w, torch::Tensor table,
-                             int64_t inter, double swiglu_limit) {
+torch::Tensor v4_moe_forward_sm120_pro6000(torch::Tensor x,
+                                           torch::Tensor topk_ids,
+                                           torch::Tensor topk_w,
+                                           torch::Tensor table, int64_t inter,
+                                           double swiglu_limit) {
   return run_v4_moe(x, topk_ids, topk_w, table, inter, swiglu_limit, true)
       .second;
 }
 
 // Single-expert forward on the native path (same contract as
 // v4_expert_forward, routing weight 1). Returns BF16 [M, H].
-torch::Tensor v4_expert_forward_fp4(torch::Tensor x, torch::Tensor w1,
-                                    torch::Tensor s1, torch::Tensor w2,
-                                    torch::Tensor s2, torch::Tensor w3,
-                                    torch::Tensor s3, double swiglu_limit) {
+torch::Tensor v4_expert_forward_fp4_sm120_pro6000(
+    torch::Tensor x, torch::Tensor w1, torch::Tensor s1, torch::Tensor w2,
+    torch::Tensor s2, torch::Tensor w3, torch::Tensor s3, double swiglu_limit) {
   for (auto* t : {&w1, &s1, &w2, &s2, &w3, &s3})
     TORCH_CHECK(t->is_cuda() && t->is_contiguous(),
                 "expert tensors must be contiguous CUDA tensors");
@@ -250,11 +268,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("mxfp4_dequant", &mxfp4_dequant, "MXFP4 uint8 blocks/scales to BF16");
   m.def("v4_expert_forward", &v4_expert_forward,
         "V4 FP4 routed-expert SwiGLU forward (BF16 dequant reference)");
-  m.def("v4_moe_forward", &v4_moe_forward,
+  m.def("v4_moe_forward_sm120_pro6000", &v4_moe_forward_sm120_pro6000,
         "V4 grouped routed-expert MoE, native W4A8 block-scaled FP4 MMA "
         "(sm_120a); returns FP32 [T, H]");
-  m.def("v4_expert_forward_fp4", &v4_expert_forward_fp4,
+  m.def("v4_expert_forward_fp4_sm120_pro6000",
+        &v4_expert_forward_fp4_sm120_pro6000,
         "V4 single routed expert on the native W4A8 block-scaled FP4 path");
+  m.def("v4_moe_supported", &v4_moe_supported, py::arg("device"),
+        "True if the *_sm120_pro6000 grouped MoE kernels may run on this "
+        "device (SM120 and RTX_PRO_6000 hardware gates)");
   m.def("fp8_dequant_blockwise", &fp8_dequant_blockwise,
         "FP8 E4M3 block-scale (128x128) weight -> BF16 dequant (GLM-5.2-FP8)");
   m.def("set_scales", &set_scales,
