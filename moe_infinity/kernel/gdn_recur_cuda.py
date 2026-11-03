@@ -32,7 +32,41 @@ void recur(torch::Tensor qg, torch::Tensor kd, torch::Tensor w, torch::Tensor u,
                    h.data_ptr<float>(), B, H, T, (int)t_base, TB, (int)nb,
                    c10::cuda::getCurrentCUDAStream());
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("recur", &recur); }
+// Persisting L2 window on [ptr, ptr + bytes) for the current stream
+// (bytes == 0 clears it).
+void l2_window(torch::Tensor buf, int64_t bytes) {
+  cudaStream_t s = c10::cuda::getCurrentCUDAStream();
+  cudaStreamAttrValue a = {};
+  if (bytes > 0) {
+    int dev; cudaGetDevice(&dev);
+    int maxp = 0, maxw = 0;
+    cudaDeviceGetAttribute(&maxp, cudaDevAttrMaxPersistingL2CacheSize, dev);
+    cudaDeviceGetAttribute(&maxw, cudaDevAttrMaxAccessPolicyWindowSize, dev);
+    size_t lim = std::min<size_t>(bytes, maxp);
+    cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, lim);
+    a.accessPolicyWindow.base_ptr = buf.data_ptr();
+    a.accessPolicyWindow.num_bytes = std::min<size_t>(bytes, maxw);
+    a.accessPolicyWindow.hitRatio = std::min(1.0f, (float)lim / (float)a.accessPolicyWindow.num_bytes);
+    a.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+    a.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+  } else {
+    a.accessPolicyWindow.num_bytes = 0;
+    cudaCtxResetPersistingL2Cache();
+  }
+  cudaStreamSetAttribute(s, cudaStreamAttributeAccessPolicyWindow, &a);
+}
+std::vector<int64_t> l2_limits() {
+  int dev; cudaGetDevice(&dev);
+  int maxp = 0, maxw = 0;
+  cudaDeviceGetAttribute(&maxp, cudaDevAttrMaxPersistingL2CacheSize, dev);
+  cudaDeviceGetAttribute(&maxw, cudaDevAttrMaxAccessPolicyWindowSize, dev);
+  return {maxp, maxw};
+}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("recur", &recur);
+  m.def("l2_window", &l2_window);
+  m.def("l2_limits", &l2_limits);
+}
 """
 
 
@@ -76,3 +110,11 @@ def available() -> bool:
 
 def recur(qg, kd, w, u, S, g, o, h, t_base: int, nb: int) -> None:
     _module().recur(qg, kd, w, u, S, g, o, h, t_base, nb)
+
+
+def l2_window(buf, nbytes: int) -> None:
+    _module().l2_window(buf, nbytes)
+
+
+def l2_limits() -> tuple[int, int]:
+    return tuple(_module().l2_limits())
