@@ -22,6 +22,7 @@ Exact string comparisons matter. Several toggles only react to `"1"` or
 | `MOE_DISABLE_CUDA_GRAPHS` | unset, treated as off | `moe_infinity/serving/cuda_graph.py` init | If `"1"`, disable CUDA graph warmup, capture, and replay. | Read when `CudaGraphRunner` is constructed. |
 | `MOE_INFINITY_UNVALIDATED_HW` | unset | `moe_infinity/utils/hw_profile.py` (each `supports` call), `extensions/kernel/hw_profile.h` (first use) | If `"1"`, kernels tuned for the RTX PRO 6000 Blackwell also run on other GPUs. | For re-tuning on a new card. Never enables sm_120-only kernels on other architectures. See [hardware-gated kernels](./hardware-gated-kernels.md). |
 | `MOE_LINEAR_ATTN_FUSED` | `"1"` | `moe_infinity/kernel/linear_attention_fused.py` per call | If `"0"`, Qwen3.5 GDN / GLM-5.3-Flash KDA prefill uses flash-linear-attention's chunked kernels instead of MoE-Infinity's fused prep + recurrence/output kernels. | Only matters with `flash-linear-attention` installed; GDN uses the fused path from 4096 tokens per call. |
+| `MOE_LINEAR_ATTN_CUDA` | `"0"` | `moe_infinity/kernel/linear_attention_fused.py` per call | If `"1"`, GDN prefill on the fused path uses the L2-blocked pipeline with the CUDA `mma.sync` recurrence (`moe_infinity/kernel/csrc/gdn_recur.cu`). | Opt-in: built with nvcc on first use (~1 min, cached in `~/.cache/moe_infinity/` or `MOE_LINEAR_ATTN_BUILD_DIR`); falls back to the default Triton path if the build fails. |
 
 ## Profiling and tracing
 
