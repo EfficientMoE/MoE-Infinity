@@ -19,7 +19,7 @@
 #include "utils/logger.h"
 #include "model/model_topology.h"
 #include "model/moe.h"
-#include "kernel/grouped_moe_decode.h"
+#include "kernel/grouped_moe_decode_pro6000.h"
 
 #include <c10/core/ScalarType.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -351,6 +351,9 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
     if (std::string(grouped) == "0") grouped_enabled_.store(false);
   }
   grouped_pending_.resize(kNumDevices());
+  for (int i = 0; i < kNumDevices(); ++i) {
+    grouped_pro6000_ok_.push_back(grouped_moe_decode_pro6000_device_ok(i));
+  }
 
   admissions_paused_.assign(kNumDevices(), 0);
   pending_by_device_.assign(kNumDevices(), 0);
@@ -1769,6 +1772,11 @@ bool ExpertDispatcher::GroupedEligible(const ExpertNodePtr& expert_node,
   if (!grouped_enabled_.load(std::memory_order_acquire) || remote) {
     return false;
   }
+  // The grouped kernels are tuned for the RTX PRO 6000 (Gate::kRtxPro6000).
+  if (gpu_id < 0 || gpu_id >= static_cast<int>(grouped_pro6000_ok_.size()) ||
+      !grouped_pro6000_ok_[gpu_id]) {
+    return false;
+  }
   if (expert_type_ != DEEPSEEK_MOE_DENSE_ACT_DENSE &&
       expert_type_ != MIXTRAL_MOE_DENSE_ACT_DENSE) {
     return false;
@@ -1821,7 +1829,7 @@ bool ExpertDispatcher::GroupedEligible(const ExpertNodePtr& expert_node,
   if (!GroupedWeightOk(w[0], gpu_id, inter, hidden) ||
       !GroupedWeightOk(w[1], gpu_id, inter, hidden) ||
       !GroupedWeightOk(w[2], gpu_id, hidden, inter) ||
-      !grouped_moe_decode_supported(tokens, hidden, inter)) {
+      !grouped_moe_decode_pro6000_supported(tokens, hidden, inter)) {
     return false;
   }
   const int top_k = grouped_top_k_.load(std::memory_order_acquire);
@@ -1919,8 +1927,9 @@ void ExpertDispatcher::GroupedExec(ExecArgs& args, int gpu_id,
           failed_generation_.load(std::memory_order_acquire) == generation) {
         return;
       }
-      grouped_moe_decode(hidden_states_, router_mask_, router_weight_, table,
-                         inter, kcap, final_hidden_states_, false, stream);
+      grouped_moe_decode_pro6000(hidden_states_, router_mask_, router_weight_,
+                                 table, inter, kcap, final_hidden_states_,
+                                 false, stream);
 
       cudaEvent_t output_done = AcquireCompletionEvent(gpu_id);
       int event_fault =

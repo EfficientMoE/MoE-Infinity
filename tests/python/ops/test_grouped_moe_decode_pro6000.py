@@ -1,11 +1,23 @@
-"""Grouped decode MoE kernels (#306): parity with the per-expert path."""
+"""Grouped decode MoE kernels (#306): parity with the per-expert path.
 
+RTX PRO 6000 only (gate RTX_PRO_6000); skipped on other GPUs, where the
+dispatcher keeps per-expert execution (tests/python/unit/
+test_grouped_moe_pro6000_gate.py covers that choice on the CPU).
+"""
+
+import gc
+import time
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
 from tests.python.ops.conftest import requires_cuda
+
+requires_pro6000 = pytest.mark.skipif(
+    not supports(RTX_PRO_6000), reason="grouped decode is RTX PRO 6000 only"
+)
 
 DEEPSEEK_EXPERT_TYPE = 5
 DTYPE_BF16 = 0
@@ -16,8 +28,12 @@ def _store():
         import moe_infinity._store as store
     except Exception as exc:  # pragma: no cover - depends on the build
         pytest.skip(f"moe_infinity._store unavailable: {exc}")
-    if isinstance(store, MagicMock) or not hasattr(store, "grouped_moe_decode"):
-        pytest.skip("moe_infinity._store built without grouped_moe_decode")
+    if isinstance(store, MagicMock) or not hasattr(
+        store, "grouped_moe_decode_pro6000"
+    ):
+        pytest.skip(
+            "moe_infinity._store built without grouped_moe_decode_pro6000"
+        )
     return store
 
 
@@ -62,6 +78,7 @@ def _assert_bf16_close(actual, expected):
 
 
 @requires_cuda
+@requires_pro6000
 @pytest.mark.parametrize(
     "tokens,num_experts,top_k,hidden,inter",
     [
@@ -98,17 +115,18 @@ def test_grouped_kernel_matches_per_expert_math(
     expected = _per_expert_reference(x, mask, weights, experts)
 
     out = torch.full((tokens, hidden), 3.0, device="cuda")
-    store.grouped_moe_decode(
+    store.grouped_moe_decode_pro6000(
         x, mask, weights, table, inter, top_k, out, zero_out=True
     )
     _assert_bf16_close(out, expected)
 
     # Accumulates into the existing output (dispatcher contract).
-    store.grouped_moe_decode(x, mask, weights, table, inter, top_k, out)
+    store.grouped_moe_decode_pro6000(x, mask, weights, table, inter, top_k, out)
     _assert_bf16_close(out, 2 * expected)
 
 
 @requires_cuda
+@requires_pro6000
 def test_grouped_kernel_subset_of_experts_and_strided_inputs():
     """Experts outside the table are left to the per-expert path."""
     store = _store()
@@ -142,7 +160,7 @@ def test_grouped_kernel_subset_of_experts_and_strided_inputs():
         device="cuda",
     )
     out = torch.zeros(tokens, hidden, device="cuda")
-    store.grouped_moe_decode(
+    store.grouped_moe_decode_pro6000(
         x, mask_wide[:, ::2], weights_wide[:, ::2], table, inter, top_k, out
     )
     _assert_bf16_close(out, _per_expert_reference(x, mask, weights, experts))
@@ -195,6 +213,28 @@ def _make_dispatcher(tmp_path, num_experts, hidden, inter, generator):
     return engine, dispatcher, experts
 
 
+@pytest.fixture
+def native_moe(tmp_path):
+    """Builds engine + dispatcher; tears down the dispatcher (and its worker
+    threads) before the engine whose globals they use."""
+    made = []
+
+    def make(num_experts, hidden, inter, generator):
+        engine, dispatcher, experts = _make_dispatcher(
+            tmp_path, num_experts, hidden, inter, generator
+        )
+        made.append([engine, dispatcher])
+        return dispatcher, experts
+
+    yield make
+    while made:
+        pair = made.pop()
+        pair[1] = None
+        gc.collect()
+        pair[0] = None
+        gc.collect()
+
+
 def _dispatch(dispatcher, x, mask, weights, native):
     dispatcher.set_inputs(x, mask, weights)
     if native:
@@ -205,21 +245,28 @@ def _dispatch(dispatcher, x, mask, weights, native):
         for e in active:
             dispatcher.enqueue_expert(0, e, 0, False)
         dispatcher.notify_fetch_start()
-    return dispatcher.wait_expert().clone()
+    try:
+        return dispatcher.wait_expert().clone()
+    finally:
+        # Experts return to IDLE on the retirement thread after the GPU work;
+        # enqueueing the same expert again before that is a fatal CAS failure
+        # (real models never reuse a layer's expert within one step), so
+        # back-to-back test dispatches wait for retirement.
+        torch.cuda.synchronize()
+        time.sleep(0.05)
 
 
 @requires_cuda
+@requires_pro6000
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("tokens", [1, 5])
 def test_dispatcher_grouped_path_matches_per_expert_path(
-    tmp_path, native, tokens
+    native_moe, native, tokens
 ):
     torch.cuda.set_device(0)
     num_experts, top_k, hidden, inter = 8, 2, 256, 128
     gen = torch.Generator().manual_seed(11)
-    engine, dispatcher, experts = _make_dispatcher(
-        tmp_path, num_experts, hidden, inter, gen
-    )
+    dispatcher, experts = native_moe(num_experts, hidden, inter, gen)
     dispatcher.set_grouped_decode(True, top_k)
     x = torch.randn(tokens, hidden, generator=gen).bfloat16().cuda()
     mask, weights = _routing(tokens, num_experts, top_k, None, "cpu")
@@ -243,18 +290,16 @@ def test_dispatcher_grouped_path_matches_per_expert_path(
     _assert_bf16_close(cold, expected)
     _assert_bf16_close(per_expert, expected)
     _assert_bf16_close(warm, per_expert)
-    del engine
 
 
 @requires_cuda
-def test_dispatcher_mixes_grouped_and_fetched_experts(tmp_path):
+@requires_pro6000
+def test_dispatcher_mixes_grouped_and_fetched_experts(native_moe):
     """Resident experts run grouped while in-flight ones use the old path."""
     torch.cuda.set_device(0)
     num_experts, hidden, inter, tokens = 8, 256, 64, 6
     gen = torch.Generator().manual_seed(5)
-    engine, dispatcher, experts = _make_dispatcher(
-        tmp_path, num_experts, hidden, inter, gen
-    )
+    dispatcher, experts = native_moe(num_experts, hidden, inter, gen)
     dispatcher.set_grouped_decode(True, 4)
     x = torch.randn(tokens, hidden, generator=gen).bfloat16().cuda()
 
@@ -270,20 +315,18 @@ def test_dispatcher_mixes_grouped_and_fetched_experts(tmp_path):
     out = _dispatch(dispatcher, x, mask, weights, native=False)
     assert dispatcher.get_routing_stats()["grouped_experts"] == 2
     _assert_bf16_close(out, _per_expert_reference(x, mask, weights, experts))
-    del engine
 
 
 @requires_cuda
+@requires_pro6000
 @pytest.mark.parametrize(
     "fault", ["exec", "output", "completion_event", "retirement_launch"]
 )
-def test_grouped_path_failure_rethrows_and_recovers(tmp_path, fault):
+def test_grouped_path_failure_rethrows_and_recovers(native_moe, fault):
     torch.cuda.set_device(0)
     num_experts, hidden, inter, tokens = 4, 256, 64, 3
     gen = torch.Generator().manual_seed(3)
-    engine, dispatcher, experts = _make_dispatcher(
-        tmp_path, num_experts, hidden, inter, gen
-    )
+    dispatcher, experts = native_moe(num_experts, hidden, inter, gen)
     dispatcher.set_grouped_decode(True, 2)
     x = torch.randn(tokens, hidden, generator=gen).bfloat16().cuda()
     mask = torch.zeros(tokens, num_experts, dtype=torch.bool)
@@ -301,4 +344,3 @@ def test_grouped_path_failure_rethrows_and_recovers(tmp_path, fault):
     out = _dispatch(dispatcher, x, mask, weights, native=True)
     _assert_bf16_close(out, _per_expert_reference(x, mask, weights, experts))
     assert dispatcher.get_routing_stats()["grouped_batches"] >= 1
-    del engine

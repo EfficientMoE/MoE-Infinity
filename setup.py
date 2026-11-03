@@ -251,7 +251,7 @@ _STORE_SOURCES = [
     # CUDA kernels for store
     "core/model/fused_mlp.cu",
     "extensions/kernel/fused_moe_mlp.cu",
-    "extensions/kernel/grouped_moe_decode.cu",
+    "extensions/kernel/grouped_moe_decode_pro6000.cu",
     "extensions/kernel/activation_kernels.cu",
     "extensions/kernel/topk_softmax_kernels.cu",
     "extensions/kernel/v4_fp4/mxfp4_dequant.cu",

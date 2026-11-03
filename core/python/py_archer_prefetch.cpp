@@ -8,7 +8,7 @@
 #include "prefetch/archer_prefetch_handle.h"
 #include "model/moe.h"
 #include "kernel/ops.h"
-#include "kernel/grouped_moe_decode.h"
+#include "kernel/grouped_moe_decode_pro6000.h"
 
 #include <ATen/cuda/CUDAContext.h>
 
@@ -160,13 +160,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul, "Fused GeLU-tanh(gate) * up");
   m.def("fatrelu_and_mul", &fatrelu_and_mul, "Fused FatReLU(gate) * up");
   m.def(
-      "grouped_moe_decode",
+      "grouped_moe_decode_pro6000",
       [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
          const torch::Tensor& router_weight, const torch::Tensor& expert_table,
          int64_t inter, int64_t kcap, torch::Tensor out, bool zero_out) {
-        grouped_moe_decode(hidden, router_mask, router_weight, expert_table,
-                           inter, kcap, out, zero_out,
-                           at::cuda::getCurrentCUDAStream().stream());
+        grouped_moe_decode_pro6000(hidden, router_mask, router_weight,
+                                   expert_table, inter, kcap, out, zero_out,
+                                   at::cuda::getCurrentCUDAStream().stream());
       },
       py::arg("hidden"), py::arg("router_mask"), py::arg("router_weight"),
       py::arg("expert_table"), py::arg("inter"), py::arg("kcap"),

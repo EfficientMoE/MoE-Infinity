@@ -1451,12 +1451,16 @@ class OffloadEngine(object):
                     self.expert_dispatcher
                 )
                 if hasattr(self.expert_dispatcher, "set_grouped_decode"):
-                    # top-k sizes the grouped decode kernel's workspace.
+                    from moe_infinity.runtime.grouped_moe_pro6000 import (
+                        grouped_decode_pro6000_enabled,
+                    )
+
+                    # RTX PRO 6000 only; top-k sizes the kernel's workspace.
                     top_k = getattr(
                         moe_text_config(self.config), "num_experts_per_tok", 0
                     )
                     self.expert_dispatcher.set_grouped_decode(
-                        os.environ.get("MOE_GROUPED_DECODE", "1") != "0",
+                        grouped_decode_pro6000_enabled(),
                         int(top_k or 0),
                     )
 

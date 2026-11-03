@@ -493,9 +493,11 @@ def expert_layer_graph_cases(model_keys: list[str] | None = None) -> list[Case]:
 def _grouped_decode_builder(n: int, M: int, T: int, E: int, H: int, I: int):
     """Grouped decode path (#306): every expert of the layer in 2 launches.
 
+    RTX PRO 6000 only (the cases are skipped on other devices).
+
     n experts with their own weight tensors (as in the expert cache), each
     routed exactly M of the T tokens; calls the shipped
-    moe_infinity._store.grouped_moe_decode with the zero-init folded in.
+    moe_infinity._store.grouped_moe_decode_pro6000 with the zero-init folded in.
     """
 
     def build():
@@ -517,7 +519,7 @@ def _grouped_decode_builder(n: int, M: int, T: int, E: int, H: int, I: int):
         out = torch.empty(T, H, device="cuda")
 
         def run():
-            store.grouped_moe_decode(
+            store.grouped_moe_decode_pro6000(
                 x, mask, weights, table, I, kcap, out, zero_out=True
             )
 
@@ -538,6 +540,12 @@ def _grouped_decode_cases(c: Case, n_exec: int) -> list[Case]:
         return []
     H, I, M, T = c.meta["H"], c.meta["I"], c.meta["M"], c.meta["tokens"]
     mem = n_exec * 3 * H * I * BF16
+    skip = f"needs {mem / 1e9:.0f} GB" if mem > 60e9 else None
+    if skip is None and torch.cuda.is_available():
+        from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
+
+        if not supports(RTX_PRO_6000):
+            skip = "grouped_decode is RTX PRO 6000 only"
     return [
         Case(
             cid=c.cid.replace("|", "|layer|", 1).replace(
@@ -556,7 +564,7 @@ def _grouped_decode_cases(c: Case, n_exec: int) -> list[Case]:
             per_layer=1.0,
             layers=c.layers,
             meta={**c.meta, "n_exec": n_exec, "streams": 1},
-            skip=f"needs {mem / 1e9:.0f} GB" if mem > 60e9 else None,
+            skip=skip,
             iters=5,
         )
     ]

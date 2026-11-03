@@ -3,6 +3,11 @@
 
 // Grouped decode MoE: all resident experts of a layer in two launches.
 //
+// RTX PRO 6000 ONLY (gate RTX_PRO_6000): the launch table below
+// (GMOE_PRO6000_CONFIGS + the heuristic in grouped_moe_decode_pro6000) was
+// tuned on the RTX PRO 6000 Blackwell Max-Q (188 SMs, 128 MiB L2). Other
+// devices keep per-expert execution in ExpertDispatcher.
+//
 // Decode feeds 1-64 tokens to each expert, so every projection is a skinny
 // GEMM that must stream its weights at DRAM speed. The kernels use
 // mma.sync.m16n8k16 (BF16, sm_80+) "swap-AB": 16 weight rows are the MMA A
@@ -27,7 +32,8 @@
 // router_mask[:, e] (T <= 256) and the first CTA of every expert publishes the
 // token list for launch 2. No host sync, no sort / align launch.
 
-#include "kernel/grouped_moe_decode.h"
+#include "kernel/grouped_moe_decode_pro6000.h"
+#include "kernel/hw_profile.h"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -253,11 +259,12 @@ __device__ void build_token_list(const Params& p, int e, int* s_tok, int* s_cnt,
 // Row-split warps walk K together, so the token fragments they share mostly
 // hit L1; K-split warps keep enough CTAs in flight when there are few rows.
 template <int MT, int NT, int WR, int WK, int U>
-__global__ void __launch_bounds__(WR* WK * 32) gate_up_kernel(const Params p) {
+__global__ void __launch_bounds__(WR* WK * 32)
+    gate_up_pro6000_kernel(const Params p) {
   constexpr int NTHREADS = WR * WK * 32;
   constexpr int ROWS = WR * MT * 8;
   extern __shared__ float red[];
-  __shared__ int s_tok[kGroupedMoeMaxTokens];
+  __shared__ int s_tok[kGroupedMoePro6000MaxTokens];
   __shared__ int s_cnt;
   __shared__ int s_wcnt[WR * WK];
 
@@ -359,12 +366,13 @@ __global__ void __launch_bounds__(WR* WK * 32) gate_up_kernel(const Params p) {
 }
 
 template <int MT, int NT, int WR, int WK, int U>
-__global__ void __launch_bounds__(WR* WK * 32) down_kernel(const Params p) {
+__global__ void __launch_bounds__(WR* WK * 32)
+    down_pro6000_kernel(const Params p) {
   constexpr int NTHREADS = WR * WK * 32;
   constexpr int ROWS = WR * MT * 16;
   extern __shared__ float red[];
-  __shared__ int s_tok[kGroupedMoeMaxTokens];
-  __shared__ float s_w[kGroupedMoeMaxTokens];
+  __shared__ int s_tok[kGroupedMoePro6000MaxTokens];
+  __shared__ float s_w[kGroupedMoePro6000MaxTokens];
 
   const int j = blockIdx.y;
   const int tid = threadIdx.x;
@@ -466,8 +474,8 @@ template <int MT, int NT, int WR, int WK, int U, bool DOWN>
 void launch_one(const Params& p, cudaStream_t stream) {
   constexpr int kSmem =
       WK > 1 ? WR * WK * MT * NT * 4 * 32 * int(sizeof(float)) : 0;
-  auto kernel =
-      DOWN ? down_kernel<MT, NT, WR, WK, U> : gate_up_kernel<MT, NT, WR, WK, U>;
+  auto kernel = DOWN ? down_pro6000_kernel<MT, NT, WR, WK, U>
+                     : gate_up_pro6000_kernel<MT, NT, WR, WK, U>;
   if constexpr (kSmem > 48 * 1024) {
     static std::once_flag once;
     std::call_once(once, [&] {
@@ -481,15 +489,15 @@ void launch_one(const Params& p, cudaStream_t stream) {
   kernel<<<grid, WR * WK * 32, kSmem, stream>>>(p);
 }
 
-// Instantiated (MT, WR, WK, U) configurations.
-#define GMOE_CONFIGS(X) \
-  X(1, 1, 8, 2)         \
-  X(1, 1, 8, 4)         \
-  X(1, 1, 8, 8)         \
-  X(1, 2, 4, 2)         \
-  X(1, 2, 4, 4)         \
-  X(1, 2, 4, 8)         \
-  X(1, 8, 1, 2)         \
+// Instantiated (MT, WR, WK, U) configurations, tuned on the RTX PRO 6000.
+#define GMOE_PRO6000_CONFIGS(X) \
+  X(1, 1, 8, 2)                 \
+  X(1, 1, 8, 4)                 \
+  X(1, 1, 8, 8)                 \
+  X(1, 2, 4, 2)                 \
+  X(1, 2, 4, 4)                 \
+  X(1, 2, 4, 8)                 \
+  X(1, 8, 1, 2)                 \
   X(2, 8, 1, 2)
 
 template <int NT, bool DOWN>
@@ -497,9 +505,10 @@ void launch_nt(const LaunchCfg& c, const Params& p, cudaStream_t stream) {
 #define GMOE_CASE(MT_, WR_, WK_, U_)                          \
   if (c.mt == MT_ && c.wr == WR_ && c.wk == WK_ && c.u == U_) \
     return launch_one<MT_, NT, WR_, WK_, U_, DOWN>(p, stream);
-  GMOE_CONFIGS(GMOE_CASE)
+  GMOE_PRO6000_CONFIGS(GMOE_CASE)
 #undef GMOE_CASE
-  TORCH_CHECK(false, "grouped_moe_decode: unsupported launch config mt=", c.mt,
+  TORCH_CHECK(false,
+              "grouped_moe_decode_pro6000: unsupported launch config mt=", c.mt,
               " wr=", c.wr, " wk=", c.wk, " u=", c.u);
 }
 
@@ -527,37 +536,48 @@ bool env_cfg(LaunchCfg& up, LaunchCfg& down) {
 
 }  // namespace
 
-bool grouped_moe_decode_supported(int64_t tokens, int64_t hidden,
-                                  int64_t inter) {
-  return tokens > 0 && tokens <= kGroupedMoeMaxTokens && hidden % 32 == 0 &&
-         inter % 32 == 0 && hidden > 0 && inter > 0;
+bool grouped_moe_decode_pro6000_device_ok(int device) {
+  return moe_infinity::hw::Supports(moe_infinity::hw::Gate::kRtxPro6000,
+                                    device);
 }
 
-void grouped_moe_decode(const torch::Tensor& hidden,
-                        const torch::Tensor& router_mask,
-                        const torch::Tensor& router_weight,
-                        const torch::Tensor& expert_table, int64_t inter,
-                        int64_t kcap, torch::Tensor& out, bool zero_out,
-                        cudaStream_t stream) {
-  TORCH_CHECK(hidden.is_cuda() && hidden.dim() == 2 &&
-                  hidden.scalar_type() == at::kBFloat16 &&
-                  hidden.stride(1) == 1,
-              "grouped_moe_decode: hidden must be a CUDA bf16 [T, H] matrix");
+bool grouped_moe_decode_pro6000_supported(int64_t tokens, int64_t hidden,
+                                          int64_t inter) {
+  return tokens > 0 && tokens <= kGroupedMoePro6000MaxTokens &&
+         hidden % 32 == 0 && inter % 32 == 0 && hidden > 0 && inter > 0;
+}
+
+void grouped_moe_decode_pro6000(const torch::Tensor& hidden,
+                                const torch::Tensor& router_mask,
+                                const torch::Tensor& router_weight,
+                                const torch::Tensor& expert_table,
+                                int64_t inter, int64_t kcap, torch::Tensor& out,
+                                bool zero_out, cudaStream_t stream) {
+  TORCH_CHECK(
+      hidden.is_cuda() && hidden.dim() == 2 &&
+          hidden.scalar_type() == at::kBFloat16 && hidden.stride(1) == 1,
+      "grouped_moe_decode_pro6000: hidden must be a CUDA bf16 [T, H] matrix");
+  TORCH_CHECK(grouped_moe_decode_pro6000_device_ok(hidden.device().index()),
+              "grouped_moe_decode_pro6000: tuned for the RTX PRO 6000 only; "
+              "use per-expert execution on this device "
+              "(MOE_INFINITY_UNVALIDATED_HW=1 to re-tune)");
   const int64_t T = hidden.size(0);
   const int64_t H = hidden.size(1);
-  TORCH_CHECK(grouped_moe_decode_supported(T, H, inter),
-              "grouped_moe_decode: unsupported shape T=", T, " H=", H,
+  TORCH_CHECK(grouped_moe_decode_pro6000_supported(T, H, inter),
+              "grouped_moe_decode_pro6000: unsupported shape T=", T, " H=", H,
               " I=", inter);
-  TORCH_CHECK(hidden.stride(0) % 8 == 0 &&
-                  reinterpret_cast<uintptr_t>(hidden.data_ptr()) % 16 == 0,
-              "grouped_moe_decode: hidden rows must be 16-byte aligned");
-  TORCH_CHECK(router_mask.dim() == 2 && router_mask.size(0) == T &&
-                  (router_mask.scalar_type() == at::kBool ||
-                   router_mask.scalar_type() == at::kByte),
-              "grouped_moe_decode: router_mask must be bool/uint8 [T, E]");
+  TORCH_CHECK(
+      hidden.stride(0) % 8 == 0 &&
+          reinterpret_cast<uintptr_t>(hidden.data_ptr()) % 16 == 0,
+      "grouped_moe_decode_pro6000: hidden rows must be 16-byte aligned");
+  TORCH_CHECK(
+      router_mask.dim() == 2 && router_mask.size(0) == T &&
+          (router_mask.scalar_type() == at::kBool ||
+           router_mask.scalar_type() == at::kByte),
+      "grouped_moe_decode_pro6000: router_mask must be bool/uint8 [T, E]");
   TORCH_CHECK(router_weight.dim() == 2 && router_weight.size(0) == T &&
                   router_weight.size(1) == router_mask.size(1),
-              "grouped_moe_decode: router_weight must be [T, E]");
+              "grouped_moe_decode_pro6000: router_weight must be [T, E]");
   int rw_dtype;
   switch (router_weight.scalar_type()) {
     case at::kFloat:
@@ -570,19 +590,21 @@ void grouped_moe_decode(const torch::Tensor& hidden,
       rw_dtype = 2;
       break;
     default:
-      TORCH_CHECK(false, "grouped_moe_decode: router_weight dtype ",
+      TORCH_CHECK(false, "grouped_moe_decode_pro6000: router_weight dtype ",
                   router_weight.scalar_type(), " not supported");
   }
-  TORCH_CHECK(expert_table.is_cuda() && expert_table.dim() == 2 &&
-                  expert_table.size(1) == 4 &&
-                  expert_table.scalar_type() == at::kLong &&
-                  expert_table.is_contiguous(),
-              "grouped_moe_decode: expert_table must be int64 [n, 4] on CUDA");
+  TORCH_CHECK(
+      expert_table.is_cuda() && expert_table.dim() == 2 &&
+          expert_table.size(1) == 4 &&
+          expert_table.scalar_type() == at::kLong &&
+          expert_table.is_contiguous(),
+      "grouped_moe_decode_pro6000: expert_table must be int64 [n, 4] on CUDA");
   TORCH_CHECK(out.is_cuda() && out.scalar_type() == at::kFloat &&
                   out.dim() == 2 && out.size(0) == T && out.size(1) == H &&
                   out.stride(1) == 1,
-              "grouped_moe_decode: out must be float32 [T, H]");
-  TORCH_CHECK(kcap > 0 && kcap * T < (1 << 30), "grouped_moe_decode: kcap");
+              "grouped_moe_decode_pro6000: out must be float32 [T, H]");
+  TORCH_CHECK(kcap > 0 && kcap * T < (1 << 30),
+              "grouped_moe_decode_pro6000: kcap");
   const int64_t n = expert_table.size(0);
   if (n == 0) {
     if (zero_out) out.zero_();

@@ -357,9 +357,11 @@ class ExpertDispatcher : public base::noncopyable {
   std::map<int, std::int64_t> GetFusedDropStatsByLayer() const;
   std::map<std::string, std::int64_t> GetRoutingStats() const;
   // Grouped decode path (#306): resident experts of a layer run as one group
-  // (two kernel launches) when the batch has <= kGroupedMoeMaxTokens tokens.
-  // MOE_GROUPED_DECODE=0 disables it at construction. top_k bounds the routed
-  // experts per token and sizes the activation workspace (0 = num_experts).
+  // (two kernel launches) when the batch has <= kGroupedMoePro6000MaxTokens
+  // tokens. RTX PRO 6000 only (Gate::kRtxPro6000); other devices keep
+  // per-expert execution. MOE_GROUPED_DECODE=0 disables it at construction.
+  // top_k bounds the routed experts per token and sizes the activation
+  // workspace (0 = num_experts).
   void SetGroupedDecode(bool enabled, int top_k);
   void SetDispatchFaultForTest(const std::string& stage);
   void FailDispatchForTest(std::uint64_t generation,
@@ -542,6 +544,9 @@ class ExpertDispatcher : public base::noncopyable {
   std::mutex grouped_mutex_;
   std::vector<std::vector<ExecArgs>> grouped_pending_;  // per device
   std::atomic<bool> grouped_enabled_{true};
+  // Per device: RTX PRO 6000 gate of the grouped kernels, evaluated once at
+  // construction. Other devices keep per-expert execution.
+  std::vector<bool> grouped_pro6000_ok_;
   std::atomic<int> grouped_top_k_{0};
   std::atomic<std::int64_t> grouped_batches_{0};
   std::atomic<std::int64_t> grouped_experts_{0};
