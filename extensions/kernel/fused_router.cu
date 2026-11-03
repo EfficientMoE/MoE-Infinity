@@ -68,7 +68,10 @@ constexpr int kBT64MinTokens = ROUTER_BT64_MIN;
   #define ROUTER_BE64 64
 #endif
 constexpr int kRows = 8;  // phase-2 rows reduced per smem pass (1 per warp)
-constexpr int kFusedMaxTokens = 1024;
+#ifndef ROUTER_FUSED_MAX_T
+  #define ROUTER_FUSED_MAX_T 1024
+#endif
+constexpr int kFusedMaxTokens = ROUTER_FUSED_MAX_T;
 #ifndef ROUTER_WIDE_MIN_T
   #define ROUTER_WIDE_MIN_T 4096
 #endif
@@ -78,7 +81,10 @@ constexpr int kWideMinTokens = ROUTER_WIDE_MIN_T;
   #define ROUTER_WIDE_BIG_WAVES 4
 #endif
 constexpr int kWideBigWaves = ROUTER_WIDE_BIG_WAVES;
-constexpr int64_t kFusedMaxElems = 196608;  // T * E, see fused_route
+#ifndef ROUTER_FUSED_MAX_ELEMS
+  #define ROUTER_FUSED_MAX_ELEMS 196608
+#endif
+constexpr int64_t kFusedMaxElems = ROUTER_FUSED_MAX_ELEMS;  // T * E
 // One CTA reduces all partials when T * E is this small (decode b1).
 #ifndef ROUTER_SINGLE_ELEMS
   #define ROUTER_SINGLE_ELEMS 512
@@ -1389,14 +1395,17 @@ std::vector<at::Tensor> fused_route(
   //    faster than cuBLASLt + routing);
   //  - 128-token tiles from kWideBigWaves waves of them (200K: 0.80-0.87 of
   //    the tensor-core roof vs 0.61-0.79 for cuBLASLt + routing);
-  //  - cuBLASLt + routing in between (a 2-3 wave tail costs the fused
-  //    kernel as much as its fusion saves).
+  //  - 32-token tiles in between (1-4 waves of 64-row tiles: the finer
+  //    tiles halve the last-wave loss; 12K / 50K 3-10 % faster than
+  //    cuBLASLt + routing).
   const int sms = at::cuda::getDeviceProperties(device)->multiProcessorCount;
   const bool wide_one_wave = (T + 63) / 64 <= sms;
   const bool wide_big = (T + 127) / 128 >= kWideBigWaves * sms;
-  if (use_gemm && T >= kWideMinTokens && (wide_one_wave || wide_big) &&
-      try_launch_wide(x, w, static_cast<int>(H), p, sc, wide_big, stream,
-                      device)) {
+  const bool wide32 = !wide_one_wave && !wide_big;
+  if (use_gemm && T >= kWideMinTokens &&
+      (wide_one_wave || wide_big || wide32) &&
+      try_launch_wide(x, w, static_cast<int>(H), p, sc,
+                      wide_big ? 128 : (wide32 ? 32 : 64), stream, device)) {
     // fused CUTLASS GEMM + top-k (one launch), E in (128, 512]
   } else if (use_gemm) {
     // Tensor-core logits (cuBLASLt, no split-K so the layer stays at two

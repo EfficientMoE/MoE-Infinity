@@ -392,10 +392,11 @@ def test_prefill_kernel_default_path_flags(E, k):
     "scoring,k", [("softmax", 8), ("sigmoid", 8), ("sqrtsoftplus", 6)]
 )
 @pytest.mark.parametrize("tie", [True, False])
-@pytest.mark.parametrize("T,H", [(4500, 2048), (100_000, 512)])
+@pytest.mark.parametrize("T,H", [(4500, 2048), (15_000, 1024), (100_000, 512)])
 def test_wide_fused_gemm_topk(scoring, k, tie, T, H):
     """E = 256 prefill takes the fused CUTLASS GEMM + top-k kernel: 64-token
-    tiles in one wave (4500), 128-token tiles from 4 waves (100K); selection
+    tiles in one wave (4500), 32-token tiles for 1-4 waves (15K), 128-token
+    tiles from 4 waves (100K); selection
     matches the torch routers."""
     from moe_infinity.kernel.router import fused_route
 

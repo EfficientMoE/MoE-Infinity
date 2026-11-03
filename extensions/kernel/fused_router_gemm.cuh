@@ -17,13 +17,14 @@
 namespace moe_router {
 
 // Tile tables (RTX PRO 6000): 64 x 256 x 4 stages while the tiles fit one
-// wave; 128 x 256 x 3 stages (half the gate-weight re-reads per token) for
-// many waves.
+// wave; 32 x 256 x 5 stages for 1-4 waves (smaller last-wave loss);
+// 128 x 256 x 3 stages (half the gate-weight re-reads per token) for many
+// waves.
 template <int BM, int BN>
 struct WideCfg {
   static constexpr int kBM = BM;
   static constexpr int kBK = 32;
-  static constexpr int kStages = BM >= 128 ? 3 : 4;
+  static constexpr int kStages = BM >= 128 ? 3 : (BM <= 32 ? 5 : 4);
   using TB = cutlass::gemm::GemmShape<kBM, BN, kBK>;
   using Warp = cutlass::gemm::GemmShape<kBM / 2, 64, kBK>;
   using Inst = cutlass::gemm::GemmShape<16, 8, 16>;
@@ -36,8 +37,9 @@ struct WideCfg {
   static constexpr int kWarpsN = BN / Warp::kN;
   static constexpr int kThreads = 32 * kWarpsM * kWarpsN;
   static constexpr int kRowsPerRound = kBM / kWarpsM;  // rows per staging
-  static constexpr int kRowsPerPass = kThreads / 8;    // epilogue rows
-  static constexpr int kLanesPerRow = 8;               // epilogue
+  // epilogue: 8 lanes per row (16 for 32-row tiles, so all 256 threads work)
+  static constexpr int kLanesPerRow = kThreads / (kBM / kWarpsM) > 8 ? 16 : 8;
+  static constexpr int kRowsPerPass = kThreads / kLanesPerRow;  // epilogue rows
   // One warp row of the fp32 tile is staged at a time.
   static constexpr int kTileBytes = kRowsPerRound * BN * 4;
   static constexpr int kSmem = sizeof(typename Mma::SharedStorage) > kTileBytes
@@ -175,8 +177,8 @@ __global__ void __launch_bounds__(WideCfg<BM, BN>::kThreads, 1)
               for (int i = 0; i < kPer; ++i)
                 if (i == slot) selk[i] = 0u;
             }
-            if ((k & 7) == j) {
-              if (k < 8)
+            if ((k & (C::kLanesPerRow - 1)) == j) {
+              if (k < C::kLanesPerRow)
                 mine[0] = idx;
               else
                 mine[1] = idx;
@@ -190,7 +192,7 @@ __global__ void __launch_bounds__(WideCfg<BM, BN>::kThreads, 1)
           float raw[2] = {0.f, 0.f};
 #pragma unroll
           for (int q = 0; q < 2; ++q) {
-            const int k = j + 8 * q;
+            const int k = j + C::kLanesPerRow * q;
             if (k < K) {
               float v = cs[row * BN + mine[q]];
               if (p.round_logits) v = __bfloat162float(__float2bfloat16_rn(v));
@@ -221,7 +223,7 @@ __global__ void __launch_bounds__(WideCfg<BM, BN>::kThreads, 1)
           if (t < T) {
 #pragma unroll
             for (int q = 0; q < 2; ++q) {
-              const int k = j + 8 * q;
+              const int k = j + C::kLanesPerRow * q;
               if (k < K) {
                 const float r = raw[q] * inv_all;
                 const float v = (p.renorm ? r / den : r) * p.scale;
