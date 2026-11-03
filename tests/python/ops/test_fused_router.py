@@ -430,3 +430,22 @@ def test_wide_fused_gemm_topk(scoring, k, tie):
     _check_dense(
         out.topk_ids, out.topk_weights, out.router_mask, out.routing_weights, E
     )
+
+
+@pytest.mark.skipif(
+    not _has_cuda_ext(), reason="moe_infinity._router not built"
+)
+def test_pro6000_gate_selects_tuned_kernels():
+    """On the RTX PRO 6000 the tuned kernels run (the parity tests above are
+    not silently exercising the torch fallback); elsewhere they must not."""
+    from moe_infinity.kernel import router as R
+    from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
+
+    x = torch.randn(4, 256, device="cuda").to(torch.bfloat16)
+    w = torch.randn(64, 256, device="cuda").to(torch.bfloat16)
+    res = R._CUDA_EXT.fused_route(
+        x, w, 4, 0, None, 1, 1, True, 1.0, 0.0, True, torch.bfloat16,
+        torch.bfloat16, False, True, False, True, 0,
+    )  # fmt: skip
+    assert bool(res) == supports(RTX_PRO_6000, x.device)
+    assert R.router_supported(x.device) == supports(RTX_PRO_6000, x.device)

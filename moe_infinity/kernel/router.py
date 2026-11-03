@@ -1,3 +1,11 @@
+# Fused MoE routing kernels (#315).
+#
+# Hardware: the routing kernels below (Triton names carry ``pro6000``) and the
+# moe_infinity._router extension are gated RTX_PRO_6000: their tile / stage
+# tables, split-K counts and dispatch thresholds were tuned on the RTX PRO 6000
+# Blackwell. Other devices run ``_route_reference`` (the previous torch
+# routing); see ``_pro6000_routing``.
+
 from typing import NamedTuple
 
 import torch
@@ -288,7 +296,7 @@ def _route_epilogue(
 
 
 @triton.jit
-def _fused_route_kernel(
+def _fused_route_pro6000_kernel(
     x_ptr,
     w_ptr,
     bias_ptr,
@@ -444,7 +452,7 @@ def _sm_count(device) -> int:
 
 # Token count above which logits come from one cuBLAS tensor-core GEMM and a
 # second launch fuses scoring/top-k (the fused-dot kernel is used below it).
-PREFILL_GEMM_MIN_TOKENS = 4096
+PREFILL_GEMM_MIN_TOKENS_PRO6000 = 4096
 
 
 # --------------------------------------------------------------------------
@@ -460,16 +468,16 @@ _I64_MIN = -9223372036854775808
 # launch instead of two) where it measured faster on sm_120: few experts
 # (E <= 128: the op streams X) from 2K tokens. For E >= 256 the [BM, E]
 # full-row tile re-reads W per tile and the cuBLASLt path stays faster.
-PREFILL_FUSED_MIN_TOKENS = 2048
-PREFILL_FUSED_MAX_EXPERTS = 128
+PREFILL_FUSED_MIN_TOKENS_PRO6000 = 2048
+PREFILL_FUSED_MAX_EXPERTS_PRO6000 = 128
 
 
 def _use_prefill_kernel(x, weight, gemm_min_tokens) -> bool:
     return (
         not gemm_min_tokens
         and x.is_cuda
-        and x.shape[0] >= PREFILL_FUSED_MIN_TOKENS
-        and weight.shape[0] <= PREFILL_FUSED_MAX_EXPERTS
+        and x.shape[0] >= PREFILL_FUSED_MIN_TOKENS_PRO6000
+        and weight.shape[0] <= PREFILL_FUSED_MAX_EXPERTS_PRO6000
         and weight.dtype == x.dtype
         and x.dtype in _LOW_PRECISION
     )
@@ -488,7 +496,7 @@ def _sel_keys(v, offs_e, valid, BLOCK_E: tl.constexpr):
 
 # seq / T change every call: specialising on them would recompile.
 @triton.jit(do_not_specialize=["seq", "T"])
-def _gemm_route_kernel(
+def _gemm_route_pro6000_kernel(
     x_ptr, w_ptr, bias_ptr, mask_ptr, dw_ptr, ids_ptr, tw_ptr, logits_ptr,
     flags_ptr, done_ptr, state_ptr, seq,
     T, stride_xt, stride_we, scale, eps,
@@ -668,7 +676,7 @@ def _flag_state(dev):
     return st
 
 
-_GEMM_CFG: dict = {
+_GEMM_CFG_PRO6000: dict = {
     16: (128, 64, 8, 2),
     32: (32, 128, 4, 2),
     128: (64, 64, 8, 4),
@@ -681,7 +689,7 @@ def _gemm_config(T, H, E, block_e):
     """(BM, BK, num_warps, num_stages) for the fused prefill kernel."""
     if block_e == 128 and H >= 6144:
         return (64, 64, 4, 3)  # MiniMax-M3 (H = 6144) sweep
-    cfg = _GEMM_CFG.get(block_e)
+    cfg = _GEMM_CFG_PRO6000.get(block_e)
     if cfg is not None:
         return cfg
     bm = 128 if block_e <= 128 else (64 if block_e <= 256 else 32)
@@ -715,7 +723,7 @@ def _route_prefill(
     if bias is not None and (bias.dtype != torch.float32 or not bias.is_cuda):
         bias = bias.to(device=dev, dtype=torch.float32)
     dummy = x
-    _gemm_route_kernel[(triton.cdiv(T, BM),)](
+    _gemm_route_pro6000_kernel[(triton.cdiv(T, BM),)](
         x, w, bias if bias is not None else dummy,
         mask if dense else dummy, dw if dense else dummy,
         ids if compact else dummy, tw if compact else dummy,
@@ -769,7 +777,7 @@ _LOW_PRECISION = (torch.bfloat16, torch.float16)
 _PLAN_OVERRIDE: dict = {}
 
 
-def _plan_launch(T: int, H: int, E: int, block_e: int, device):
+def _plan_launch_pro6000(T: int, H: int, E: int, block_e: int, device):
     """Pick (BLOCK_T, BLOCK_H, SPLIT_K, num_warps, num_stages)."""
     if _PLAN_OVERRIDE:
         return _PLAN_OVERRIDE["plan"]
@@ -787,6 +795,93 @@ def _plan_launch(T: int, H: int, E: int, block_e: int, device):
     split = max(1, min(split, (256 * 1024) // (4 * rows * block_e)))
     num_warps = 4 if block_t <= 16 else 8
     return block_t, block_h, split, num_warps, num_stages
+
+
+# --------------------------------------------------------------------------
+# Hardware gate. Every routing kernel in this module and in
+# moe_infinity._router (split-K decode, cuBLASLt + routing, Triton fused
+# prefill, CUTLASS GEMM + top-k) was tuned on the RTX PRO 6000 Blackwell
+# (188 SMs, 128 MiB L2, 99 KiB shared memory per block): split counts from the
+# SM count, tile / stage tables, one-wave thresholds. On any other device the
+# routing falls back to the previous torch implementation (_route_reference:
+# F.linear + softmax / sigmoid / sqrt-softplus + top-k, the models' own code).
+# The sync-free expert dispatch around it is generic and stays on.
+# --------------------------------------------------------------------------
+
+_PRO6000_ROUTING: dict = {}
+
+
+def _pro6000_routing(device) -> bool:
+    """True if the RTX PRO 6000-tuned routing kernels may run on ``device``
+    (evaluated once per device)."""
+    if device is None or torch.device(device).type != "cuda":
+        return False
+    idx = torch.device(device).index
+    if idx is None:
+        idx = torch.cuda.current_device()
+    ok = _PRO6000_ROUTING.get(idx)
+    if ok is None:
+        from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
+
+        ok = _PRO6000_ROUTING[idx] = supports(RTX_PRO_6000, idx)
+    return ok
+
+
+def router_supported(device) -> bool:
+    """Public form of the gate: callers with their own torch routing (the
+    moe-store wrappers) keep it when this is ``False``."""
+    return _pro6000_routing(device)
+
+
+def _route_reference(
+    x, w, top_k, sc, bias, n_group, topk_group, renormalize, scaling, eps,
+    round_logits, weights_dtype, logits_dtype, return_logits, dense,
+):  # fmt: skip
+    """Previous (torch) routing: what the models ran before the fused router."""
+    T, E = x.shape[0], w.shape[0]
+    if not 1 <= top_k <= E:
+        raise ValueError("top_k must be in [1, E]")
+    if round_logits or (sc == SCORING_SOFTMAX and x.dtype in _LOW_PRECISION):
+        logits = torch.nn.functional.linear(x, w.to(x.dtype))
+        lg = logits.float()
+    else:
+        lg = torch.nn.functional.linear(x.float(), w.float())
+        logits = lg
+    if sc == SCORING_SOFTMAX:
+        scores = torch.softmax(lg, dim=-1)
+        sel = scores
+    else:
+        if sc == SCORING_SIGMOID:
+            scores = torch.sigmoid(lg)
+        else:
+            scores = torch.nn.functional.softplus(lg).sqrt()
+        sel = (
+            scores + bias.to(lg.device, torch.float32)
+            if bias is not None
+            else scores
+        )
+    if n_group > 1:
+        if E % n_group or not 1 <= topk_group <= n_group:
+            raise ValueError("invalid n_group / topk_group")
+        gs = sel.view(T, n_group, E // n_group).topk(2, dim=-1)[0].sum(-1)
+        gi = torch.topk(gs, k=topk_group, dim=-1, sorted=False)[1]
+        gm = torch.zeros_like(gs).scatter_(1, gi, 1.0)
+        keep = gm.unsqueeze(-1).expand(T, n_group, E // n_group).reshape(T, E)
+        sel = sel.masked_fill(keep == 0, float("-inf"))
+    ids = torch.topk(sel, top_k, dim=-1)[1]
+    tw = scores.gather(1, ids)
+    if renormalize:
+        tw = tw / (tw.sum(dim=-1, keepdim=True) + eps)
+    tw = (tw * scaling).float()
+    ids = ids.to(torch.int32)
+    mask = dw = None
+    if dense:
+        mask = torch.zeros((T, E), dtype=torch.bool, device=x.device)
+        mask.scatter_(1, ids.long(), True)
+        dw = torch.zeros((T, E), dtype=weights_dtype, device=x.device)
+        dw.scatter_(1, ids.long(), tw.to(weights_dtype))
+    out_logits = logits.to(logits_dtype) if return_logits else None
+    return RouteOutput(ids, tw, mask, dw, out_logits, None)
 
 
 def fused_route(
@@ -833,8 +928,10 @@ def fused_route(
         dense: also write the dense ``[T, E]`` mask / weights.
         compact: also return ``topk_ids`` / ``topk_weights`` (CUDA backend may
             skip them when ``False``: one allocation less per call).
-        backend: ``"cuda"`` (``moe_infinity._router``), ``"triton"`` or
-            ``"auto"`` (CUDA when built and applicable, else Triton).
+        backend: ``"cuda"`` (``moe_infinity._router``), ``"triton"``,
+            ``"reference"`` (torch) or ``"auto"`` (CUDA when built and
+            applicable, else Triton). Off the RTX PRO 6000 every backend
+            runs the torch reference (see ``_pro6000_routing``).
         active_flags: also produce the ``[E]`` active-expert flags directly
             in pinned host memory (CUDA backend; written by the routing kernel,
             valid once the stream reaches this point). They are remembered for
@@ -864,6 +961,12 @@ def fused_route(
         weights_dtype = xdt if sc == SCORING_SOFTMAX else torch.float32
     logits_dtype = xdt if softmax_lp else torch.float32
 
+    if backend == "reference" or not (x.is_cuda and _pro6000_routing(x.device)):
+        return _route_reference(
+            x, weight, top_k, sc, bias, n_group, topk_group, renormalize,
+            scaling, eps, round_logits, weights_dtype, logits_dtype,
+            return_logits, dense,
+        )  # fmt: skip
     if backend == "prefill" or (
         backend == "auto" and _use_prefill_kernel(x, weight, gemm_min_tokens)
     ):
@@ -938,7 +1041,12 @@ def make_router(
         else torch.float32
     )
     gmt = CUDA_GEMM_MIN_TOKENS if gemm_min_tokens is None else gemm_min_tokens
-    if _CUDA_EXT is not None and weight.is_cuda and wdt in _LOW_PRECISION:
+    if (
+        _CUDA_EXT is not None
+        and weight.is_cuda
+        and wdt in _LOW_PRECISION
+        and _pro6000_routing(weight.device)
+    ):
         native = _CUDA_EXT.Router(
             weight, top_k, sc, bias, n_group, topk_group, renormalize,
             scaling, eps, round_logits, weights_dtype, logits_dtype,
@@ -1034,7 +1142,7 @@ def _fused_route_triton(
     both_low = low_precision and w.dtype == x.dtype
     precision = "ieee" if both_low else "tf32x3"
     if not gemm_min_tokens:  # None / 0: default
-        gemm_min_tokens = PREFILL_GEMM_MIN_TOKENS
+        gemm_min_tokens = PREFILL_GEMM_MIN_TOKENS_PRO6000
     common = dict(
         H=H,
         E=E,
@@ -1058,14 +1166,14 @@ def _fused_route_triton(
         else:
             logits = torch.mm(x, w.t())
         block_t = max(1, min(64, 8192 // block_e))
-        _fused_route_kernel[(triton.cdiv(T, block_t), 1)](
+        _fused_route_pro6000_kernel[(triton.cdiv(T, block_t), 1)](
             x, w, bias_arg, logits, tw, tw, ids, tw, mask, dw, logits_out,
             T, x.stride(0), w.stride(0), float(scaling), float(eps),
             BLOCK_T=block_t, BLOCK_H=16, SPLIT_K=1, H_PER_SPLIT=16,
             LOGITS_IN=True, PRECISION=precision, num_warps=4, **common,
         )  # fmt: skip
     else:
-        block_t, block_h, split, num_warps, num_stages = _plan_launch(
+        block_t, block_h, split, num_warps, num_stages = _plan_launch_pro6000(
             T, H, E, block_e, device
         )
         h_per_split = triton.cdiv(triton.cdiv(H, split), block_h) * block_h
@@ -1075,7 +1183,7 @@ def _fused_route_triton(
             partial, counter = _scratch(device).get(split * T * block_e, n_t)
         else:
             partial, counter = tw, ids
-        _fused_route_kernel[(n_t, split)](
+        _fused_route_pro6000_kernel[(n_t, split)](
             x, w, bias_arg, tw, partial, counter, ids, tw, mask, dw,
             logits_out, T, x.stride(0), w.stride(0), float(scaling),
             float(eps), BLOCK_T=block_t, BLOCK_H=block_h, SPLIT_K=split,

@@ -15,6 +15,12 @@
 // Selection math mirrors the torch routers (expf / log1pf / sqrtf / IEEE
 // division, lowest index wins ties), so expert selection is identical
 // whenever the logits are.
+//
+// Hardware: RTX_PRO_6000 gate (moe_infinity::hw, kernel/hw_profile.h). Split
+// counts, tile sizes, the 99 KiB shared-memory budgets and the one-wave
+// thresholds were tuned on the RTX PRO 6000 Blackwell (188 SMs, 128 MiB L2).
+// fused_route() returns {} on any other device and the Python side runs the
+// previous torch routing (moe_infinity/kernel/router.py, _route_reference).
 
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CachingHostAllocator.h>
@@ -24,6 +30,8 @@
 #include <cuda_fp16.h>
 #include <mma.h>
 #include <torch/extension.h>
+
+#include "kernel/hw_profile.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -602,7 +610,7 @@ __device__ void reduce_and_route(const DecodeArgs& a, const EpilogueParams& p,
 // barrier, phase 2 spread over all CTAs.
 template <typename Tin, int BT, int VPL, int SC, bool kSingleTile>
 __global__ void __launch_bounds__(kThreads)
-    fused_route_kernel(DecodeArgs a, EpilogueParams p) {
+    fused_route_pro6000_kernel(DecodeArgs a, EpilogueParams p) {
   extern __shared__ __align__(128) unsigned char smem[];
   // Warm L2 with what phase 2 touches (counter / barrier words, bias) while
   // phase 1 waits on the gate weight: after an L2 flush each of these would
@@ -646,7 +654,8 @@ __global__ void __launch_bounds__(kThreads)
 // Large-T routing over precomputed logits: one warp per token.
 template <typename Tl, int VPL, int SC>
 __global__ void __launch_bounds__(256)
-    route_logits_kernel(const Tl* __restrict__ logits, EpilogueParams p) {
+    route_logits_pro6000_kernel(const Tl* __restrict__ logits,
+                                EpilogueParams p) {
   extern __shared__ __align__(16) unsigned char smem[];
   float* st = reinterpret_cast<float*>(smem);
   uint32_t* kt = reinterpret_cast<uint32_t*>(st + kWarps * p.E);
@@ -901,17 +910,18 @@ void launch_logits_route(const at::Tensor& logits, const EpilogueParams& p,
       static_cast<size_t>(warps) * p.E * (2 * sizeof(float) + 1);
   switch (logits.scalar_type()) {
     case at::kFloat:
-      route_logits_kernel<float, VPL, SC>
+      route_logits_pro6000_kernel<float, VPL, SC>
           <<<grid, warps * 32, smem, stream>>>(logits.data_ptr<float>(), p);
       break;
     case at::kBFloat16:
-      route_logits_kernel<__nv_bfloat16, VPL, SC>
+      route_logits_pro6000_kernel<__nv_bfloat16, VPL, SC>
           <<<grid, warps * 32, smem, stream>>>(
               reinterpret_cast<const __nv_bfloat16*>(logits.data_ptr()), p);
       break;
     case at::kHalf:
-      route_logits_kernel<__half, VPL, SC><<<grid, warps * 32, smem, stream>>>(
-          reinterpret_cast<const __half*>(logits.data_ptr()), p);
+      route_logits_pro6000_kernel<__half, VPL, SC>
+          <<<grid, warps * 32, smem, stream>>>(
+              reinterpret_cast<const __half*>(logits.data_ptr()), p);
       break;
     default:
       TORCH_CHECK(false, "fused_route: unsupported logits dtype");
@@ -921,7 +931,7 @@ void launch_logits_route(const at::Tensor& logits, const EpilogueParams& p,
 template <typename Tin, int BT, int VPL, int SC, bool kSingleTile>
 void launch_fused(const at::Tensor& x, const at::Tensor& w, int H,
                   EpilogueParams p, cudaStream_t stream, int device) {
-  auto kernel = fused_route_kernel<Tin, BT, VPL, SC, kSingleTile>;
+  auto kernel = fused_route_pro6000_kernel<Tin, BT, VPL, SC, kSingleTile>;
   constexpr int smem = decode_smem_bytes<Tin, BT>();
   static int max_ctas[16] = {0};  // co-resident CTAs, per device
   int& cap = max_ctas[device & 15];
@@ -1078,8 +1088,10 @@ std::vector<at::Tensor> fused_route(
       x.stride(0) % 8 == 0 && w.stride(0) % 8 == 0 &&
       reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0 &&
       reinterpret_cast<uintptr_t>(w.data_ptr()) % 16 == 0;
-  if (!supported) return {};
   const int device = x.get_device();
+  if (!supported ||
+      !moe_infinity::hw::Supports(moe_infinity::hw::Gate::kRtxPro6000, device))
+    return {};
   c10::cuda::OptionalCUDAGuard guard;
   if (c10::cuda::current_device() != device) guard.set_index(device);
   const auto cstream = at::cuda::getCurrentCUDAStream(device);

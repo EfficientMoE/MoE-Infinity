@@ -5,6 +5,11 @@
 // leave the SM: X and W are read once per tile, only the routing outputs are
 // written (#315).
 //
+// Hardware: RTX_PRO_6000 gate. The 64 x 256 tile, 4 stages, the 99 KiB
+// shared-memory budget and the "tiles fit one wave of 188 SMs" dispatch rule
+// were tuned on the RTX PRO 6000 Blackwell; fused_route() checks the gate, so
+// other devices never reach this kernel (they run the torch routing).
+//
 // Included by fused_router.cu (needs its EpilogueParams / helpers).
 
 #include "cutlass/gemm/threadblock/default_mma.h"
@@ -53,9 +58,10 @@ __device__ __forceinline__ float wide_score(float v) {
 
 template <int BN, int SC, int KMAX>
 __global__ void __launch_bounds__(WideCfg<BN>::kThreads, 1)
-    wide_route_kernel(const cutlass::bfloat16_t* __restrict__ x, int64_t ldx,
-                      const cutlass::bfloat16_t* __restrict__ w, int64_t ldw,
-                      int H, EpilogueParams p) {
+    wide_route_pro6000_kernel(const cutlass::bfloat16_t* __restrict__ x,
+                              int64_t ldx,
+                              const cutlass::bfloat16_t* __restrict__ w,
+                              int64_t ldw, int H, EpilogueParams p) {
   using C = WideCfg<BN>;
   using Mma = typename C::Mma;
   extern __shared__ __align__(128) unsigned char smem[];
@@ -249,7 +255,7 @@ template <int BN, int SC, int KMAX>
 void launch_wide(const at::Tensor& x, const at::Tensor& w, int H,
                  const EpilogueParams& p, cudaStream_t stream, int device) {
   using C = WideCfg<BN>;
-  auto kernel = wide_route_kernel<BN, SC, KMAX>;
+  auto kernel = wide_route_pro6000_kernel<BN, SC, KMAX>;
   static bool attr[16] = {false};
   if (!attr[device & 15]) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(
