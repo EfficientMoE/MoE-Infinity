@@ -1,5 +1,14 @@
 """Split-KV (flash-decoding) paged attention for the decode phase.
 
+Hardware: the split-KV kernels, their launch table and split counts were tuned
+on the RTX PRO 6000 Blackwell (sm_120, 188 SMs, 128 MiB L2) and run only where
+``hw_profile.supports(RTX_PRO_6000)`` holds (``use_pro6000_decode_attention``).
+They use no sm_120-only instructions. On every other device the previous
+implementations run: ``fused_decode_attention`` uses the previous one-program-
+per-head Triton kernel (with the #300 64-bit offset fix and without the
+``seq_lens.max().item()`` sync), and ``paged_attention_fwd`` uses
+``paged_attention_v1`` / ``paged_attention_int8_v1`` / the SDPA fallback.
+
 Each sequence contributes exactly one new query token per step. One program
 handles one (KV split, KV head, sequence) triple: it loads every query head of
 the GQA group at once, so each KV head is read from DRAM once per step for the
@@ -36,9 +45,28 @@ import triton
 import triton.language as tl
 from triton.language.extra.cuda import gdc_launch_dependents, gdc_wait
 
+from moe_infinity.utils import hw_profile
+
 _LOG2E = 1.4426950408889634
 _MAX_SPLITS = 256
 _SUPPORTED_HEAD_DIMS = (64, 80, 96, 112, 128, 256)
+_PREVIOUS_HEAD_DIMS = (64, 128)
+
+_PRO6000_GATE: dict[int, bool] = {}
+
+
+def use_pro6000_decode_attention(device: torch.device | int | None) -> bool:
+    """Dispatch flag: the split-KV kernels run only on the RTX PRO 6000.
+
+    Evaluated once per device index and cached."""
+    if isinstance(device, torch.device) and device.type != "cuda":
+        return False
+    index = hw_profile._index(device)
+    flag = _PRO6000_GATE.get(index)
+    if flag is None:
+        flag = hw_profile.supports(hw_profile.RTX_PRO_6000, index)
+        _PRO6000_GATE[index] = flag
+    return flag
 
 
 @triton.jit
@@ -120,7 +148,7 @@ def _load_page_scales(
 
 
 @triton.jit
-def _split_kv_decode_kernel(
+def _split_kv_decode_pro6000_kernel(
     q_ptr,
     k_ptr,
     v_ptr,
@@ -355,7 +383,7 @@ def _split_kv_decode_kernel(
 
 
 @triton.jit
-def _merge_splits_kernel(
+def _merge_splits_pro6000_kernel(
     part_o_ptr,
     part_lse_ptr,
     out_ptr,
@@ -418,6 +446,7 @@ def _sm_count(device: torch.device) -> int:
     return count
 
 
+# RTX PRO 6000 only (see the module docstring for other devices).
 # Per (padded head_dim, int8 KV): (tokens per tile, num_warps, resident
 # programs per SM the split count aims for, num_stages). Tuned on sm_120
 # (RTX PRO 6000, 188 SMs) against the size-matched read ceiling: bf16 KV uses
@@ -425,7 +454,7 @@ def _sm_count(device: torch.device) -> int:
 # D = 128, 2 for D = 256); D = 64 moves few bytes per page and uses 64-token
 # tiles; int8 KV moves half the bytes per token and uses 32-token tiles.
 # Software pipelining (num_stages > 1) was slower in every configuration.
-_TILE_CONFIG = {
+_PRO6000_TILE_CONFIG = {
     (64, False): (64, 4, 2, 1),
     (128, False): (16, 2, 3, 1),
     (256, False): (16, 2, 2, 1),
@@ -470,7 +499,7 @@ def _nhd_layout(cache: torch.Tensor) -> tuple[int, int, int, int, int, int]:
     return s[2], s[1], s[3], 0, 1, cache.shape[1]
 
 
-def split_kv_decode_attention(
+def split_kv_decode_attention_pro6000(
     query: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
@@ -549,7 +578,7 @@ def split_kv_decode_attention(
 
     d_pad = triton.next_power_of_2(head_dim)
     g_pad = max(16, triton.next_power_of_2(group))
-    tile_tokens, num_warps, ctas_per_sm, num_stages = _TILE_CONFIG[
+    tile_tokens, num_warps, ctas_per_sm, num_stages = _PRO6000_TILE_CONFIG[
         (d_pad, is_int8)
     ]
     pages = max(1, tile_tokens // page)
@@ -599,7 +628,7 @@ def split_kv_decode_attention(
         ks = vs = key_cache
         ks_page = vs_page = ks_sh = ks_st = vs_sh = vs_st = 0
 
-    _split_kv_decode_kernel[(num_kv_heads, splits, batch)](
+    _split_kv_decode_pro6000_kernel[(num_kv_heads, splits, batch)](
         query,
         key_cache,
         value_cache,
@@ -654,7 +683,7 @@ def split_kv_decode_attention(
     if not direct:
         d_block = min(d_pad, 64)
         s_chunk = min(triton.next_power_of_2(splits), 4096 // d_block)
-        _merge_splits_kernel[(num_heads, batch, d_pad // d_block)](
+        _merge_splits_pro6000_kernel[(num_heads, batch, d_pad // d_block)](
             part_o,
             part_lse,
             out,
@@ -742,10 +771,10 @@ def fused_decode_attention(
         raise ValueError("seq_lens batch dimension must match query")
     if num_heads % num_kv_heads != 0:
         raise ValueError("num_heads must be divisible by num_kv_heads")
-    if head_dim not in _SUPPORTED_HEAD_DIMS:
-        raise ValueError(
-            f"head_dim must be one of {_SUPPORTED_HEAD_DIMS}, got {head_dim}"
-        )
+    pro6000 = use_pro6000_decode_attention(query.device)
+    head_dims = _SUPPORTED_HEAD_DIMS if pro6000 else _PREVIOUS_HEAD_DIMS
+    if head_dim not in head_dims:
+        raise ValueError(f"head_dim must be one of {head_dims}, got {head_dim}")
     if num_blocks <= 0:
         raise ValueError("key_cache must contain at least one block")
     if block_tables.shape[1] <= 0:
@@ -753,7 +782,11 @@ def fused_decode_attention(
     if key_cache.stride(-1) != 1 or value_cache.stride(-1) != 1:
         raise ValueError("KV cache head_dim must be the contiguous dimension")
 
-    return split_kv_decode_attention(
+    if not pro6000:
+        return _fused_decode_attention_previous(
+            query, key_cache, value_cache, block_tables, seq_lens, scale
+        )
+    return split_kv_decode_attention_pro6000(
         query[:, 0],
         key_cache,
         value_cache,
@@ -767,11 +800,208 @@ def fused_decode_attention(
 
 
 def supports_head_dim(head_dim: int) -> bool:
+    """Head dims of the RTX PRO 6000 split-KV kernel."""
     return head_dim in _SUPPORTED_HEAD_DIMS
+
+
+# ---------------------------------------------------------------------------
+# Previous implementation, used on every device except the RTX PRO 6000:
+# one program per (sequence, query head), no split-KV. Kept as it was before
+# #300 except for the correctness fix (64-bit page offsets) and the removed
+# seq_lens.max().item() host sync.
+# ---------------------------------------------------------------------------
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_KV": 32}, num_stages=2, num_warps=4),
+        triton.Config({"BLOCK_KV": 64}, num_stages=2, num_warps=4),
+        triton.Config({"BLOCK_KV": 128}, num_stages=2, num_warps=8),
+    ],
+    key=["head_dim", "block_size", "max_blocks_per_seq"],
+)
+@triton.jit
+def _fused_decode_attention_kernel(
+    query_ptr,  # [batch, 1, num_heads, head_dim]
+    key_ptr,  # [num_blocks, block_size, num_kv_heads, head_dim]
+    value_ptr,  # [num_blocks, block_size, num_kv_heads, head_dim]
+    block_tables_ptr,  # [batch, max_blocks_per_seq]
+    seq_lens_ptr,  # [batch]
+    out_ptr,  # [batch, num_heads, head_dim]
+    scale,
+    head_dim,
+    block_size,
+    max_blocks_per_seq,
+    q_stride_b,
+    q_stride_t,
+    q_stride_h,
+    q_stride_d,
+    k_stride_block,
+    k_stride_token,
+    k_stride_head,
+    k_stride_d,
+    v_stride_block,
+    v_stride_token,
+    v_stride_head,
+    v_stride_d,
+    bt_stride_b,
+    bt_stride_block,
+    out_stride_b,
+    out_stride_h,
+    out_stride_d,
+    QUERY_GROUP_SIZE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+
+    offs_d = tl.arange(0, HEAD_DIM)
+    out_ptrs = (
+        out_ptr
+        + batch_idx * out_stride_b
+        + head_idx * out_stride_h
+        + offs_d * out_stride_d
+    )
+
+    seq_len = tl.load(seq_lens_ptr + batch_idx).to(tl.int32)
+    if seq_len <= 0:
+        tl.store(
+            out_ptrs,
+            tl.zeros((HEAD_DIM,), dtype=tl.bfloat16),
+            mask=offs_d < head_dim,
+        )
+        return
+
+    kv_head_idx = head_idx // QUERY_GROUP_SIZE
+    q_ptrs = (
+        query_ptr
+        + batch_idx * q_stride_b
+        + 0 * q_stride_t
+        + head_idx * q_stride_h
+        + offs_d * q_stride_d
+    )
+    q = tl.load(q_ptrs, mask=offs_d < head_dim, other=0.0).to(tl.float32)
+
+    acc = tl.zeros((HEAD_DIM,), dtype=tl.float32)
+    m_i = tl.full((), float("-inf"), dtype=tl.float32)
+    l_i = tl.zeros((), dtype=tl.float32)
+
+    for token_start in range(0, tl.cdiv(seq_len, BLOCK_KV)):
+        offs_t = token_start * BLOCK_KV + tl.arange(0, BLOCK_KV)
+        token_mask = offs_t < seq_len
+
+        logical_block_idx = offs_t // block_size
+        token_in_block = offs_t % block_size
+        block_table_ptrs = (
+            block_tables_ptr
+            + batch_idx * bt_stride_b
+            + logical_block_idx * bt_stride_block
+        )
+        # int64: page offsets exceed 2**31 elements on large KV pools (#300).
+        physical_block_idx = tl.load(
+            block_table_ptrs, mask=token_mask, other=0
+        ).to(tl.int64)
+
+        k_ptrs = (
+            key_ptr
+            + physical_block_idx[:, None] * k_stride_block
+            + token_in_block[:, None] * k_stride_token
+            + kv_head_idx * k_stride_head
+            + offs_d[None, :] * k_stride_d
+        )
+        kv_mask = token_mask[:, None] & (offs_d[None, :] < head_dim)
+        k = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)
+        logits = tl.sum(k * q[None, :], axis=1) * scale
+        logits = tl.where(token_mask, logits, float("-inf"))
+
+        m_ij = tl.max(logits, axis=0)
+        m_new = tl.maximum(m_i, m_ij)
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(logits - m_new)
+        p = tl.where(token_mask, p, 0.0)
+
+        v_ptrs = (
+            value_ptr
+            + physical_block_idx[:, None] * v_stride_block
+            + token_in_block[:, None] * v_stride_token
+            + kv_head_idx * v_stride_head
+            + offs_d[None, :] * v_stride_d
+        )
+        v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)
+
+        acc = acc * alpha + tl.sum(v * p[:, None], axis=0)
+        l_i = l_i * alpha + tl.sum(p, axis=0)
+        m_i = m_new
+
+    out = tl.where(l_i > 0, acc / l_i, 0.0)
+    tl.store(out_ptrs, out.to(tl.bfloat16), mask=offs_d < head_dim)
+
+
+def _fused_decode_attention_previous(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    batch, _, num_heads, head_dim = query.shape
+    _, block_size, num_kv_heads, _ = key_cache.shape
+    query = query.contiguous()
+    key_cache = key_cache.contiguous()
+    value_cache = value_cache.contiguous()
+    block_tables = block_tables.contiguous()
+    seq_lens = seq_lens.contiguous()
+
+    output = torch.empty(
+        (batch, num_heads, head_dim), dtype=query.dtype, device=query.device
+    )
+    if output.numel() == 0:
+        return output
+
+    query_group_size = num_heads // num_kv_heads
+    max_blocks_per_seq = block_tables.shape[1]
+    grid = (batch, num_heads)
+
+    _fused_decode_attention_kernel[grid](
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        seq_lens,
+        output,
+        float(scale),
+        head_dim,
+        block_size,
+        max_blocks_per_seq,
+        query.stride(0),
+        query.stride(1),
+        query.stride(2),
+        query.stride(3),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(2),
+        key_cache.stride(3),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(2),
+        value_cache.stride(3),
+        block_tables.stride(0),
+        block_tables.stride(1),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        QUERY_GROUP_SIZE=query_group_size,
+        HEAD_DIM=head_dim,
+    )
+
+    return output
 
 
 __all__ = [
     "fused_decode_attention",
-    "split_kv_decode_attention",
+    "split_kv_decode_attention_pro6000",
+    "use_pro6000_decode_attention",
     "supports_head_dim",
 ]

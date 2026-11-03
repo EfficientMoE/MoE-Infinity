@@ -302,3 +302,68 @@ def test_fused_decode_attention_falls_back_to_eager_when_disabled(
         atol=BF16_ATOL,
         rtol=BF16_RTOL,
     )
+
+
+@pytest.fixture
+def previous_path(monkeypatch):
+    """Dispatch as on a GPU other than the RTX PRO 6000."""
+    from moe_infinity.kernel import fused_decode_attn
+
+    monkeypatch.setattr(
+        fused_decode_attn, "use_pro6000_decode_attention", lambda device: False
+    )
+
+
+@requires_cuda
+@requires_triton
+@pytest.mark.parametrize("head_dim", [64, 128])
+def test_previous_kernel_on_other_gpus_matches_reference(
+    previous_path, head_dim
+) -> None:
+    from moe_infinity.kernel.fused_decode_attn import fused_decode_attention
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    key_cache, value_cache, block_tables, _ = _make_paged_kv(
+        batch=3,
+        seq_len=1024,
+        num_kv_heads=4,
+        head_dim=head_dim,
+        block_size=16,
+        device=device,
+    )
+    seq_lens = torch.tensor([1, 1024, 333], device=device).int()
+    query = torch.randn(3, 1, 32, head_dim, device=device).to(torch.bfloat16)
+    scale = head_dim**-0.5
+    output = fused_decode_attention(
+        query, key_cache, value_cache, block_tables, seq_lens, scale
+    )
+    reference = _reference_decode_attention(
+        query, key_cache, value_cache, block_tables, seq_lens, scale
+    )
+    torch.testing.assert_close(
+        output.float(), reference.float(), atol=BF16_ATOL, rtol=BF16_RTOL
+    )
+
+
+@requires_cuda
+@requires_triton
+def test_previous_kernel_keeps_head_dim_limits(previous_path) -> None:
+    from moe_infinity.kernel.fused_decode_attn import fused_decode_attention
+
+    device = torch.device("cuda")
+    key_cache, value_cache, block_tables, seq_lens = _make_paged_kv(
+        1, 16, 2, 256, 16, device
+    )
+    query = torch.randn(1, 1, 8, 256, device=device).to(torch.bfloat16)
+    with pytest.raises(ValueError, match="head_dim"):
+        fused_decode_attention(
+            query, key_cache, value_cache, block_tables, seq_lens, 0.1
+        )
+
+
+@requires_cuda
+@requires_triton
+def test_previous_kernel_kv_pool_over_2pow31_elements(previous_path) -> None:
+    """The #300 64-bit offset fix also applies to the kernel other GPUs run."""
+    test_fused_decode_attention_kv_pool_over_2pow31_elements()

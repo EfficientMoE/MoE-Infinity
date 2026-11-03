@@ -9,6 +9,7 @@ pytest.importorskip(
     reason="paged_attention_ops required",
 )
 
+from moe_infinity.kernel import paged_attention_ops
 from moe_infinity.kernel.paged_attention_ops import (
     paged_attention_fwd,
     paged_attention_reference,
@@ -506,3 +507,42 @@ def test_reference_cpu_matches_sdpa(num_heads, num_kv_heads):
     out = paged_attention_reference(q, k, v, bt, lens, 0.125, num_kv_heads)
     ref = sdpa_reference(q, k, v, bt, lens, 0.125, num_kv_heads)
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+
+@pytest.fixture
+def previous_path(monkeypatch):
+    """Dispatch as on a GPU other than the RTX PRO 6000."""
+    from moe_infinity.kernel import fused_decode_attn
+
+    monkeypatch.setattr(
+        fused_decode_attn, "use_pro6000_decode_attention", lambda device: False
+    )
+
+
+@requires_cuda
+@pytest.mark.parametrize(
+    "head_dim,num_heads,num_kv_heads", [(128, 32, 4), (256, 16, 2)]
+)
+def test_previous_paths_on_other_gpus_match_sdpa(
+    previous_path, head_dim, num_heads, num_kv_heads
+):
+    """paged_attention_v1 (head_dim <= 128) and the SDPA fallback (256),
+    with max_seq_len omitted (no seq_lens.max() sync on this path either)."""
+    torch.manual_seed(8)
+    k, v, bt, lens = make_vllm_cache([1, 70, 300], num_kv_heads, head_dim)
+    q = torch.randn(3, num_heads, head_dim, device="cuda").bfloat16()
+    out = paged_attention_fwd(q, k, v, bt, lens, head_dim**-0.5, num_kv_heads)
+    ref = sdpa_reference(q, k, v, bt, lens, head_dim**-0.5, num_kv_heads)
+    torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@requires_cuda
+def test_previous_int8_path_on_other_gpus_matches_sdpa(previous_path):
+    test_int8_paged_attention_matches_dequantized_sdpa(32, 8)
+
+
+@requires_cuda
+def test_previous_path_kv_pool_over_2pow31_elements(previous_path):
+    if not paged_attention_ops.HAS_PAGED_ATTN:
+        pytest.skip("paged_attention_v1 extension not built")
+    test_paged_attention_kv_pool_over_2pow31_elements()
