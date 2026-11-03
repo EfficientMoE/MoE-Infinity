@@ -378,17 +378,33 @@ __global__ void __launch_bounds__(256) combine_kernel(CombineParams p) {
     }
     int const n = min(__ldg(p.tcount + t), p.kcap);
     int const* r = p.rowmap + int64_t(t) * p.kcap;
-    for (int j = 0; j < n; ++j) {
-      int const row = __ldg(r + j);
-      float const w = __ldg(p.weights + row);
-      uint4 const v =
-          __ldg(reinterpret_cast<uint4 const*>(p.y + int64_t(row) * p.H + c));
-      __nv_bfloat162 const* h = reinterpret_cast<__nv_bfloat162 const*>(&v);
+    // Rows in groups of 4 with all loads issued before the adds; the sum
+    // order stays ascending.
+    for (int j0 = 0; j0 < n; j0 += 4) {
+      uint4 v[4];
+      float w[4];
 #pragma unroll
-      for (int k = 0; k < 4; ++k) {
-        float2 const f = __bfloat1622float2(h[k]);
-        acc[2 * k] += w * f.x;
-        acc[2 * k + 1] += w * f.y;
+      for (int q = 0; q < 4; ++q) {
+        w[q] = 0.f;
+        v[q] = make_uint4(0, 0, 0, 0);
+        if (j0 + q < n) {
+          int const row = __ldg(r + j0 + q);
+          w[q] = __ldg(p.weights + row);
+          v[q] = __ldcs(
+              reinterpret_cast<uint4 const*>(p.y + int64_t(row) * p.H + c));
+        }
+      }
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        if (j0 + q >= n) break;
+        __nv_bfloat162 const* h =
+            reinterpret_cast<__nv_bfloat162 const*>(&v[q]);
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+          float2 const f = __bfloat1622float2(h[k]);
+          acc[2 * k] += w[q] * f.x;
+          acc[2 * k + 1] += w[q] * f.y;
+        }
       }
     }
     *reinterpret_cast<float4*>(o) = make_float4(acc[0], acc[1], acc[2], acc[3]);
@@ -479,10 +495,10 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
     double big, small;
   };
   static constexpr Rate kDualRate[] = {
-      {1.85, 0}, {1.68, 0}, {1.45, 0}, {1.85, 1.45}, {1.45, 1.10}};
+      {1.85, 0}, {1.68, 0}, {1.45, 0}, {1.85, 1.45}, {1.45, 1.30}};
   static constexpr Rate kDownRate[] = {{1.70, 0},    {1.64, 0},    {1.40, 0},
                                        {1.70, 1.40}, {1.64, 1.40}, {1.40, 1.05},
-                                       {1.44, 1.08}};
+                                       {1.40, 1.05}};
   static_assert(std::size(kDualRate) == kNumDual &&
                 std::size(kDownRate) == kNumDown);
   // A config's split: small tiles finish an expert while they cost less than
