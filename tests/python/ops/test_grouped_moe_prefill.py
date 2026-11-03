@@ -108,7 +108,7 @@ def test_grouped_moe_prefill_every_config(seed_everything, T, E, n, k, H, I):
 def test_grouped_moe_prefill_accumulates(
     seed_everything, weight_dtype, combine
 ):
-    """combine=0: fp32 scatter-add epilogue; 1: bf16 rows + combine launch."""
+    """combine=0: fp32 scatter-add epilogue; 1: bf16 rows + per-token sum."""
     _requires_binding()
     dtype = getattr(torch, weight_dtype)
     x, mask, w, experts, ids, table = _layer(500, 32, 32, 4, 512, 256, dtype)

@@ -39,7 +39,7 @@ void grouped_moe_prefill(const torch::Tensor& hidden,
                          cudaStream_t stream);
 
 // As above with an explicit tile config per GEMM and combine mode (0 = fp32
-// scatter-add in the down epilogue, 1 = bf16 rows + combine launch; -1 =
+// scatter-add in the down epilogue, 1 = bf16 rows + per-token combine; -1 =
 // automatic for all three). For tests and tuning.
 void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
                              const torch::Tensor& router_mask,

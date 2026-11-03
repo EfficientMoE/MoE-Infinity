@@ -315,6 +315,100 @@ struct TileSplit {
   }
 };
 
+// Combine mode of the down launch: once every down tile of an N pass has
+// stored its bf16 rows y[r] (expert-sorted), CTAs sum each token's rows over
+// that pass's columns, in ascending row order:
+//   out[t, c] (+)= sum_r w[r] * y[r, c]
+// The combine items of pass p are interleaved with the down tiles of pass
+// p + 1, so the memory-bound sum overlaps the compute-bound GEMM; only the
+// last pass's items run at the end.
+template <typename Element>
+struct GroupedCombine {
+  Element const* y;  // [rows, H], written by this launch
+  float const* weights;
+  int const* tcount;  // [T] rows of every token
+  int const* rowmap;  // [T, kcap] its rows, ascending
+  float* out;
+  int64_t ldo;
+  int T, H, kcap, zero_out;
+  int* done;  // [passes] down tiles finished per pass, zeroed by routing
+  int tokens_per_item;
+};
+
+template <typename Element>
+CUTLASS_DEVICE void combine_item(GroupedCombine<Element> const& p, int t0,
+                                 int t1, int c0, int c1) {
+  // One CTA of a GEMM launch per SM does this, so every thread keeps
+  // kItems x kRows 16-byte loads in flight.
+  constexpr int kItems = 2, kRows = 8;
+  int const vec = (c1 - c0) / 8;
+  int const count = (t1 - t0) * vec;
+  for (int i0 = threadIdx.x; i0 < count; i0 += kItems * blockDim.x) {
+    int t[kItems], n[kItems];
+    int const* r[kItems];
+    float* o[kItems];
+    CUTLASS_PRAGMA_UNROLL
+    for (int q = 0; q < kItems; ++q) {
+      int const i = i0 + q * blockDim.x;
+      t[q] = i < count ? t0 + i / vec : -1;
+      n[q] = t[q] >= 0 ? min(__ldg(p.tcount + t[q]), p.kcap) : 0;
+      r[q] = p.rowmap + int64_t(max(t[q], 0)) * p.kcap;
+      o[q] = p.out + int64_t(max(t[q], 0)) * p.ldo + c0 + (i % vec) * 8;
+    }
+    float acc[kItems][8];
+    CUTLASS_PRAGMA_UNROLL
+    for (int q = 0; q < kItems; ++q) {
+      if (p.zero_out || t[q] < 0) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int k = 0; k < 8; ++k) acc[q][k] = 0.f;
+      } else {
+        float4 const a = *reinterpret_cast<float4 const*>(o[q]);
+        float4 const b = *reinterpret_cast<float4 const*>(o[q] + 4);
+        acc[q][0] = a.x, acc[q][1] = a.y, acc[q][2] = a.z, acc[q][3] = a.w;
+        acc[q][4] = b.x, acc[q][5] = b.y, acc[q][6] = b.z, acc[q][7] = b.w;
+      }
+    }
+    int const nmax = max(n[0], n[1]);
+    for (int j0 = 0; j0 < nmax; j0 += kRows) {
+      uint4 v[kItems][kRows];
+      float w[kItems][kRows];
+      CUTLASS_PRAGMA_UNROLL
+      for (int q = 0; q < kItems; ++q) {
+        int64_t const col = o[q] - (p.out + int64_t(max(t[q], 0)) * p.ldo);
+        CUTLASS_PRAGMA_UNROLL
+        for (int j = 0; j < kRows; ++j) {
+          w[q][j] = 0.f;
+          v[q][j] = make_uint4(0, 0, 0, 0);
+          if (j0 + j < n[q]) {
+            int const row = __ldg(r[q] + j0 + j);
+            w[q][j] = __ldg(p.weights + row);
+            v[q][j] = __ldcg(
+                reinterpret_cast<uint4 const*>(p.y + int64_t(row) * p.H + col));
+          }
+        }
+      }
+      CUTLASS_PRAGMA_UNROLL
+      for (int q = 0; q < kItems; ++q) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int j = 0; j < kRows; ++j) {
+          if (j0 + j >= n[q]) break;
+          Element const* h = reinterpret_cast<Element const*>(&v[q][j]);
+          CUTLASS_PRAGMA_UNROLL
+          for (int k = 0; k < 8; ++k) acc[q][k] += w[q][j] * float(h[k]);
+        }
+      }
+    }
+    CUTLASS_PRAGMA_UNROLL
+    for (int q = 0; q < kItems; ++q) {
+      if (t[q] < 0) continue;
+      *reinterpret_cast<float4*>(o[q]) =
+          make_float4(acc[q][0], acc[q][1], acc[q][2], acc[q][3]);
+      *reinterpret_cast<float4*>(o[q] + 4) =
+          make_float4(acc[q][4], acc[q][5], acc[q][6], acc[q][7]);
+    }
+  }
+}
+
 // One persistent launch over the tiles of every expert, with two tile heights
 // (Big for full tiles, Small for the remainder of each expert; Small = Big for
 // a single-height config). Both share the CTA size and the N tile.
@@ -345,6 +439,7 @@ struct GroupedTiledGemm {
     typename Small::Params small;
     TileSplit split;
     int* next_tile;  // zeroed before the launch: CTAs claim tiles in order
+    GroupedCombine<typename Big::Element> combine;  // down only; y = null: off
   };
 
   template <typename... Args>
@@ -354,6 +449,7 @@ struct GroupedTiledGemm {
     p.small = Small::make_params(args...);
     p.split = {kBigM, kMixed ? kSmallM : kBigM, kMixed ? max_small : 0};
     p.next_tile = nullptr;
+    p.combine = {};
     return p;
   }
   CUTLASS_DEVICE
@@ -362,40 +458,95 @@ struct GroupedTiledGemm {
     // expert, then N panel, then M tile (big tiles first); the routing kernel
     // published the first tile of every expert within one pass.
     auto const& pb = p.big;
+    auto const& cw = p.combine;
     int const* start = pb.routing.tile_start;
     int const per_pass = start[pb.n];
-    int const total = per_pass * (pb.tiles_n / pb.panels);
+    int const passes = pb.tiles_n / pb.panels;
+    bool const fuse = !Big::kDual && cw.y != nullptr;
+    // Combine mode: after the down tiles of pass p come the combine items of
+    // pass p - 1; the items of the last pass close the launch.
+    int const items =
+        fuse ? (cw.T + cw.tokens_per_item - 1) / cw.tokens_per_item : 0;
+    int const seg = per_pass + items;
+    // Down tiles of pass p that precede its first combine item of pass p - 1,
+    // so the last tiles of pass p - 1 have finished by then.
+    int const lead = min(per_pass, 2 * int(gridDim.x));
+    int const total = per_pass * passes + items * passes;
     // Tiles of different heights take different times, so CTAs claim the
-    // next tile from a counter instead of a fixed stride.
+    // next tile from a counter instead of a fixed stride. Claiming the first
+    // tile too means every claimed tile belongs to a running CTA, so a
+    // combine item never waits on a tile whose CTA is not resident.
     __shared__ int claimed;
-    for (int t = blockIdx.x; t < total;) {
-      int const pass = t / per_pass;
-      int const tl = t - pass * per_pass;
-      int lo = 0, hi = pb.n;  // largest e with start[e] <= tl
-      while (hi - lo > 1) {
-        int mid = (lo + hi) / 2;
-        if (__ldg(start + mid) <= tl)
-          lo = mid;
-        else
-          hi = mid;
+    if (threadIdx.x == 0)
+      claimed = p.next_tile ? atomicAdd(p.next_tile, 1) : int(blockIdx.x);
+    __syncthreads();
+    for (int t = claimed; t < total;) {
+      int pass = t / per_pass, tl = t - pass * per_pass, item = -1;
+      if (fuse && t >= per_pass) {
+        int const u = t - per_pass;
+        pass = 1 + u / seg;
+        int const r = u % seg;
+        if (pass >= passes) {
+          item = r;
+          pass -= 1;
+        } else if (r < lead) {
+          tl = r;
+        } else {
+          // Spread the items of pass - 1 evenly over the rest of the segment.
+          int64_t const q = r - lead, len = seg - lead;
+          int const upto = int((q + 1) * items / len);
+          if (upto != int(q * items / len)) {
+            item = upto - 1;
+            pass -= 1;
+          } else {
+            tl = r - upto;
+          }
+        }
       }
-      int const e = lo;
-      int const rows = pb.routing.offsets[e + 1] - pb.routing.offsets[e];
-      int nbig, nsmall;
-      p.split.split(rows, nbig, nsmall);
-      int const tiles_m = nbig + nsmall;
-      int const local = tl - start[e];
-      int const m = local % tiles_m;
-      int const n = pass * pb.panels + local / tiles_m;
-      if (kMixed && m >= nbig)
-        Small::run_tile(p.small, storage.small, e,
-                        nbig * (kBigM / kSmallM) + (m - nbig), n);
-      else
-        Big::run_tile(pb, storage.big, e, m, n);
-      // run_tile ends with a barrier, so every thread has read `claimed`.
+      if (item >= 0) {
+        if (threadIdx.x == 0) {
+          while (*reinterpret_cast<int volatile*>(cw.done + pass) < per_pass)
+            __nanosleep(256);
+          __threadfence();
+        }
+        __syncthreads();
+        int const t0 = item * cw.tokens_per_item;
+        int const c0 = pass * pb.panels * ThreadblockShape::kN;
+        combine_item(cw, t0, min(cw.T, t0 + cw.tokens_per_item), c0,
+                     min(cw.H, c0 + pb.panels * ThreadblockShape::kN));
+        __syncthreads();
+      } else {
+        int lo = 0, hi = pb.n;  // largest e with start[e] <= tl
+        while (hi - lo > 1) {
+          int mid = (lo + hi) / 2;
+          if (__ldg(start + mid) <= tl)
+            lo = mid;
+          else
+            hi = mid;
+        }
+        int const e = lo;
+        int const rows = pb.routing.offsets[e + 1] - pb.routing.offsets[e];
+        int nbig, nsmall;
+        p.split.split(rows, nbig, nsmall);
+        int const tiles_m = nbig + nsmall;
+        int const local = tl - start[e];
+        int const m = local % tiles_m;
+        int const n = pass * pb.panels + local / tiles_m;
+        if (kMixed && m >= nbig)
+          Small::run_tile(p.small, storage.small, e,
+                          nbig * (kBigM / kSmallM) + (m - nbig), n);
+        else
+          Big::run_tile(pb, storage.big, e, m, n);
+        if (fuse) {
+          // Publish this tile's rows of y before counting it done.
+          __threadfence();
+          __syncthreads();
+          if (threadIdx.x == 0) atomicAdd(cw.done + pass, 1);
+        }
+      }
+      // Every thread has read `claimed` (barrier above).
       if (threadIdx.x == 0)
-        claimed = p.next_tile ? atomicAdd(p.next_tile, 1) + int(gridDim.x)
-                              : t + int(gridDim.x);
+        claimed = p.next_tile ? atomicAdd(p.next_tile, 1) : t + int(gridDim.x);
       __syncthreads();
       t = claimed;
     }

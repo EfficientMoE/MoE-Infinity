@@ -12,8 +12,9 @@
 // the device.
 // Launch 2: grouped gate/up dual GEMM -> act [rows, I] (bf16).
 // Launch 3: grouped down GEMM, out[t] += w · bf16(act · Wdᵀ) (fp32 reductions);
-// for outputs far larger than L2 it writes y[r] = bf16(act · Wdᵀ) per sorted
-// row instead, and launch 4 (combine) sums every token's rows in a fixed order.
+// for outputs far larger than L2 (combine mode) it writes y[r] = bf16(act ·
+// Wdᵀ) per sorted row instead, and the same launch sums every token's rows in
+// a fixed order (moe_sum), interleaved with the next pass's down tiles.
 
 #include "kernel/grouped_moe_prefill.h"
 #include "kernel/moe_grouped_gemm.h"
@@ -148,6 +149,9 @@ int occupancy(int device) {
 // Routing
 // ---------------------------------------------------------------------------
 
+// Down passes (N panel groups) at most; see panels[1] below.
+constexpr int kMaxPasses = 8;
+
 struct RouteParams {
   uint8_t const* mask;
   int64_t mask_ld, mask_cs;
@@ -170,7 +174,8 @@ struct RouteParams {
   int64_t ldo;
   int zero_out;
   // Combine mode: sorted rows of every token, ascending, count in tcount.
-  int* next_tile;  // [2] tile counters of the GEMM launches
+  int* next_tile;  // [2 + kMaxPasses] tile counters of the GEMM launches,
+                   // then finished down tiles per pass (combine mode)
   int* tcount;     // [T] or nullptr
   int* rowmap;     // [T, kcap]
   int kcap;
@@ -313,7 +318,7 @@ __global__ void __launch_bounds__(256) route_kernel(RouteParams p) {
   __syncthreads();
   if (b == 0) {
     for (int j = tid; j <= p.n; j += blockDim.x) p.offsets[j] = offs[j];
-    if (tid < 2) p.next_tile[tid] = 0;
+    if (tid < 2 + kMaxPasses) p.next_tile[tid] = 0;
   }
   for (int j = tid; j < p.n; j += blockDim.x) cnt[j] = 0;
   __syncthreads();
@@ -346,75 +351,12 @@ __global__ void __launch_bounds__(256) route_kernel(RouteParams p) {
   }
 }
 
-// Combine mode, launch 4: out[t] (+)= sum over t's rows r (ascending) of
-// w[r] · y[r], fp32, 8 columns per thread.
-struct CombineParams {
-  Elem const* y;  // [rows, H]
-  float const* weights;
-  int const* tcount;
-  int const* rowmap;
-  float* out;
-  int64_t ldo;
-  int T, H, kcap, zero_out;
-};
-
-__global__ void __launch_bounds__(256) combine_kernel(CombineParams p) {
-  int const vec = p.H / 8;
-  int64_t const items = int64_t(p.T) * vec;
-  for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < items;
-       i += int64_t(gridDim.x) * blockDim.x) {
-    int const t = int(i / vec);
-    int const c = int(i % vec) * 8;
-    float* o = p.out + int64_t(t) * p.ldo + c;
-    float acc[8];
-    if (p.zero_out) {
-#pragma unroll
-      for (int k = 0; k < 8; ++k) acc[k] = 0.f;
-    } else {
-      float4 const a = *reinterpret_cast<float4 const*>(o);
-      float4 const b = *reinterpret_cast<float4 const*>(o + 4);
-      acc[0] = a.x, acc[1] = a.y, acc[2] = a.z, acc[3] = a.w;
-      acc[4] = b.x, acc[5] = b.y, acc[6] = b.z, acc[7] = b.w;
-    }
-    int const n = min(__ldg(p.tcount + t), p.kcap);
-    int const* r = p.rowmap + int64_t(t) * p.kcap;
-    // Rows in groups of 4 with all loads issued before the adds; the sum
-    // order stays ascending.
-    for (int j0 = 0; j0 < n; j0 += 4) {
-      uint4 v[4];
-      float w[4];
-#pragma unroll
-      for (int q = 0; q < 4; ++q) {
-        w[q] = 0.f;
-        v[q] = make_uint4(0, 0, 0, 0);
-        if (j0 + q < n) {
-          int const row = __ldg(r + j0 + q);
-          w[q] = __ldg(p.weights + row);
-          v[q] = __ldcs(
-              reinterpret_cast<uint4 const*>(p.y + int64_t(row) * p.H + c));
-        }
-      }
-#pragma unroll
-      for (int q = 0; q < 4; ++q) {
-        if (j0 + q >= n) break;
-        __nv_bfloat162 const* h =
-            reinterpret_cast<__nv_bfloat162 const*>(&v[q]);
-#pragma unroll
-        for (int k = 0; k < 4; ++k) {
-          float2 const f = __bfloat1622float2(h[k]);
-          acc[2 * k] += w[q] * f.x;
-          acc[2 * k + 1] += w[q] * f.y;
-        }
-      }
-    }
-    *reinterpret_cast<float4*>(o) = make_float4(acc[0], acc[1], acc[2], acc[3]);
-    *reinterpret_cast<float4*>(o + 4) =
-        make_float4(acc[4], acc[5], acc[6], acc[7]);
-  }
-}
-
 // Output slice per down pass (see panels[1] below).
 constexpr size_t kOutPassBytes = size_t(32) << 20;
+// Combine mode: down passes (qwen3.5-35b 50K down + combine: 1 pass 5.02 ms,
+// 2: 4.75, 4: 4.72, 8: 5.20) and tokens per combine item.
+constexpr int kCombinePasses = 4;
+constexpr int kCombineTokens = 32;
 // Largest combine-mode row buffer (see `combine` below).
 constexpr size_t kMaxCombineBytes = size_t(4) << 30;
 
@@ -539,9 +481,9 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
     tiles_n[0] = (I + Gm::ThreadblockShape::kN - 1) / Gm::ThreadblockShape::kN;
     panels[0] = tiles_n[0];
   });
-  // Combine mode (launch 4): when the fp32 output is too large for the
+  // Combine mode: when the fp32 output is too large for the
   // scatter-add to stay in L2 even in 4 passes, the down GEMM writes every
-  // (token, expert) row in bf16 and a combine launch sums each token's rows.
+  // (token, expert) row in bf16 and then sums each token's rows (moe_sum).
   // The bf16 rows take T·kcap·H·2 bytes of workspace; above kMaxCombineBytes
   // the layer keeps the scatter-add.
   bool const combine =
@@ -556,6 +498,13 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
     // (T x H / P x 4 B) resident at the cost of reading the activations P
     // times, which pays off for up to 4 passes.
     panels[1] = tiles_n[1];
+    // Combine mode: passes let the combine of one pass overlap the down
+    // tiles of the next (each pass re-reads the activations).
+    if (combine) {
+      int passes = kCombinePasses;
+      while (passes > 1 && tiles_n[1] % passes != 0) --passes;
+      panels[1] = tiles_n[1] / passes;
+    }
     for (int passes = 2; passes <= 4 && !combine; ++passes) {
       if (tiles_n[1] % passes != 0) continue;
       if (double(T) * H * 4 <= double(kOutPassBytes)) break;
@@ -582,7 +531,7 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   size_t const o_off = carve(sizeof(int) * (n + 1));
   size_t const o_ts0 = carve(sizeof(int) * (n + 1));
   size_t const o_ts1 = carve(sizeof(int) * (n + 1));
-  size_t const o_next = carve(sizeof(int) * 2);
+  size_t const o_next = carve(sizeof(int) * (2 + kMaxPasses));
   size_t const o_tok = carve(sizeof(int) * rows);
   size_t const o_w = carve(sizeof(float) * rows);
   size_t const o_act = carve(sizeof(Elem) * rows * I);
@@ -655,27 +604,27 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
                             out.data_ptr<float>(), out.stride(0));
     p.big.panels = panels[1];
     p.small.panels = panels[1];
-    if (combine) p.big.y = p.small.y = reinterpret_cast<Elem*>(ws + o_y);
     p.next_tile = rp.next_tile + 1;
+    if (combine) {
+      auto* y = reinterpret_cast<Elem*>(ws + o_y);
+      p.big.y = p.small.y = y;
+      p.combine = {y,
+                   rp.weights,
+                   rp.tcount,
+                   rp.rowmap,
+                   out.data_ptr<float>(),
+                   out.stride(0),
+                   T,
+                   H,
+                   int(kcap),
+                   zero_out ? 1 : 0,
+                   rp.next_tile + 2,
+                   kCombineTokens};
+    }
     int const grid = sms * occupancy<G>(device);
     moe_gemm::grouped_expert_gemm_kernel<G>
         <<<grid, G::kThreads, G::kSmemBytes, stream>>>(p);
   });
-  if (combine) {
-    CombineParams cp{reinterpret_cast<Elem const*>(ws + o_y),
-                     rp.weights,
-                     rp.tcount,
-                     rp.rowmap,
-                     out.data_ptr<float>(),
-                     out.stride(0),
-                     T,
-                     H,
-                     int(kcap),
-                     zero_out ? 1 : 0};
-    int64_t const items = int64_t(T) * (H / 8);
-    int const grid = int(std::min<int64_t>((items + 255) / 256, sms * 8));
-    combine_kernel<<<grid, 256, 0, stream>>>(cp);
-  }
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
               "grouped_moe_prefill launch failed: ", cudaGetErrorString(err));
