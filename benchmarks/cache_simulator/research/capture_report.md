@@ -654,3 +654,33 @@ EXPERIMENTS.md rows appended.
 | 1280 (10E) | 0.7123 | **0.7203** | 0.7171 | 0.8671 | lcnu |
 | 1408 (11E) | 0.7422 | 0.7482 | **0.7523** | 0.8848 | s3fifo |
 | 1536 (12E) | 0.7721 | 0.7731 | **0.7821** | 0.8990 | s3fifo |
+
+---
+
+## Addendum 5 — mechanism probe: demand imbalance separates the flipper (exp655): SUPPORTED
+
+Addendum 4 excluded capture length. Remaining candidates: spatial demand
+imbalance (expert concentration) and temporal hot-set rotation. Pre-registered
+test (sha 2eb17537…, frozen 2026-11-03T04:37:39Z) on the two local frozen
+traces, granite size-matched by step subsampling (per-expert sample depth
+equalized; seeds 654321-23, sign required on all three):
+
+- **S1 spatial (Gini of per-(prompt,layer) expert counts):** qwen3-30b 0.706
+  vs granite-matched 0.469 — the flipper's demand is far more concentrated.
+- **S2 temporal (total-variation distance between per-layer first/second-half
+  decode distributions):** qwen3-30b 0.203 vs granite-matched 0.148 — the
+  flipper's hot set rotates more within a single generation.
+- **S3 footprint (distinct experts touched per layer, observational):**
+  granite 37.7/40 (94%, near-uniform) vs qwen3-30b 85.2/128 (66.5%,
+  concentrated).
+
+Verdict **SUPPORTED** (P1 and P2 hold on all three matched seeds). Mechanism,
+consistent with addenda 2-4: LCNU's layer-fair allocation is optimal while
+demand is near-uniform across experts (granite: LCNU best through 19E, flip
+only near saturation); once demand concentrates on a subset of experts AND
+the hot set rotates within a generation (qwen3-30b), global recency
+(s3fifo) exploits the concentration and takes over at ~10E, with the margin
+modulated by decode length (addendum 4). Caveats: two models, single traces;
+a2.7b/235b streams not measured locally (their non-flip is consistent with
+this story but unverified). Deployable synthesis stands: LCNU default;
+expect a recency takeover only for concentrated, rotating expert demand.
