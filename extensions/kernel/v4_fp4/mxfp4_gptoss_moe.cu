@@ -1168,7 +1168,7 @@ cudaError_t dispatch(const __nv_bfloat16* x, int M, int K, const uint8_t* wq,
       return run_gemv<8, 3, 1, 1, SWIGLU, PDL>(x, M, K, wq, ws, bias, N, y,
                                                stream);
     case 1:
-      return run_gemv<8, 3, 2, 1, SWIGLU, PDL>(x, M, K, wq, ws, bias, N, y,
+      return run_gemv<8, 3, 2, 2, SWIGLU, PDL>(x, M, K, wq, ws, bias, N, y,
                                                stream);
     case 2:
       return run_gemv<8, 2, 4, 1, SWIGLU, PDL>(x, M, K, wq, ws, bias, N, y,
@@ -1202,9 +1202,12 @@ size_t workspace_bytes_max(int dev) {
 // Measured on RTX PRO 6000 Max-Q (sm_120) at H = I = 2880.
 int pick_pro6000_config(int M, bool swiglu) {
   static_assert(kMxfp4GemvMaxTokens == 32, "keep in sync with configs 0-3");
-  // Up to 32 tokens: the NT = 1 kernel over ceil(M / 8) token slices
-  // (blockIdx.y) beats the wider NT = 2 / 4 variants on this GPU.
-  if (M <= kMxfp4GemvMaxTokens) return 0;
+  // Up to 16 tokens: the NT = 1 kernel over ceil(M / 8) token slices
+  // (blockIdx.y). 17-32 tokens: 16-token slices with two 16-row tiles per
+  // warp (config 1), which halves the activation traffic per weight row
+  // (M = 32: 36.3 -> 30.7 us per expert).
+  if (M <= 16) return 0;
+  if (M <= kMxfp4GemvMaxTokens) return 1;
   if (M <= 128) return swiglu ? 6 : 4;
   if (M <= 256) return 5;
   return 7;
