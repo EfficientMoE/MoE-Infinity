@@ -4,7 +4,7 @@
 // active-expert flags in pinned host memory -- so the dispatcher never has to
 // reduce the mask or copy it back, and nothing on the path syncs the host.
 //
-//   T <= kFusedMaxTokens: ONE launch.
+//   T <= kFusedMaxTokens (2048): ONE launch.
 //     phase 1  split-K x expert-tile x token-tile work items (WMMA bf16/fp16,
 //              fp32 accumulate) write fp32 partials;
 //     hand-off the last CTA (one tile) or the last min(T, grid) CTAs to
@@ -69,7 +69,7 @@ constexpr int kBT64MinTokens = ROUTER_BT64_MIN;
 #endif
 constexpr int kRows = 8;  // phase-2 rows reduced per smem pass (1 per warp)
 #ifndef ROUTER_FUSED_MAX_T
-  #define ROUTER_FUSED_MAX_T 1024
+  #define ROUTER_FUSED_MAX_T 2048
 #endif
 constexpr int kFusedMaxTokens = ROUTER_FUSED_MAX_T;
 #ifndef ROUTER_WIDE_MIN_T
@@ -82,7 +82,7 @@ constexpr int kWideMinTokens = ROUTER_WIDE_MIN_T;
 #endif
 constexpr int kWideBigWaves = ROUTER_WIDE_BIG_WAVES;
 #ifndef ROUTER_FUSED_MAX_ELEMS
-  #define ROUTER_FUSED_MAX_ELEMS 196608
+  #define ROUTER_FUSED_MAX_ELEMS (2048 * 512)
 #endif
 constexpr int64_t kFusedMaxElems = ROUTER_FUSED_MAX_ELEMS;  // T * E
 // One CTA reduces all partials when T * E is this small (decode b1).

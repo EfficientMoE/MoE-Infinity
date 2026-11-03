@@ -138,6 +138,10 @@ SOFTMAX_SHAPES = [
     (64, 4096, 512, 10),
     (300, 2880, 128, 4),
     (5000, 2048, 256, 8),
+    # fused split-K path with mma.sync items (b256, 1K / 2K prefill)
+    (256, 4096, 512, 10),
+    (1024, 2048, 256, 8),
+    (2048, 4096, 512, 10),
 ]
 
 
@@ -193,6 +197,8 @@ GROUPED_CASES = [
     (1, 4096, 256, 6, 1, 1, "sqrtsoftplus", 1.5),  # DeepSeek-V4-Flash
     (257, 5120, 384, 6, 1, 1, "sqrtsoftplus", 1.5),  # DeepSeek-V4.1-Flash
     (5000, 4096, 256, 6, 1, 1, "sqrtsoftplus", 1.5),
+    (1024, 6144, 256, 8, 8, 4, "sigmoid", 2.5),  # fused path at 1K
+    (2048, 5120, 384, 6, 1, 1, "sqrtsoftplus", 1.5),
 ]
 
 
