@@ -81,9 +81,9 @@ def test_grouped_moe_prefill_every_config(seed_everything, T, E, n, k, H, I):
     _requires_binding()
     x, mask, w, experts, ids, table = _layer(T, E, n, k, H, I)
     ref = _reference(x, mask, w, experts, ids)
-    # 5 gate/up and 6 down configs, incl. the mixed-height ones (-1 = auto)
+    # 5 gate/up and 7 down configs, incl. the mixed-height ones (-1 = auto)
     for dual_cfg in range(-1, 5):
-        for down_cfg in range(-1, 6):
+        for down_cfg in range(-1, 7):
             out = torch.full((T, H), 7.0, device="cuda")
             _STORE.grouped_moe_prefill(
                 x, mask, w, table, I, k, out, True, dual_cfg, down_cfg

@@ -65,7 +65,9 @@ using DownConfigs = std::tuple<
     GroupedTiledGemm<G<128, 128, 32, 64, 64, 3, false>,
                      G<64, 128, 32, 32, 64, 4, false>>,  // 4: 4 warps, mixed
     GroupedTiledGemm<G<64, 128, 32, 32, 64, 4, false>,
-                     G<32, 128, 32, 32, 32, 4, false>>>;  // 5: 4 warps, mixed
+                     G<32, 128, 32, 32, 32, 4, false>>,  // 5: 4 warps, mixed
+    GroupedTiledGemm<G<64, 128, 64, 32, 64, 3, false>,
+                     G<32, 128, 64, 32, 32, 3, false>>>;  // 6: 4 warps, mixed
 constexpr int kNumDual = std::tuple_size_v<DualConfigs>;
 constexpr int kNumDown = std::tuple_size_v<DownConfigs>;
 
@@ -407,7 +409,8 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
                                        {1.45, 1.10, true}};
   static constexpr Rate kDownRate[] = {{1.70, 0, false},    {1.64, 0, false},
                                        {1.40, 0, true},     {1.70, 1.40, false},
-                                       {1.64, 1.40, false}, {1.40, 1.05, true}};
+                                       {1.64, 1.40, false}, {1.40, 1.05, true},
+                                       {1.44, 1.08, true}};
   static_assert(std::size(kDualRate) == kNumDual &&
                 std::size(kDownRate) == kNumDown);
   bool const streaming = rows_e < kStreamRows;
