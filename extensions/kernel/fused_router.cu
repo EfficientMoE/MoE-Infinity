@@ -525,7 +525,18 @@ struct DecodeArgs {
   int H;
   int n_t, n_e, n_split, h_per_split;
   float* partial;  // [n_split][T][E]
+  int be;          // expert tile of the mma.sync items (64 / 128; 0: WMMA)
 };
+
+}  // namespace moe_router
+#include "kernel/fused_router_dec_mma.cuh"
+namespace moe_router {
+
+#ifndef ROUTER_DEC_MMA
+  #define ROUTER_DEC_MMA 1
+#endif
+// T >= kBT64MinTokens: CUTLASS mma.sync work items (64 x 128) instead of WMMA.
+constexpr bool kDecMma = ROUTER_DEC_MMA != 0;
 
 // Work-item tile: BT tokens x kBE experts over one H split.
 //   BT=16 : 8 warps = (kBE / 16) expert columns x (8 / columns) slices of
@@ -560,6 +571,11 @@ constexpr int decode_smem_bytes() {
   constexpr int red =
       2 * kRows * kMaxE * 4 + kRows * kMaxE;  // scores, keys, chosen
   constexpr int m = op > acc ? op : acc;
+  if constexpr (BT == 64 && kDecMma) {
+    constexpr int c = DecMmaCfg<Tin, 128>::kSmem;
+    constexpr int mm = m > red ? m : red;
+    return mm > c ? mm : c;
+  }
   return m > red ? m : red;
 }
 
@@ -787,8 +803,18 @@ __global__ void __launch_bounds__(kThreads)
     q.bias = sbias;
   }
   const int n_items = a.n_t * a.n_e * a.n_split;
-  for (int item = blockIdx.x; item < n_items; item += gridDim.x)
-    logits_item<Tin, BT>(a, p, item, smem);
+  for (int item = blockIdx.x; item < n_items; item += gridDim.x) {
+    if constexpr (BT == 64 && kDecMma) {
+      if (a.be == 64)
+        logits_item_mma<Tin, 64>(a, p, item, smem);
+      else if (a.be == 128)
+        logits_item_mma<Tin, 128>(a, p, item, smem);
+      else
+        logits_item<Tin, BT>(a, p, item, smem);
+    } else {
+      logits_item<Tin, BT>(a, p, item, smem);
+    }
+  }
   __threadfence();
   if constexpr (kSingleTile) {
     __shared__ bool last;
@@ -1106,11 +1132,15 @@ void launch_fused(const at::Tensor& x, const at::Tensor& w, int H,
   }
   const int T = p.T, E = p.E;
   const int n_t = (T + BT - 1) / BT;
-  const int n_e = (E + Tile<BT>::kBE - 1) / Tile<BT>::kBE;
+  // mma.sync items (pro6000 table): 64 x 128 for T > 64 and E >= 256, else
+  // 64 x 64; routers with E < 128 keep the WMMA item (a wider MMA tile
+  // mostly multiplies padding there; measured slower at b256).
+  const int be =
+      BT == 64 && kDecMma ? (E < 128 ? 0 : (T > 64 && E >= 256 ? 128 : 64)) : 0;
+  const int n_e =
+      (E + (be ? be : Tile<BT>::kBE) - 1) / (be ? be : Tile<BT>::kBE);
   constexpr int kHC = Tile<BT>::kHC;
   const int max_split = std::max(1, H / kHC);
-  // Wide rows (E > 320): fewer partial planes keep the single-token
-  // reduction short; measured ~1 us faster for E = 384 / 512 decode.
   // Wide rows (E > 320) in the single-CTA hand-off (b1): fewer partial planes
   // keep its reduction short. Multi-row decode spreads the reduction over
   // R CTAs, so it takes more splits (more CTAs streaming the weight).
@@ -1123,8 +1153,8 @@ void launch_fused(const at::Tensor& x, const at::Tensor& w, int H,
 
   float* partial =
       scratch_for(device, stream, static_cast<int64_t>(split) * T * E);
-  DecodeArgs a{x.data_ptr(), x.stride(0), w.data_ptr(), w.stride(0), H,
-               n_t,          n_e,         split,        h_per_split, partial};
+  DecodeArgs a{x.data_ptr(), x.stride(0), w.data_ptr(), w.stride(0), H, n_t,
+               n_e,          split,       h_per_split,  partial,     be};
   if constexpr (kSingleTile) {
     kernel<<<grid, kThreads, smem, stream>>>(a, p);
   } else {
