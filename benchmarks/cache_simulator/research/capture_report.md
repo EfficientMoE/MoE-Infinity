@@ -736,3 +736,40 @@ artifact of how the stream is counted — and making the operational guidance
 clean: the same ~10E crossover applies whether or not prefill experts are
 cached. Data: results_real_qwen3-30b-a3b-fine-u.{csv,md}, EXPERIMENTS.md rows
 appended.
+
+---
+
+## Addendum 8 — two-oracle decomposition: allocation structure does NOT explain the flip; static popularity is a weak predictor (exp659): NOT-STRUCTURAL
+
+Pre-registered (sha 280ed822..., frozen in exp659 ARTIFACT.sha256) hindsight test:
+at each capacity, compare a PER-LAYER oracle (top C/L keys per layer — the
+ideal layer-fair allocation LCNU approximates) against a GLOBAL oracle
+(top C keys overall — what global-recency policies approximate). If the
+flip were an allocation-structure phenomenon, per-layer should dominate on
+granite and lose on 30b near 10E.
+
+**Result: NOT-STRUCTURAL — H2 refuted.** The global oracle beats the
+per-layer oracle at EVERY capacity on BOTH traces (30b 896..1792:
++0.15 to +0.24pp; granite 280..560: +0.19 to +0.42pp). Allocation
+structure alone never favors layer-fair placement, even on the model where
+LCNU wins online. Per the pre-commit, no post-hoc rescue: the mechanism
+question stays open at the allocation level.
+
+**The contrast the decomposition exposes — static popularity vs online
+tracking, per model (decode arm):**
+- qwen3-30b @1280 (=10E): per-layer 0.5482, global 0.5497 vs online LRU
+  0.7195, LCNU 0.7328, s3fifo 0.7420, belady 0.8788. EVERY online policy
+  beats the static-popularity ceiling by 17+ pp.
+- granite @400 (=10E): per-layer 0.5799, global 0.5819 vs online LRU
+  0.5244, s3fifo 0.5399, LCNU 0.6291, belady 0.7832. Static popularity
+  BEATS online LRU and s3fifo by 4-6pp; only LCNU clears it (+4.7pp).
+
+On 30b, aggregate popularity knowledge is worth little because demand
+rotates too fast to plan statically — all the hit rate lives in temporal
+tracking. On granite, popularity is far more predictive (rotation slower,
+cf. addendum 5 TVD 0.148 vs 0.203): naive recency (LRU/s3fifo) actually
+UNDERPERFORMS the static optimum, and LCNU's edge is precisely that it
+exploits static structure while remaining online. This reframes the flip:
+what separates 30b from the non-flippers is rotation rate, not static
+skew — and it gives the static-vs-online gap (17pp vs 4.7pp) as a direct,
+model-comparable rotation-rate proxy.
