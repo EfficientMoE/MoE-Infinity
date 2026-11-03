@@ -994,7 +994,9 @@ def _gdn_fla_builder(T, Hv, dk, dv, fused=False):
 
         def run():
             # opt-in CUDA recurrence path is chosen per call
-            os.environ["MOE_LINEAR_ATTN_CUDA"] = "1" if fused == "cuda" else "0"
+            os.environ["MOE_LINEAR_ATTN_CUDA_PRO6000"] = (
+                "1" if fused == "cuda" else "0"
+            )
             return chunk_gated_delta_rule(
                 q,
                 k,

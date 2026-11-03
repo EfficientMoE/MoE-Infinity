@@ -1,5 +1,10 @@
 // Chunked delta-rule recurrence with fused output, sm_80+ mma.sync (#304).
 //
+// Hardware: RTX_PRO_6000. Tuned on the RTX PRO 6000 Blackwell (188 SMs,
+// 99 KiB shared memory per block): 92.5 KiB of shared tiles per CTA and one
+// wave of 128 CTAs. Launched only via moe_infinity/kernel/gdn_recur_cuda.py,
+// which checks hw_profile.supports(RTX_PRO_6000); other GPUs run fla.
+//
 // One CTA = one (sequence, head, 32-column value slice); 4 warps, each warp
 // owns 8 value columns of the state h [K=128, V] and runs its recurrence in
 // registers (fp32 accumulators). Per 64-token chunk (operands precomputed by
@@ -107,7 +112,7 @@ __device__ __forceinline__ void to_b(const float (*acc)[4], uint32_t (*b)[2]) {
   }
 }
 
-__global__ void __launch_bounds__(NW * 32) recur_kernel(
+__global__ void __launch_bounds__(NW * 32) recur_pro6000_kernel(
     const __nv_bfloat16* __restrict__ qg, const __nv_bfloat16* __restrict__ kd,
     const __nv_bfloat16* __restrict__ w, const __nv_bfloat16* __restrict__ u,
     const __nv_bfloat16* __restrict__ S, const float* __restrict__ g,
@@ -296,9 +301,9 @@ void gdn_recur_launch(const void* qg, const void* kd, const void* w,
   dim3 grid(B * H * (gdn::KD / gdn::BV));
   dim3 block(gdn::NW * 32);
   size_t sm = gdn::smem_bytes();
-  cudaFuncSetAttribute(gdn::recur_kernel,
+  cudaFuncSetAttribute(gdn::recur_pro6000_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sm);
-  gdn::recur_kernel<<<grid, block, sm, stream>>>(
+  gdn::recur_pro6000_kernel<<<grid, block, sm, stream>>>(
       (const __nv_bfloat16*)qg, (const __nv_bfloat16*)kd,
       (const __nv_bfloat16*)w, (const __nv_bfloat16*)u, (const __nv_bfloat16*)S,
       g, (__nv_bfloat16*)o, h, T, t_base, TB, nb, H);

@@ -454,7 +454,7 @@ def _glm5_next_layer():
 def test_layer_binds_fused_kernels_and_matches_torch(build, cls):
     layer = build()
     report = enable_linear_attention_kernels(torch.nn.Sequential(layer))
-    assert report[cls]["chunk"] == "fused", report
+    assert report[cls]["chunk"] == "fused_pro6000", report
     assert report[cls]["recurrent"] == "fla", report
 
     # > MIN_FUSED_TOKENS so the GDN layer takes the fused path

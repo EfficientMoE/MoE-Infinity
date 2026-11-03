@@ -200,7 +200,7 @@ pip install 'flash-linear-attention>=0.6.0'
 pip install -e '.[linear_attn]'
 ```
 
-`transformers` binds the kernels automatically. MoE-Infinity logs a warning at load time if a linear-attention layer is still on the torch fallback. At load, MoE-Infinity also routes long prefills (inference, bf16, head dim 128) through its own fused kernels built on fla. These keep the per-chunk recurrent state in registers instead of writing it to DRAM; `MOE_LINEAR_ATTN_FUSED=0` turns them off. On an RTX PRO 6000 (sm_120), one Qwen3.5-35B GDN layer at 9K tokens drops from 20.3 ms to 1.13 ms with fla and to 0.86 ms with the fused path, and a decode step drops from 94 µs to 10 µs. [`causal-conv1d`](https://github.com/Dao-AILab/causal-conv1d) is optional (it needs a CUDA build). Without it, the short convolution runs as a cuDNN depthwise conv.
+`transformers` binds the kernels automatically. MoE-Infinity logs a warning at load time if a linear-attention layer is still on the torch fallback. At load, MoE-Infinity also routes long prefills (inference, bf16, head dim 128) through its own fused kernels built on fla. These keep the per-chunk recurrent state in registers instead of writing it to DRAM; `MOE_LINEAR_ATTN_PRO6000=0` turns them off. On an RTX PRO 6000 (sm_120), one Qwen3.5-35B GDN layer at 9K tokens drops from 20.3 ms to 1.13 ms with fla and to 0.86 ms with the fused path, and a decode step drops from 94 µs to 10 µs. [`causal-conv1d`](https://github.com/Dao-AILab/causal-conv1d) is optional (it needs a CUDA build). Without it, the short convolution runs as a cuDNN depthwise conv.
 
 ## Usage and Examples
 

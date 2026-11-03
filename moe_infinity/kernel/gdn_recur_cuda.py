@@ -3,6 +3,11 @@
 Compiled on first use with ``torch.utils.cpp_extension.load`` for the
 current device's architecture; ``available()`` is False if nvcc is missing
 or the build fails, and callers then use the Triton recurrence.
+
+Hardware: RTX_PRO_6000. 92.5 KiB of dynamic shared memory per CTA (fits the
+99 KiB limit), one wave of 128 CTAs on 188 SMs and the persisting-L2 window
+were sized for the RTX PRO 6000 Blackwell; ``available()`` is False on any
+other device (generic mma.sync / ldmatrix / movmatrix ISA, sm_80+).
 """
 
 from __future__ import annotations
@@ -79,7 +84,10 @@ def _module():
     build = Path(
         os.environ.get(
             "MOE_LINEAR_ATTN_BUILD_DIR",
-            Path.home() / ".cache" / "moe_infinity" / f"gdn_recur_sm{arch}",
+            Path.home()
+            / ".cache"
+            / "moe_infinity"
+            / f"gdn_recur_pro6000_sm{arch}",
         )
     )
     build.mkdir(parents=True, exist_ok=True)
@@ -87,7 +95,7 @@ def _module():
     if not cpp.exists() or cpp.read_text() != _CPP:
         cpp.write_text(_CPP)
     return load(
-        name=f"moe_gdn_recur_sm{arch}",
+        name=f"moe_gdn_recur_pro6000_sm{arch}",
         sources=[str(cpp), str(_SRC)],
         extra_cuda_cflags=[
             "-O3",
@@ -100,6 +108,10 @@ def _module():
 
 
 def available() -> bool:
+    from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
+
+    if not supports(RTX_PRO_6000):
+        return False
     try:
         _module()
         return True
