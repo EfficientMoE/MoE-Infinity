@@ -990,7 +990,9 @@ def fused_mxfp4_gemm(
     if M == 0:
         return output.reshape(*orig_shape[:-1], N)
 
-    if 2 <= M <= 8 and _small_m_sm120_cuda(
+    # M = 2..8, plus M = 1 for narrow N (< 4096) where the CUDA kernel's
+    # 16-warp / 16-row CTAs beat the Triton GEMV on this card.
+    if (2 <= M <= 8 or (M == 1 and N < 4096)) and _small_m_sm120_cuda(
         x_2d, weight_packed, weight_scales, bias, output
     ):
         return output.reshape(*orig_shape[:-1], N)
