@@ -41,24 +41,41 @@ using moe_gemm::GroupedExpert;
 using moe_gemm::GroupedExpertGemm;
 using moe_gemm::GroupedRouting;
 
-// gate/up (dual, gathered A) and down (scatter-add epilogue) configs; the last
-// of each is for layers whose experts get few rows.
-using DualConfigs =
-    std::tuple<GroupedExpertGemm<Elem, Shape<128, 128, 32>, Shape<64, 32, 32>,
-                                 3, true>,  // 8 warps
-               GroupedExpertGemm<Elem, Shape<128, 64, 32>, Shape<64, 32, 32>, 3,
-                                 true>,  // 4 warps
-               GroupedExpertGemm<Elem, Shape<64, 128, 32>, Shape<32, 64, 32>, 3,
-                                 true>>;  // 4 warps
-using DownConfigs =
-    std::tuple<GroupedExpertGemm<Elem, Shape<128, 256, 32>, Shape<64, 64, 32>,
-                                 3, false>,  // 8 warps
-               GroupedExpertGemm<Elem, Shape<128, 128, 32>, Shape<64, 64, 32>,
-                                 3, false>,  // 4 warps
-               GroupedExpertGemm<Elem, Shape<64, 128, 32>, Shape<32, 64, 32>, 4,
-                                 false>>;  // 4 warps
+// gate/up (dual, gathered A) and down (scatter-add epilogue) configs. The
+// mixed ones run full tiles of one height and finish every expert with tiles
+// of half that height: an expert with 288 rows pads to 320 instead of 384
+// (128 + 64), one with 144 rows to 160 instead of 192 (64 + 32).
+template <int M, int N, int K, int WM, int WN, int S, bool Dual>
+using G = GroupedExpertGemm<Elem, Shape<M, N, K>, Shape<WM, WN, K>, S, Dual>;
+using moe_gemm::GroupedTiledGemm;
+using DualConfigs = std::tuple<
+    GroupedTiledGemm<G<128, 128, 32, 64, 32, 3, true>>,  // 0: 8 warps
+    GroupedTiledGemm<G<128, 64, 32, 64, 32, 3, true>>,   // 1: 4 warps
+    GroupedTiledGemm<G<64, 128, 32, 32, 64, 3, true>>,   // 2: 4 warps
+    GroupedTiledGemm<G<128, 128, 32, 64, 32, 3, true>,
+                     G<64, 128, 32, 32, 32, 3, true>>,  // 3: 8 warps, mixed
+    GroupedTiledGemm<G<64, 128, 32, 32, 64, 3, true>,
+                     G<32, 128, 32, 32, 32, 3, true>>>;  // 4: 4 warps, mixed
+using DownConfigs = std::tuple<
+    GroupedTiledGemm<G<128, 256, 32, 64, 64, 3, false>>,  // 0: 8 warps
+    GroupedTiledGemm<G<128, 128, 32, 64, 64, 3, false>>,  // 1: 4 warps
+    GroupedTiledGemm<G<64, 128, 32, 32, 64, 4, false>>,   // 2: 4 warps
+    GroupedTiledGemm<G<128, 256, 32, 64, 64, 3, false>,
+                     G<64, 256, 32, 32, 64, 3, false>>,  // 3: 8 warps, mixed
+    GroupedTiledGemm<G<128, 128, 32, 64, 64, 3, false>,
+                     G<64, 128, 32, 32, 64, 4, false>>,  // 4: 4 warps, mixed
+    GroupedTiledGemm<G<64, 128, 32, 32, 64, 4, false>,
+                     G<32, 128, 32, 32, 32, 4, false>>>;  // 5: 4 warps, mixed
 constexpr int kNumDual = std::tuple_size_v<DualConfigs>;
 constexpr int kNumDown = std::tuple_size_v<DownConfigs>;
+
+template <typename Configs>
+struct Heights;
+template <typename... Gs>
+struct Heights<std::tuple<Gs...>> {
+  static constexpr int big[] = {Gs::kBigM...};
+  static constexpr int small[] = {(Gs::kMixed ? Gs::kSmallM : 0)...};
+};
 
 template <typename Configs, typename F, size_t... Is>
 void visit(int cfg, F&& f, std::index_sequence<Is...>) {
@@ -135,15 +152,16 @@ struct RouteParams {
   int rw_dtype;  // 0 fp32, 1 bf16, 2 fp16
   GroupedExpert const* experts;
   int n, T, E, H;
-  int chunk;                  // tokens per block
-  int* block_count;           // [blocks, n]
-  int* block_base;            // [blocks, n]
-  int* total;                 // [n]
-  int* offsets;               // [n + 1]
-  int* tokens;                // [rows]
-  float* weights;             // [rows]
-  int* tile_start[2];         // [n + 1] per GEMM
-  int tile_m[2], tiles_n[2];  // tiles_n = N panels per pass
+  int chunk;                     // tokens per block
+  int* block_count;              // [blocks, n]
+  int* block_base;               // [blocks, n]
+  int* total;                    // [n]
+  int* offsets;                  // [n + 1]
+  int* tokens;                   // [rows]
+  float* weights;                // [rows]
+  int* tile_start[2];            // [n + 1] per GEMM
+  moe_gemm::TileSplit split[2];  // M tiles of an expert per GEMM
+  int tiles_n[2];                // N panels per pass
   float* out;
   int64_t ldo;
   int zero_out;
@@ -278,10 +296,7 @@ __global__ void __launch_bounds__(256) route_kernel(RouteParams p) {
   if (b == 0 && tid >= 32 && tid < 96) {
     int const g = (tid - 32) / 32;  // tile prefix of GEMM g
     warp_scan(
-        p.n,
-        [&](int e) {
-          return (p.total[e] + p.tile_m[g] - 1) / p.tile_m[g] * p.tiles_n[g];
-        },
+        p.n, [&](int e) { return p.split[g].tiles(p.total[e]) * p.tiles_n[g]; },
         [&](int e, int v) { p.tile_start[g][e] = v; });
   }
   __syncthreads();
@@ -370,38 +385,77 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   TORCH_CHECK(rw_dtype >= 0, "grouped_moe_prefill: router_weight dtype");
 
   // Tile config: rows per expert are known only on the device; T·kcap / n is
-  // their mean when routing is balanced.
+  // their mean when routing is balanced. Relative MMA rates of the tile
+  // heights (sm_120 sweep) and the padding of every expert's last tiles
+  // decide between them.
   double const mean_rows = double(T) * kcap / n;
-  auto pick = [&](double const* rate, int const* tm, int count) {
-    int best = 0;
-    double best_eff = 0.0;
-    for (int c = 0; c < count; ++c) {
-      double padded = std::ceil(mean_rows / tm[c]) * tm[c];
-      double eff = rate[c] * mean_rows / padded;
-      if (eff > best_eff) {
-        best_eff = eff;
-        best = c;
+  int const rows_e = std::max(1, int(std::lround(mean_rows)));
+  // An expert's arithmetic intensity on its weights is about its row count
+  // (FLOP per weight byte). Below ~1.25x the ridge point (269 TF / 1641 GB/s
+  // = 164) the layer streams weights, and the 4-warp 64-row configs, with
+  // twice the CTAs in flight per SM, keep more loads outstanding than the
+  // 8-warp 128-row ones (deepseek-v4.1 9K gate/up: 15.9 vs 21.7 ms).
+  constexpr int kStreamRows = 208;
+  struct Rate {
+    double big, small;
+    bool streaming;  // a candidate when the layer streams weights
+  };
+  static constexpr Rate kDualRate[] = {{1.85, 0, false},
+                                       {1.68, 0, false},
+                                       {1.45, 0, true},
+                                       {1.85, 1.45, false},
+                                       {1.45, 1.10, true}};
+  static constexpr Rate kDownRate[] = {{1.70, 0, false},    {1.64, 0, false},
+                                       {1.40, 0, true},     {1.70, 1.40, false},
+                                       {1.64, 1.40, false}, {1.40, 1.05, true}};
+  static_assert(std::size(kDualRate) == kNumDual &&
+                std::size(kDownRate) == kNumDown);
+  bool const streaming = rows_e < kStreamRows;
+  // A config's split: small tiles finish an expert while they cost less than
+  // one more big tile.
+  auto split_of = [](Rate r, int big_m, int small_m) {
+    if (small_m == 0) return moe_gemm::TileSplit{big_m, big_m, 0};
+    return moe_gemm::TileSplit{
+        big_m, small_m, int(std::floor(big_m / r.big / (small_m / r.small)))};
+  };
+  auto cost = [&](Rate r, moe_gemm::TileSplit sp) {
+    int nb, ns;
+    sp.split(rows_e, nb, ns);
+    // Mixed heights cost ~8 % more per tile than the padding predicts (the
+    // static tile stride hands the cheap tiles to every other CTA): at 1200
+    // rows per expert pure 128-row tiles win, at 288 the mixed ones do.
+    return ns ? 1.08 * (nb * sp.big_m / r.big + ns * sp.small_m / r.small)
+              : nb * sp.big_m / r.big;
+  };
+  auto pick = [&]<typename Configs>(Rate const* rate, int& cfg) {
+    using Hm = Heights<Configs>;
+    if (cfg < 0) {
+      double best = 0;
+      for (int c = 0; c < int(std::size(Hm::big)); ++c) {
+        if (streaming && !rate[c].streaming) continue;
+        double t = cost(rate[c], split_of(rate[c], Hm::big[c], Hm::small[c]));
+        if (cfg < 0 || t < best) {
+          best = t;
+          cfg = c;
+        }
       }
     }
-    return best;
+    TORCH_CHECK(cfg < int(std::size(Hm::big)),
+                "grouped_moe_prefill: invalid tile config ", cfg);
+    return split_of(rate[cfg], Hm::big[cfg], Hm::small[cfg]);
   };
-  // Relative MMA rates of the configs on full tiles (sm_120 sweep); padding
-  // of the last M tile of every expert decides between them.
-  static constexpr double kDualRate[] = {1.85, 1.68, 1.45};
-  static constexpr int kDualTm[] = {128, 128, 64};
-  static constexpr double kDownRate[] = {1.70, 1.64, 1.40};
-  static constexpr int kDownTm[] = {128, 128, 64};
-  if (dual_cfg < 0) dual_cfg = pick(kDualRate, kDualTm, kNumDual);
-  if (down_cfg < 0) down_cfg = pick(kDownRate, kDownTm, kNumDown);
-  int tile_m[2], tiles_n[2], panels[2];
-  visit<DualConfigs>(dual_cfg, [&]<typename G>() {
-    tile_m[0] = G::ThreadblockShape::kM;
-    tiles_n[0] = (I + G::ThreadblockShape::kN - 1) / G::ThreadblockShape::kN;
+  moe_gemm::TileSplit const split[2] = {
+    pick.template operator()<DualConfigs>(kDualRate, dual_cfg),
+    pick.template operator()<DownConfigs>(kDownRate, down_cfg)
+  };
+  int const ms[2] = {split[0].max_small, split[1].max_small};
+  int tiles_n[2], panels[2];
+  visit<DualConfigs>(dual_cfg, [&]<typename Gm>() {
+    tiles_n[0] = (I + Gm::ThreadblockShape::kN - 1) / Gm::ThreadblockShape::kN;
     panels[0] = tiles_n[0];
   });
-  visit<DownConfigs>(down_cfg, [&]<typename G>() {
-    tile_m[1] = G::ThreadblockShape::kM;
-    tiles_n[1] = (H + G::ThreadblockShape::kN - 1) / G::ThreadblockShape::kN;
+  visit<DownConfigs>(down_cfg, [&]<typename Gm>() {
+    tiles_n[1] = (H + Gm::ThreadblockShape::kN - 1) / Gm::ThreadblockShape::kN;
     // The scatter-add output is [T, H] fp32 and every row receives kcap
     // reductions from different experts. When it does not fit in L2 those
     // reductions miss; sweeping it in P passes of N panels keeps one slice
@@ -461,8 +515,8 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   rp.weights = reinterpret_cast<float*>(ws + o_w);
   rp.tile_start[0] = reinterpret_cast<int*>(ws + o_ts0);
   rp.tile_start[1] = reinterpret_cast<int*>(ws + o_ts1);
-  rp.tile_m[0] = tile_m[0];
-  rp.tile_m[1] = tile_m[1];
+  rp.split[0] = split[0];
+  rp.split[1] = split[1];
   rp.tiles_n[0] = panels[0];
   rp.tiles_n[1] = panels[1];
   rp.out = out.data_ptr<float>();
@@ -486,17 +540,18 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
 
   visit<DualConfigs>(dual_cfg, [&]<typename G>() {
     routing.tile_start = rp.tile_start[0];
-    auto p = G::make_params(n, I, H, int(hidden.stride(0)), experts, routing, x,
-                            act, nullptr, 0);
+    auto p = G::make_params(ms[0], n, I, H, int(hidden.stride(0)), experts,
+                            routing, x, act, nullptr, 0);
     int const grid = sms * occupancy<G>(device);
     moe_gemm::grouped_expert_gemm_kernel<G>
         <<<grid, G::kThreads, G::kSmemBytes, stream>>>(p);
   });
   visit<DownConfigs>(down_cfg, [&]<typename G>() {
     routing.tile_start = rp.tile_start[1];
-    auto p = G::make_params(n, H, I, I, experts, routing, act, nullptr,
+    auto p = G::make_params(ms[1], n, H, I, I, experts, routing, act, nullptr,
                             out.data_ptr<float>(), out.stride(0));
-    p.panels = panels[1];
+    p.big.panels = panels[1];
+    p.small.panels = panels[1];
     int const grid = sms * occupancy<G>(device);
     moe_gemm::grouped_expert_gemm_kernel<G>
         <<<grid, G::kThreads, G::kSmemBytes, stream>>>(p);

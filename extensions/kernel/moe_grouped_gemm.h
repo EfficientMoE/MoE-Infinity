@@ -24,6 +24,7 @@
 #include "kernel/moe_expert_gemm.h"
 
 #include <cstdint>
+#include <type_traits>
 
 namespace moe_gemm {
 
@@ -275,19 +276,85 @@ struct GroupedExpertGemm {
     }
     __syncthreads();  // the next tile's prologue reuses shared memory
   }
+};
 
+// Rows of one expert split into `nbig` tiles of big_m rows followed by
+// `nsmall` tiles of small_m rows: the small tiles cover the remainder when at
+// most max_small of them are cheaper than one more big tile. A single-height
+// config has small_m = big_m and max_small = 0.
+struct TileSplit {
+  int big_m, small_m, max_small;
+  CUTLASS_HOST_DEVICE void split(int rows, int& nbig, int& nsmall) const {
+    nbig = rows / big_m;
+    int const rem = rows - nbig * big_m;
+    nsmall = 0;
+    if (rem > 0) {
+      nsmall = (rem + small_m - 1) / small_m;
+      if (nsmall > max_small) {
+        ++nbig;
+        nsmall = 0;
+      }
+    }
+  }
+  CUTLASS_HOST_DEVICE int tiles(int rows) const {
+    int a, b;
+    split(rows, a, b);
+    return a + b;
+  }
+};
+
+// One persistent launch over the tiles of every expert, with two tile heights
+// (Big for full tiles, Small for the remainder of each expert; Small = Big for
+// a single-height config). Both share the CTA size and the N tile.
+template <typename Big_, typename Small_ = Big_>
+struct GroupedTiledGemm {
+  using Big = Big_;
+  using Small = Small_;
+  static constexpr bool kMixed = !std::is_same_v<Big, Small>;
+  static_assert(Big::kThreads == Small::kThreads, "one CTA size");
+  static_assert(Big::ThreadblockShape::kN == Small::ThreadblockShape::kN,
+                "one N tile");
+  static_assert(Big::ThreadblockShape::kM % Small::ThreadblockShape::kM == 0,
+                "small tiles start on big tile boundaries");
+  static_assert(Big::kDual == Small::kDual, "same GEMM");
+  using ThreadblockShape = typename Big::ThreadblockShape;
+  static constexpr int kBigM = Big::ThreadblockShape::kM;
+  static constexpr int kSmallM = Small::ThreadblockShape::kM;
+  static constexpr int kThreads = Big::kThreads;
+
+  union KernelStorage {
+    typename Big::SharedStorage big;
+    typename Small::SharedStorage small;
+  };
+  static constexpr int kSmemBytes = int(sizeof(KernelStorage));
+
+  struct Params {
+    typename Big::Params big;
+    typename Small::Params small;
+    TileSplit split;
+  };
+
+  template <typename... Args>
+  static Params make_params(int max_small, Args&&... args) {
+    Params p;
+    p.big = Big::make_params(args...);
+    p.small = Small::make_params(args...);
+    p.split = {kBigM, kMixed ? kSmallM : kBigM, kMixed ? max_small : 0};
+    return p;
+  }
   CUTLASS_DEVICE
   static void run(Params const& p, KernelStorage& storage) {
     // Tiles are numbered pass-major (groups of `panels` N panels), then
-    // expert, then N panel, then M tile; the routing kernel published the
-    // first tile of every expert within one pass.
-    int const* start = p.routing.tile_start;
-    int const per_pass = start[p.n];
-    int const total = per_pass * (p.tiles_n / p.panels);
+    // expert, then N panel, then M tile (big tiles first); the routing kernel
+    // published the first tile of every expert within one pass.
+    auto const& pb = p.big;
+    int const* start = pb.routing.tile_start;
+    int const per_pass = start[pb.n];
+    int const total = per_pass * (pb.tiles_n / pb.panels);
     for (int t = blockIdx.x; t < total; t += gridDim.x) {
       int const pass = t / per_pass;
       int const tl = t - pass * per_pass;
-      int lo = 0, hi = p.n;  // largest e with start[e] <= tl
+      int lo = 0, hi = pb.n;  // largest e with start[e] <= tl
       while (hi - lo > 1) {
         int mid = (lo + hi) / 2;
         if (__ldg(start + mid) <= tl)
@@ -296,12 +363,21 @@ struct GroupedExpertGemm {
           hi = mid;
       }
       int const e = lo;
-      int const rows = p.routing.offsets[e + 1] - p.routing.offsets[e];
-      int const tiles_m =
-          (rows + ThreadblockShape::kM - 1) / ThreadblockShape::kM;
+      int const rows = pb.routing.offsets[e + 1] - pb.routing.offsets[e];
+      int nbig, nsmall;
+      p.split.split(rows, nbig, nsmall);
+      int const tiles_m = nbig + nsmall;
       int const local = tl - start[e];
-      run_tile(p, storage.tiles, e, local % tiles_m,
-               pass * p.panels + local / tiles_m);
+      int const m = local % tiles_m;
+      int const n = pass * pb.panels + local / tiles_m;
+      if constexpr (kMixed) {
+        if (m >= nbig) {
+          Small::run_tile(p.small, storage.small, e,
+                          nbig * (kBigM / kSmallM) + (m - nbig), n);
+          continue;
+        }
+      }
+      Big::run_tile(pb, storage.big, e, m, n);
     }
   }
 };
