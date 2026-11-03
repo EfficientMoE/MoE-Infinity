@@ -123,13 +123,12 @@ torch::Tensor gptoss_mxfp4_expert(torch::Tensor x, torch::Tensor gu_blocks,
                                   torch::Tensor d_bias) {
   TORCH_CHECK(x.is_cuda() && x.dim() == 2, "x must be a 2D CUDA tensor");
   auto xb = x.to(torch::kBFloat16).contiguous();
-  auto act = torch::empty({xb.size(0), d_blocks.size(1) * 2}, xb.options());
   auto out = torch::empty_like(xb);
   GptOssExpertScratch scratch;
   auto stream = at::cuda::getCurrentCUDAStream(x.device().index());
   TORCH_CHECK(
       gptoss_mxfp4_expert_forward(xb, gu_blocks, gu_scales, gu_bias, d_blocks,
-                                  d_scales, d_bias, act, out, scratch, stream),
+                                  d_scales, d_bias, out, scratch, stream),
       "gptoss_mxfp4_expert: unsupported shapes/dtypes/alignment");
   return out;
 }

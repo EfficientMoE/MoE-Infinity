@@ -66,6 +66,10 @@ cudaError_t gptoss_mxfp4_expert_cuda(const void* x, int M, int H, int I,
                                      const Mxfp4Workspace* ws_d,
                                      cudaStream_t stream);
 
+// Drops [p, p + bytes) from L2 without write-back (discard.global.L2): for
+// intermediates that are dead once the op is done. p 128-B aligned.
+cudaError_t mxfp4_l2_discard_cuda(void* p, size_t bytes, cudaStream_t stream);
+
 void mxfp4_dequant_cuda(const void* packed, const void* scales, void* output,
                         int rows, int packed_cols, int scale_cols,
                         int block_size, cudaStream_t stream);

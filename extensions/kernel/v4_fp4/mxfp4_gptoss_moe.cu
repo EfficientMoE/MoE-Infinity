@@ -170,6 +170,15 @@ __device__ __forceinline__ void cp_async_wait() {
   asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
 }
 
+// Drops 128-B L2 lines without writing them back (their data is dead).
+__device__ __forceinline__ void discard_l2(const void* p, size_t bytes, int tid,
+                                           int nthreads) {
+  const char* c = static_cast<const char*>(p);
+  for (size_t i = static_cast<size_t>(tid) * 128; i < bytes;
+       i += static_cast<size_t>(nthreads) * 128)
+    asm volatile("discard.global.L2 [%0], 128;" ::"l"(c + i) : "memory");
+}
+
 __device__ __forceinline__ float swiglu_oai(float gate, float up) {
   // Match the BF16 module: gate/up are rounded to BF16 after the bias add.
   gate = __bfloat162float(__float2bfloat16(gate));
@@ -434,7 +443,7 @@ struct StreamK {
   int n_tiles;         // all tiles
   int n_dp;            // tiles [0, n_dp) are processed whole
   long long sk_iters;  // (n_tiles - n_dp) * KB
-  float* partials;     // [grid][2][slot_floats]
+  float* partials;     // [2][grid][slot_floats] (first / last segment)
   int* counters;       // [n_tiles - n_dp], zero on entry and on exit
   // Optional side job: de-quantise `side_blocks` MX blocks (16 B codes +
   // 1 B scale -> 32 BF16) of another MXFP4 tensor while the GEMM runs, so
@@ -901,7 +910,8 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
         eng.epilogue(bias, N, y, M, n0, t0, acc);
       } else {
         const int which = (it == b) ? 0 : 1;
-        float* mine = sk.partials + (2 * blockIdx.x + which) * slot;
+        float* mine =
+            sk.partials + (which * static_cast<size_t>(G) + blockIdx.x) * slot;
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
@@ -927,7 +937,8 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
           for (int c = c_first; c <= c_last; ++c) {
             if (c == static_cast<int>(blockIdx.x)) continue;
             const int w = sk_begin(c, T, G) >= tb ? 0 : 1;
-            const float* other = sk.partials + (2 * c + w) * slot;
+            const float* other =
+                sk.partials + (w * static_cast<size_t>(G) + c) * slot;
 #pragma unroll
             for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
@@ -955,6 +966,11 @@ __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
     }
   }
   if (!hooks.waited) pdl_wait();
+}
+
+__global__ void l2_discard_kernel(void* p, size_t bytes) {
+  discard_l2(p, bytes, blockIdx.x * blockDim.x + threadIdx.x,
+             gridDim.x * blockDim.x);
 }
 
 // --------------------------------------------------------------------------
@@ -1090,7 +1106,10 @@ struct TileLauncher {
                          work->counters != nullptr;
     if (have_ws)
       grid = static_cast<int>(std::min<size_t>(grid, work->bytes / slot_bytes));
-    const bool can_sk = have_ws && grid >= slots / 2 && sk.n_tiles % slots != 0;
+    // Stream-K only pays off for a few waves; with many, the tail wave is
+    // cheap and the FP32 partials would only add L2 traffic.
+    const bool can_sk = have_ws && grid >= slots / 2 &&
+                        sk.n_tiles % slots != 0 && sk.n_tiles < 16 * slots;
     if (!can_sk) {
       sk.n_dp = sk.n_tiles;
       grid = std::min(slots * 8, sk.n_tiles);
@@ -1236,6 +1255,17 @@ cudaError_t mxfp4_linear_cuda(const void* x, int M, int K, const void* wq,
                                      stream, config)
              : dispatch<false, false>(xb, M, K, wqb, wsb, bb, N, yb, work, side,
                                       stream, config);
+}
+
+cudaError_t mxfp4_l2_discard_cuda(void* p, size_t bytes, cudaStream_t stream) {
+  using namespace gptoss_mxfp4;
+  bytes &= ~size_t{127};
+  if (bytes == 0) return cudaSuccess;
+  if (reinterpret_cast<uintptr_t>(p) % 128 != 0) return cudaErrorInvalidValue;
+  const int blocks = static_cast<int>(std::min<size_t>(
+      device_info(current_device()).sms * 2, (bytes / 128 + 255) / 256));
+  l2_discard_kernel<<<blocks, 256, 0, stream>>>(p, bytes);
+  return cudaGetLastError();
 }
 
 cudaError_t gptoss_mxfp4_expert_cuda(const void* x, int M, int H, int I,

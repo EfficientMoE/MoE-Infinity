@@ -209,20 +209,16 @@ def _gptoss_offload_builder(M: int, H: int, I: int):
         gu_packed, gu_scale, gu_bias, d_packed, d_scale, d_bias = (
             _mxfp4_weights(H, I)
         )
-        act = torch.empty(M, I, device="cuda", dtype=torch.bfloat16)
         out = torch.empty(M, H, device="cuda", dtype=torch.bfloat16)
         # Per-executor scratch, sized like gptoss_mxfp4_expert_forward
-        # allocates it (partials only for M > 32, BF16 Wd only for the
-        # dense-down path at M >= 320).
-        ws = ext.mxfp4_workspace_bytes() if M > 32 else 0
-        u8 = dict(device="cuda", dtype=torch.uint8)
-        partials_gu = torch.empty(ws, **u8)
-        partials_d = torch.empty(ws if M < 320 else 0, **u8)
+        # allocates it (BF16 Wd, act and stream-K partials in one arena).
+        arena = torch.empty(
+            ext.gptoss_expert_arena_bytes(M, H, I),
+            device="cuda",
+            dtype=torch.uint8,
+        )
         counters = torch.zeros(
             2 * ext.mxfp4_stream_k_counters, device="cuda", dtype=torch.int32
-        )
-        wd = torch.empty(
-            (H, I) if M >= 320 else (0, 0), device="cuda", dtype=torch.bfloat16
         )
 
         def run():
@@ -234,12 +230,9 @@ def _gptoss_offload_builder(M: int, H: int, I: int):
                 d_packed,
                 d_scale,
                 d_bias,
-                act,
                 out,
-                partials_gu,
-                partials_d,
+                arena,
                 counters,
-                wd,
             )
 
         return run

@@ -55,13 +55,11 @@ static void py_fp8_dequant_blockwise(at::Tensor weight_u8, at::Tensor scale,
 static void py_gptoss_mxfp4_expert(at::Tensor x, at::Tensor gu_blocks,
                                    at::Tensor gu_scales, at::Tensor gu_bias,
                                    at::Tensor d_blocks, at::Tensor d_scales,
-                                   at::Tensor d_bias, at::Tensor act,
-                                   at::Tensor out, at::Tensor partials_gu,
-                                   at::Tensor partials_d, at::Tensor counters,
-                                   at::Tensor wd_bf16) {
-  GptOssExpertScratch scratch{partials_gu, partials_d, counters, wd_bf16};
+                                   at::Tensor d_bias, at::Tensor out,
+                                   at::Tensor arena, at::Tensor counters) {
+  GptOssExpertScratch scratch{arena, counters};
   TORCH_CHECK(gptoss_mxfp4_expert_forward(
-      x, gu_blocks, gu_scales, gu_bias, d_blocks, d_scales, d_bias, act, out,
+      x, gu_blocks, gu_scales, gu_bias, d_blocks, d_scales, d_bias, out,
       scratch, at::cuda::getCurrentCUDAStream().stream()));
 }
 
@@ -70,7 +68,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("mxfp4_dequant", &py_mxfp4_dequant);
   m.def("fp8_dequant_blockwise", &py_fp8_dequant_blockwise);
   m.def("gptoss_mxfp4_expert", &py_gptoss_mxfp4_expert);
-  m.def("mxfp4_workspace_bytes",
-        []() { return static_cast<int64_t>(mxfp4_linear_workspace_bytes()); });
+  m.def("gptoss_expert_arena_bytes", [](int64_t M, int64_t H, int64_t I) {
+    return static_cast<int64_t>(gptoss_expert_arena_bytes(M, H, I));
+  });
   m.attr("mxfp4_stream_k_counters") = kMxfp4StreamKCounters;
 }

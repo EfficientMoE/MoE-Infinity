@@ -169,10 +169,9 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
     data_shapes.push_back({kMaxTokens, hdim});  // input buffer
     data_shapes.push_back({kMaxTokens, hdim});  // output buffer
 
-    // GPT-OSS needs one intermediate (the SwiGLU output); the MXFP4 kernels
-    // keep their own scratch (GptOssExpertScratch).
+    // GPT-OSS keeps its intermediate in its own scratch (GptOssExpertScratch).
     const size_t n_intermediate =
-        expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE ? 1 : tensor_shapes.size();
+        expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE ? 0 : tensor_shapes.size();
     for (size_t i = 0; i < n_intermediate; i++) {
       data_shapes.push_back({kMaxTokens, idim});  // intermediate buffers
     }
@@ -298,11 +297,10 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
 
   if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
     const auto& p = gpt_oss_param_;
-    auto& act = buffer_[2];
     // MXFP4 tensor-core kernels on the stored blocks/scales: 2 launches with
     // bias, interleaved gate/up split and clamped SwiGLU-OAI fused.
     if (gptoss_mxfp4_expert_forward(input, p[0], p[1], p[2], p[3], p[4], p[5],
-                                    act, output, gpt_oss_scratch_, stream)) {
+                                    output, gpt_oss_scratch_, stream)) {
       return;
     }
     // Fallback (layouts the kernels do not cover): BF16 reference math.

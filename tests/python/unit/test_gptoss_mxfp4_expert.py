@@ -79,7 +79,9 @@ def _reference(x, w, bf16_steps):
 
 
 @pytest.mark.parametrize("H,I", [(64, 96), (2880, 2880)])
-@pytest.mark.parametrize("M", [1, 2, 3, 8, 13, 17, 32, 33, 64, 200, 320, 700])
+@pytest.mark.parametrize(
+    "M", [1, 2, 3, 8, 13, 17, 32, 33, 64, 200, 288, 320, 700]
+)
 def test_matches_reference(H, I, M):
     ext = _ext()
     w = _expert(H, I, seed=M)
