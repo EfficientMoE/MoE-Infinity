@@ -23,6 +23,9 @@ import torch
 import triton
 import triton.language as tl
 
+# keep the block buffers resident (Rule F); toggled for measurement
+L2_PERSIST = True
+
 
 @triton.jit(do_not_specialize=["T", "t_base", "TB", "NC"])
 def blocked_recur_kernel(
@@ -183,11 +186,17 @@ def chunk_gated_delta_rule_blocked(
         if initial_state is not None
         else k.new_zeros(B, H, K, V, dtype=torch.float32)
     )
-    w = k.new_empty(B, TB, H, K)
-    u = k.new_empty(B, TB, H, V)
-    qg = k.new_empty(B, TB, H, K)
-    kd = k.new_empty(B, TB, H, K)
-    S = k.new_empty(B, TB, H, 64)
+    # one allocation so a single persisting-L2 window can cover the buffers
+    n = B * TB * H
+    arena = k.new_empty(n * (3 * K + V + 64))
+    w, u, qg, kd, S = (
+        t.view(B, TB, H, -1)
+        for t in arena.split([n * K, n * V, n * K, n * K, n * 64])
+    )
+    if use_cuda and L2_PERSIST:
+        from moe_infinity.kernel import gdn_recur_cuda
+
+        gdn_recur_cuda.l2_window(arena, arena.numel() * arena.element_size())
     for t_base in range(0, T, TB):
         nb = min(TB, T - t_base)
         gdn_fwd_prep_kernel[(triton.cdiv(nb, 64), B * H)](
@@ -245,4 +254,6 @@ def chunk_gated_delta_rule_blocked(
             num_stages,
             use_cuda,
         )
+    if use_cuda and L2_PERSIST:
+        gdn_recur_cuda.l2_window(arena, 0)
     return o, (h if output_final_state else None)
