@@ -52,7 +52,7 @@ def _gate(b_A, gi, gj, mi, mj, STRICT: tl.constexpr, o_i):
     return b_A * tl.where(m, tl.exp2(gi[:, None] - gj[None, :]), 0.0)
 
 
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "t_base", "TB"])
 def gdn_fwd_prep_kernel(
     k,
     v,
@@ -62,6 +62,8 @@ def gdn_fwd_prep_kernel(
     u,
     kn,
     T,
+    t_base,
+    TB,
     HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -69,13 +71,22 @@ def gdn_fwd_prep_kernel(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NORM_K: tl.constexpr,
+    BLOCK_OUT: tl.constexpr = False,
 ):
+    """BLOCK_OUT: chunk i_t of the token block starting at ``t_base``; w / u
+    go to block-local buffers ([B, TB, H, *]) and k_n is not written."""
     tl.static_assert(BT == 4 * BC)
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
     bos = i_b * T
+    # output rows are indexed with global token ids; shift the base so that
+    # global id t_base lands on local row 0 of the block buffers
+    if BLOCK_OUT:
+        obos = i_b * TB - t_base
+    else:
+        obos = bos
 
-    t0 = i_t * BT
+    t0 = t_base + i_t * BT
     o_i = tl.arange(0, BC)
     r0 = t0 + o_i
     r1 = r0 + BC
@@ -85,9 +96,9 @@ def gdn_fwd_prep_kernel(
 
     k += (bos * HV + i_h) * K
     v += (bos * HV + i_h) * V
-    w += (bos * HV + i_h) * K
-    u += (bos * HV + i_h) * V
-    kn += (bos * HV + i_h) * K
+    w += (obos * HV + i_h) * K
+    u += (obos * HV + i_h) * V
+    kn += (obos * HV + i_h) * K
     pb = beta + bos * HV + i_h
     pg = g + bos * HV + i_h
     b0 = tl.load(pb + r0 * HV, mask=m0, other=0.0).to(tl.float32)
@@ -234,7 +245,7 @@ def gdn_fwd_prep_kernel(
     x1 = tl.load(pk + r1[:, None] * (HV * K), mask=m1[:, None], other=0.0)
     x2 = tl.load(pk + r2[:, None] * (HV * K), mask=m2[:, None], other=0.0)
     x3 = tl.load(pk + r3[:, None] * (HV * K), mask=m3[:, None], other=0.0)
-    if NORM_K:
+    if NORM_K and not BLOCK_OUT:
         pn = kn + o_k[None, :]
         tl.store(
             pn + r0[:, None] * (HV * K),
@@ -322,6 +333,67 @@ def gdn_fwd_prep_kernel(
     )
 
 
+@triton.jit(do_not_specialize=["T", "t_base", "TB"])
+def gdn_fwd_aux_kernel(
+    q,
+    k,
+    g,
+    qg,
+    kd,
+    S,
+    scale,
+    T,
+    t_base,
+    TB,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    BT: tl.constexpr,
+    NORM: tl.constexpr,
+):
+    """h-independent recurrence operands of one chunk into block buffers:
+    qg = scale * exp2(g) * q_n, kd = exp2(g_last - g) * k_n,
+    S = scale * tril(q_n k_n^T * exp2(g_i - g_j))."""
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_b, i_h = i_bh // HV, i_bh % HV
+    bos = i_b * T
+    obos = i_b * TB - t_base
+    t0 = t_base + i_t * BT
+    o_c = tl.arange(0, BT)
+    o_k = tl.arange(0, K)
+    o_t = t0 + o_c
+    m_t = o_t < T
+    p_row = o_t[:, None] * (HV * K) + o_k[None, :]
+    base = (bos * HV + i_h) * K
+    b_k = tl.load(k + base + p_row, mask=m_t[:, None], other=0.0).to(tl.float32)
+    b_q = tl.load(q + base + p_row, mask=m_t[:, None], other=0.0).to(tl.float32)
+    pg = g + bos * HV + i_h
+    b_gc = tl.load(pg + o_t * HV, mask=m_t, other=0.0).to(tl.float32)
+    b_gl = tl.load(pg + (tl.minimum(t0 + BT, T) - 1) * HV).to(tl.float32)
+    if NORM:
+        b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k, 1) + 1e-6)[:, None]
+        b_q = b_q * tl.rsqrt(tl.sum(b_q * b_q, 1) + 1e-6)[:, None]
+    dt = qg.dtype.element_ty
+    b_S = tl.dot(b_q.to(dt), tl.trans(b_k.to(dt)))
+    m_S = (o_c[:, None] >= o_c[None, :]) & m_t[:, None] & m_t[None, :]
+    b_S = tl.where(m_S, b_S * tl.exp2(b_gc[:, None] - b_gc[None, :]), 0.0)
+    o_row = (obos * HV + i_h) * K + p_row
+    tl.store(
+        qg + o_row,
+        (b_q * (tl.exp2(b_gc) * scale)[:, None]).to(dt),
+        mask=m_t[:, None],
+    )
+    tl.store(
+        kd + o_row,
+        (b_k * tl.where(m_t, tl.exp2(b_gl - b_gc), 0.0)[:, None]).to(dt),
+        mask=m_t[:, None],
+    )
+    tl.store(
+        S + (obos * HV + i_h) * BT + o_t[:, None] * (HV * BT) + o_c[None, :],
+        (b_S * scale).to(dt),
+        mask=m_t[:, None],
+    )
+
+
 def gdn_fwd_prep(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -348,6 +420,8 @@ def gdn_fwd_prep(
         w,
         u,
         kn,
+        T,
+        0,
         T,
         HV=H,
         K=K,
