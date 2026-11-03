@@ -901,3 +901,54 @@ Artifacts: `results_real_qwen3-30b-a3b-rothead.csv`,
 prereg + verdict JSON + artifact hashes in `exp662-moei-rothead/`. EXPERIMENTS.md
 rows carry `647ed87+dirty` provenance (run preceded this commit; policy sha
 frozen in ARTIFACT.sha256 before the run).
+
+## Addendum 12 — exp663 HotFit (capacity-aware hot-set arbitration): FAIL
+
+**Prereg** `edc3d916` (frozen before sweep; smoke disclosed). Policy: `research/policies_hotfit.py` —
+online probe computes N_hot = smallest hottest-key set covering >= 80% of a 2048-access window,
+re-evaluated every 4096 accesses; arbitration `capacity >= 1.0 x N_hot -> S3FIFO else LCNU`.
+COVERAGE=0.80, ALPHA=1.0, window/segment sizes are round a-priori values, not tuned.
+
+### Execution integrity note (disclosed)
+The first sweep was **invalid and fully excised**: `hotfit` had been registered in the policy
+factory and CLI but omitted from `GEOMETRY_POLICIES`, so the sweep harness built the wrapper with
+default geometry (num_layers=1, prior=0.05) instead of trace geometry (num_layers=48/32,
+prior=k/E). The wrapper's deterministic re-simulation gate (sweep CSV vs independent resim with
+explicit kwargs) flagged rate mismatches (e.g. 30b@cap128 CSV 0.183462 vs resim 0.208345);
+root cause confirmed in-process (`geometry_kwargs('hotfit', stats) == {}`), the one-line set
+membership fix applied, corrupted CSV/MD files and their 42 EXPERIMENTS.md rows removed, and both
+sweeps re-run. All numbers below are from the corrected runs; determinism_ok=True at 5e-7.
+
+### Verdict: **FAIL** (H1=False, H2=False, H3=False)
+
+Per-capacity hit rates (decode, real traces; baselines from frozen `*_decode.csv`):
+
+| cap | 30b LCNU | 30b S3FIFO | 30b HotFit | sw | granite LCNU | granite S3FIFO | granite HotFit | sw |
+|---|---|---|---|---|---|---|---|---|
+| 128 | 0.2083 | 0.0000 | **0.2083** | 0 | 0.2838 | 0.0000 | **0.2838** | 0 |
+| 256 | 0.3273 | 0.0689 | **0.3273** | 0 | 0.4682 | 0.3789 | **0.4682** | 0 |
+| 384 | 0.4148 | 0.3598 | **0.4148** | 0 | 0.7287 | 0.6765 | **0.6779** | 7 |
+| 512 | 0.4853 | 0.4227 | **0.4829** | 26 | 0.8864 | 0.8793 | **0.8794** | 1 |
+| 768 | 0.5905 | 0.5424 | **0.5591** | 131 | 0.9708 | 0.9732 | **0.9732** | 1 |
+
+- **H1 (30b near-dominance, <=0.5pp of best baseline at every cap): FAIL.** Worst deficit vs best
+  baseline: cap 768, -3.14pp below LCNU (HotFit entered S3FIFO at cap 1024 where LCNU still
+  leads; the exp652 LCNU->S3FIFO crossover is at ~1280).
+- **H2 (granite no-loss vs LCNU, <=0.5pp): FAIL.** Worst deficit cap 512, -5.08pp (early
+  S3FIFO entry at 768 + boundary oscillation at 512).
+- **H3 (stability <=6 switches): FAIL.** Max switches: 30b 131,
+  granite 7 — N_hot hovers near capacity in the transition band and
+  the arbitration flips per segment.
+- Both extremes are exact: caps <=384 (30b) / <=256 (granite) reproduce LCNU bit-for-bit
+  (0 switches); caps >=1536 (30b) / 1024 (granite) reproduce S3FIFO (1 switch).
+
+### Mechanism conclusion
+Capacity-aware hot-set arbitration is a strict improvement over exp662's capacity-blind probe
+(worst-case error shrinks from -25.65pp to -3.14pp on 30b, and both regimes are now identified
+exactly), but the specific criterion "capacity >= 80%-coverage hot set" **overshoots the
+crossover**: the hot set at 80% coverage fits well before the measured 10E boundary, so the
+policy enters S3FIFO one-to-two grid steps early and pays the LCNU advantage in that band. The
+transition band additionally suffers probe-noise oscillation (131 switches at 30b cap 768).
+A correct online criterion must sit between hot-set-fit (too early) and full working set
+(exp659 ceilings) — i.e., the boundary is governed by the *effective* reuse structure (exp660
+half-life), not by static coverage quantiles.

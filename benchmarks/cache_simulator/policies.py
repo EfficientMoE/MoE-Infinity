@@ -1370,6 +1370,7 @@ POLICY_FACTORIES = {
     "layer_lru": lambda cap, **kw: LayerLRUPolicy(cap, **kw),
     "lcnu": lambda cap, **kw: LayerCycleNextUsePolicy(cap, **kw),
     "rothead": lambda cap, **kw: _build_rothead(cap, **kw),
+    "hotfit": lambda cap, **kw: _build_hotfit(cap, **kw),
 }
 
 
@@ -1382,9 +1383,18 @@ def _build_rothead(cap, **kw):
 
     return RotHeadPolicy(cap, **kw)
 
+
+def _build_hotfit(cap, **kw):
+    # Lazy import for the same no-cycle reason as _build_rothead.
+    from benchmarks.cache_simulator.research.policies_hotfit import (
+        HotFitPolicy,
+    )
+
+    return HotFitPolicy(cap, **kw)
+
 #: Policies that accept the model geometry (``num_layers``; ``lcnu`` also
 #: ``prior = top_k / num_experts``) as keyword arguments.
-GEOMETRY_POLICIES = {"layer_lru", "lcnu", "rothead"}
+GEOMETRY_POLICIES = {"layer_lru", "lcnu", "rothead", "hotfit"}
 
 
 # Keep a module-level INF for callers that compare against Belady.
