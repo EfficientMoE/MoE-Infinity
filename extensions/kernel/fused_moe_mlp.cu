@@ -399,10 +399,11 @@ size_t l2_size(int device) {
 // the down launch reads it with a streaming window, which releases the lines.
 // Applies to intermediates from 8 MB up to twice the persisting carve-out
 // (80 MB on sm_120); one larger than the carve-out persists in part
-// (hitRatio = 0.9 x carve-out / size).
+// (hitRatio = carve-out / size).
 class IntermediateWindow {
-  // Persisting lines beyond the carve-out evict each other; leave slack.
-  static constexpr double kPersistShare = 0.9;
+  // Share of the carve-out given to the window (mixtral 12K, 88 MB: DRAM /
+  // ideal 1.10 at 1.0, 1.15 at 0.9).
+  static constexpr double kPersistShare = 1.0;
 
  public:
   IntermediateWindow(int device, cudaStream_t stream, void* base, size_t bytes)
