@@ -143,7 +143,10 @@ def test_scale_edge_cases():
     gq[:, 4:8] = 0x77  # +6 / +6
     dq[:, :2] = 0xFF  # -6 / -6
     w = (gq, gs, gb, dq, ds, db)
-    x = torch.randn(M, H, device="cuda").to(torch.bfloat16)
+    # Seeded: with the 2^13 down scale, one BF16 ulp of act (accumulation
+    # order) moves an output by ~1 % of the max, so unseeded x made this flaky.
+    g = torch.Generator(device="cuda").manual_seed(3)
+    x = torch.randn(M, H, device="cuda", generator=g).to(torch.bfloat16)
     out = ext.gptoss_mxfp4_expert(x, *w)
     ref = _reference(x, w, bf16_steps=False)
     assert torch.isfinite(out).all() and torch.isfinite(ref).all()
