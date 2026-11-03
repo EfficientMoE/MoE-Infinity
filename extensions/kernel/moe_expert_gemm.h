@@ -196,6 +196,36 @@ struct ExpertGemm {
     return p;
   }
 
+  // Rasterisation when the operands do not fit in L2 together (`l2_bytes`
+  // = the part of L2 they may use): if the smaller operand plus one tile
+  // band of the other fits, keep the smaller one resident and sweep it once
+  // per band of the other (group 1), so both are read from DRAM once.
+  // Otherwise size the groups so one band stays resident.
+  static void fit_raster(Params& p, cutlass::gemm::GemmCoord problem,
+                         double l2_bytes) {
+    double const e = sizeof(Element);
+    double const a = double(problem.m()) * problem.k() * e;
+    double const b = double(problem.n()) * problem.k() * e * kAccumulators;
+    if (a + b <= l2_bytes) return;
+    double const band_a = double(ThreadblockShape::kM) * problem.k() * e;
+    double const band_b =
+        double(ThreadblockShape::kN) * problem.k() * e * kAccumulators;
+    if (a <= b ? a + band_b <= l2_bytes : b + band_a <= l2_bytes) {
+      p.group = 1;
+      p.group_along_m = a > b;  // along M: B swept per M tile
+      return;
+    }
+    // Neither fits: keep a band of g tiles of one operand in half of L2 and
+    // stream the other once per band; pick the side that reads less.
+    double const half = 0.5 * l2_bytes;
+    int const gm = std::clamp(int(half / band_a), 1, p.tiles_m);
+    int const gn = std::clamp(int(half / band_b), 1, p.tiles_n);
+    double const via_m = a + b * double((p.tiles_m + gm - 1) / gm);
+    double const via_n = b + a * double((p.tiles_n + gn - 1) / gn);
+    p.group_along_m = via_m <= via_n;
+    p.group = p.group_along_m ? gm : gn;
+  }
+
   static int split_tiles(Params const& p) {
     return p.sk_slices > 1 ? p.tiles_m * p.tiles_n - p.dp_tiles : 0;
   }

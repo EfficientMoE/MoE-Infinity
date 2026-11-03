@@ -197,10 +197,11 @@ TileInfo tile_info(int device) {
 template <typename Gemm>
 void launch(int device, int sms, cutlass::gemm::GemmCoord problem, int splits,
             Elem const* A, int lda, Elem const* B0, Elem const* B1, int ldb,
-            Elem* D, int ldd, cudaStream_t stream) {
+            Elem* D, int ldd, cudaStream_t stream, double l2_bytes) {
   int const slots = sms * (setup_kernel<Gemm>(device) - 1);
   auto params =
       Gemm::make_params(problem, splits, slots, A, lda, B0, B1, ldb, D, ldd);
+  Gemm::fit_raster(params, problem, l2_bytes);
   if (Gemm::split_tiles(params) > 0) {
     size_t floats = Gemm::workspace_floats(params);
     Workspace ws;
@@ -209,6 +210,7 @@ void launch(int device, int sms, cutlass::gemm::GemmCoord problem, int splits,
                        ws)) {
       params =
           Gemm::make_params(problem, 1, slots, A, lda, B0, B1, ldb, D, ldd);
+      Gemm::fit_raster(params, problem, l2_bytes);
     } else {
       params.partials = ws.partials;
       params.counters = ws.counters;
@@ -382,6 +384,100 @@ bool tuned_config(bool dual, int sms, int M, int Nd, int K, int num_cfgs,
 
 }  // namespace
 
+size_t l2_size(int device) {
+  static std::array<int, 64> l2{};
+  if (l2[device] == 0)
+    cudaDeviceGetAttribute(&l2[device], cudaDevAttrL2CacheSize, device);
+  return size_t(l2[device]);
+}
+
+// Keeps the [M, I] intermediate in L2 between the gate/up launch that writes
+// it and the down launch that reads it. Without a hint, the weights and X
+// streamed by gate/up evict it (mixtral 9K: 66 MB written back and read
+// again on a 390 MB op). The gate/up launch runs with an L2 persisting
+// access-policy window on the intermediate (weights and X stream around it);
+// the down launch reads it with a streaming window, which releases the lines.
+// Applies to intermediates from 8 MB up to twice the persisting carve-out
+// (80 MB on sm_120); one larger than the carve-out persists in part
+// (hitRatio = 0.9 x carve-out / size).
+class IntermediateWindow {
+  // Persisting lines beyond the carve-out evict each other; leave slack.
+  static constexpr double kPersistShare = 0.9;
+
+ public:
+  IntermediateWindow(int device, cudaStream_t stream, void* base, size_t bytes)
+      : stream_(stream) {
+    size_t const carve = carve_out(device);
+    // Below half resident the carve-out costs the operands more L2 than it
+    // saves (mixtral 50K: 367 MB intermediate, Rule F).
+    if (carve == 0 || bytes < (size_t(8) << 20) ||
+        double(bytes) > 2 * kPersistShare * double(carve))
+      return;
+    if (cudaStreamGetAttribute(stream, cudaStreamAttributeAccessPolicyWindow,
+                               &saved_) != cudaSuccess)
+      return;
+    window_.base_ptr = base;
+    window_.num_bytes = std::min(bytes, window_max(device));
+    window_.hitRatio = float(std::min(
+        1.0, kPersistShare * double(carve) / double(window_.num_bytes)));
+    window_.hitProp = cudaAccessPropertyPersisting;
+    window_.missProp = cudaAccessPropertyStreaming;
+    active_ = set(window_);
+  }
+  size_t persisting_bytes() const {
+    return active_ ? size_t(double(window_.num_bytes) * window_.hitRatio) : 0;
+  }
+  void last_use() {
+    if (!active_) return;
+    window_.hitRatio = 1.f;
+    window_.hitProp = cudaAccessPropertyStreaming;
+    set(window_);
+  }
+  ~IntermediateWindow() {
+    if (active_)
+      cudaStreamSetAttribute(stream_, cudaStreamAttributeAccessPolicyWindow,
+                             &saved_);
+  }
+
+ private:
+  bool set(cudaAccessPolicyWindow const& w) {
+    cudaStreamAttrValue v{};
+    v.accessPolicyWindow = w;
+    bool ok =
+        cudaStreamSetAttribute(stream_, cudaStreamAttributeAccessPolicyWindow,
+                               &v) == cudaSuccess;
+    if (!ok) cudaGetLastError();
+    return ok;
+  }
+  // Raises the persisting L2 limit to the device maximum once per device.
+  static size_t carve_out(int device) {
+    static std::array<long long, 64> carve{};
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (carve[device] == 0) {
+      int max_persist = 0;
+      cudaDeviceGetAttribute(&max_persist, cudaDevAttrMaxPersistingL2CacheSize,
+                             device);
+      carve[device] = -1;
+      if (max_persist > 0 && cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize,
+                                                max_persist) == cudaSuccess)
+        carve[device] = max_persist;
+      cudaGetLastError();
+    }
+    return carve[device] > 0 ? size_t(carve[device]) : 0;
+  }
+  static size_t window_max(int device) {
+    int v = 0;
+    cudaDeviceGetAttribute(&v, cudaDevAttrMaxAccessPolicyWindowSize, device);
+    return size_t(std::max(v, 0));
+  }
+
+  cudaStream_t stream_;
+  cudaStreamAttrValue saved_{};
+  cudaAccessPolicyWindow window_{};
+  bool active_ = false;
+};
+
 void fused_moe_ffn_tuned(torch::Tensor& hidden, torch::Tensor& gate_proj,
                          torch::Tensor& up_proj, torch::Tensor& down_proj,
                          torch::Tensor& fused_buf, torch::Tensor& output,
@@ -454,13 +550,18 @@ void fused_moe_ffn_tuned(torch::Tensor& hidden, torch::Tensor& gate_proj,
   auto* act = reinterpret_cast<Elem*>(fused_buf.data_ptr());
   auto* out = reinterpret_cast<Elem*>(output.data_ptr());
 
+  IntermediateWindow window(device, stream, act, size_t(M) * I * sizeof(Elem));
+  // L2 left to the operands: minus the persisting intermediate (gate/up
+  // only) and 8 MB of slack.
+  double const l2 = double(l2_size(device)) - double(8 << 20);
   visit_config<DualConfigs>(dual_cfg, [&]<typename Gemm>() {
     launch<Gemm>(device, sms, {M, I, H}, dual_splits, x, H, wg, wu, H, act, I,
-                 stream);
+                 stream, l2 - double(window.persisting_bytes()));
   });
+  window.last_use();
   visit_config<DownConfigs>(down_cfg, [&]<typename Gemm>() {
     launch<Gemm>(device, sms, {M, H, I}, down_splits, act, I, wd, nullptr, I,
-                 out, H, stream);
+                 out, H, stream, l2);
   });
 }
 
