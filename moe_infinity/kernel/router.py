@@ -691,9 +691,9 @@ def _small_t_config_pro6000(T, block_e):
     if T > 16384:
         return None
     if block_e == 16:
-        return (64, 128, 8, 4)
+        return (64, 128, 8, 4) if T <= 10240 else (64, 128, 4, 3)
     if block_e == 32:
-        return (32, 128, 4, 4)
+        return (32, 128, 4, 4) if T <= 10240 else (32, 128, 4, 3)
     if block_e == 128:
         if T <= 4096:
             return (32, 128, 8, 3)
