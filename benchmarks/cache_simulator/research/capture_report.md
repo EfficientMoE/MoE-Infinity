@@ -1329,3 +1329,12 @@ exposure peaks at W=RESEGMENT alignment (mid-transition arbitration on stale
 mass), faster blockwise shifts fully absorbed. Blockwise drift now bounded
 both sides (slow 0.781pp exp676 / fast 0.439pp exp677). Residual axis:
 sub-block intra-window shifts.
+## Addendum 24 (exp678 cost model): COST-H1 — hit-rate proxy breaks under bursty reload
+
+Time metric with 1+kappa*u_e+phi*burst miss cost, 24 cells: 1 H1 violation
+(skew 1.3, cap 2048, kappa=0, phi=4 — 1.057% time deficit at 0.079pp hit
+deficit). Mechanism: costfit's 502 extra misses CLUSTER; burst penalty
+amplifies clustered misses. Clustering, not expert heterogeneity, is the
+failure mode. Hit-rate proxy is blind to miss temporal structure — all
+prior rankings carry this caveat. Follow-up: anti-clustering candidate +
+(phi,cap) boundary map.
