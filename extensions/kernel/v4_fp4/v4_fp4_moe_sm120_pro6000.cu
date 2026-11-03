@@ -775,29 +775,36 @@ __global__ void combine_kernel(const __nv_bfloat16* __restrict__ ybuf,
 // partial sums are added once per unit.
 
 constexpr int kDecThreads = 256;  // 8 warps, each 2 m16 tiles
-constexpr int kDecRows = 64;      // weight rows per work unit
-constexpr int kDecRowWarps = kDecRows / 32;
-constexpr int kDecKSplit = kDecThreads / 32 / kDecRowWarps;  // K shares
-static_assert(kDecKSplit >= 1 && kDecKSplit <= 4, "k64 quarters per stage");
 constexpr int kDecK = 256;
-constexpr int kDecStages = 5;
 constexpr int kDecMaxI = 2560;
-constexpr int kDecStageA = kDecRows * kDecK / 2;    // 8 KB
-constexpr int kDecStageSA = kDecRows * kDecK / 32;  // 512 B
-constexpr int kDecStageB = 8 * kDecK;               // 2 KB
-constexpr int kDecStage = kDecStageA + kDecStageSA + kDecStageB;
-constexpr int kDecBres = 8 * (kDecMaxI + 16);  // row stride I + 16 bytes
-constexpr int kDecRed = (kDecKSplit - 1) * kDecRowWarps * 32 * 8 * 4;
-constexpr int kDecOut = 8 * (kDecRows + 8) * 2;
-// in-flight work units: the producer runs up to kDecStages - 1 stages (so up
+constexpr int kDecStageB = 8 * kDecK;  // 2 KB
+// in-flight work units: the producer runs up to STAGES - 1 stages (so up
 // to that many units of >= 1 stage) ahead of the consumer
 constexpr int kDecRing = 16;
-static_assert(kDecRing > kDecStages, "unit ring must cover the lookahead");
 constexpr long long kDecL2Budget = 64ll << 20;  // w2 L2 prefetch limit
-constexpr int kDecSmem = kDecStage * kDecStages + kDecBres +
-                         kDecRing * (8 * 64 + (int)sizeof(TileExt)) + kDecRed +
-                         kDecOut + 128;
-static_assert(kDecSmem <= 101376, "decode kernel shared memory budget");
+constexpr int kDecSmemLimit = 101376;  // 99 KiB per block (RTX PRO 6000)
+
+// Decode kernel configuration: ROWS weight rows per work unit, STAGES
+// pipeline stages, BROWS token rows per tile (8, or 1 for the batch-1 path,
+// whose tiles hold one routed slot each, so h needs one shared-memory row).
+template <int ROWS, int STAGES, int BROWS>
+struct DecCfg {
+  static constexpr int kRowWarps = ROWS / 32;
+  static constexpr int kKSplit = kDecThreads / 32 / kRowWarps;  // K shares
+  static_assert(kKSplit >= 1 && kKSplit <= 4, "k64 quarters per stage");
+  static constexpr int kStageA = ROWS * kDecK / 2;
+  static constexpr int kStageSA = ROWS * kDecK / 32;
+  static constexpr int kStage = kStageA + kStageSA + kDecStageB;
+  static constexpr int kBres = BROWS * (kDecMaxI + 16);  // stride I + 16
+  static constexpr int kRed = (kKSplit - 1) * kRowWarps * 32 * 8 * 4;
+  static constexpr int kOut = 8 * (ROWS + 8) * 2;
+  static_assert(kDecRing > STAGES, "unit ring must cover the lookahead");
+  static constexpr int kSmem = kStage * STAGES + kBres +
+                               kDecRing * (8 * 64 + (int)sizeof(TileExt)) +
+                               kRed + kOut + 128;
+  static_assert(kSmem <= kDecSmemLimit, "decode kernel shared memory budget");
+};
+constexpr int kDecRows = 64;  // general decode units (rb_done is sized by it)
 
 struct DecodeArgs {
   const int64_t* table;
@@ -831,6 +838,7 @@ struct DecUnit {
 // and with a lag of L tiles (about one wave of CTAs) a tile's h is normally
 // ready when its down units are dequeued: down units overlap with the
 // gate|up stream instead of forming a tail.
+template <int ROWS>
 __device__ __forceinline__ DecUnit decode_unit(const DecodeArgs& a, int u,
                                                int nt, int U1, int U2, int L) {
   DecUnit d;
@@ -854,37 +862,38 @@ __device__ __forceinline__ DecUnit decode_unit(const DecodeArgs& a, int u,
       d.blk = w % U2;
     }
   }
-  d.n0 = d.up ? d.blk * (kDecRows / 2) : d.blk * kDecRows;
+  d.n0 = d.up ? d.blk * (ROWS / 2) : d.blk * ROWS;
   d.KS = (d.up ? a.H : a.I) / kDecK;
   return d;
 }
 
-template <typename IdT>
+template <typename IdT, int ROWS, int STAGES, int BROWS>
 __global__ void __launch_bounds__(kDecThreads, 1)
     moe_decode_sm120_pro6000_kernel(const DecodeArgs a) {
+  using C = DecCfg<ROWS, STAGES, BROWS>;
   extern __shared__ __align__(128) uint8_t smem[];
   // Bres is only touched by the consumer between units: single buffer.
-  uint8_t* sBres = smem + kDecStage * kDecStages;  // [8][I + 16] FP8
-  uint8_t* sSB0 = sBres + kDecBres;                // ring x [8][64] ue8m0
+  uint8_t* sBres = smem + C::kStage * STAGES;  // [8][I + 16] FP8
+  uint8_t* sSB0 = sBres + C::kBres;            // ring x [8][64] ue8m0
   TileExt* sTE = reinterpret_cast<TileExt*>(sSB0 + kDecRing * 8 * 64);
   float* sRed = reinterpret_cast<float*>(sTE + kDecRing);
   __nv_bfloat16* sOut = reinterpret_cast<__nv_bfloat16*>(
-      reinterpret_cast<uint8_t*>(sRed) + kDecRed);
+      reinterpret_cast<uint8_t*>(sRed) + C::kRed);
   int* sMisc = reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(sOut) +
-                                      kDecOut);  // [0..15] tickets, [16] flag
+                                      C::kOut);  // [0..15] tickets, [16] flag
 
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const int g = lane >> 2, t4 = lane & 3;
   // warp -> (row group wr, K share kq): K share kq takes the k64 quarters
   // [kq * kQ, (kq + 1) * kQ) of every 256-wide stage
-  const int wr = warp % kDecRowWarps, kq = warp / kDecRowWarps;
-  constexpr int kQ = 4 / kDecKSplit;
+  const int wr = warp % C::kRowWarps, kq = warp / C::kRowWarps;
+  constexpr int kQ = 4 / C::kKSplit;
   const int ldb = a.I + 16;
   const int KCx = a.H / kBK;
 
   asm volatile("griddepcontrol.wait;" ::: "memory");
   const int ntiles = *a.num_tiles;
-  const int U1 = a.I / (kDecRows / 2), U2 = a.H / kDecRows;
+  const int U1 = a.I / (ROWS / 2), U2 = a.H / ROWS;
   // lag (in tiles) between a tile's gate|up units and its down units
   const int lag = min(ntiles, (int)((gridDim.x + U1 - 1) / U1));
   // When all down-projection weights of the layer fit comfortably in L2
@@ -940,7 +949,7 @@ __global__ void __launch_bounds__(kDecThreads, 1)
                               : gridDim.x + atomicAdd(a.queue, 1);
     }
     __syncthreads();
-    pu = decode_unit(a, sMisc[slot], ntiles, U1, U2, lag);
+    pu = decode_unit<ROWS>(a, sMisc[slot], ntiles, U1, U2, lag);
     ++p_count;
     pks = 0;
     if (!pu.valid) return;
@@ -980,24 +989,24 @@ __global__ void __launch_bounds__(kDecThreads, 1)
     if (pu.valid) {
       const int K = pu.up ? a.H : a.I;
       const int kpack = K / 2, kscale = K / 32;
-      uint8_t* sA = smem + buf * kDecStage;
-      uint8_t* sS = sA + kDecStageA;
-      uint8_t* sB = sS + kDecStageSA;
+      uint8_t* sA = smem + buf * C::kStage;
+      uint8_t* sS = sA + C::kStageA;
+      uint8_t* sB = sS + C::kStageSA;
 #pragma unroll
-      for (int i = 0; i < kDecStageA / 16 / kDecThreads; ++i) {
+      for (int i = 0; i < C::kStageA / 16 / kDecThreads; ++i) {
         int c = tid + i * kDecThreads;
         int r = c >> 3, cc = c & 7;
-        bool hi = pu.up && r >= kDecRows / 2;
-        int wrow = pu.up ? (r & (kDecRows / 2 - 1)) : r;
+        bool hi = pu.up && r >= ROWS / 2;
+        int wrow = pu.up ? (r & (ROWS / 2 - 1)) : r;
         const uint8_t* src = (hi ? w_hi : w_lo) +
                              (pu.n0 + wrow) * (long long)kpack +
                              pks * (kDecK / 2) + cc * 16;
         cp_async16(smem_u32(sA + r * 128 + ((cc ^ (r & 7)) << 4)), src, 16);
       }
-      if (tid < kDecRows) {
+      if (tid < ROWS) {
         int r = tid;
-        bool hi = pu.up && r >= kDecRows / 2;
-        int wrow = pu.up ? (r & (kDecRows / 2 - 1)) : r;
+        bool hi = pu.up && r >= ROWS / 2;
+        int wrow = pu.up ? (r & (ROWS / 2 - 1)) : r;
         const uint8_t* src =
             (hi ? s_hi : s_lo) + (pu.n0 + wrow) * (long long)kscale + pks * 8;
         cp_async4(smem_u32(sS + r * 8), src);
@@ -1015,7 +1024,7 @@ __global__ void __launch_bounds__(kDecThreads, 1)
 
   next_unit();
 #pragma unroll 1
-  for (int s = 0; s < kDecStages - 1; ++s) {
+  for (int s = 0; s < STAGES - 1; ++s) {
     if (pu.valid && pks == pu.KS) next_unit();
     issue(s);
   }
@@ -1032,19 +1041,19 @@ __global__ void __launch_bounds__(kDecThreads, 1)
     if (cblk < 0 || a.out == nullptr) return;
     asm volatile("fence.acq_rel.gpu;" ::: "memory");
     const IdT* ids = reinterpret_cast<const IdT*>(a.topk_ids);
-    for (int i = tid; i < a.T * (kDecRows / 8); i += kDecThreads) {
-      int t = i / (kDecRows / 8), c8 = i % (kDecRows / 8);
-      combine8<true>(a.ybuf, ids, t, a.topk, a.E, a.H, cblk * kDecRows + c8 * 8,
+    for (int i = tid; i < a.T * (ROWS / 8); i += kDecThreads) {
+      int t = i / (ROWS / 8), c8 = i % (ROWS / 8);
+      combine8<true>(a.ybuf, ids, t, a.topk, a.E, a.H, cblk * ROWS + c8 * 8,
                      a.out);
     }
   };
 
   // ---- consumer
   int c_count = 0;  // units consumed
-  int stage = 0;    // global stage counter (ring slot = stage % kDecStages)
+  int stage = 0;    // global stage counter (ring slot = stage % STAGES)
   for (;;) {
     const int cslot = c_count & (kDecRing - 1);
-    const DecUnit cu = decode_unit(a, sMisc[cslot], ntiles, U1, U2, lag);
+    const DecUnit cu = decode_unit<ROWS>(a, sMisc[cslot], ntiles, U1, U2, lag);
     maybe_combine();
     if (tid == 0) last_ticket = -1;
     if (!cu.valid) break;
@@ -1102,17 +1111,17 @@ __global__ void __launch_bounds__(kDecThreads, 1)
       for (int q = 0; q < 4; ++q) acc[mi][q] = 0.f;
     // warp's 2 m16 tiles: gate|up -> rows 16wr (gate), R/2+16wr (up)
     const int ar0 = cu.up ? 16 * wr : 32 * wr;
-    const int ar1 = cu.up ? kDecRows / 2 + 16 * wr : 32 * wr + 16;
+    const int ar1 = cu.up ? ROWS / 2 + 16 * wr : 32 * wr + 16;
 
 #pragma unroll 1
     for (int ks = 0; ks < cu.KS; ++ks, ++stage) {
-      cp_async_wait<kDecStages - 2>();
+      cp_async_wait<STAGES - 2>();
       __syncthreads();
       if (pu.valid && pks == pu.KS) next_unit();
-      issue((stage + kDecStages - 1) % kDecStages);
-      const uint8_t* sA = smem + (stage % kDecStages) * kDecStage;
-      const uint8_t* sS = sA + kDecStageA;
-      const uint8_t* sB = sS + kDecStageSA;
+      issue((stage + STAGES - 1) % STAGES);
+      const uint8_t* sA = smem + (stage % STAGES) * C::kStage;
+      const uint8_t* sS = sA + C::kStageA;
+      const uint8_t* sB = sS + C::kStageSA;
 #pragma unroll
       for (int qi = 0; qi < kQ; ++qi) {
         const int Q = kq * kQ + qi;  // k64 quarter of the stage
@@ -1147,7 +1156,9 @@ __global__ void __launch_bounds__(kDecThreads, 1)
                     b3);
           } else {
             int ch = (kc * kBK + 64 * jp) / 16 + (lane >> 3);
-            ldsm_x4(smem_u32(sBres + r * ldb + ch * 16), b0, b1, b2, b3);
+            // one-row tiles: every column reads the tile's single h row
+            ldsm_x4(smem_u32(sBres + (BROWS == 1 ? 0 : r) * ldb + ch * 16), b0,
+                    b1, b2, b3);
           }
         }
 #pragma unroll
@@ -1167,16 +1178,16 @@ __global__ void __launch_bounds__(kDecThreads, 1)
     if (kq > 0)
 #pragma unroll
       for (int i = 0; i < 8; ++i)
-        sRed[(((kq - 1) * kDecRowWarps + wr) * 32 + lane) * 8 + i] =
+        sRed[(((kq - 1) * C::kRowWarps + wr) * 32 + lane) * 8 + i] =
             acc[i >> 2][i & 3];
     __syncthreads();
     if (kq == 0)
 #pragma unroll
-      for (int j = 0; j < kDecKSplit - 1; ++j)
+      for (int j = 0; j < C::kKSplit - 1; ++j)
 #pragma unroll
         for (int i = 0; i < 8; ++i)
           acc[i >> 2][i & 3] +=
-              sRed[((j * kDecRowWarps + wr) * 32 + lane) * 8 + i];
+              sRed[((j * C::kRowWarps + wr) * 32 + lane) * 8 + i];
 
     if (cu.up) {
       // h = bf16(silu(clamp(gate)) * clamp(up) * w) -> hbuf (BF16)
@@ -1207,7 +1218,7 @@ __global__ void __launch_bounds__(kDecThreads, 1)
             "red.release.gpu.global.add.s32 [%0], 1;" ::"l"(a.tile_done + cu.tl)
             : "memory");
     } else {
-      constexpr int LD = kDecRows + 8;
+      constexpr int LD = ROWS + 8;
       if (kq == 0)
 #pragma unroll
         for (int mi = 0; mi < 2; ++mi)
@@ -1218,8 +1229,8 @@ __global__ void __launch_bounds__(kDecThreads, 1)
             sOut[col * LD + row] = __float2bfloat16(acc[mi][q]);
           }
       __syncthreads();
-      if (tid < 8 * (kDecRows / 8)) {
-        int col = tid / (kDecRows / 8), cc = tid % (kDecRows / 8);
+      if (tid < 8 * (ROWS / 8)) {
+        int col = tid / (ROWS / 8), cc = tid % (ROWS / 8);
         if (col < nrows) {
           int slot = tex.slot[col];
           *reinterpret_cast<uint4*>(a.ybuf + (long long)slot * a.H + cu.n0 +
@@ -1284,13 +1295,14 @@ void run_cfg(GemmArgs a1, GemmArgs a2, int T, int topk, int E, int H, int I,
   launch_gemm<2, WM, WN, MT, NT, STAGES>(a2, H / C::ROWS, gy, s);
 }
 
-template <typename IdT>
+template <typename IdT, int ROWS, int STAGES, int BROWS>
 void launch_decode(const DecodeArgs& a, cudaStream_t s) {
-  auto k = moe_decode_sm120_pro6000_kernel<IdT>;
+  using C = DecCfg<ROWS, STAGES, BROWS>;
+  auto k = moe_decode_sm120_pro6000_kernel<IdT, ROWS, STAGES, BROWS>;
   static int sms = 0;
   if (sms == 0) {
     cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         kDecSmem);
+                         C::kSmem);
     int dev;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
@@ -1298,7 +1310,7 @@ void launch_decode(const DecodeArgs& a, cudaStream_t s) {
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(sms);
   cfg.blockDim = dim3(kDecThreads);
-  cfg.dynamicSmemBytes = kDecSmem;
+  cfg.dynamicSmemBytes = C::kSmem;
   cfg.stream = s;
   cudaLaunchAttribute attr[1];
   DecodeArgs d = a;
@@ -1317,6 +1329,24 @@ void launch_decode(const DecodeArgs& a, cudaStream_t s) {
     cfg.numAttrs = 0;
     cudaLaunchKernelEx(&cfg, k, d);
   }
+}
+
+// Weight rows per work unit of the batch-1 path, measured on the RTX PRO 6000
+// (188 CTAs; V4-Flash b1 75.4 -> 67.7 us with 256, V4.1-Flash 106.6 -> 90.8
+// us with 128): large units cut the per-unit setup and K-share reduction,
+// but must still give every CTA about one unit or more.
+inline int b1_rows_pro6000(int H, int I) {
+  return (H == 4096 && I == 2048) ? 256 : 128;
+}
+
+template <typename IdT>
+void launch_decode_any(const DecodeArgs& a, bool one_row, cudaStream_t s) {
+  if (!one_row)
+    launch_decode<IdT, 64, 5, 8>(a, s);
+  else if (b1_rows_pro6000(a.H, a.I) == 256)
+    launch_decode<IdT, 256, 2, 1>(a, s);
+  else
+    launch_decode<IdT, 128, 4, 1>(a, s);
 }
 
 int choose_bt(long long n, int E) {
@@ -1380,10 +1410,11 @@ void v4_moe_forward_sm120_pro6000_cuda(
     d.rb_done = counters + 1 + (n_counters - 1 - H / kDecRows);
     d.swiglu_limit = swiglu_limit;
     d.static_sched = (long long)T * topk <= 8;
+    // bt == 1: the batch-1 path, one routed slot per tile
     if (ids_int64)
-      launch_decode<int64_t>(d, stream);
+      launch_decode_any<int64_t>(d, bt == 1, stream);
     else
-      launch_decode<int32_t>(d, stream);
+      launch_decode_any<int32_t>(d, bt == 1, stream);
     return;
   }
 

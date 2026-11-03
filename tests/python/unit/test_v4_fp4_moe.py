@@ -129,6 +129,8 @@ def _no_tf32():
         (1, 6, 16, 256, 256),  # BT=8, persistent decode kernel
         (4, 6, 16, 512, 256),
         (40, 6, 64, 256, 512),  # decode kernel, several tiles per expert
+        (1, 6, 32, 4096, 2048),  # V4-Flash batch 1: 256-row units
+        (1, 6, 24, 5120, 2304),  # V4.1-Flash batch 1: 128-row units
         (2, 6, 32, 4096, 2048),  # V4-Flash dims
         (3, 6, 24, 5120, 2304),  # V4.1-Flash dims
         (24, 4, 8, 256, 256),  # BT=16
@@ -183,6 +185,34 @@ def test_moe_int32_ids_skips_invalid_and_empty_experts():
     )
     ref = moe_ref(x, ids.long(), wts, experts, 0.0)
     assert torch.all(out[6] == 0)
+    assert _rel(out, ref) < 2e-2
+
+
+@pytest.mark.parametrize("H,I", [(4096, 2048), (512, 256)])
+def test_batch1_duplicate_and_invalid_ids(H, I):
+    """Batch 1 runs one routed slot per tile: a repeated expert id becomes two
+    tiles of the same expert, ids outside [0, E) are skipped."""
+    ext = _ext()
+    gen = torch.Generator().manual_seed(H)
+    E = 8
+    experts = [make_expert(H, I, gen) for _ in range(E)]
+    x = torch.randn(1, H, generator=gen).bfloat16().cuda()
+    ids = torch.tensor([[3, 3, -1, 5, 8, 0]], dtype=torch.int64).cuda()
+    wts = torch.rand(1, 6, generator=gen).cuda() + 0.1
+    out = ext.v4_moe_forward_sm120_pro6000(
+        x, ids, wts, table_of(experts), I, 10.0
+    )
+    ref = torch.zeros(1, H, dtype=torch.float32, device="cuda")
+    for e in sorted(set(ids[0].tolist())):
+        if not 0 <= e < E:
+            continue
+        p = experts[e]
+        w = [
+            dequant_fp4(p[k], p[s])
+            for k, s in (("w1", "s1"), ("w3", "s3"), ("w2", "s2"))
+        ]
+        for j in (ids[0] == e).nonzero().flatten().tolist():
+            ref += expert_ref(x, *w, 10.0, wts[:, j, None]).float()
     assert _rel(out, ref) < 2e-2
 
 

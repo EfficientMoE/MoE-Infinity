@@ -137,9 +137,11 @@ std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
               "8192");
   TORCH_CHECK(E >= 1 && E <= 1024 && topk <= 16, "E <= 1024, topk <= 16");
   const int64_t n = T * topk;
-  const int bt = v4_moe_choose_bt(n, (int)E);
-  const int bound = v4_moe_tile_bound(n, (int)E, bt);
+  int bt = v4_moe_choose_bt(n, (int)E);
   const bool decode = v4_moe_use_decode(bt, (int)H, (int)I);
+  // one token: tiles of one routed slot each (decode kernel's batch-1 path)
+  if (decode && T == 1 && topk <= 8) bt = 1;
+  const int bound = v4_moe_tile_bound(n, (int)E, bt);
   const int64_t n1 = std::max<int64_t>(n, 1);
   const int64_t n_counters = v4_moe_decode_counters(bound, (int)H);
   // One scratch allocation: the host time of every allocation before the
