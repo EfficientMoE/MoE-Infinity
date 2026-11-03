@@ -15,12 +15,12 @@ void mxfp4_dequant_cuda(const void* packed, const void* scales, void* output,
                         int block_size, cudaStream_t stream);
 void fp8_dequant_blockwise_cuda(const void* weight, const void* scale,
                                 void* out, int N, int K, cudaStream_t stream);
-void fused_fp8_moe_ffn_into(const at::Tensor& hidden, const at::Tensor& gate_w,
-                            const at::Tensor& gate_s, const at::Tensor& up_w,
-                            const at::Tensor& up_s, const at::Tensor& down_w,
-                            const at::Tensor& down_s, at::Tensor& output,
-                            cudaStream_t stream);
-bool fp8_moe_native_supported(int64_t hidden, int64_t inter);
+void fused_fp8_moe_ffn_sm120_pro6000_into(
+    const at::Tensor& hidden, const at::Tensor& gate_w,
+    const at::Tensor& gate_s, const at::Tensor& up_w, const at::Tensor& up_s,
+    const at::Tensor& down_w, const at::Tensor& down_s, at::Tensor& output,
+    cudaStream_t stream);
+bool fp8_moe_sm120_pro6000_supported(int64_t hidden, int64_t inter, int device);
 
 static void py_fused_moe_ffn_into(at::Tensor hidden, at::Tensor gate_proj,
                                   at::Tensor up_proj, at::Tensor down_proj,
@@ -53,18 +53,19 @@ static void py_fp8_dequant_blockwise(at::Tensor weight_u8, at::Tensor scale,
       weight_u8.size(1), at::cuda::getCurrentCUDAStream().stream());
 }
 
-static void py_fused_fp8_moe_ffn_into(at::Tensor hidden, at::Tensor gate_w,
-                                      at::Tensor gate_s, at::Tensor up_w,
-                                      at::Tensor up_s, at::Tensor down_w,
-                                      at::Tensor down_s, at::Tensor output) {
-  fused_fp8_moe_ffn_into(hidden, gate_w, gate_s, up_w, up_s, down_w, down_s,
-                         output, at::cuda::getCurrentCUDAStream().stream());
+static void py_fused_fp8_moe_ffn_sm120_pro6000_into(
+    at::Tensor hidden, at::Tensor gate_w, at::Tensor gate_s, at::Tensor up_w,
+    at::Tensor up_s, at::Tensor down_w, at::Tensor down_s, at::Tensor output) {
+  fused_fp8_moe_ffn_sm120_pro6000_into(
+      hidden, gate_w, gate_s, up_w, up_s, down_w, down_s, output,
+      at::cuda::getCurrentCUDAStream().stream());
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_moe_ffn_into", &py_fused_moe_ffn_into);
   m.def("mxfp4_dequant", &py_mxfp4_dequant);
   m.def("fp8_dequant_blockwise", &py_fp8_dequant_blockwise);
-  m.def("fused_fp8_moe_ffn_into", &py_fused_fp8_moe_ffn_into);
-  m.def("fp8_moe_native_supported", &fp8_moe_native_supported);
+  m.def("fused_fp8_moe_ffn_sm120_pro6000_into",
+        &py_fused_fp8_moe_ffn_sm120_pro6000_into);
+  m.def("fp8_moe_sm120_pro6000_supported", &fp8_moe_sm120_pro6000_supported);
 }

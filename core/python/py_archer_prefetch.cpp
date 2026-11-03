@@ -160,18 +160,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul, "Fused GeLU-tanh(gate) * up");
   m.def("fatrelu_and_mul", &fatrelu_and_mul, "Fused FatReLU(gate) * up");
   m.def(
-      "fp8_moe_ffn_into",
+      "fp8_moe_ffn_sm120_pro6000_into",
       [](const torch::Tensor& hidden, const torch::Tensor& gate_w,
          const torch::Tensor& gate_s, const torch::Tensor& up_w,
          const torch::Tensor& up_s, const torch::Tensor& down_w,
          const torch::Tensor& down_s, torch::Tensor output) {
-        fused_fp8_moe_ffn_into(hidden, gate_w, gate_s, up_w, up_s, down_w,
-                               down_s, output,
-                               at::cuda::getCurrentCUDAStream().stream());
+        fused_fp8_moe_ffn_sm120_pro6000_into(
+            hidden, gate_w, gate_s, up_w, up_s, down_w, down_s, output,
+            at::cuda::getCurrentCUDAStream().stream());
       },
-      "Native FP8 (e4m3, 128x128 block-scaled) SwiGLU expert into output");
-  m.def("fp8_moe_native_supported", &fp8_moe_native_supported,
-        "Whether the native FP8 expert kernels run on the current device");
+      "Native FP8 (e4m3, 128x128 block-scaled) SwiGLU expert into output "
+      "(RTX PRO 6000 / sm_120 only)");
+  m.def("fp8_moe_sm120_pro6000_supported", &fp8_moe_sm120_pro6000_supported,
+        py::arg("hidden"), py::arg("inter"), py::arg("device") = -1,
+        "Whether the sm120 / RTX PRO 6000 FP8 expert kernels run on device");
 
   py::class_<ExpertDispatcher::ResizeToken>(m, "expert_resize_token")
       .def_readonly("id", &ExpertDispatcher::ResizeToken::id)
@@ -325,5 +327,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            &ExpertDispatcher::InjectTransitionFailureOnceForTest)
 #endif
       .def("set_scales", &ExpertDispatcher::SetScales,
-           "Store fp8 block scales for dequant-on-copy (fp8-in-store path)");
+           "Store fp8 block scales for dequant-on-copy (fp8-in-store path)")
+      .def("set_fp8_sm120_pro6000_experts",
+           &ExpertDispatcher::SetFp8Sm120Pro6000Experts, py::arg("allowed"),
+           "Allow the sm120 / RTX PRO 6000 native FP8 expert kernels");
 }

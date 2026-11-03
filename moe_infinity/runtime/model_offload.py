@@ -992,6 +992,15 @@ class OffloadEngine(object):
         set_scales = getattr(dispatcher, "set_scales", None)
         if callable(set_scales):
             set_scales(scales)
+            set_backend = getattr(
+                dispatcher, "set_fp8_sm120_pro6000_experts", None
+            )
+            if callable(set_backend):
+                from moe_infinity.kernel.fp8_experts import (
+                    fp8_sm120_pro6000_allowed,
+                )
+
+                set_backend(fp8_sm120_pro6000_allowed())
         else:
             warnings.warn(
                 "blockwise-FP8 routed experts are kept FP8 in the store but "

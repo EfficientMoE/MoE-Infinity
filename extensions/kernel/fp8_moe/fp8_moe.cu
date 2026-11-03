@@ -4,8 +4,20 @@
 // EfficientMoE Team
 //
 // Native FP8 (e4m3, 128x128 block-scaled) SwiGLU expert, see fp8_moe.h.
+//
+// Hardware specificity (docs/hardware-gated-kernels.md): tuned on the RTX PRO
+// 6000 Blackwell Max-Q (sm_120, 188 SMs, 128 MiB L2, 99 KiB smem/block).
+//   - CUTLASS sm120 blockwise FP8 GEMM (Sm120*Gemm): SM120 gate, built only
+//     with MOE_ENABLE_SM120_FP8 (sm_120a).
+//   - tensor-core decode GEMV (fp8_gemv_pro6000_kernel), the tile / stream-K /
+//     serialisation choices (blockwise_gemm_sm120_pro6000,
+//     pro6000_serialize_min_tokens): RTX_PRO_6000 gate.
+// fp8_moe_sm120_pro6000_supported() checks both; on every other device the
+// caller (MoEMLP) keeps the previous FP8 path: per-call dequant to BF16 +
+// BF16 CUTLASS GEMM.
 
 #include "fp8_moe.h"
+#include "kernel/hw_profile.h"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -137,13 +149,13 @@ __device__ __forceinline__ void mma_bf16_16816(float* d, const uint32_t* a,
 
 template <int NMAT, int U, int WARPS>
 __global__ void __launch_bounds__(WARPS * 32)
-    fp8_gemv_tc_kernel(const __nv_bfloat16* __restrict__ x, int64_t ldx, int M,
-                       const uint8_t* __restrict__ w0,
-                       const float* __restrict__ s0,
-                       const uint8_t* __restrict__ w1,
-                       const float* __restrict__ s1,
-                       __nv_bfloat16* __restrict__ out, int64_t ldo, int N,
-                       int K) {
+    fp8_gemv_pro6000_kernel(const __nv_bfloat16* __restrict__ x, int64_t ldx,
+                            int M, const uint8_t* __restrict__ w0,
+                            const float* __restrict__ s0,
+                            const uint8_t* __restrict__ w1,
+                            const float* __restrict__ s1,
+                            __nv_bfloat16* __restrict__ out, int64_t ldo, int N,
+                            int K) {
   __shared__ float red[WARPS][NMAT][32][4];
   pdl_wait();
   const int lane = threadIdx.x & 31;
@@ -249,13 +261,13 @@ __global__ void __launch_bounds__(WARPS * 32)
 }
 
 template <int NMAT>
-void launch_gemv_tc(int M, const __nv_bfloat16* x, int64_t ldx,
-                    const uint8_t* w0, const float* s0, const uint8_t* w1,
-                    const float* s1, __nv_bfloat16* out, int64_t ldo, int N,
-                    int K, cudaStream_t stream) {
+void launch_gemv_pro6000(int M, const __nv_bfloat16* x, int64_t ldx,
+                         const uint8_t* w0, const float* s0, const uint8_t* w1,
+                         const float* s1, __nv_bfloat16* out, int64_t ldo,
+                         int N, int K, cudaStream_t stream) {
   // 4 chunks in flight per warp, 8 warps per 16 rows: best of a sweep over
   // (U, warps) in {1,2,4} x {4,8} on GLM-5.3 / GLM-5.3-Flash shapes.
-  launch_kernel(fp8_gemv_tc_kernel<NMAT, 4, kTcWarps>, dim3((N + 15) / 16),
+  launch_kernel(fp8_gemv_pro6000_kernel<NMAT, 4, kTcWarps>, dim3((N + 15) / 16),
                 dim3(kTcWarps * 32), NMAT == 1, stream, x, ldx, M, w0, s0, w1,
                 s1, out, ldo, N, K);
 }
@@ -443,13 +455,14 @@ struct BlockwiseGemm {
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<Kernel>;
 };
 
-using CoopGemm =
+using Sm120CoopGemm =
     BlockwiseGemm<Shape<_128, _128, _128>,
                   cutlass::gemm::KernelScheduleSm120Blockwise>::Gemm;
-using StreamKGemm = BlockwiseGemm<Shape<_128, _128, _128>,
-                                  cutlass::gemm::KernelScheduleSm120Blockwise,
-                                  cutlass::gemm::StreamKScheduler>::Gemm;
-using PingGemm = BlockwiseGemm<
+using Sm120StreamKGemm =
+    BlockwiseGemm<Shape<_128, _128, _128>,
+                  cutlass::gemm::KernelScheduleSm120Blockwise,
+                  cutlass::gemm::StreamKScheduler>::Gemm;
+using Sm120PingGemm = BlockwiseGemm<
     Shape<_64, _128, _128>,
     cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120>::Gemm;
 
@@ -535,19 +548,20 @@ void run_gemm(const GemmProblem& p, cudaStream_t stream) {
 // stream-K kernels interfere (measured
 // on the 4-stream expert_layer harness: 128x128 tiles beat both stream-K and
 // 64x128 ping-pong above 256 tokens, ping-pong wins below).
-void blockwise_gemm(const GemmProblem& p, bool exclusive, cudaStream_t stream) {
+void blockwise_gemm_sm120_pro6000(const GemmProblem& p, bool exclusive,
+                                  cudaStream_t stream) {
   const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   const int64_t tiles =
       int64_t((p.M + 127) / 128) * (p.N / 128) * std::max(p.L, 1);
   if (tiles >= 6 * int64_t(sms)) {
-    run_gemm<CoopGemm>(p, stream);
+    run_gemm<Sm120CoopGemm>(p, stream);
   } else if (exclusive && p.K >= 4864) {
     // Long-K gate/up with only a few waves of tiles: stream-K splits K.
-    run_gemm<StreamKGemm>(p, stream);
+    run_gemm<Sm120StreamKGemm>(p, stream);
   } else if (p.M <= (exclusive ? 2048 : 256)) {
-    run_gemm<PingGemm>(p, stream);
+    run_gemm<Sm120PingGemm>(p, stream);
   } else {
-    run_gemm<CoopGemm>(p, stream);
+    run_gemm<Sm120CoopGemm>(p, stream);
   }
 }
 
@@ -555,9 +569,9 @@ void blockwise_gemm(const GemmProblem& p, bool exclusive, cudaStream_t stream) {
 // concurrently their working sets (weights + activations) thrash the L2.
 // Chain those calls through one per-device event so they run back to back
 // on the device (no host blocking). Skipped while a stream is capturing.
-int64_t serialize_min_tokens() {
+int64_t pro6000_serialize_min_tokens() {
   static const int64_t v = [] {
-    const char* env = std::getenv("MOE_FP8_SERIALIZE_MIN_TOKENS");
+    const char* env = std::getenv("MOE_FP8_PRO6000_SERIALIZE_MIN_TOKENS");
     return env ? std::atoll(env) : int64_t(3072);
   }();
   return v;
@@ -662,20 +676,23 @@ const uint8_t* weight_ptr(const torch::Tensor& w) {
 
 using namespace fp8_moe_detail;
 
-bool fp8_moe_native_supported(int64_t hidden, int64_t inter) {
+bool fp8_moe_sm120_pro6000_supported(int64_t hidden, int64_t inter,
+                                     int device) {
 #if defined(MOE_ENABLE_SM120_FP8)
   if (hidden <= 0 || inter <= 0 || hidden % kBlock || inter % kBlock)
     return false;
-  const auto* prop = at::cuda::getCurrentDeviceProperties();
-  return prop->major == 12 && prop->minor == 0;
+  using moe_infinity::hw::Gate;
+  using moe_infinity::hw::Supports;
+  return Supports(Gate::kSm120, device) && Supports(Gate::kRtxPro6000, device);
 #else
   (void)hidden;
   (void)inter;
+  (void)device;
   return false;
 #endif
 }
 
-void fused_fp8_moe_ffn_into(
+void fused_fp8_moe_ffn_sm120_pro6000_into(
     const torch::Tensor& hidden, const torch::Tensor& gate_w,
     const torch::Tensor& gate_s, const torch::Tensor& up_w,
     const torch::Tensor& up_s, const torch::Tensor& down_w,
@@ -683,6 +700,9 @@ void fused_fp8_moe_ffn_into(
   const int64_t M = hidden.size(0);
   const int64_t H = hidden.size(1);
   const int64_t I = gate_w.size(0);
+  TORCH_CHECK(fp8_moe_sm120_pro6000_supported(H, I, hidden.get_device()),
+              "fp8 expert: the sm120/RTX PRO 6000 kernels do not run on this "
+              "device or build; use the dequant-to-BF16 path");
   TORCH_CHECK(hidden.scalar_type() == at::kBFloat16 &&
                   output.scalar_type() == at::kBFloat16,
               "fp8 expert: activations must be bf16");
@@ -714,14 +734,15 @@ void fused_fp8_moe_ffn_into(
   auto* x = reinterpret_cast<const __nv_bfloat16*>(hidden.data_ptr());
   auto* out = reinterpret_cast<__nv_bfloat16*>(output.data_ptr());
 
-  if (M <= kFp8GemvMaxTokens) {
+  if (M <= kFp8Pro6000GemvMaxTokens) {
     at::Tensor inter = at::empty({M, I}, hidden.options());
     auto* ip = reinterpret_cast<__nv_bfloat16*>(inter.data_ptr());
-    launch_gemv_tc<2>(M, x, H, weight_ptr(gate_w), gate_s.data_ptr<float>(),
-                      weight_ptr(up_w), up_s.data_ptr<float>(), ip, I, I, H,
-                      stream);
-    launch_gemv_tc<1>(M, ip, I, weight_ptr(down_w), down_s.data_ptr<float>(),
-                      nullptr, nullptr, out, H, H, I, stream);
+    launch_gemv_pro6000<2>(M, x, H, weight_ptr(gate_w),
+                           gate_s.data_ptr<float>(), weight_ptr(up_w),
+                           up_s.data_ptr<float>(), ip, I, I, H, stream);
+    launch_gemv_pro6000<1>(M, ip, I, weight_ptr(down_w),
+                           down_s.data_ptr<float>(), nullptr, nullptr, out, H,
+                           H, I, stream);
     return;
   }
 
@@ -766,7 +787,7 @@ void fused_fp8_moe_ffn_into(
 
   const int device = hidden.get_device();
   ChainScope chain_scope;
-  if (M >= serialize_min_tokens() &&
+  if (M >= pro6000_serialize_min_tokens() &&
       device_chain(device).Enter(stream, device)) {
     chain_scope.chain = &device_chain(device);
     chain_scope.stream = stream;
@@ -786,16 +807,19 @@ void fused_fp8_moe_ffn_into(
 
   // Column halves of gu: batch 0 -> [0, I), batch 1 -> [I, 2I).
   if (batched) {
-    blockwise_gemm({(int)M, (int)I, (int)H, 2, xq, H, 0, b0, H, b_stride, sfx,
-                    0, sfb, (int32_t)(IB * HB), gu, 2 * I, I},
-                   exclusive, stream);
+    blockwise_gemm_sm120_pro6000(
+        {(int)M, (int)I, (int)H, 2, xq, H, 0, b0, H, b_stride, sfx, 0, sfb,
+         (int32_t)(IB * HB), gu, 2 * I, I},
+        exclusive, stream);
   } else {
-    blockwise_gemm({(int)M, (int)I, (int)H, 1, xq, H, 0, gate_first ? gp : upp,
-                    H, 0, sfx, 0, sfb, 0, gu, 2 * I, 0},
-                   exclusive, stream);
-    blockwise_gemm({(int)M, (int)I, (int)H, 1, xq, H, 0, gate_first ? upp : gp,
-                    H, 0, sfx, 0, sfb + IB * HB, 0, gu + I, 2 * I, 0},
-                   exclusive, stream);
+    blockwise_gemm_sm120_pro6000(
+        {(int)M, (int)I, (int)H, 1, xq, H, 0, gate_first ? gp : upp, H, 0, sfx,
+         0, sfb, 0, gu, 2 * I, 0},
+        exclusive, stream);
+    blockwise_gemm_sm120_pro6000(
+        {(int)M, (int)I, (int)H, 1, xq, H, 0, gate_first ? upp : gp, H, 0, sfx,
+         0, sfb + IB * HB, 0, gu + I, 2 * I, 0},
+        exclusive, stream);
   }
 
   const int gate_off = gate_first ? 0 : (int)I;
@@ -804,9 +828,10 @@ void fused_fp8_moe_ffn_into(
                      {nullptr, nullptr, 0, 0}, {nullptr, nullptr, 0, 0},
                      {nullptr, nullptr, 0, 0}, DeadRegion{xq, sz_xq}, stream);
 
-  blockwise_gemm({(int)M, (int)H, (int)I, 1, aq, I, 0, weight_ptr(down_w), I, 0,
-                  sfa, 0, sfb_down, 0, out, H, 0},
-                 exclusive, stream);
+  blockwise_gemm_sm120_pro6000(
+      {(int)M, (int)H, (int)I, 1, aq, I, 0, weight_ptr(down_w), I, 0, sfa, 0,
+       sfb_down, 0, out, H, 0},
+      exclusive, stream);
 
   if (!capturing) inflight(device).Record(stream, device);
 

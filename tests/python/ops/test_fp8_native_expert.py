@@ -21,14 +21,14 @@ def _store():
         import moe_infinity._store as store
     except Exception as exc:  # pragma: no cover - depends on the build
         pytest.skip(f"moe_infinity._store unavailable: {exc}")
-    if not hasattr(store, "fp8_moe_ffn_into"):
+    if not hasattr(store, "fp8_moe_ffn_sm120_pro6000_into"):
         pytest.skip("_store built without the native FP8 expert kernels")
     return store
 
 
 def _skip_unless_native(store, hidden, inter):
-    if not store.fp8_moe_native_supported(hidden, inter):
-        pytest.skip("native FP8 experts need an sm_120 device and build")
+    if not store.fp8_moe_sm120_pro6000_supported(hidden, inter):
+        pytest.skip("native FP8 experts are gated to sm_120 + RTX PRO 6000")
 
 
 def _weight(n, k, gen):
@@ -90,7 +90,7 @@ def test_fp8_native_expert_matches_reference(hidden, inter, m):
     x = torch.randn(m, hidden, generator=gen, device="cuda").bfloat16()
     out = torch.empty(m, hidden, device="cuda", dtype=torch.bfloat16)
 
-    store.fp8_moe_ffn_into(x, *gate, *up, *down, out)
+    store.fp8_moe_ffn_sm120_pro6000_into(x, *gate, *up, *down, out)
     torch.cuda.synchronize()
 
     gemv = m <= 8
@@ -117,7 +117,7 @@ def test_fp8_native_expert_uint8_weights_and_glm_shape():
     for m in (1, 16):
         x = torch.randn(m, hidden, generator=gen, device="cuda").bfloat16()
         out = torch.empty(m, hidden, device="cuda", dtype=torch.bfloat16)
-        store.fp8_moe_ffn_into(
+        store.fp8_moe_ffn_sm120_pro6000_into(
             x,
             gate[0].view(torch.uint8),
             gate[1],
@@ -147,11 +147,11 @@ def test_fp8_native_expert_allocates_no_weight_copy():
     for m in (1, 8, 64):
         x = torch.randn(m, hidden, generator=gen, device="cuda").bfloat16()
         out = torch.empty(m, hidden, device="cuda", dtype=torch.bfloat16)
-        store.fp8_moe_ffn_into(x, *gate, *up, *down, out)
+        store.fp8_moe_ffn_sm120_pro6000_into(x, *gate, *up, *down, out)
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
         base = torch.cuda.memory_allocated()
-        store.fp8_moe_ffn_into(x, *gate, *up, *down, out)
+        store.fp8_moe_ffn_sm120_pro6000_into(x, *gate, *up, *down, out)
         torch.cuda.synchronize()
         peak = torch.cuda.max_memory_allocated() - base
         # Only activation-sized workspace; a BF16 weight copy would be 2x this.

@@ -77,8 +77,8 @@ void MoEMLP::SetRepresentation(const ExpertExecutionDescriptor& descriptor) {
 
 void MoEMLP::PrepareRepresentation(cudaStream_t stream) {
   if (representation_execution_kind_ != 1) return;
-  if (TryBindNativeFp8({param_[0], param_[2], param_[4]},
-                       {param_[1], param_[3], param_[5]})) {
+  if (TryBindFp8Sm120Pro6000({param_[0], param_[2], param_[4]},
+                             {param_[1], param_[3], param_[5]})) {
     return;
   }
   int device = at::cuda::current_device();
@@ -107,7 +107,7 @@ void MoEMLP::PrepareRepresentation(cudaStream_t stream) {
 }
 
 void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
-  fp8_native_ = false;
+  fp8_sm120_pro6000_ = false;
   if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
     DLOG_FATAL_IF(tensor_ids.size() != 6,
                   "GPT-OSS expert requires blocks/scales/bias for two "
@@ -340,13 +340,14 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
     auto& down_proj =
         (expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE) ? param_[2] : param_[1];
 
-    if (fp8_native_) {
+    if (fp8_sm120_pro6000_) {
       const int up = expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ? 1 : 2;
       const int down = expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ? 2 : 1;
-      fused_fp8_moe_ffn_into(input, fp8_native_weights_[0],
-                             fp8_native_scales_[0], fp8_native_weights_[up],
-                             fp8_native_scales_[up], fp8_native_weights_[down],
-                             fp8_native_scales_[down], output, stream);
+      fused_fp8_moe_ffn_sm120_pro6000_into(
+          input, fp8_sm120_pro6000_weights_[0], fp8_sm120_pro6000_scales_[0],
+          fp8_sm120_pro6000_weights_[up], fp8_sm120_pro6000_scales_[up],
+          fp8_sm120_pro6000_weights_[down], fp8_sm120_pro6000_scales_[down],
+          output, stream);
       return;
     }
 
@@ -368,20 +369,28 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
   DLOG_FATAL("MoEMLP::forward: expert_type not supported", expert_type_);
 }
 
+void MoEMLP::SetFp8Sm120Pro6000Allowed(bool allowed) {
+  fp8_sm120_pro6000_allowed_ = allowed;
+}
+
 void MoEMLP::SetFp8Scales(const std::vector<torch::Tensor>& scales) {
   fp8_scales_ = scales;
   has_fp8_scales_ = !scales.empty();
 }
 
-bool MoEMLP::TryBindNativeFp8(const std::array<torch::Tensor, 3>& weights,
-                              const std::array<torch::Tensor, 3>& scales) {
-  // MOE_FP8_NATIVE=0 forces the per-call BF16 dequant path (A/B, debugging).
+bool MoEMLP::TryBindFp8Sm120Pro6000(
+    const std::array<torch::Tensor, 3>& weights,
+    const std::array<torch::Tensor, 3>& scales) {
+  // Hardware-gated (SM120 + RTX_PRO_6000, docs/hardware-gated-kernels.md):
+  // the native FP8 kernels run only on the RTX PRO 6000 Blackwell; on every
+  // other device this returns false and the per-call dequant-to-BF16 path
+  // below runs. MOE_FP8_NATIVE=0 forces that path everywhere.
   static const bool kNativeEnabled = [] {
     const char* env = std::getenv("MOE_FP8_NATIVE");
     return env == nullptr || std::string(env) != "0";
   }();
-  fp8_native_ = false;
-  if (!kNativeEnabled) return false;
+  fp8_sm120_pro6000_ = false;
+  if (!kNativeEnabled || !fp8_sm120_pro6000_allowed_) return false;
   if (expert_type_ != DEEPSEEK_MOE_DENSE_ACT_DENSE &&
       expert_type_ != MIXTRAL_MOE_DENSE_ACT_DENSE) {
     return false;
@@ -410,18 +419,27 @@ bool MoEMLP::TryBindNativeFp8(const std::array<torch::Tensor, 3>& weights,
   for (const auto& s : scales) {
     if (s.numel() != scale_numel) return false;
   }
-  if (!fp8_moe_native_supported(hidden, inter)) return false;
-  fp8_native_weights_ = weights;
-  fp8_native_scales_ = scales;
-  fp8_native_ = true;
+  // Gate evaluated once per module (each module serves one GPU and one
+  // expert shape) and kept.
+  if (fp8_sm120_pro6000_gate_ < 0) {
+    fp8_sm120_pro6000_gate_ = fp8_moe_sm120_pro6000_supported(
+                                  hidden, inter, at::cuda::current_device())
+                                  ? 1
+                                  : 0;
+  }
+  if (fp8_sm120_pro6000_gate_ == 0) return false;
+  fp8_sm120_pro6000_weights_ = weights;
+  fp8_sm120_pro6000_scales_ = scales;
+  fp8_sm120_pro6000_ = true;
   return true;
 }
 
 void MoEMLP::DequantFp8Params(cudaStream_t stream) {
   if (!has_fp8_scales_) return;
   if (fp8_scales_.size() >= 3 && param_.size() >= 3 &&
-      TryBindNativeFp8({param_[0], param_[1], param_[2]},
-                       {fp8_scales_[0], fp8_scales_[1], fp8_scales_[2]})) {
+      TryBindFp8Sm120Pro6000(
+          {param_[0], param_[1], param_[2]},
+          {fp8_scales_[0], fp8_scales_[1], fp8_scales_[2]})) {
     return;
   }
   int device = at::cuda::current_device();

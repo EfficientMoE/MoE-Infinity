@@ -261,6 +261,12 @@ bool GenericFormatExecutionPair(ExpertFormat format, std::uint8_t execution) {
 
 }  // namespace
 
+void ExpertDispatcher::SetFp8Sm120Pro6000Experts(bool allowed) {
+  for (auto* module : modules_) {
+    if (module != nullptr) module->SetFp8Sm120Pro6000Allowed(allowed);
+  }
+}
+
 void ExpertDispatcher::SetScales(
     const std::map<std::string, torch::Tensor>& scales) {
   if (scales.empty()) return;

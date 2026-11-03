@@ -143,12 +143,17 @@ def _fp8_prod_builder(M: int, H: int, I: int):
 
 def _fp8_native_builder(M: int, H: int, I: int):
     """Native FP8 experts (#310): block-scaled GEMV (M <= 8) or CUTLASS
-    sm_120 blockwise FP8 GEMM, reading the e4m3 weights once."""
+    sm_120 blockwise FP8 GEMM, reading the e4m3 weights once. Gated to
+    sm_120 + RTX PRO 6000 (other GPUs run fp8_prod in production)."""
 
     def build():
         from benchmarks.kernel_audit.ext import load
 
         ext = load()
+        if not ext.fp8_moe_sm120_pro6000_supported(H, I, -1):
+            raise RuntimeError(
+                "fp8_native runs only on sm_120 + RTX PRO 6000 builds/devices"
+            )
         x = _rand(M, H, scale=1.0)
         shapes = ((I, H), (I, H), (H, I))
         w = [
@@ -160,7 +165,7 @@ def _fp8_native_builder(M: int, H: int, I: int):
             for s in shapes
         ]
         out = torch.empty(M, H, device="cuda", dtype=torch.bfloat16)
-        return lambda: ext.fused_fp8_moe_ffn_into(
+        return lambda: ext.fused_fp8_moe_ffn_sm120_pro6000_into(
             x, w[0], sc[0], w[1], sc[1], w[2], sc[2], out
         )
 
