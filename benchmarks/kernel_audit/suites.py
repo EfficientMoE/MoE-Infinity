@@ -1236,6 +1236,9 @@ def _gptoss_moe_grouped_builder(
     def build():
         from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
 
+        # Fixed routing: the active-expert count (and so the bytes actually
+        # read) would otherwise change from run to run.
+        torch.manual_seed(0)
         x = _rand(T, H, scale=1.0)
         wr, br = _rand(E, H), _rand(E)
         gu_p = torch.randint(
