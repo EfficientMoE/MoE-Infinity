@@ -546,3 +546,32 @@ note: the preregistered H2 online-filter followed the CSV's
 `is_oracle_upper_bound` flag, which does not flag `belady` itself; `belady`
 (the offline optimum) was therefore excluded from the online set explicitly —
 filter repair only, hypothesis text unchanged.
+
+---
+
+## Addendum 2 — crossover localization (fine capacity sweep, exp652)
+
+Pre-registered before the sweep (sha 1c0be3bf…, frozen 2026-11-03T03:35:29Z) on
+the same frozen trace (no recapture): decode arm at capacities 7E..14E step E
+(896..1792). Verdict PASS 3/4; sharpens the regime rule to an exact boundary:
+
+- LCNU is strictly best online at 896, 1024, 1152 — its **last crown is 9E**.
+- s3fifo takes over at exactly **1280 = 10E** (0.7420 vs LCNU 0.7328) and holds
+  every capacity through 1792 = 14E.
+- LCNU keeps beating plain LRU until **1536 = 12E** (H4 refuted: flip at 12E,
+  not 10-11E) — losing the crown and losing to LRU are different events,
+  two E-steps apart.
+- s3fifo >= LRU at every fine capacity (e.g. 0.6026 vs 0.5990 at 896): the
+  deployable rule collapses to **LCNU below 10E, s3fifo at/above 10E** —
+  s3fifo never loses to LRU in the swept range.
+
+| cap (=E×) | LRU | LCNU | s3fifo | belady | best online |
+|----:|----:|----:|----:|----:|:--|
+| 896 (7E) | 0.5990 | 0.6318 | 0.6026 | 0.8033 | lcnu |
+| 1024 (8E) | 0.6413 | 0.6685 | 0.6547 | 0.8327 | lcnu |
+| 1152 (9E) | 0.6808 | 0.7018 | 0.7005 | 0.8577 | lcnu |
+| 1280 (10E) | 0.7195 | 0.7328 | **0.7420** | 0.8788 | s3fifo |
+| 1408 (11E) | 0.7544 | 0.7614 | **0.7773** | 0.8970 | s3fifo |
+| 1536 (12E) | 0.7878 | 0.7871 | **0.8083** | 0.9124 | s3fifo |
+| 1664 (13E) | 0.8172 | 0.8100 | **0.8354** | 0.9253 | s3fifo |
+| 1792 (14E) | 0.8449 | 0.8301 | **0.8581** | 0.9362 | s3fifo |
