@@ -75,15 +75,16 @@ def _assert_close(out, ref):
         (1000, 128, 100, 8, 1024, 512),
         (777, 8, 8, 2, 264, 520),
         (2000, 64, 64, 8, 512, 256),  # 250 rows / expert: 128 + 64 + 64
+        (1152, 64, 64, 8, 512, 256),  # 144 rows / expert: 128 + 16
     ],
 )
 def test_grouped_moe_prefill_every_config(seed_everything, T, E, n, k, H, I):
     _requires_binding()
     x, mask, w, experts, ids, table = _layer(T, E, n, k, H, I)
     ref = _reference(x, mask, w, experts, ids)
-    # 5 gate/up and 7 down configs, incl. the mixed-height ones (-1 = auto)
-    for dual_cfg in range(-1, 5):
-        for down_cfg in range(-1, 7):
+    # 6 gate/up and 8 down configs, incl. the mixed-height ones (-1 = auto)
+    for dual_cfg in range(-1, 6):
+        for down_cfg in range(-1, 8):
             for combine in (0, 1):
                 out = torch.full((T, H), 7.0, device="cuda")
                 _STORE.grouped_moe_prefill(

@@ -47,6 +47,30 @@ struct GroupedRouting {
   int const* tile_start;  // [n + 1] first tile of every expert (this GEMM)
 };
 
+// Stand-in epilogue of the direct-store (remainder) tiles.
+struct NoEpilogue {
+  struct SharedStorage {};
+  struct OutputTileIterator {
+    struct Params {
+      Params() = default;
+      template <typename Layout>
+      explicit Params(Layout) {}
+    };
+  };
+};
+
+template <bool Direct, typename TB, typename WarpMma, int PartitionsK,
+          typename OutputOp, int Alignment>
+struct EpilogueOf {
+  using type = typename cutlass::epilogue::threadblock::DefaultEpilogueTensorOp<
+      TB, WarpMma, PartitionsK, OutputOp, Alignment>::Epilogue;
+};
+template <typename TB, typename WarpMma, int PartitionsK, typename OutputOp,
+          int Alignment>
+struct EpilogueOf<true, TB, WarpMma, PartitionsK, OutputOp, Alignment> {
+  using type = NoEpilogue;
+};
+
 template <typename Element_, typename ThreadblockShape_, typename WarpShape_,
           int Stages, bool Dual, typename Act = SiluAndMul>
 struct GroupedExpertGemm {
@@ -94,10 +118,12 @@ struct GroupedExpertGemm {
   using OutputOp = cutlass::epilogue::thread::LinearCombination<
       Element, kAlignment, ElementAccumulator, ElementAccumulator,
       cutlass::epilogue::thread::ScaleType::OnlyAlphaScaling>;
+  // Tiles under 32 rows (remainder tiles of an expert) have no CUTLASS
+  // threadblock epilogue: they store straight from the mma fragments.
+  static constexpr bool kDirectStore = ThreadblockShape::kM < 32;
   using Epilogue =
-      typename cutlass::epilogue::threadblock::DefaultEpilogueTensorOp<
-          ThreadblockShape, WarpMma, kPartitionsK, OutputOp,
-          kAlignment>::Epilogue;
+      typename EpilogueOf<kDirectStore, ThreadblockShape, WarpMma, kPartitionsK,
+                          OutputOp, kAlignment>::type;
   using OutputIterator = typename Epilogue::OutputTileIterator;
 
   static constexpr int kThreads = 32 * WarpCount::kCount;
@@ -225,6 +251,42 @@ struct GroupedExpertGemm {
     }
   }
 
+  // dst[r, c] = bf16(acc) for the tile's live rows, straight from the
+  // mma.m16n8 fragments (lane (g, q): rows g and g+8, columns 2q and 2q+1).
+  CUTLASS_DEVICE
+  static void direct_store(Element* dst, int ld, int rows, int ncols,
+                           FragmentC const& acc, int tile_m, int tile_n,
+                           int warp_idx, int lane_idx) {
+    int const warp_mn = warp_idx % (WarpCount::kM * WarpCount::kN);
+    int const warp_m = warp_mn % WarpCount::kM;
+    int const warp_n = warp_mn / WarpCount::kM;
+    int const g = lane_idx / 4;
+    int const q = lane_idx % 4;
+    int const base_r =
+        tile_m * ThreadblockShape::kM + warp_m * WarpShape::kM + g;
+    int const base_c =
+        tile_n * ThreadblockShape::kN + warp_n * WarpShape::kN + 2 * q;
+    float const* v = reinterpret_cast<float const*>(&acc);
+    CUTLASS_PRAGMA_UNROLL
+    for (int mi = 0; mi < MmaIterations::kRow; ++mi) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int ni = 0; ni < MmaIterations::kColumn; ++ni) {
+        int const chunk = mi + ni * MmaIterations::kRow;
+        int const c = base_c + ni * 8;
+        CUTLASS_PRAGMA_UNROLL
+        for (int h = 0; h < 2; ++h) {
+          int const r = base_r + mi * 16 + 8 * h;
+          if (r >= rows || c >= ncols) continue;
+          cutlass::Array<Element, 2> pair;
+          pair[0] = Element(v[chunk * 4 + 2 * h]);
+          pair[1] = Element(v[chunk * 4 + 2 * h + 1]);
+          *reinterpret_cast<cutlass::Array<Element, 2>*>(dst + int64_t(r) * ld +
+                                                         c) = pair;
+        }
+      }
+    }
+  }
+
   CUTLASS_DEVICE
   static void run_tile(Params const& p, SharedStorage& smem, int e, int tile_m,
                        int tile_n) {
@@ -262,12 +324,17 @@ struct GroupedExpertGemm {
         acc[0][i] = Act::apply(acc[0][i], acc[1][i], p.act_params);
 
       cutlass::arch::cp_async_wait<0>();
-      __syncthreads();
-      OutputIterator iterator_D(
-          p.params_D, p.act + int64_t(row0) * p.N, {rows, p.N}, thread_idx,
-          {tile_m * ThreadblockShape::kM, tile_n * ThreadblockShape::kN});
-      Epilogue epilogue(smem.epilogue, thread_idx, warp_idx, lane_idx);
-      epilogue(OutputOp(typename OutputOp::Params(1.0f)), iterator_D, acc[0]);
+      if constexpr (kDirectStore) {
+        direct_store(p.act + int64_t(row0) * p.N, p.N, rows, p.N, acc[0],
+                     tile_m, tile_n, warp_idx, lane_idx);
+      } else {
+        __syncthreads();
+        OutputIterator iterator_D(
+            p.params_D, p.act + int64_t(row0) * p.N, {rows, p.N}, thread_idx,
+            {tile_m * ThreadblockShape::kM, tile_n * ThreadblockShape::kN});
+        Epilogue epilogue(smem.epilogue, thread_idx, warp_idx, lane_idx);
+        epilogue(OutputOp(typename OutputOp::Params(1.0f)), iterator_D, acc[0]);
+      }
     } else {
       IteratorA iterator_A(p.params_A,
                            const_cast<Element*>(p.A) + int64_t(row0) * p.K,
@@ -279,12 +346,18 @@ struct GroupedExpertGemm {
       cutlass::arch::cp_async_wait<0>();
       if (p.y) {
         // Combine mode: bf16 rows in sorted order, summed per token later.
-        __syncthreads();
-        OutputIterator iterator_D(
-            p.params_D, p.y + int64_t(row0) * p.N, {rows, p.N}, thread_idx,
-            {tile_m * ThreadblockShape::kM, tile_n * ThreadblockShape::kN});
-        Epilogue epilogue(smem.epilogue, thread_idx, warp_idx, lane_idx);
-        epilogue(OutputOp(typename OutputOp::Params(1.0f)), iterator_D, acc[0]);
+        if constexpr (kDirectStore) {
+          direct_store(p.y + int64_t(row0) * p.N, p.N, rows, p.N, acc[0],
+                       tile_m, tile_n, warp_idx, lane_idx);
+        } else {
+          __syncthreads();
+          OutputIterator iterator_D(
+              p.params_D, p.y + int64_t(row0) * p.N, {rows, p.N}, thread_idx,
+              {tile_m * ThreadblockShape::kM, tile_n * ThreadblockShape::kN});
+          Epilogue epilogue(smem.epilogue, thread_idx, warp_idx, lane_idx);
+          epilogue(OutputOp(typename OutputOp::Params(1.0f)), iterator_D,
+                   acc[0]);
+        }
       } else {
         scatter_epilogue(p, acc[0], row0, rows, tile_m, tile_n, warp_idx,
                          lane_idx);

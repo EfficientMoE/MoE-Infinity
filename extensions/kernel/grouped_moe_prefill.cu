@@ -53,7 +53,9 @@ using moe_gemm::GroupedRouting;
 // gate/up (dual, gathered A) and down (scatter-add epilogue) configs. The
 // mixed ones run full tiles of one height and finish every expert with tiles
 // of half that height: an expert with 288 rows pads to 320 instead of 384
-// (128 + 64), one with 144 rows to 160 instead of 192 (64 + 32).
+// (128 + 64). Configs 5 (gate/up) and 7 (down) finish with 16-row tiles
+// (direct fragment stores, no CUTLASS epilogue): 144 rows = 128 + 16, no
+// padding. Their small-tile rates keep them to remainders of <= 32 rows.
 template <int M, int N, int K, int WM, int WN, int S, bool Dual>
 using G = GroupedExpertGemm<Elem, Shape<M, N, K>, Shape<WM, WN, K>, S, Dual>;
 using moe_gemm::GroupedTiledGemm;
@@ -64,7 +66,9 @@ using DualConfigs = std::tuple<
     GroupedTiledGemm<G<128, 128, 32, 64, 32, 3, true>,
                      G<64, 128, 32, 32, 32, 3, true>>,  // 3: 8 warps, mixed
     GroupedTiledGemm<G<64, 128, 32, 32, 64, 3, true>,
-                     G<32, 128, 32, 32, 32, 3, true>>>;  // 4: 4 warps, mixed
+                     G<32, 128, 32, 32, 32, 3, true>>,  // 4: 4 warps, mixed
+    GroupedTiledGemm<G<128, 64, 32, 64, 32, 3, true>,
+                     G<16, 64, 64, 16, 16, 3, true>>>;  // 5: 4 warps, mixed
 using DownConfigs = std::tuple<
     GroupedTiledGemm<G<128, 256, 32, 64, 64, 3, false>>,  // 0: 8 warps
     GroupedTiledGemm<G<128, 128, 32, 64, 64, 3, false>>,  // 1: 4 warps
@@ -76,7 +80,9 @@ using DownConfigs = std::tuple<
     GroupedTiledGemm<G<64, 128, 32, 32, 64, 4, false>,
                      G<32, 128, 32, 32, 32, 4, false>>,  // 5: 4 warps, mixed
     GroupedTiledGemm<G<64, 128, 64, 32, 64, 3, false>,
-                     G<32, 128, 64, 32, 32, 3, false>>>;  // 6: 4 warps, mixed
+                     G<32, 128, 64, 32, 32, 3, false>>,  // 6: 4 warps, mixed
+    GroupedTiledGemm<G<128, 128, 32, 64, 64, 3, false>,
+                     G<16, 128, 64, 16, 32, 3, false>>>;  // 7: 4 warps, mixed
 constexpr int kNumDual = std::tuple_size_v<DualConfigs>;
 constexpr int kNumDown = std::tuple_size_v<DownConfigs>;
 
@@ -444,11 +450,12 @@ void grouped_moe_prefill_pro6000(
   struct Rate {
     double big, small;
   };
-  static constexpr Rate kDualRate[] = {
-      {1.85, 0}, {1.68, 0}, {1.45, 0}, {1.85, 1.45}, {1.45, 1.30}};
+  static constexpr Rate kDualRate[] = {{1.85, 0},    {1.68, 0},
+                                       {1.45, 0},    {1.85, 1.45},
+                                       {1.45, 1.30}, {1.68, 0.55}};
   static constexpr Rate kDownRate[] = {{1.70, 0},    {1.64, 0},    {1.40, 0},
                                        {1.70, 1.40}, {1.64, 1.40}, {1.40, 1.05},
-                                       {1.40, 1.05}};
+                                       {1.40, 1.05}, {1.64, 0.50}};
   static_assert(std::size(kDualRate) == kNumDual &&
                 std::size(kDownRate) == kNumDown);
   // A config's split: small tiles finish an expert while they cost less than
