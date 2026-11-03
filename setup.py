@@ -459,6 +459,24 @@ if cuda_available:
             )
         )
 
+    if os.environ.get("MOE_ENABLE_SM120", "0") == "1":
+        # GPT-OSS grouped MXFP4 decode MoE (bf16 mma.sync, sm_80+ code paths;
+        # PDL on sm_90+), built with the sm_120 kernels it was tuned for.
+        ext_modules.append(
+            cpp_extension.CUDAExtension(
+                name="moe_infinity._gptoss_moe",
+                sources=[
+                    "extensions/kernel/gptoss_moe/gptoss_moe_binding.cpp",
+                    "extensions/kernel/gptoss_moe/gptoss_grouped_mxfp4.cu",
+                ],
+                extra_compile_args={
+                    "cxx": ["-O3", "-std=c++20", "-fPIC"],
+                    "nvcc": ["-O3", "--use_fast_math", "-std=c++20"]
+                    + _cuda_arch_flags,
+                },
+            )
+        )
+
     ext_modules.append(
         cpp_extension.CUDAExtension(
             name="moe_infinity._marlin",

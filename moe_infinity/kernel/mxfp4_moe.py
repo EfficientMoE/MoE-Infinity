@@ -716,6 +716,35 @@ def _block_m(tk: int, num_experts: int) -> int:
 # routed assignments) use the register GEMV kernels (sm_100a+ native e2m1
 # decode) instead of the tensor-core path.
 GEMV_MAX_TK = 8
+# Decode batches (T * top_k in (GEMV_MAX_TK, CUDA_MAX_TK], <= 16 tokens per
+# expert) use the CUDA grouped kernel (extensions/kernel/gptoss_moe) if built.
+CUDA_MAX_TK = 256
+
+
+@functools.lru_cache(maxsize=None)
+def _cuda_ext():
+    try:
+        from moe_infinity import _gptoss_moe
+    except ImportError:
+        return None
+    return _gptoss_moe
+
+
+def _use_cuda_grouped(tk, num_experts, top_k, hidden, inter, x) -> bool:
+    ext = _cuda_ext()
+    return (
+        ext is not None
+        and GEMV_MAX_TK < tk <= CUDA_MAX_TK
+        and tk <= 16 * min(num_experts, tk)
+        and ext.supported(tk // top_k, top_k, num_experts, hidden, inter)
+        and x.stride(0) % 8 == 0
+    )
+
+
+def _cuda_operands_ok(*tensors) -> bool:
+    return all(t.is_contiguous() for t in tensors)
+
+
 # MXFP4 decode of the tensor-core path (see ``_mxfp4_mma``).
 UPCAST = 0
 # Grid order: N tiles of one expert block run next to each other.
@@ -973,6 +1002,27 @@ def fused_moe_mxfp4(
     out = torch.empty_like(x)
     if tk == 0:
         return out.zero_()
+    if (
+        configs is None
+        and _use_cuda_grouped(tk, E, top_k, H, inter, x)
+        and _cuda_operands_ok(
+            gate_up_blocks, gate_up_scales, down_blocks, down_scales
+        )
+    ):
+        # Hand-written mma.sync kernel: 2 launches, routing on device.
+        return _cuda_ext().grouped_mxfp4_moe(
+            x,
+            topk_ids.view(T, top_k).to(torch.int64),
+            topk_weights.view(T, top_k).to(torch.bfloat16),
+            gate_up_blocks,
+            gate_up_scales,
+            gate_up_bias.to(torch.bfloat16),
+            down_blocks,
+            down_scales,
+            down_bias.to(torch.bfloat16),
+            float(alpha),
+            float(limit),
+        )
     if (
         tk <= GEMV_MAX_TK
         and _gemv_block_m(tk, E) == 1

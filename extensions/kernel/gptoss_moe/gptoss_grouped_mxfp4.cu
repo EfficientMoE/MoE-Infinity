@@ -72,6 +72,7 @@ struct Params {
   int* tok_cnt;   // [Y]
   int* y_expert;  // [Y]
   bf16* out;      // [T, H]
+  int pdl;
 };
 
 __device__ __forceinline__ uint2 ld_stream8(const uint8_t* p) {
@@ -321,6 +322,11 @@ __global__ void __launch_bounds__(WR* WK * 32) gate_up_kernel(const Params p) {
   const int wk = warp / WR;
   const int g = lane >> 2;
   const int t4 = lane & 3;
+#if __CUDA_ARCH__ >= 900
+  // Let launch 2 get scheduled while this grid drains (it waits for our
+  // completion with griddepcontrol.wait before touching anything).
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
 
   {  // zero the bf16 output for launch 2's scatter-add
     const int64_t nblocks = int64_t(gridDim.x) * gridDim.y;
@@ -442,6 +448,9 @@ __global__ void __launch_bounds__(WR* WK * 32) down_kernel(const Params p) {
   const int g = lane >> 2;
   const int t4 = lane & 3;
 
+#if __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
   const int cnt = p.tok_cnt[y];
   if (cnt == 0) return;
   const int e = p.y_expert[y];
@@ -555,7 +564,23 @@ void launch_one(const Params& p, int Y, cudaStream_t stream) {
   const int rows = DOWN ? WR * MT * 16 : WR * MT * 8;
   const int dim = DOWN ? p.H : p.I;
   dim3 grid((dim + rows - 1) / rows, Y);
-  kernel<<<grid, WR * WK * 32, kSmem, stream>>>(p);
+  if (!DOWN) {
+    kernel<<<grid, WR * WK * 32, kSmem, stream>>>(p);
+    return;
+  }
+  // Launch 2 as a programmatic dependent of launch 1 (sm_90+): its CTAs are
+  // scheduled during launch 1's tail and wait in griddepcontrol.wait.
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = grid;
+  cfg.blockDim = dim3(WR * WK * 32);
+  cfg.dynamicSmemBytes = kSmem;
+  cfg.stream = stream;
+  cudaLaunchAttribute attr[1];
+  attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attr[0].val.programmaticStreamSerializationAllowed = p.pdl;
+  cfg.attrs = attr;
+  cfg.numAttrs = 1;
+  cudaLaunchKernelEx(&cfg, kernel, p);
 }
 
 // Instantiated (MT, WR, WK, U); 8 warps each (the routing scan needs 256
@@ -569,6 +594,10 @@ void launch_one(const Params& p, int Y, cudaStream_t stream) {
   X(1, 4, 2, 4)        \
   X(1, 8, 1, 2)        \
   X(1, 8, 1, 4)        \
+  X(1, 2, 4, 8)        \
+  X(1, 4, 2, 8)        \
+  X(1, 8, 1, 8)        \
+  X(2, 4, 2, 2)        \
   X(2, 8, 1, 2)
 
 template <int NT, bool DOWN>
@@ -598,12 +627,19 @@ void launch(int nt, const LaunchCfg& c, const Params& p, int Y,
   }
 }
 
-// Tuning override: MOE_GPTOSS_MXFP4_CFG="nt;mt,wr,wk,u;mt,wr,wk,u".
-bool env_cfg(int& nt, LaunchCfg& up, LaunchCfg& down) {
+// Tuning override: MOE_GPTOSS_MXFP4_CFG="nt_up,nt_down;mt,wr,wk,u;mt,wr,wk,u".
+bool env_cfg(int& nt_up, int& nt_down, LaunchCfg& up, LaunchCfg& down) {
   const char* env = std::getenv("MOE_GPTOSS_MXFP4_CFG");
   if (env == nullptr || *env == '\0') return false;
-  return std::sscanf(env, "%d;%d,%d,%d,%d;%d,%d,%d,%d", &nt, &up.mt, &up.wr,
-                     &up.wk, &up.u, &down.mt, &down.wr, &down.wk, &down.u) == 9;
+  int v[10];
+  if (std::sscanf(env, "%d,%d;%d,%d,%d,%d;%d,%d,%d,%d", &v[0], &v[1], &v[2],
+                  &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]) != 10)
+    return false;
+  nt_up = v[0];
+  nt_down = v[1];
+  up = LaunchCfg{v[2], v[3], v[4], v[5]};
+  down = LaunchCfg{v[6], v[7], v[8], v[9]};
+  return true;
 }
 
 }  // namespace
@@ -690,16 +726,25 @@ torch::Tensor gptoss_grouped_mxfp4(
   p.tok_cnt = reinterpret_cast<int*>(base + act_bytes + list_bytes);
   p.y_expert = p.tok_cnt + Y;
   p.out = reinterpret_cast<bf16*>(out.data_ptr());
+  p.pdl = at::cuda::getCurrentDeviceProperties()->major >= 9 ? 1 : 0;
 
-  // Token tiles: enough n8 tiles for the expected tokens per expert.
+  // Launch configs measured on sm_120 (RTX PRO 6000 Max-Q, 300 W) for the
+  // GPT-OSS shapes (H = I = 2880): up to ~4 tokens per expert, one n8 token
+  // tile per pass (extra tokens take a second, L2-resident pass) and K-split
+  // warps; ~8 tokens per expert, two n8 tiles and row-split warps.
   const int64_t m_avg = (TK + Y - 1) / Y;
-  int nt = m_avg <= 8 ? 1 : m_avg <= 16 ? 2 : m_avg <= 32 ? 4 : 8;
-  LaunchCfg up{1, 1, 8, 2};
-  LaunchCfg down{1, 2, 4, 2};
-  env_cfg(nt, up, down);
+  int nt = 1, nt_down = 1;
+  LaunchCfg up{1, 2, 4, 4};
+  LaunchCfg down{1, 1, 8, 2};
+  if (m_avg > 4) {
+    nt = nt_down = m_avg <= 16 ? 2 : m_avg <= 32 ? 4 : 8;
+    up = LaunchCfg{1, 8, 1, 8};
+    down = LaunchCfg{1, 2, 4, 2};
+  }
+  env_cfg(nt, nt_down, up, down);
   launch<false>(nt, up, p, static_cast<int>(Y), stream);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  launch<true>(nt, down, p, static_cast<int>(Y), stream);
+  launch<true>(nt_down, down, p, static_cast<int>(Y), stream);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
