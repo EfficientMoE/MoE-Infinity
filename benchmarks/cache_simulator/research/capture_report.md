@@ -807,3 +807,31 @@ a few hundred decode steps, no labels); if it is short relative to
 capacity-refill time, prefer global-recency eviction (s3fifo/LRU) at
 >=10E; if long, LCNU-style layer-fair policies dominate at every capacity
 we tested.
+
+---
+
+## Addendum 10 — prefix-probe validation: short probes rank correctly but misestimate magnitude (exp661): FAIL
+
+Addendum 9's practitioner rule assumed a few hundred decode steps suffice
+to estimate half-life. Pre-registered prefix test (sha ef9fdbe2..., frozen
+in exp661 ARTIFACT.sha256): recompute the rotation probe from prefixes
+P=256/512 of the frozen decode streams.
+
+- H1 holds: ordering survives at P=512 — half-life(30b) 1.165 windows <
+  half-life(granite) 2.376.
+- H3 fails: granite prefix-512 half-life 2.376 vs full-stream 4.59 — a 48%
+  underestimate, outside the pre-registered ±35% bound (30b: 1.165 vs
+  1.60, -27%, within bound). H2 fails on the strict reading (granite P256
+  censored at exactly 3.0 windows with J(3)=0.5038).
+- Verdict FAIL per the pre-commit; no post-hoc rescue.
+
+**Substance:** short probes get the ORDER right but not the MAGNITUDE.
+Granite's rotation is nonstationary — early decode steps rotate ~2x faster
+than the stream average (the probe sees mostly early steps, so it
+overestimates rotation speed). Two practical corrections to the
+addendum-9 rule: (1) a >=512-step probe is sufficient to CHOOSE between
+fast/slow rotation regimes (ordering is robust), but (2) half-life
+MAGNITUDES — and any threshold calibrated on them — need the full serving
+window, and rotation speed itself drifts over generation. Also visible:
+30b's prefix J(d) is U-shaped (min at d~3, partial recovery by d~6),
+consistent with prompt-cycle periodicity rather than pure noise decay.
