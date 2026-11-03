@@ -1372,6 +1372,7 @@ POLICY_FACTORIES = {
     "rothead": lambda cap, **kw: _build_rothead(cap, **kw),
     "hotfit": lambda cap, **kw: _build_hotfit(cap, **kw),
     "shadowfit": lambda cap, **kw: _build_shadowfit(cap, **kw),
+    "decayfit": lambda cap, **kw: _build_decayfit(cap, **kw),
 }
 
 
@@ -1383,6 +1384,12 @@ def _build_rothead(cap, **kw):
     )
 
     return RotHeadPolicy(cap, **kw)
+
+
+def _build_decayfit(cap, **kw):
+    from .research.policies_decayfit import DecayFitPolicy
+
+    return DecayFitPolicy(cap, **kw)
 
 
 def _build_shadowfit(cap, **kw):
@@ -1401,7 +1408,7 @@ def _build_hotfit(cap, **kw):
 
 #: Policies that accept the model geometry (``num_layers``; ``lcnu`` also
 #: ``prior = top_k / num_experts``) as keyword arguments.
-GEOMETRY_POLICIES = {"layer_lru", "lcnu", "rothead", "hotfit", "shadowfit"}
+GEOMETRY_POLICIES = {"layer_lru", "lcnu", "rothead", "hotfit", "shadowfit", "decayfit"}
 
 
 # Keep a module-level INF for callers that compare against Belady.
