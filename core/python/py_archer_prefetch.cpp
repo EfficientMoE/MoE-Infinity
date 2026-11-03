@@ -184,16 +184,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
          const torch::Tensor& router_weight, const torch::Tensor& expert_table,
          int64_t inter, int64_t kcap, torch::Tensor out, bool zero_out,
-         int dual_cfg, int down_cfg) {
+         int dual_cfg, int down_cfg, int combine) {
         grouped_moe_prefill_cfg(hidden, router_mask, router_weight,
                                 expert_table, inter, kcap, out, zero_out,
-                                dual_cfg, down_cfg,
+                                dual_cfg, down_cfg, combine,
                                 at::cuda::getCurrentCUDAStream().stream());
       },
       py::arg("hidden"), py::arg("router_mask"), py::arg("router_weight"),
       py::arg("expert_table"), py::arg("inter"), py::arg("kcap"),
       py::arg("out"), py::arg("zero_out") = false, py::arg("dual_cfg") = -1,
-      py::arg("down_cfg") = -1,
+      py::arg("down_cfg") = -1, py::arg("combine") = -1,
       "Grouped prefill MoE layer: out += sum_e w[:, e] * FFN_e(hidden) over "
       "the experts in expert_table (int64 [n, 4]: gate*, up*, down*, id); "
       "same interface as grouped_moe_decode.");

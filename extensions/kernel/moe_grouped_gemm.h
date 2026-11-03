@@ -121,6 +121,7 @@ struct GroupedExpertGemm {
     typename OutputIterator::Params params_D;
     Element* act;  // gate/up output [rows, N]
     float* out;    // down output [T, N], accumulated
+    Element* y;    // down output per sorted row [rows, N] (combine mode)
     int64_t ldo;
     typename Act::Params act_params;
   };
@@ -144,6 +145,7 @@ struct GroupedExpertGemm {
     p.params_D = typename OutputIterator::Params(LayoutC(N));
     p.act = act;
     p.out = out;
+    p.y = nullptr;
     p.ldo = ldo;
     p.act_params = act_params;
     return p;
@@ -271,8 +273,18 @@ struct GroupedExpertGemm {
                            {p.K, p.N}, thread_idx, offset_B);
       mma(k_iterations, acc[0], iterator_A, iterator_B, acc[0]);
       cutlass::arch::cp_async_wait<0>();
-      scatter_epilogue(p, acc[0], row0, rows, tile_m, tile_n, warp_idx,
-                       lane_idx);
+      if (p.y) {
+        // Combine mode: bf16 rows in sorted order, summed per token later.
+        __syncthreads();
+        OutputIterator iterator_D(
+            p.params_D, p.y + int64_t(row0) * p.N, {rows, p.N}, thread_idx,
+            {tile_m * ThreadblockShape::kM, tile_n * ThreadblockShape::kN});
+        Epilogue epilogue(smem.epilogue, thread_idx, warp_idx, lane_idx);
+        epilogue(OutputOp(typename OutputOp::Params(1.0f)), iterator_D, acc[0]);
+      } else {
+        scatter_epilogue(p, acc[0], row0, rows, tile_m, tile_n, warp_idx,
+                         lane_idx);
+      }
     }
     __syncthreads();  // the next tile's prologue reuses shared memory
   }

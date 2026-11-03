@@ -84,24 +84,63 @@ def test_grouped_moe_prefill_every_config(seed_everything, T, E, n, k, H, I):
     # 5 gate/up and 7 down configs, incl. the mixed-height ones (-1 = auto)
     for dual_cfg in range(-1, 5):
         for down_cfg in range(-1, 7):
-            out = torch.full((T, H), 7.0, device="cuda")
-            _STORE.grouped_moe_prefill(
-                x, mask, w, table, I, k, out, True, dual_cfg, down_cfg
-            )
-            _assert_close(out, ref)
+            for combine in (0, 1):
+                out = torch.full((T, H), 7.0, device="cuda")
+                _STORE.grouped_moe_prefill(
+                    x,
+                    mask,
+                    w,
+                    table,
+                    I,
+                    k,
+                    out,
+                    True,
+                    dual_cfg,
+                    down_cfg,
+                    combine,
+                )
+                _assert_close(out, ref)
 
 
 @requires_cuda
+@pytest.mark.parametrize("combine", [0, 1])
 @pytest.mark.parametrize("weight_dtype", ["float32", "bfloat16", "float16"])
-def test_grouped_moe_prefill_accumulates(seed_everything, weight_dtype):
+def test_grouped_moe_prefill_accumulates(
+    seed_everything, weight_dtype, combine
+):
+    """combine=0: fp32 scatter-add epilogue; 1: bf16 rows + combine launch."""
     _requires_binding()
     dtype = getattr(torch, weight_dtype)
     x, mask, w, experts, ids, table = _layer(500, 32, 32, 4, 512, 256, dtype)
     ref = _reference(x, mask, w, experts, ids)
     base = torch.randn(500, 512, device="cuda")
     out = base.clone()
-    _STORE.grouped_moe_prefill(x, mask, w, table, 256, 4, out, False)
+    _STORE.grouped_moe_prefill(
+        x, mask, w, table, 256, 4, out, False, combine=combine
+    )
     _assert_close(out - base, ref)
+
+
+@requires_cuda
+@pytest.mark.parametrize("dual_cfg,down_cfg", [(-1, -1), (3, 3), (4, 6)])
+def test_grouped_moe_prefill_combine_deterministic(
+    seed_everything, dual_cfg, down_cfg
+):
+    """Combine mode sums every token's rows in a fixed order: bitwise
+    reproducible, and equal to the scatter-add path to fp32 rounding."""
+    _requires_binding()
+    x, mask, w, experts, ids, table = _layer(1500, 64, 48, 6, 1024, 512)
+    ref = _reference(x, mask, w, experts, ids)
+    outs = []
+    for combine in (1, 1, 0):
+        out = torch.full((1500, 1024), 5.0, device="cuda")
+        _STORE.grouped_moe_prefill(
+            x, mask, w, table, 512, 6, out, True, dual_cfg, down_cfg, combine
+        )
+        outs.append(out)
+    assert torch.equal(outs[0], outs[1])
+    _assert_close(outs[0], ref)
+    torch.testing.assert_close(outs[0], outs[2], rtol=1e-5, atol=1e-5)
 
 
 @requires_cuda
