@@ -1318,4 +1318,4 @@ and the three disclosed failed design iterations: `exp673-moei-costfit3/PREREG.m
 
 ## Addendum 21 (exp674)
 
-**Verdict: SAFETY-BROKEN** — the BO point (HL=160975, 4.9x center) improves the mean deficit but violates the no-harm barrier on the synthetic grid. The center calibration stands; the BO objective overfit the worst case to two real traces.
+**Verdict: SAFETY-BROKEN** — the BO point (HL=160975, 4.9x center) degrades the mean hit rate vs center (-0.1234pp) and violates the no-harm barrier on the synthetic grid (see ADDENDUM21.md same-day correction). The center calibration stands; the BO objective overfit the worst case to two real traces.
