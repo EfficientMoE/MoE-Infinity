@@ -60,6 +60,11 @@ constexpr int kBT64MinTokens = ROUTER_BT64_MIN;
 #endif
 constexpr int kRows = 8;  // phase-2 rows reduced per smem pass (1 per warp)
 constexpr int kFusedMaxTokens = 1024;
+#ifndef ROUTER_WIDE_MIN_T
+  #define ROUTER_WIDE_MIN_T 4096
+#endif
+// From this many tokens wide routers use the fused CUTLASS GEMM + top-k.
+constexpr int kWideMinTokens = ROUTER_WIDE_MIN_T;
 constexpr int64_t kFusedMaxElems = 196608;  // T * E, see fused_route
 // One CTA reduces all partials when T * E is this small (decode b1).
 #ifndef ROUTER_SINGLE_ELEMS
@@ -1016,6 +1021,10 @@ struct LogitsL {
   }
 };
 
+}  // namespace moe_router
+#include "kernel/fused_router_gemm.cuh"
+namespace moe_router {
+
 // Flags produced together with a mask on this thread, for the executor
 // (take_active_flags): identity of the mask, held weakly.
 thread_local c10::weak_intrusive_ptr<c10::TensorImpl> t_last_mask{
@@ -1170,7 +1179,15 @@ std::vector<at::Tensor> fused_route(
       T > kFusedMaxTokens ||
       (gemm_min_tokens > 0 ? T >= gemm_min_tokens
                            : (T > 256 && T * E > kFusedMaxElems));
-  if (use_gemm) {
+  // The fused CUTLASS GEMM + top-k wins while its 64-token tiles fit in one
+  // wave (measured: 9K tokens 1.1-1.4x faster than cuBLASLt + routing); past
+  // that the per-tile epilogue does not overlap the next tile's mainloop and
+  // cuBLASLt + routing is as fast or faster.
+  const int sms = at::cuda::getDeviceProperties(device)->multiProcessorCount;
+  if (use_gemm && T >= kWideMinTokens && (T + 63) / 64 <= sms &&
+      try_launch_wide(x, w, static_cast<int>(H), p, sc, stream, device)) {
+    // fused CUTLASS GEMM + top-k (one launch), E in (128, 512]
+  } else if (use_gemm) {
     // Tensor-core logits (cuBLASLt, no split-K so the layer stays at two
     // launches); fp32 out unless the router rounds to the model dtype.
     at::Tensor logits =

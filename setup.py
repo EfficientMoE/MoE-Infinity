@@ -443,6 +443,7 @@ if cuda_available:
                 # No --use_fast_math: scores must round exactly like the
                 # torch routers (expf / IEEE division) for identical routing.
                 "nvcc": [a for a in COMMON_NVCC_ARGS if a != "--use_fast_math"]
+                + ["--expt-relaxed-constexpr"]
                 + _cuda_arch_flags,
             },
         )

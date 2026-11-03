@@ -383,3 +383,50 @@ def test_prefill_kernel_default_path_flags(E, k):
     assert torch.equal(flags, out.router_mask.any(0).cpu())
     ref_idx, *_ = _softmax_ref(x, w, k)
     assert _same_set(out.topk_ids, ref_idx).all()
+
+
+@pytest.mark.skipif(
+    not _has_cuda_ext(), reason="moe_infinity._router not built"
+)
+@pytest.mark.parametrize(
+    "scoring,k", [("softmax", 8), ("sigmoid", 8), ("sqrtsoftplus", 6)]
+)
+@pytest.mark.parametrize("tie", [True, False])
+def test_wide_fused_gemm_topk(scoring, k, tie):
+    """E = 256 prefill in one tile wave takes the fused CUTLASS GEMM + top-k
+    kernel; selection matches the torch routers."""
+    from moe_infinity.kernel.router import fused_route
+
+    T, H, E = 4500, 2048, 256
+    if tie:
+        x, w = _int_inputs(T, H, E, seed=7)
+    else:
+        torch.manual_seed(7)
+        x = torch.randn(T, H, device="cuda").to(torch.bfloat16)
+        w = (torch.randn(E, H, device="cuda") * 0.02).to(torch.bfloat16)
+    g = torch.Generator(device="cuda").manual_seed(3)
+    bias = (
+        None
+        if scoring == "softmax"
+        else (
+            torch.randint(-2, 3, (E,), device="cuda", generator=g) * 0.25
+        ).float()
+    )
+    eps = 0.0 if scoring == "softmax" else 1e-20
+    out = fused_route(
+        x, w, k, scoring=scoring, bias=bias, eps=eps, backend="cuda",
+        active_flags=True,
+    )  # fmt: skip
+    if scoring == "softmax":
+        ref_idx, _, _, lg = _softmax_ref(x, w, k)
+        sel, tol = lg.float(), 2.0**-6  # cuBLAS bf16 output: ~1 ulp noise
+    else:
+        fn = torch.sigmoid if scoring == "sigmoid" else _sqrtsoftplus
+        ref_idx, _, sel, _ = _grouped_ref(x, w, bias, k, 1, 1, True, 1.0, fn)
+        tol = 1e-5
+    same = _same_set(out.topk_ids, ref_idx)
+    dec = torch.ones_like(same) if tie else _decisive(sel, k, tol)
+    assert same[dec].all(), f"{(~same[dec]).sum().item()} tokens differ"
+    _check_dense(
+        out.topk_ids, out.topk_weights, out.router_mask, out.routing_weights, E
+    )
