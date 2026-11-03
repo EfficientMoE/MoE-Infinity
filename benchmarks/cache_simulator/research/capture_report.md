@@ -427,3 +427,122 @@ stack**: an observation-only llama.cpp eval-callback tracer on CPU decode
   7 of 8 capacities (second at 1024 by 0.0024).
 - **Belady floors**: 0.6458 at 256 slots (>= 0.4242 static top-8 floor) and
   0.8547 at 512 (>= 0.6785 top-16 floor).
+
+---
+
+# Addendum — qwen3-30b-a3b capture on x86_64 (llama.cpp tracer), fourth capture
+stack, first big-E (E=128) llama.cpp arm
+
+## Capture
+
+- Model: Qwen3-30B-A3B (GGUF v3, sha256-58574f2e…, 18,556,685,856 B, digest
+  verified pre-run), MoE config 48 layers / 128 experts / top_k 8 (k/E = 6.25%,
+  vs granite-3b 20% and qwen3-235b 3.1%).
+- Stack: llama.cpp @ cd8427d0 with the expert-routing tracer (src sha
+  5c9d38bb…) — same tracer as the granite3.1-moe-3b addendum, now on
+  Linux/x86_64 (WSL2) instead of Apple Silicon. Greedy decoding pinned
+  (--temp 0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -c 4096), batch 1,
+  -n 512.
+- Dataset: handcrafted8-greedy512 (same 8 prompts as the granite arm; sha of
+  PROMPTS 43703bef…). Per-prompt decode steps 512×7 + 126 (p3 lawful greedy
+  EOS at 126 tokens — disclosed, not repaired); prompt lens 20–44.
+- Host: single x86_64 host end-to-end (capture AND conversion substrate). The
+  exp647 cross-ISA check showed expert traces are NOT byte-reproducible across
+  M4 (arm64) and x86_64 under pinned greedy (81.3% byte-diff, first order-flip
+  at rowid 21): near-tie router logits flip across ISAs. Rule adopted: this
+  research line's traces are captured, converted and consumed on ONE host;
+  cross-host trace reuse is invalid methodology.
+- Determinism (same host): two back-to-back decode runs of prompt 0 produced
+  byte-identical traces (sha 0a5c6f2d… ×2, 26,128 rows each).
+
+## Conversion + validation
+
+- Converter: parametrized copy of the granite converter (identical logic,
+  NL=48/NE=128). 191,389-row trace -> 3,718 records (3,710 decode
+  [48,1,8] forward_mode=2 + 8 prefill [48,L,8] forward_mode=1), identity
+  physical->logical map.
+- Reconciliation gates (all exact, matching the sealed capture verdict):
+  3,710 clean decode forwards (= (178,088 − 8 lone rows)/48);
+  1,424,640 decode accesses (= 3,710 × 48 × 8); records 3,718;
+  distinct decode keys 5,948 ≤ 6,144 (= 48×128; 96.8% of the layer×expert key
+  space touched across only 8 prompts — the big-E regime the granite arm
+  couldn't probe).
+
+## Known capture artifacts (documented, not repaired)
+
+- **Layer-47 prefill gap** (same class as granite's layer-31): each prefill
+  contributes 47 full layers plus ONE lone layer-47 row at n_tokens=1
+  (reclassified into the prefill record; remaining layer-47 prefill slots use
+  the -1 sentinel that `extract_access_sequence`/`union_prefill_sequence`
+  skip). Union arm undercounts layer-47 first-use fetches by at most 8×128 of
+  ~1.44M accesses. Decode captures all 48 layers.
+- **p3 early EOS**: 126 decode steps (greedy-converged), consistent with the
+  sealed exp647 verdict (legitimate EOS, not capture failure).
+
+## Capacity grid + run disclosure
+
+Both arms use the series' canonical qwen3-30b grid from #294 (capacities =
+multiples of E: 128, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096),
+chosen because the cliff hypothesis (H1) is stated at 3×E = 384. A first
+decode sweep was accidentally launched on the harness default grid
+(64…2048, no 384) — a run-configuration error, discovered before any
+analysis; those outputs were snapshotted (sha256 in the provenance record)
+and discarded, EXPERIMENTS.md reverted, and both arms re-run end-to-end on
+the canonical grid. No hypothesis was edited after seeing data (PREREG
+frozen 2026-11-03T01:26:31Z, sha 416bbe06…); all numbers below come from
+the re-run.
+
+## Headline findings
+
+Frozen hypotheses (PREREG sha 416bbe06…, frozen 2026-11-03T01:26:31Z, before any
+sweep): verdict **PASS 3/4**.
+
+- **H1 CONFIRMED — the zero-band cliff scales with E.** LRU hit rate is
+  exactly 0.0000 at every capacity ≤ 256 (= 2×E) and jumps to 0.3043 at 384
+  (= 3×E) — inside the preregistered [0.25, 0.40] window. Granite (E=40,
+  k/E=20%) zero band ended at 128 with cliff 0.3503@256; qwen3-30b (E=128,
+  k/E=6.25%) zeroes out twice as far relative to E, and the cliff lands at
+  3×E. Pattern across three models: the useless-cache band is set by the
+  active working set, which tracks E at fixed k.
+- **H3 CONFIRMED — belady floor at the cliff.** belady @384 = 0.6012
+  (window [0.55, 0.75]): even the offline optimum only reaches ~60% at the
+  cliff capacity, i.e. at 3×E roughly 40% of decode accesses are
+  first-touch-of-run and unrecoverable by any cache policy. Same shape as
+  granite (0.6458@256) — a policy-independent floor for sizing "useful"
+  expert caches.
+- **H4 CONFIRMED — prefill barely widens the key set.** union vs decode
+  distinct keys: +34 (window [0, 64]); union LRU first-nonzero capacity
+  384 = decode's cliff. Prompt prefill adds almost no long-lived experts
+  beyond what decode touches: for sizing purposes the decode trace is the
+  signal; caching prefill-derived keys buys nothing at small capacities.
+- **H2 REFUTED at large capacities — LCNU is a small/medium-budget policy.**
+  LCNU is the best online policy at every capacity ≤ 1024 (= 8×E): +0.2083
+  over LRU at cap 128 (0.2083 vs 0.0000!), +0.11 at the 384 cliff, and
+  still +0.03 at 1024. But it does NOT dominate everywhere: at ≥ 1536 LRU
+  recency wins (2048: LRU 0.8873 vs LCNU 0.8648) and s3fifo takes
+  best-online at 1536/2048/3072 (e.g. 0.8083 vs LRU 0.7877 at 1536).
+  This replicates exp650's granite result (LCNU best online 7/8 caps, not
+  universal) on a second architecture and a 3.2× larger expert count, and
+  sharpens it into a regime rule: **LCNU's layer-cyclic utility pays below
+  ~8×E; above that, plain recency (LRU/s3fifo) is as good or better.**
+
+Full per-capacity table (hit rates, decode arm):
+
+| cap | LRU | LCNU | belady | best online |
+|----:|----:|----:|----:|:--|
+| 128 | 0.0000 | 0.2083 | 0.3067 | lcnu |
+| 256 | 0.0000 | 0.3273 | 0.4977 | lcnu |
+| 384 | 0.3043 | 0.4148 | 0.6012 | lcnu |
+| 512 | 0.4266 | 0.4853 | 0.6722 | lcnu |
+| 768 | 0.5486 | 0.5905 | 0.7682 | lcnu |
+| 1024 | 0.6413 | 0.6685 | 0.8327 | lcnu |
+| 1536 | 0.7877 | 0.7871 | 0.9124 | s3fifo 0.8083 |
+| 2048 | 0.8873 | 0.8648 | 0.9532 | s3fifo 0.8956 |
+| 3072 | 0.9679 | 0.9445 | 0.9856 | s3fifo 0.9685 |
+| 4096 | 0.9894 | 0.9780 | 0.9935 | score/lru 0.9894 |
+
+Verdict artifact: `exp651-verdict.json` (frozen analyzer output). Analyzer
+note: the preregistered H2 online-filter followed the CSV's
+`is_oracle_upper_bound` flag, which does not flag `belady` itself; `belady`
+(the offline optimum) was therefore excluded from the online set explicitly —
+filter repair only, hypothesis text unchanged.
