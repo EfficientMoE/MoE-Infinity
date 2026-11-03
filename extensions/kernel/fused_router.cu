@@ -167,43 +167,78 @@ __device__ __forceinline__ float warp_sum(float v) {
 //      leaves (top logit, 1 / sum, denominator) in smem;
 //   3. every thread writes the dense mask / weights.
 // logit(i) returns the logit of element i = r * E + e.
+#ifdef ROUTER_GT
+__device__ unsigned long long gt_mark[16];
+  #define GT_MARK(k)                                         \
+    if (threadIdx.x == 0) {                                  \
+      unsigned long long g_;                                 \
+      asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(g_)); \
+      gt_mark[k] = g_;                                       \
+    }
+#else
+  #define GT_MARK(k)
+#endif
 template <int VPL, int SC, typename LogitFn>
 __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
                                            const EpilogueParams& p, float* st,
                                            uint32_t* kt, bool* chosen,
                                            int* flag_sink) {
   __shared__ float rowinfo[kWarps][3];
+#ifdef ROUTER_CLK
+  __shared__ long long clk7;
+  if (threadIdx.x == 0) clk7 = clock64();
+#endif
   const int E = p.E;
   const int n = rows * E;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
 
-  for (int i = tid; i < n; i += blockDim.x) {
-    float v = logit(i);
-    if (p.round_logits) v = __bfloat162float(__float2bfloat16_rn(v));
-    if (p.logits_out != nullptr)
-      store_typed(p.logits_out, static_cast<int64_t>(t0) * E + i, v,
-                  p.logits_dtype);
-    float sc;
-    uint32_t key;
-    if (SC == kSoftmax) {
-      // softmax is strictly increasing: select on the (rounded) logits; the
-      // probabilities of the selected experts are formed below.
-      sc = v;
-      key = ord32(v);
-    } else {
-      if (SC == kSigmoid) {
-        sc = __frcp_rn(1.0f + expf(-v));  // == 1.0f / (...), IEEE
-      } else {
-        sc = sqrtf(v > 20.f ? v : log1pf(expf(v)));
-      }
-      const int e = i - (i / E) * E;
-      key = ord32(p.bias != nullptr ? sc + p.bias[e] : sc);
+  // Two elements per thread per pass, loads first: both elements' partial
+  // reads are in flight together (one L2 round trip instead of two at
+  // E = 512 decode).
+  constexpr int kLB = 2;
+  for (int i0 = tid; i0 < n; i0 += kLB * blockDim.x) {
+    float lv[kLB];
+#pragma unroll
+    for (int b = 0; b < kLB; ++b) {
+      const int i = i0 + b * blockDim.x;
+      lv[b] = i < n ? logit(i) : 0.f;
     }
-    st[i] = sc;
-    kt[i] = key;
+#pragma unroll
+    for (int b = 0; b < kLB; ++b) {
+      const int i = i0 + b * blockDim.x;
+      if (i >= n) break;
+      float v = lv[b];
+      if (p.round_logits) v = __bfloat162float(__float2bfloat16_rn(v));
+      if (p.logits_out != nullptr)
+        store_typed(p.logits_out, static_cast<int64_t>(t0) * E + i, v,
+                    p.logits_dtype);
+      float sc;
+      uint32_t key;
+      if (SC == kSoftmax) {
+        // softmax is strictly increasing: select on the (rounded) logits; the
+        // probabilities of the selected experts are formed below.
+        sc = v;
+        key = ord32(v);
+      } else {
+        if (SC == kSigmoid) {
+          sc = __frcp_rn(1.0f + expf(-v));  // == 1.0f / (...), IEEE
+        } else {
+          sc = sqrtf(v > 20.f ? v : log1pf(expf(v)));
+        }
+        const int e = i - (i / E) * E;
+        key = ord32(p.bias != nullptr ? sc + p.bias[e] : sc);
+      }
+      st[i] = sc;
+      kt[i] = key;
+    }
   }
   __syncthreads();
+  GT_MARK(0)
 
+#ifdef ROUTER_CLK
+  __shared__ long long clk[8];
+  if (threadIdx.x == 0) clk[0] = clock64();
+#endif
   if (warp < rows && p.n_group > 1) {
     uint32_t* krow = kt + warp * E;
     {
@@ -251,6 +286,10 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
   }
   __syncthreads();
 
+  int my_id = 0;
+#ifdef ROUTER_CLK
+  if (threadIdx.x == 0) clk[1] = clock64();
+#endif
   // Top-k: warp r scans row r. Lane l owns experts l, l + 32, ... in
   // registers; each step takes the warp argmax (larger key, then lower
   // index -- torch's tie order) and removes it from the owner lane.
@@ -260,34 +299,138 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
     const uint32_t* krow = kt + warp * E;
     bool* crow = chosen + warp * E;
     uint32_t key[VPL];  // 0 = not a candidate (no real value maps to 0)
-#pragma unroll
-    for (int i = 0; i < VPL; ++i) {
-      const int e = lane + 32 * i;
-      key[i] = e < E ? krow[e] : 0u;
-      if (e < E) crow[e] = false;
-    }
-    int my_id = 0;
-#pragma unroll 1
-    for (int k = 0; k < p.K; ++k) {
-      uint32_t lv = 0;
-      int li = 0x7FFFFFFF;
+    {
 #pragma unroll
       for (int i = 0; i < VPL; ++i) {
-        if (key[i] > lv) {
-          lv = key[i];
-          li = lane + 32 * i;
+        const int e = lane + 32 * i;
+        key[i] = e < E ? krow[e] : 0u;
+        if (e < E) crow[e] = false;
+      }
+      // Fast path: no K serial argmax rounds. Keys made unique with the
+      // index (larger key, then lower index -- torch's tie order). The K-th
+      // largest lane maximum tau bounds the K-th largest key from below
+      // (the K best lane maxima are K distinct elements), so the top K are
+      // among the elements >= tau; those (usually ~K..2K) are ranked all
+      // pairs at once. More than 64 candidates: the rounds below.
+      bool done_sel = false;
+#ifndef ROUTER_NO_FASTSEL
+      {
+        __shared__ uint64_t sbuf[kWarps][64];
+        __shared__ int ssel[kWarps][kMaxK];
+        const int K = p.K;
+        uint64_t ck[VPL];
+  #pragma unroll
+        for (int i = 0; i < VPL; ++i) {
+          const int e = lane + 32 * i;
+          ck[i] = e < E ? (static_cast<uint64_t>(key[i]) << 32) |
+                              (0xFFFFFFFFu - static_cast<uint32_t>(e))
+                        : 0ull;
+        }
+        uint64_t m = ck[0];
+  #pragma unroll
+        for (int i = 1; i < VPL; ++i) m = ck[i] > m ? ck[i] : m;
+        GT_MARK(3)
+
+  #ifdef ROUTER_CLK
+        if (threadIdx.x == 0) clk[4] = clock64();
+  #endif
+
+        sbuf[warp][lane] = m;
+        __syncwarp();
+        int r = 0;
+  #pragma unroll 8
+        for (int j = 0; j < 32; ++j) r += sbuf[warp][j] > m;
+        const unsigned bal = __ballot_sync(0xffffffffu, r == K - 1);
+        const uint64_t tau =
+            bal ? __shfl_sync(0xffffffffu, m, __ffs(bal) - 1) : 0ull;
+        GT_MARK(4)
+
+  #ifdef ROUTER_CLK
+        if (threadIdx.x == 0) clk[5] = clock64();
+  #endif
+
+        int cnt = 0;
+  #pragma unroll
+        for (int i = 0; i < VPL; ++i) cnt += ck[i] != 0ull && ck[i] >= tau;
+        int incl = cnt;
+  #pragma unroll
+        for (int o = 1; o < 32; o <<= 1) {
+          const int v = __shfl_up_sync(0xffffffffu, incl, o);
+          if (lane >= o) incl += v;
+        }
+        const int total = __shfl_sync(0xffffffffu, incl, 31);
+        GT_MARK(5)
+
+  #ifdef ROUTER_CLK
+        if (threadIdx.x == 0) clk[6] = clock64();
+  #endif
+
+        __syncwarp();
+        if (total <= 64) {
+          int pos = incl - cnt;
+  #pragma unroll
+          for (int i = 0; i < VPL; ++i)
+            if (ck[i] != 0ull && ck[i] >= tau) sbuf[warp][pos++] = ck[i];
+          __syncwarp();
+          for (int c = lane; c < total; c += 32) {
+            const uint64_t v = sbuf[warp][c];
+            int rr = 0;
+  #pragma unroll 8
+            for (int j = 0; j < total; ++j) rr += sbuf[warp][j] > v;
+            if (rr < K)
+              ssel[warp][rr] =
+                  static_cast<int>(0xFFFFFFFFu - static_cast<uint32_t>(v));
+          }
+          __syncwarp();
+          if (lane < K) my_id = ssel[warp][lane];
+          GT_MARK(6)
+          done_sel = true;
         }
       }
-      uint32_t wmax;
-      const int idx = warp_argmax(lv, li, &wmax);
-      if ((idx & 31) == lane) {
+#endif
+      if (!done_sel)
+#ifdef ROUTER_NO_TOPK
+  #pragma unroll 1
+        for (int k = 0; k < 1; ++k) {
+#else
+  #pragma unroll 1
+        for (int k = 0; k < p.K; ++k) {
+#endif
+          // Lane-local argmax as a tree (depth log2 VPL instead of a VPL-long
+          // dependency chain: ~4x shorter per round at VPL = 16). Adjacent
+          // pairs keep the lower slot on ties.
+          uint32_t tk[VPL];
+          int ti[VPL];
 #pragma unroll
-        for (int i = 0; i < VPL; ++i)
-          if (i == (idx >> 5)) key[i] = 0u;
-      }
-      if (lane == k) my_id = idx;
+          for (int i = 0; i < VPL; ++i) {
+            tk[i] = key[i];
+            ti[i] = i;
+          }
+#pragma unroll
+          for (int st2 = 1; st2 < VPL; st2 <<= 1)
+#pragma unroll
+            for (int i = 0; i + st2 < VPL; i += 2 * st2)
+              if (tk[i + st2] > tk[i]) {
+                tk[i] = tk[i + st2];
+                ti[i] = ti[i + st2];
+              }
+          const uint32_t lv = tk[0];
+          const int li = lv != 0u ? lane + 32 * ti[0] : 0x7FFFFFFF;
+          uint32_t wmax;
+          const int idx = warp_argmax(lv, li, &wmax);
+          if ((idx & 31) == lane) {
+#pragma unroll
+            for (int i = 0; i < VPL; ++i)
+              if (i == (idx >> 5)) key[i] = 0u;
+          }
+          if (lane == k) my_id = idx;
+        }
     }
+#ifdef ROUTER_CLK
+    if (threadIdx.x == 0) clk[3] = clock64();
+#endif
     __syncwarp();
+    GT_MARK(7)
     if (lane < p.K) crow[my_id] = true;
     float my_w = lane < p.K ? srow[my_id] : 0.f;
     const float top_logit = __shfl_sync(0xffffffffu, my_w, 0);  // rank 0
@@ -320,10 +463,18 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
     }
   }
   __syncthreads();
+  GT_MARK(1)
 
+#ifdef ROUTER_CLK
+  if (threadIdx.x == 0) clk[2] = clock64();
+#endif
+#ifdef ROUTER_NO_DENSE
+  if (false) {
+#else
   if (p.mask != nullptr) {
+#endif
     for (int i = tid; i < n; i += blockDim.x) {
-      const int r = i / E;
+      const int r = rows == 1 ? 0 : i / E;
       const bool on = chosen[i];
       p.mask[static_cast<int64_t>(t0) * E + i] = on;
       float v = 0.f;
@@ -337,6 +488,12 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
     }
   }
   __syncthreads();
+  GT_MARK(2)
+#ifdef ROUTER_CLK
+  if (threadIdx.x == 0 && t0 == 0)
+    printf("RCLK load+max %lld tau %lld scan %lld rank %lld\n", clk[4] - clk[1],
+           clk[5] - clk[4], clk[6] - clk[5], clk[3] - clk[6]);
+#endif
 }
 
 // Tell the host ring this launch's slot writes are done (see FlagRing).
@@ -404,6 +561,9 @@ struct DecodeArgs {
 //           (kBE / 2 experts each, kBE / 32 fragments per warp).
 //   (A 64x128 tile with 2x2 warp fragments measured slower at T=256: fewer
 //   items -> fewer SMs streaming the gate weight.)
+#ifndef ROUTER_STAGES16
+  #define ROUTER_STAGES16 3
+#endif
 constexpr int kBE16 = ROUTER_BE16;
 constexpr int kBE64 = ROUTER_BE64;
 template <int BT>
@@ -416,12 +576,13 @@ struct Tile {
   static constexpr int kLd = kHC + kPad;
   static constexpr int kXElems = BT * kLd;
   static constexpr int kWElems = kBE * kLd;
+  static constexpr int kSt = BT == 16 ? ROUTER_STAGES16 : kStages;
 };
 
 template <typename Tin, int BT>
 constexpr int decode_smem_bytes() {
   using TL = Tile<BT>;
-  constexpr int op = kStages * (TL::kXElems + TL::kWElems) * sizeof(Tin);
+  constexpr int op = TL::kSt * (TL::kXElems + TL::kWElems) * sizeof(Tin);
   constexpr int acc = (BT == 16 ? TL::kParts * 16 : BT) * TL::kBE * 4;
   constexpr int red =
       2 * kRows * kMaxE * 4 + kRows * kMaxE;  // scores, keys, chosen
@@ -446,7 +607,7 @@ __device__ void logits_item(const DecodeArgs& a, const EpilogueParams& p,
   const Tin* x = static_cast<const Tin*>(a.x);
   const Tin* w = static_cast<const Tin*>(a.w);
   Tin* xs = reinterpret_cast<Tin*>(smem);
-  Tin* ws = xs + kStages * TL::kXElems;
+  Tin* ws = xs + TL::kSt * TL::kXElems;
 
   auto load_stage = [&](int stage, int h0) {
     constexpr int kVec = 8;  // 16 B per cp.async
@@ -486,18 +647,18 @@ __device__ void logits_item(const DecodeArgs& a, const EpilogueParams& p,
 
   const int n_chunks = h_hi > h_lo ? (h_hi - h_lo + kHC - 1) / kHC : 0;
 #pragma unroll
-  for (int s = 0; s < kStages - 1; ++s) {
+  for (int s = 0; s < TL::kSt - 1; ++s) {
     if (s < n_chunks) load_stage(s, h_lo + s * kHC);
     asm volatile("cp.async.commit_group;\n" ::);
   }
   for (int c = 0; c < n_chunks; ++c) {
-    asm volatile("cp.async.wait_group %0;\n" ::"n"(kStages - 2));
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(TL::kSt - 2));
     __syncthreads();
-    if (c + kStages - 1 < n_chunks)
-      load_stage((c + kStages - 1) % kStages, h_lo + (c + kStages - 1) * kHC);
+    if (c + TL::kSt - 1 < n_chunks)
+      load_stage((c + TL::kSt - 1) % TL::kSt, h_lo + (c + TL::kSt - 1) * kHC);
     asm volatile("cp.async.commit_group;\n" ::);
-    const Tin* xa = xs + (c % kStages) * TL::kXElems;
-    const Tin* wb = ws + (c % kStages) * TL::kWElems;
+    const Tin* xa = xs + (c % TL::kSt) * TL::kXElems;
+    const Tin* wb = ws + (c % TL::kSt) * TL::kWElems;
     if constexpr (BT == 16) {
       constexpr int kSlice = kHC / TL::kParts;
       const int col = (warp % TL::kCols) * 16;
@@ -572,34 +733,42 @@ __device__ void reduce_and_route(const DecodeArgs& a, const EpilogueParams& p,
   const int n_split = a.n_split;
   for (int t0 = t_begin; t0 < t_end; t0 += kRows) {
     const float* base = a.partial + static_cast<int64_t>(t0) * E;
-    // Fixed split order s = 0, 1, 2, ... (deterministic); unconditional
-    // groups keep 8 (then 4) loads in flight.
-    auto logit = [&](int i) {
-      const float* src = base + i;
-      float acc = 0.f;
-      int s = 0;
-      for (; s + 8 <= n_split; s += 8) {
-        float v[8];
+    // Fixed split order s = 0, 1, 2, ... (deterministic). Every load of a
+    // thread's elements is issued before any is summed: one L2 round trip.
+    // The sums go to st[i] for the thread that owns i in route_rows (same
+    // i = tid + 256 j mapping), which reads them back before overwriting.
+    const int n = min(kRows, t_end - t0) * E;
+    for (int i0 = threadIdx.x; i0 < n; i0 += 2 * kThreads) {
+      const int i1 = i0 + kThreads;
+      float v0[kMaxSplit], v1[kMaxSplit];
 #pragma unroll
-        for (int j = 0; j < 8; ++j) v[j] = __ldcg(src + (s + j) * plane);
-#pragma unroll
-        for (int j = 0; j < 8; ++j) acc += v[j];
+      for (int sp = 0; sp < kMaxSplit; ++sp) {
+        if (sp < n_split) {
+          v0[sp] = __ldcg(base + i0 + sp * plane);
+          v1[sp] = i1 < n ? __ldcg(base + i1 + sp * plane) : 0.f;
+        }
       }
-      for (; s + 4 <= n_split; s += 4) {
-        float v[4];
+      float a0 = 0.f, a1 = 0.f;
 #pragma unroll
-        for (int j = 0; j < 4; ++j) v[j] = __ldcg(src + (s + j) * plane);
-#pragma unroll
-        for (int j = 0; j < 4; ++j) acc += v[j];
+      for (int sp = 0; sp < kMaxSplit; ++sp) {
+        if (sp < n_split) {
+          a0 += v0[sp];
+          a1 += v1[sp];
+        }
       }
-      for (; s < n_split; ++s) acc += __ldcg(src + s * plane);
-      return acc;
-    };
+      st[i0] = a0;
+      if (i1 < n) st[i1] = a1;
+    }
+    auto logit = [&](int i) { return st[i]; };
     route_rows<VPL, SC>(logit, t0, min(kRows, t_end - t0), p, st, kt, chosen,
                         want_flags ? sflags : nullptr);
   }
   // Host pre-zeroed the pinned flags; set the experts this CTA routed to.
+#ifdef ROUTER_NO_FLAGS
+  if (false)
+#else
   if (want_flags && t_begin < t_end)
+#endif
     for (int e = threadIdx.x; e < E; e += kThreads)
       if (sflags[e]) p.flags_host[e] = true;
   signal_done(p);
@@ -608,6 +777,9 @@ __device__ void reduce_and_route(const DecodeArgs& a, const EpilogueParams& p,
 // T <= BT (one token tile): no grid barrier -- the last CTA to finish its
 // phase-1 items routes every token. Larger T: cooperative launch, grid
 // barrier, phase 2 spread over all CTAs.
+#ifdef ROUTER_GT
+__device__ unsigned long long gt_dbg[1024];
+#endif
 template <typename Tin, int BT, int VPL, int SC, bool kSingleTile>
 __global__ void __launch_bounds__(kThreads)
     fused_route_pro6000_kernel(DecodeArgs a, EpilogueParams p) {
@@ -626,9 +798,22 @@ __global__ void __launch_bounds__(kThreads)
   __shared__ float sbias[kMaxE];
   EpilogueParams q = p;
   if (p.bias != nullptr) {
-    for (int e = threadIdx.x; e < p.E; e += kThreads) sbias[e] = p.bias[e];
+    // Asynchronous (its own cp.async group, older than the mainloop's): the
+    // bias arrives alongside the first weight chunk instead of stalling
+    // every CTA for a DRAM round trip before its first load.
+    for (int e = threadIdx.x; e < p.E; e += kThreads) {
+      const uint32_t dst =
+          static_cast<uint32_t>(__cvta_generic_to_shared(sbias + e));
+      asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(dst),
+                   "l"(p.bias + e));
+    }
+    asm volatile("cp.async.commit_group;\n" ::);
     q.bias = sbias;
   }
+#ifdef ROUTER_GT
+  __shared__ unsigned long long gt0;
+  if (threadIdx.x == 0) asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(gt0));
+#endif
   const int n_items = a.n_t * a.n_e * a.n_split;
   for (int item = blockIdx.x; item < n_items; item += gridDim.x)
     logits_item<Tin, BT>(a, p, item, smem);
@@ -639,12 +824,57 @@ __global__ void __launch_bounds__(kThreads)
     if (threadIdx.x == 0)
       last = atomicAdd(&p.state->tile_count, 1u) == gridDim.x - 1;
     __syncthreads();
+#ifdef ROUTER_GT
+    if (threadIdx.x == 0) {
+      unsigned long long g1;
+      asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(g1));
+      gt_dbg[blockIdx.x * 2] = gt0;
+      gt_dbg[blockIdx.x * 2 + 1] = g1;
+    }
+#endif
     if (!last) return;
     __threadfence();
+#ifdef ROUTER_NO_ROUTE
+    if (threadIdx.x == 0) p.state->tile_count = 0;
+    signal_done(p);
+    return;
+#endif
+#ifdef ROUTER_GT
+    unsigned long long g2, g3;
+    if (threadIdx.x == 0) asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(g2));
+#endif
     reduce_and_route<VPL, SC>(a, q, 0, p.T, smem);
     if (threadIdx.x == 0) p.state->tile_count = 0;
+#ifdef ROUTER_GT
+    if (threadIdx.x == 0) {
+      asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(g3));
+      unsigned long long mn = ~0ull, mx0 = 0, mx1 = 0;
+      for (int b = 0; b < gridDim.x - 1; ++b) {
+        mn = min(mn, gt_dbg[2 * b]);
+        mx0 = max(mx0, gt_dbg[2 * b]);
+        mx1 = max(mx1, gt_dbg[2 * b + 1]);
+      }
+      printf(
+          "GT3 max %llu tau %llu scan %llu rank %llu ->w %llu weights %llu\n",
+          gt_mark[3] - gt_mark[0], gt_mark[4] - gt_mark[3],
+          gt_mark[5] - gt_mark[4], gt_mark[6] - gt_mark[5],
+          gt_mark[7] - gt_mark[6], gt_mark[1] - gt_mark[7]);
+      printf("GT2 score %llu topk %llu dense %llu flags+ %llu\n",
+             gt_mark[0] - g2, gt_mark[1] - gt_mark[0], gt_mark[2] - gt_mark[1],
+             g3 - gt_mark[2]);
+      printf(
+          "GT grid %d start_spread %llu last_p1_end %llu my_p1_end %llu "
+          "route_start %llu end %llu\n",
+          gridDim.x, mx0 - mn, mx1 - mn, gt_dbg[2 * blockIdx.x + 1] - mn,
+          g2 - mn, g3 - mn);
+    }
+#endif
   } else {
     grid_barrier(p.state);
+#ifdef ROUTER_NO_ROUTE
+    if (blockIdx.x == 0) signal_done(p);
+    return;
+#endif
     const int tpc = (p.T + gridDim.x - 1) / gridDim.x;
     const int t_begin = blockIdx.x * tpc;
     reduce_and_route<VPL, SC>(a, q, t_begin, min(p.T, t_begin + tpc), smem);
