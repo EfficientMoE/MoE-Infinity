@@ -1311,3 +1311,7 @@ Cost model, parameters (exp667 center), registration points, prereg sha,
 and the three disclosed failed design iterations: `exp673-moei-costfit3/PREREG.md`
 (frozen pre-run, `f7378dd3`). Data: `research/exp673-costfit3.json`.
 
+
+## Addendum 20 (exp669)
+
+**Verdict: IMPROVED** (frozen rule: IMPROVED if H1) — re-eval determinism gate PASS (best config rebuilt post-run on both traces; all recorded cells byte-identical).
