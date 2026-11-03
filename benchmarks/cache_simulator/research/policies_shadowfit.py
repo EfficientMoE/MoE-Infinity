@@ -29,6 +29,7 @@ class ShadowFitPolicy:
 
     MARGIN = 0.01
     RESEGMENT = 4096
+    uses_oracle = False
 
     def __init__(self, capacity: int, num_layers: int = 1, prior: float = 1.0 / 16):
         self.capacity = capacity
