@@ -97,6 +97,7 @@ from moe_infinity.runtime.expert_variant_manifest import (
     ExpertVariantManifest,
     load_derivative_overlay,
 )
+from moe_infinity.runtime.gptoss_offload import gptoss_mxfp4_pro6000_enabled
 from moe_infinity.runtime.hooks import *
 from moe_infinity.runtime.resident_precision import (
     load_time_fp8_plan,
@@ -1450,6 +1451,14 @@ class OffloadEngine(object):
                 self.expert_prefetcher.expert_dispatcher = (
                     self.expert_dispatcher
                 )
+                if parse_expert_type(self.config) == 6 and hasattr(
+                    self.expert_dispatcher, "set_gptoss_mxfp4_pro6000"
+                ):
+                    # RTX PRO 6000-tuned MXFP4 expert kernels; other devices
+                    # keep the de-quantise + matmul path.
+                    self.expert_dispatcher.set_gptoss_mxfp4_pro6000(
+                        gptoss_mxfp4_pro6000_enabled()
+                    )
 
                 for name, param in model.named_parameters(recurse=True):
                     # remove base_model_prefix from self.name_id_map

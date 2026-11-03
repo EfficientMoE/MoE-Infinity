@@ -3,6 +3,10 @@
 
 // GPT-OSS MXFP4 expert forward on the stored blocks/scales (no per-call
 // de-quantisation of gate_up). See mxfp4_gptoss_moe.cu for the kernels.
+//
+// Tuned on the RTX PRO 6000 Blackwell and gated to it (RTX_PRO_6000, see
+// docs/hardware-gated-kernels.md); other devices get `false` and keep the
+// previous de-quantise + matmul path.
 
 #pragma once
 
@@ -22,12 +26,12 @@ struct GptOssExpertScratch {
 // From this many tokens the down projection runs as a BF16 cuBLAS GEMM on
 // weights de-quantised by the gate_up kernel (overlapped with its MMAs);
 // below it both projections stay MXFP4.
-constexpr int64_t kGptOssDenseDownMinTokens = 320;
+constexpr int64_t kGptOssPro6000DenseDownMinTokens = 320;
 
 // From this many tokens the arena gets an L2 persisting window for the op
 // (Wd, act and partials stay in L2 between the launches), and Wd / act are
 // discarded from L2 after it (one extra launch), so they never reach DRAM.
-constexpr int64_t kGptOssL2ResidentMinTokens = 257;
+constexpr int64_t kGptOssPro6000L2ResidentMinTokens = 257;
 
 // Bytes of GptOssExpertScratch::arena for M tokens.
 size_t gptoss_expert_arena_bytes(int64_t M, int64_t H, int64_t I);
@@ -38,7 +42,7 @@ size_t gptoss_expert_arena_bytes(int64_t M, int64_t H, int64_t I);
 // [H, I/2] / [H, I/32]); biases: [2I] / [H]. Runs on `stream`. Returns false
 // (and launches nothing) when the inputs are outside what the kernels cover,
 // so the caller can fall back to de-quantise + matmul.
-bool gptoss_mxfp4_expert_forward(
+bool gptoss_mxfp4_expert_forward_pro6000(
     const torch::Tensor& x, const torch::Tensor& gu_blocks,
     const torch::Tensor& gu_scales, const torch::Tensor& gu_bias,
     const torch::Tensor& d_blocks, const torch::Tensor& d_scales,

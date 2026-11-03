@@ -7,6 +7,7 @@
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
 #include "kernel/fused_moe_mlp.h"
+#include "kernel/hw_profile.h"
 #include "kernel/v4_fp4/mxfp4_gptoss_moe.h"
 extern void fp8_dequant_blockwise_cuda(const void* weight, const void* scale,
                                        void* out, int N, int K,
@@ -197,9 +198,15 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
 // Binds the stored MXFP4 tensors (gate_up blocks/scales/bias, down
 // blocks/scales/bias). ForwardHelper consumes them directly; the BF16
 // de-quantisation only runs on the fallback path.
-void MoEMLP::DequantMxfp4Params(cudaStream_t stream) {
+void MoEMLP::DequantMxfp4Params(cudaStream_t stream, bool allow_pro6000) {
   if (expert_type_ != GPT_OSS_MOE_DENSE_ACT_DENSE) return;
   int device = at::cuda::current_device();
+  if (!gpt_oss_gate_set_) {
+    gpt_oss_mxfp4_pro6000_ =
+        allow_pro6000 &&
+        moe_infinity::hw::Supports(moe_infinity::hw::Gate::kRtxPro6000, device);
+    gpt_oss_gate_set_ = true;
+  }
   gpt_oss_param_.clear();
   for (int i = 0; i < 6; ++i) {
     gpt_oss_param_.push_back(param_[i].to(CUDA_DEVICE(device)));
@@ -297,13 +304,15 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
 
   if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
     const auto& p = gpt_oss_param_;
-    // MXFP4 tensor-core kernels on the stored blocks/scales: 2 launches with
-    // bias, interleaved gate/up split and clamped SwiGLU-OAI fused.
-    if (gptoss_mxfp4_expert_forward(input, p[0], p[1], p[2], p[3], p[4], p[5],
-                                    output, gpt_oss_scratch_, stream)) {
+    // RTX PRO 6000: MXFP4 tensor-core kernels on the stored blocks/scales
+    // (bias, interleaved gate/up split and clamped SwiGLU-OAI fused).
+    if (gpt_oss_mxfp4_pro6000_ && gptoss_mxfp4_expert_forward_pro6000(
+                                      input, p[0], p[1], p[2], p[3], p[4], p[5],
+                                      output, gpt_oss_scratch_, stream)) {
       return;
     }
-    // Fallback (layouts the kernels do not cover): BF16 reference math.
+    // Previous path (other devices, or layouts the kernels do not cover):
+    // de-quantise to BF16 + matmul.
     auto gate_up =
         torch::matmul(input, DequantMxfp4(p[0], p[1], stream).transpose(0, 1)) +
         p[2];

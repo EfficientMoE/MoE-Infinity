@@ -1,6 +1,6 @@
 """GPT-OSS offloaded-expert MXFP4 kernels (#311).
 
-`moe_infinity._v4_fp4.gptoss_mxfp4_expert` runs the same entry point as
+`moe_infinity._v4_fp4.gptoss_mxfp4_expert_pro6000` runs the same entry point as
 MoEMLP::ForwardHelper for type-6 experts (fused W4A16 MXFP4 GEMMs with the
 bias / SwiGLU-OAI epilogue, and the dense-down path for large token counts).
 """
@@ -21,8 +21,12 @@ def _ext():
         import moe_infinity._v4_fp4 as ext
     except Exception:
         pytest.skip("native MXFP4 extension not built")
-    if not hasattr(ext, "gptoss_mxfp4_expert"):
-        pytest.skip("extension built without gptoss_mxfp4_expert")
+    if not hasattr(ext, "gptoss_mxfp4_expert_pro6000"):
+        pytest.skip("extension built without gptoss_mxfp4_expert_pro6000")
+    from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
+
+    if not supports(RTX_PRO_6000):
+        pytest.skip("MXFP4 expert kernels are RTX PRO 6000 only")
     return ext
 
 
@@ -86,7 +90,7 @@ def test_matches_reference(H, I, M):
     ext = _ext()
     w = _expert(H, I, seed=M)
     x = torch.randn(M, H, device="cuda").to(torch.bfloat16)
-    out = ext.gptoss_mxfp4_expert(x, *w)
+    out = ext.gptoss_mxfp4_expert_pro6000(x, *w)
     torch.cuda.synchronize()
     assert out.shape == (M, H) and out.dtype == torch.bfloat16
     ref = _reference(x, w, bf16_steps=False)
@@ -126,7 +130,7 @@ def test_matches_hf_gpt_oss_experts():
         ones = torch.ones(M, 1, device="cuda", dtype=torch.bfloat16)
         with torch.no_grad():
             expected = hf(x, router_indices=idx, routing_weights=ones)
-        out = ext.gptoss_mxfp4_expert(x, *experts[e])
+        out = ext.gptoss_mxfp4_expert_pro6000(x, *experts[e])
         scale = expected.float().abs().max().item()
         assert (out.float() - expected.float()).abs().max() <= 3e-2 * scale
 
@@ -147,7 +151,7 @@ def test_scale_edge_cases():
     # order) moves an output by ~1 % of the max, so unseeded x made this flaky.
     g = torch.Generator(device="cuda").manual_seed(3)
     x = torch.randn(M, H, device="cuda", generator=g).to(torch.bfloat16)
-    out = ext.gptoss_mxfp4_expert(x, *w)
+    out = ext.gptoss_mxfp4_expert_pro6000(x, *w)
     ref = _reference(x, w, bf16_steps=False)
     assert torch.isfinite(out).all() and torch.isfinite(ref).all()
     scale = ref.abs().max().item()

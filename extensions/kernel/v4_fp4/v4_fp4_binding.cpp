@@ -116,27 +116,29 @@ void set_scales(const std::map<std::string, torch::Tensor>& /*scales*/) {
 
 // GPT-OSS MXFP4 expert on the stored blocks/scales (the offloaded-expert
 // path of MoEMLP): returns SwiGLU-OAI(x . Wgu^T + b_gu) . Wd^T + b_d.
-torch::Tensor gptoss_mxfp4_expert(torch::Tensor x, torch::Tensor gu_blocks,
-                                  torch::Tensor gu_scales,
-                                  torch::Tensor gu_bias, torch::Tensor d_blocks,
-                                  torch::Tensor d_scales,
-                                  torch::Tensor d_bias) {
+// RTX PRO 6000 only (RTX_PRO_6000 gate); raises on other devices.
+torch::Tensor gptoss_mxfp4_expert_pro6000(
+    torch::Tensor x, torch::Tensor gu_blocks, torch::Tensor gu_scales,
+    torch::Tensor gu_bias, torch::Tensor d_blocks, torch::Tensor d_scales,
+    torch::Tensor d_bias) {
   TORCH_CHECK(x.is_cuda() && x.dim() == 2, "x must be a 2D CUDA tensor");
   auto xb = x.to(torch::kBFloat16).contiguous();
   auto out = torch::empty_like(xb);
   GptOssExpertScratch scratch;
   auto stream = at::cuda::getCurrentCUDAStream(x.device().index());
-  TORCH_CHECK(
-      gptoss_mxfp4_expert_forward(xb, gu_blocks, gu_scales, gu_bias, d_blocks,
-                                  d_scales, d_bias, out, scratch, stream),
-      "gptoss_mxfp4_expert: unsupported shapes/dtypes/alignment");
+  TORCH_CHECK(gptoss_mxfp4_expert_forward_pro6000(xb, gu_blocks, gu_scales,
+                                                  gu_bias, d_blocks, d_scales,
+                                                  d_bias, out, scratch, stream),
+              "gptoss_mxfp4_expert_pro6000: needs an RTX PRO 6000 "
+              "(MOE_INFINITY_UNVALIDATED_HW=1 overrides) and supported "
+              "shapes/dtypes/alignment");
   return out;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp4_dequant", &fp4_dequant, "FP4 E2M1 packed -> BF16 dequant");
   m.def("mxfp4_dequant", &mxfp4_dequant, "MXFP4 uint8 blocks/scales to BF16");
-  m.def("gptoss_mxfp4_expert", &gptoss_mxfp4_expert,
+  m.def("gptoss_mxfp4_expert_pro6000", &gptoss_mxfp4_expert_pro6000,
         "GPT-OSS MXFP4 expert forward (fused W4A16 GEMMs)");
   m.def("v4_expert_forward", &v4_expert_forward,
         "V4 FP4 routed-expert SwiGLU forward");

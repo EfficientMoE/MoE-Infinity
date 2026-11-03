@@ -3,6 +3,12 @@
 
 // W4A16 MXFP4 GEMM for GPT-OSS experts (BF16 activations, FP32 accumulate).
 //
+// RTX PRO 6000 only: the instructions are generic sm_80 / sm_90+ ISA, but the
+// tile configs (MXFP4_PRO6000_TILE_CONFIGS, pick_pro6000_config), the 99 KiB
+// smem stage budgets and the persistent 188-SM grids were tuned on the RTX
+// PRO 6000 Blackwell. The callers gate on RTX_PRO_6000; other devices run the
+// previous de-quantise + matmul path.
+//
 // Weights stay in their storage format: blocks [N, K/2] uint8 (two E2M1 codes
 // per byte, low nibble first) and E8M0 scales [N, K/32]. Every byte is read
 // once per GEMM and de-quantised in registers straight into mma.sync A
@@ -198,11 +204,12 @@ __device__ __forceinline__ float swiglu_oai(float gate, float up) {
 // --------------------------------------------------------------------------
 template <int WK, int U, int NT, int MT, bool SWIGLU, bool PDL_WAIT>
 __global__ void __launch_bounds__(WK * 32)
-    mxfp4_gemv_kernel(const __nv_bfloat16* __restrict__ x, int M, int K,
-                      const uint8_t* __restrict__ wq,
-                      const uint8_t* __restrict__ ws,
-                      const __nv_bfloat16* __restrict__ bias, int N,
-                      __nv_bfloat16* __restrict__ y, int prefetch_aligned) {
+    mxfp4_gemv_pro6000_kernel(const __nv_bfloat16* __restrict__ x, int M, int K,
+                              const uint8_t* __restrict__ wq,
+                              const uint8_t* __restrict__ ws,
+                              const __nv_bfloat16* __restrict__ bias, int N,
+                              __nv_bfloat16* __restrict__ y,
+                              int prefetch_aligned) {
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
   const int g = lane >> 2;
@@ -787,11 +794,11 @@ struct TileEngine {
 template <int BN_, int BT, int WARPS_N, int WARPS_T, int STAGES, bool SWIGLU,
           bool PDL_WAIT>
 __global__ void __launch_bounds__(32 * WARPS_N * WARPS_T)
-    mxfp4_tile_kernel(const __nv_bfloat16* __restrict__ x, int M, int K,
-                      const uint8_t* __restrict__ wq,
-                      const uint8_t* __restrict__ ws,
-                      const __nv_bfloat16* __restrict__ bias, int N,
-                      __nv_bfloat16* __restrict__ y, StreamK sk) {
+    mxfp4_tile_pro6000_kernel(const __nv_bfloat16* __restrict__ x, int M, int K,
+                              const uint8_t* __restrict__ wq,
+                              const uint8_t* __restrict__ ws,
+                              const __nv_bfloat16* __restrict__ bias, int N,
+                              __nv_bfloat16* __restrict__ y, StreamK sk) {
   using Cfg = TileCfg<BN_, BT, WARPS_N, WARPS_T, STAGES>;
   using Engine = TileEngine<Cfg, SWIGLU>;
   constexpr int BN = Cfg::kBN;
@@ -1032,7 +1039,7 @@ cudaError_t run_gemv(const __nv_bfloat16* x, int M, int K, const uint8_t* wq,
   const int aligned =
       (reinterpret_cast<uintptr_t>(wq) % 16 == 0) && ((K / 2) % 16 == 0);
   dim3 grid((N + 16 * MT - 1) / (16 * MT), (M + 8 * NT - 1) / (8 * NT));
-  return launch(mxfp4_gemv_kernel<WK, U, NT, MT, SWIGLU, PDL>, grid,
+  return launch(mxfp4_gemv_pro6000_kernel<WK, U, NT, MT, SWIGLU, PDL>, grid,
                 dim3(WK * 32), 0, stream, PDL, x, M, K, wq, ws, bias, N, y,
                 aligned);
 }
@@ -1048,7 +1055,7 @@ template <int BN_, int BT, int WARPS_N, int WARPS_T, int STAGES, bool SWIGLU,
 struct TileLauncher {
   using Cfg = TileCfg<BN_, BT, WARPS_N, WARPS_T, STAGES>;
   static constexpr auto kernel =
-      mxfp4_tile_kernel<BN_, BT, WARPS_N, WARPS_T, STAGES, SWIGLU, PDL>;
+      mxfp4_tile_pro6000_kernel<BN_, BT, WARPS_N, WARPS_T, STAGES, SWIGLU, PDL>;
 
   // Resident CTAs per SM (raises the dynamic smem limit on first use).
   static cudaError_t occupancy(int dev, int* occ) {
@@ -1145,10 +1152,10 @@ struct TileLauncher {
 };
 
 // id, weight rows, tokens, warps along rows, warps along tokens, stages
-#define MXFP4_TILE_CONFIGS(X) \
-  X(4, 128, 32, 4, 1, 4)      \
-  X(5, 128, 64, 2, 2, 4)      \
-  X(6, 128, 64, 2, 2, 6)      \
+#define MXFP4_PRO6000_TILE_CONFIGS(X) \
+  X(4, 128, 32, 4, 1, 4)              \
+  X(5, 128, 64, 2, 2, 4)              \
+  X(6, 128, 64, 2, 2, 6)              \
   X(7, 256, 128, 4, 2, 4)
 
 template <bool SWIGLU, bool PDL>
@@ -1173,7 +1180,7 @@ cudaError_t dispatch(const __nv_bfloat16* x, int M, int K, const uint8_t* wq,
   case ID:                                                     \
     return TileLauncher<BN, BT, WN, WT, ST, SWIGLU, PDL>::run( \
         x, M, K, wq, ws, bias, N, y, work, side, stream);
-      MXFP4_TILE_CONFIGS(MXFP4_CASE)
+      MXFP4_PRO6000_TILE_CONFIGS(MXFP4_CASE)
 #undef MXFP4_CASE
     default:
       return cudaErrorInvalidValue;
@@ -1187,13 +1194,13 @@ size_t workspace_bytes_max(int dev) {
       m, TileLauncher<BN, BT, WN, WT, ST, true, false>::workspace_bytes(dev)); \
   m = std::max(                                                                \
       m, TileLauncher<BN, BT, WN, WT, ST, false, true>::workspace_bytes(dev));
-  MXFP4_TILE_CONFIGS(MXFP4_WS)
+  MXFP4_PRO6000_TILE_CONFIGS(MXFP4_WS)
 #undef MXFP4_WS
   return m;
 }
 
 // Measured on RTX PRO 6000 Max-Q (sm_120) at H = I = 2880.
-int pick_config(int M, bool swiglu) {
+int pick_pro6000_config(int M, bool swiglu) {
   static_assert(kMxfp4GemvMaxTokens == 32, "keep in sync with configs 0-3");
   // Up to 32 tokens: the NT = 1 kernel over ceil(M / 8) token slices
   // (blockIdx.y) beats the wider NT = 2 / 4 variants on this GPU.
@@ -1210,11 +1217,13 @@ size_t mxfp4_linear_workspace_bytes() {
   return gptoss_mxfp4::workspace_bytes_max(gptoss_mxfp4::current_device());
 }
 
-cudaError_t mxfp4_linear_cuda(const void* x, int M, int K, const void* wq,
-                              const void* ws, const void* bias, int N, void* y,
-                              bool swiglu, bool pdl_wait,
-                              const Mxfp4Workspace* work, const Mxfp4Side* side,
-                              int config, cudaStream_t stream) {
+cudaError_t mxfp4_linear_pro6000_cuda(const void* x, int M, int K,
+                                      const void* wq, const void* ws,
+                                      const void* bias, int N, void* y,
+                                      bool swiglu, bool pdl_wait,
+                                      const Mxfp4Workspace* work,
+                                      const Mxfp4Side* side, int config,
+                                      cudaStream_t stream) {
   using namespace gptoss_mxfp4;
   if (M <= 0) return cudaSuccess;
   auto misaligned = [](const void* p) {
@@ -1230,7 +1239,7 @@ cudaError_t mxfp4_linear_cuda(const void* x, int M, int K, const void* wq,
     return cudaErrorNotSupported;
   const int major = device_info(current_device()).major;
   const bool pdl = pdl_wait && major >= 9;
-  if (config < 0) config = pick_config(M, swiglu);
+  if (config < 0) config = pick_pro6000_config(M, swiglu);
   const bool gemv = config < 4;
   if (side != nullptr && side->n_blocks > 0 &&
       (gemv || major < 9 || side->n_blocks % kSideLanes != 0)) {
@@ -1268,18 +1277,16 @@ cudaError_t mxfp4_l2_discard_cuda(void* p, size_t bytes, cudaStream_t stream) {
   return cudaGetLastError();
 }
 
-cudaError_t gptoss_mxfp4_expert_cuda(const void* x, int M, int H, int I,
-                                     const void* gu_blocks,
-                                     const void* gu_scales, const void* gu_bias,
-                                     const void* d_blocks, const void* d_scales,
-                                     const void* d_bias, void* act, void* out,
-                                     const Mxfp4Workspace* ws_gu,
-                                     const Mxfp4Workspace* ws_d,
-                                     cudaStream_t stream) {
+cudaError_t gptoss_mxfp4_expert_pro6000_cuda(
+    const void* x, int M, int H, int I, const void* gu_blocks,
+    const void* gu_scales, const void* gu_bias, const void* d_blocks,
+    const void* d_scales, const void* d_bias, void* act, void* out,
+    const Mxfp4Workspace* ws_gu, const Mxfp4Workspace* ws_d,
+    cudaStream_t stream) {
   cudaError_t e =
-      mxfp4_linear_cuda(x, M, H, gu_blocks, gu_scales, gu_bias, 2 * I, act,
-                        true, false, ws_gu, nullptr, -1, stream);
+      mxfp4_linear_pro6000_cuda(x, M, H, gu_blocks, gu_scales, gu_bias, 2 * I,
+                                act, true, false, ws_gu, nullptr, -1, stream);
   if (e != cudaSuccess) return e;
-  return mxfp4_linear_cuda(act, M, I, d_blocks, d_scales, d_bias, H, out, false,
-                           true, ws_d, nullptr, -1, stream);
+  return mxfp4_linear_pro6000_cuda(act, M, I, d_blocks, d_scales, d_bias, H,
+                                   out, false, true, ws_d, nullptr, -1, stream);
 }

@@ -1,6 +1,12 @@
 // Copyright (c) EfficientMoE.
 // SPDX-License-Identifier: Apache-2.0
 
+// RTX PRO 6000 only (hardware gate RTX_PRO_6000): the kernels' tile / grid
+// tables and the 80 MB L2 persisting window were tuned on the RTX PRO 6000
+// Blackwell (188 SMs, 128 MiB L2, 99 KiB smem per block).
+// gptoss_mxfp4_expert_forward_pro6000 returns false on any other device, and
+// MoEMLP then runs the previous de-quantise + matmul path.
+
 #include "gptoss_expert.h"
 
 #include <ATen/cuda/CUDAContext.h>
@@ -11,6 +17,7 @@
 #include <mutex>
 #include <optional>
 
+#include "../hw_profile.h"
 #include "mxfp4_gptoss_moe.h"
 
 namespace {
@@ -51,7 +58,7 @@ struct ArenaLayout {
 ArenaLayout arena_layout(int64_t M, int64_t H, int64_t I) {
   ArenaLayout l{};
   const bool tiled = M > kMxfp4GemvMaxTokens;
-  const bool dense = M >= kGptOssDenseDownMinTokens;
+  const bool dense = M >= kGptOssPro6000DenseDownMinTokens;
   l.ws = tiled ? align256(mxfp4_linear_workspace_bytes()) : 0;
   l.wd = 0;
   l.act = dense ? align256(static_cast<size_t>(H) * I * 2) : 0;
@@ -64,9 +71,10 @@ ArenaLayout arena_layout(int64_t M, int64_t H, int64_t I) {
 // while the object lives (persisting access-policy window), then restores
 // the stream's previous window. The device's persisting set-aside is raised
 // to its maximum on first use; the window is capped to it.
-class L2Window {
+class L2WindowPro6000 {
  public:
-  L2Window(cudaStream_t stream, void* p, size_t bytes) : stream_(stream) {
+  L2WindowPro6000(cudaStream_t stream, void* p, size_t bytes)
+      : stream_(stream) {
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev >= 64) return;
     static std::once_flag once[64];
@@ -104,13 +112,13 @@ class L2Window {
                                &v) == cudaSuccess;
     if (!active_) cudaGetLastError();
   }
-  ~L2Window() {
+  ~L2WindowPro6000() {
     if (active_)
       cudaStreamSetAttribute(stream_, cudaStreamAttributeAccessPolicyWindow,
                              &old_);
   }
-  L2Window(const L2Window&) = delete;
-  L2Window& operator=(const L2Window&) = delete;
+  L2WindowPro6000(const L2WindowPro6000&) = delete;
+  L2WindowPro6000& operator=(const L2WindowPro6000&) = delete;
 
  private:
   cudaStream_t stream_;
@@ -124,7 +132,7 @@ size_t gptoss_expert_arena_bytes(int64_t M, int64_t H, int64_t I) {
   return arena_layout(M, H, I).total;
 }
 
-bool gptoss_mxfp4_expert_forward(
+bool gptoss_mxfp4_expert_forward_pro6000(
     const torch::Tensor& x, const torch::Tensor& gu_blocks,
     const torch::Tensor& gu_scales, const torch::Tensor& gu_bias,
     const torch::Tensor& d_blocks, const torch::Tensor& d_scales,
@@ -134,6 +142,9 @@ bool gptoss_mxfp4_expert_forward(
       !x.is_contiguous())
     return false;
   const auto device = x.device();
+  if (!moe_infinity::hw::Supports(moe_infinity::hw::Gate::kRtxPro6000,
+                                  device.index()))
+    return false;
   const int64_t M = x.size(0);
   const int64_t H = x.size(1);
   const int64_t I = d_blocks.dim() == 2 ? d_blocks.size(1) * 2 : 0;
@@ -178,12 +189,12 @@ bool gptoss_mxfp4_expert_forward(
 
   // Large M: Wd / act / partials would otherwise be partly written back to
   // DRAM before they are read. Small M: they stay in L2 anyway.
-  const bool resident = M >= kGptOssL2ResidentMinTokens;
-  std::optional<L2Window> window;
+  const bool resident = M >= kGptOssPro6000L2ResidentMinTokens;
+  std::optional<L2WindowPro6000> window;
   if (resident) window.emplace(stream, arena, lay.total);
 
   cudaError_t err;
-  if (M >= kGptOssDenseDownMinTokens) {
+  if (M >= kGptOssPro6000DenseDownMinTokens) {
     // gate_up (MXFP4, fused SwiGLU) de-quantises Wd on the side; the down
     // projection is then one cuBLAS GEMM with the bias in its epilogue.
     auto wd = torch::from_blob(
@@ -194,9 +205,9 @@ bool gptoss_mxfp4_expert_forward(
         torch::TensorOptions().dtype(torch::kBFloat16).device(device));
     const Mxfp4Side side{d_blocks.data_ptr(), d_scales.data_ptr(),
                          wd.data_ptr(), static_cast<int>(H * I / 32)};
-    err = mxfp4_linear_cuda(x.data_ptr(), M, H, gu_blocks.data_ptr(),
-                            gu_scales.data_ptr(), gu_b.data_ptr(), 2 * I, act,
-                            true, false, &ws_gu, &side, -1, stream);
+    err = mxfp4_linear_pro6000_cuda(
+        x.data_ptr(), M, H, gu_blocks.data_ptr(), gu_scales.data_ptr(),
+        gu_b.data_ptr(), 2 * I, act, true, false, &ws_gu, &side, -1, stream);
     if (err == cudaErrorNotSupported) return false;
     TORCH_CHECK(err == cudaSuccess,
                 "GPT-OSS gate_up kernel: ", cudaGetErrorString(err));
@@ -205,7 +216,7 @@ bool gptoss_mxfp4_expert_forward(
     at::addmm_out(out, d_b, act_t, wd.t());
   } else {
     const Mxfp4Workspace ws_d = workspace(1);
-    err = gptoss_mxfp4_expert_cuda(
+    err = gptoss_mxfp4_expert_pro6000_cuda(
         x.data_ptr(), M, H, I, gu_blocks.data_ptr(), gu_scales.data_ptr(),
         gu_b.data_ptr(), d_blocks.data_ptr(), d_scales.data_ptr(),
         d_b.data_ptr(), act, out.data_ptr(), &ws_gu, &ws_d, stream);

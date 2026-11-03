@@ -198,7 +198,7 @@ def _gptoss_legacy_builder(M: int, H: int, I: int, dequant: bool = True):
 
 def _gptoss_offload_builder(M: int, H: int, I: int):
     """C++ type-6 path (device_memory_ratio < 0.9): MoEMLP::ForwardHelper ->
-    gptoss_mxfp4_expert_forward (fused W4A16 MXFP4 GEMMs, scratch reused
+    gptoss_mxfp4_expert_forward_pro6000 (fused W4A16 MXFP4 GEMMs, scratch reused
     across calls like an expert executor)."""
 
     def build():
@@ -210,7 +210,7 @@ def _gptoss_offload_builder(M: int, H: int, I: int):
             _mxfp4_weights(H, I)
         )
         out = torch.empty(M, H, device="cuda", dtype=torch.bfloat16)
-        # Per-executor scratch, sized like gptoss_mxfp4_expert_forward
+        # Per-executor scratch, sized like gptoss_mxfp4_expert_forward_pro6000
         # allocates it (BF16 Wd, act and stream-K partials in one arena).
         arena = torch.empty(
             ext.gptoss_expert_arena_bytes(M, H, I),
@@ -222,7 +222,7 @@ def _gptoss_offload_builder(M: int, H: int, I: int):
         )
 
         def run():
-            ext.gptoss_mxfp4_expert(
+            ext.gptoss_mxfp4_expert_pro6000(
                 x,
                 gu_packed,
                 gu_scale,

@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // W4A16 MXFP4 GEMM / GPT-OSS expert forward (mxfp4_gptoss_moe.cu).
+//
+// The *_pro6000 entry points carry tile, stage and grid tables tuned on the
+// RTX PRO 6000 Blackwell (188 SMs, 128 MiB L2, 99 KiB smem per block); call
+// them only behind moe_infinity::hw::Supports(Gate::kRtxPro6000), as
+// gptoss_mxfp4_expert_forward_pro6000 does. mxfp4_dequant_cuda is generic.
 
 #pragma once
 
@@ -46,25 +51,25 @@ size_t mxfp4_linear_workspace_bytes();
 // nullptr. config < 0 picks a kernel from M. Returns cudaErrorNotSupported
 // for shapes / alignments the kernels do not cover (K % 32, N % 16, 16-B
 // aligned pointers).
-cudaError_t mxfp4_linear_cuda(const void* x, int M, int K, const void* wq,
-                              const void* ws, const void* bias, int N, void* y,
-                              bool swiglu, bool pdl_wait,
-                              const Mxfp4Workspace* work, const Mxfp4Side* side,
-                              int config, cudaStream_t stream);
+cudaError_t mxfp4_linear_pro6000_cuda(const void* x, int M, int K,
+                                      const void* wq, const void* ws,
+                                      const void* bias, int N, void* y,
+                                      bool swiglu, bool pdl_wait,
+                                      const Mxfp4Workspace* work,
+                                      const Mxfp4Side* side, int config,
+                                      cudaStream_t stream);
 
 // GPT-OSS expert with both projections in MXFP4: act = SwiGLU-OAI(x . Wgu^T +
 // b_gu); out = act . Wd^T + b_d. x / out [M, H], act [M, I] BF16. gate_up
 // blocks [2I, H/2] / scales [2I, H/32]; down blocks [H, I/2] / scales
 // [H, I/32]. ws_gu and ws_d must not alias (the down GEMM may start while
 // gate_up drains).
-cudaError_t gptoss_mxfp4_expert_cuda(const void* x, int M, int H, int I,
-                                     const void* gu_blocks,
-                                     const void* gu_scales, const void* gu_bias,
-                                     const void* d_blocks, const void* d_scales,
-                                     const void* d_bias, void* act, void* out,
-                                     const Mxfp4Workspace* ws_gu,
-                                     const Mxfp4Workspace* ws_d,
-                                     cudaStream_t stream);
+cudaError_t gptoss_mxfp4_expert_pro6000_cuda(
+    const void* x, int M, int H, int I, const void* gu_blocks,
+    const void* gu_scales, const void* gu_bias, const void* d_blocks,
+    const void* d_scales, const void* d_bias, void* act, void* out,
+    const Mxfp4Workspace* ws_gu, const Mxfp4Workspace* ws_d,
+    cudaStream_t stream);
 
 // Drops [p, p + bytes) from L2 without write-back (discard.global.L2): for
 // intermediates that are dead once the op is done. p 128-B aligned.
