@@ -617,3 +617,40 @@ Granite fine sweep (this addendum, decode arm, same frozen trace as #340):
 | 480 (12E) | 0.6113 | **0.7024** | 0.6393 | 0.8367 | lcnu |
 | 520 (13E) | 0.6431 | **0.7352** | 0.6856 | 0.8589 | lcnu |
 | 560 (14E) | 0.6848 | **0.7654** | 0.7265 | 0.8785 | lcnu |
+
+---
+
+## Addendum 4 — the 10E flip is qwen3-30b-structural, not capture-length (exp654): REFUTES-LENGTH
+
+Addendum 3 left the flip's root cause open, with per-prompt decode length
+(512 vs 64 tokens) the leading confound: every non-flipping model was captured
+at greedy64. Pre-registered test (sha 887b827d…, frozen 2026-11-03T04:28:07Z):
+truncate the frozen 30b trace to greedy64-equivalent (8 prompts x 64 decode
+steps; frozen source 08732f27 untouched; derived artifact 3998785e) and re-run
+the identical 7E..14E fine grid.
+
+- **H2 control holds:** LCNU strictly best at 896/1024/1152 (7E..9E).
+- **H1 refuted:** s3fifo STILL strictly best at 1408 (11E, 0.7523 vs 0.7482)
+  and 1536 (12E, 0.7821 vs 0.7731). The flip does not vanish — it shifts one
+  E-step later and its margin shrinks (+0.4pp at 11E vs +0.9pp at 10E on the
+  full trace).
+- **Pre-committed conclusion (H3):** decode length is NOT the driver. Length
+  modulates the flip's magnitude; existence is structural to the qwen3-30b
+  expert-access stream. Combined with addendum 3: the mid-curve s3fifo
+  takeover is a model-structural property observed only in qwen3-30b-a3b so
+  far (k/E 6.25% with 48 layers; 235b shares k/E but has 94 layers and does
+  not flip through 64E).
+
+Remaining structural candidates (next in series): layer count relative to
+expert count (interleave depth per layer), absolute per-layer working set,
+and expert-reuse skew. Data: results_real_qwen3-30b-a3b-g64.{csv,md},
+EXPERIMENTS.md rows appended.
+
+| cap (=Ex) | LRU | LCNU | s3fifo | belady | best online |
+|----:|----:|----:|----:|----:|:--|
+| 896 (7E) | 0.6029 | **0.6257** | 0.5870 | 0.7963 | lcnu |
+| 1024 (8E) | 0.6456 | **0.6608** | 0.6365 | 0.8234 | lcnu |
+| 1152 (9E) | 0.6796 | **0.6910** | 0.6779 | 0.8466 | lcnu |
+| 1280 (10E) | 0.7123 | **0.7203** | 0.7171 | 0.8671 | lcnu |
+| 1408 (11E) | 0.7422 | 0.7482 | **0.7523** | 0.8848 | s3fifo |
+| 1536 (12E) | 0.7721 | 0.7731 | **0.7821** | 0.8990 | s3fifo |
