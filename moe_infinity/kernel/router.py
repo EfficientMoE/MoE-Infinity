@@ -486,10 +486,11 @@ def _sel_keys(v, offs_e, valid, BLOCK_E: tl.constexpr):
     return tl.where(valid, key, -9223372036854775808)
 
 
-@triton.jit
+# seq / T change every call: specialising on them would recompile.
+@triton.jit(do_not_specialize=["seq", "T"])
 def _gemm_route_kernel(
     x_ptr, w_ptr, bias_ptr, mask_ptr, dw_ptr, ids_ptr, tw_ptr, logits_ptr,
-    flags_ptr, done_ptr, seq,
+    flags_ptr, done_ptr, state_ptr, seq,
     T, stride_xt, stride_we, scale, eps,
     H: tl.constexpr, E: tl.constexpr, K: tl.constexpr, K_PAD: tl.constexpr,
     BLOCK_E: tl.constexpr, BM: tl.constexpr, BK: tl.constexpr,
@@ -637,15 +638,36 @@ def _gemm_route_kernel(
             tw_ptr + offs_t[:, None] * K + offs_kk[None, :], tw_tile, k_mask
         )
     if WRITE_FLAGS:
-        # One write per (program, active expert) into pinned host memory
-        # (pre-zeroed by the host); then the completion word for the ring.
+        # OR this tile's active experts into a device-side [E] buffer; the
+        # last program publishes it to pinned host memory (pre-zeroed by the
+        # host), re-zeroes it and writes the ring's completion word. Writing
+        # host memory from every program costs ~25 % at 200K tokens.
         act = tl.max((selmask & valid_t[:, None]).to(tl.int32), axis=0)
-        tl.store(flags_ptr + offs_e, act.to(tl.int8), mask=(act > 0) & valid_e)
-        tl.store(done_ptr, seq)
+        tl.atomic_or(state_ptr + offs_e, act, mask=(act > 0) & valid_e)
+        tl.debug_barrier()
+        n_done = tl.atomic_add(state_ptr + 512, 1, sem="acq_rel", scope="gpu")
+        if n_done == tl.num_programs(0) - 1:
+            agg = tl.atomic_xchg(state_ptr + offs_e, 0, mask=valid_e)
+            tl.store(flags_ptr + offs_e, (agg > 0).to(tl.int8), mask=valid_e)
+            tl.store(state_ptr + 512, 0)
+            tl.store(done_ptr, seq)
 
 
 # Measured best (BM, BK, num_warps, num_stages) per padded E on sm_120
 # (50K-token sweep); other sizes fall back to the formula below.
+_FLAG_STATE: dict = {}
+
+
+def _flag_state(dev):
+    # [512] OR-buffer + arrival counter, zero between launches (the last
+    # program of each launch restores it). One per (device, stream).
+    key = (dev, torch.cuda.current_stream(dev).stream_id)
+    st = _FLAG_STATE.get(key)
+    if st is None:
+        st = _FLAG_STATE[key] = torch.zeros(513, dtype=torch.int32, device=dev)
+    return st
+
+
 _GEMM_CFG: dict = {
     16: (128, 64, 8, 2),
     32: (32, 128, 4, 2),
@@ -697,7 +719,8 @@ def _route_prefill(
         ids if compact else dummy, tw if compact else dummy,
         logits if return_logits else dummy,
         flags if flags is not None else dummy,
-        done if done is not None else dummy, seq or 0,
+        done if done is not None else dummy,
+        _flag_state(dev) if flags is not None else dummy, seq or 0,
         T, x.stride(0), w.stride(0), float(scaling), float(eps),
         H=H, E=E, K=top_k, K_PAD=triton.next_power_of_2(top_k),
         BLOCK_E=block_e, BM=BM, BK=BK, SCORING=sc,
