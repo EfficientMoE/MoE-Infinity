@@ -713,3 +713,26 @@ to model-level router properties (load-distribution shape at E=128, k=8,
 48 layers — 235b shares E and k at 94 layers and does not flip through 64E).
 Data: results_real_qwen3-30b-a3b-{hi,lo}.{csv,md}, EXPERIMENTS.md rows
 appended.
+
+---
+
+## Addendum 7 — union-arm fine sweep: the 10E boundary is accounting-invariant (exp657): PASS
+
+exp652's 10E boundary was measured on the decode-only stream. Deployments
+that keep prefill-activated experts resident see the union stream, where
+exp651's coarse grid hinted a different late regime (LRU over LCNU by 12E).
+Pre-registered fine union sweep (sha 904d87e9…, frozen 2026-11-03T05:14:22Z),
+same frozen trace, grid 896..1792:
+
+- **H1 holds:** LCNU strictly best at 896/1024/1152 (7E..9E).
+- **H2 holds:** best online at 1536/1664/1792 is s3fifo, not LCNU.
+- **H3 holds:** first non-LCNU capacity is exactly **1280 = 10E** — identical
+  to the decode arm. s3fifo 0.7342 vs LCNU 0.7296 at the boundary, gap
+  widening with capacity.
+
+The takeover boundary is invariant to prefill/decode accounting, reinforcing
+addendum 6's conclusion that it is a router-structure property, not an
+artifact of how the stream is counted — and making the operational guidance
+clean: the same ~10E crossover applies whether or not prefill experts are
+cached. Data: results_real_qwen3-30b-a3b-fine-u.{csv,md}, EXPERIMENTS.md rows
+appended.
