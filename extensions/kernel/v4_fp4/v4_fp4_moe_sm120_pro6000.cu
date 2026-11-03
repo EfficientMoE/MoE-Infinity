@@ -777,7 +777,6 @@ __global__ void combine_kernel(const __nv_bfloat16* __restrict__ ybuf,
 constexpr int kDecThreads = 256;  // 8 warps, each 2 m16 tiles
 constexpr int kDecK = 256;
 constexpr int kDecMaxI = 2560;
-constexpr int kDecStageB = 8 * kDecK;  // 2 KB
 // in-flight work units: the producer runs up to STAGES - 1 stages (so up
 // to that many units of >= 1 stage) ahead of the consumer
 constexpr int kDecRing = 16;
@@ -794,14 +793,16 @@ struct DecCfg {
   static_assert(kKSplit >= 1 && kKSplit <= 4, "k64 quarters per stage");
   static constexpr int kStageA = ROWS * kDecK / 2;
   static constexpr int kStageSA = ROWS * kDecK / 32;
-  static constexpr int kStage = kStageA + kStageSA + kDecStageB;
+  static constexpr int kStageB = BROWS * kDecK;  // token rows of the stage
+  static constexpr int kSB = BROWS * 64;  // ue8m0 activation scales per unit
+  static constexpr int kStage = kStageA + kStageSA + kStageB;
   static constexpr int kBres = BROWS * (kDecMaxI + 16);  // stride I + 16
   static constexpr int kRed = (kKSplit - 1) * kRowWarps * 32 * 8 * 4;
   static constexpr int kOut = 8 * (ROWS + 8) * 2;
   static_assert(kDecRing > STAGES, "unit ring must cover the lookahead");
   static constexpr int kSmem = kStage * STAGES + kBres +
-                               kDecRing * (8 * 64 + (int)sizeof(TileExt)) +
-                               kRed + kOut + 128;
+                               kDecRing * (kSB + (int)sizeof(TileExt)) + kRed +
+                               kOut + 128;
   static_assert(kSmem <= kDecSmemLimit, "decode kernel shared memory budget");
 };
 constexpr int kDecRows = 64;  // general decode units (rb_done is sized by it)
@@ -874,8 +875,8 @@ __global__ void __launch_bounds__(kDecThreads, 1)
   extern __shared__ __align__(128) uint8_t smem[];
   // Bres is only touched by the consumer between units: single buffer.
   uint8_t* sBres = smem + C::kStage * STAGES;  // [8][I + 16] FP8
-  uint8_t* sSB0 = sBres + C::kBres;            // ring x [8][64] ue8m0
-  TileExt* sTE = reinterpret_cast<TileExt*>(sSB0 + kDecRing * 8 * 64);
+  uint8_t* sSB0 = sBres + C::kBres;            // ring x [BROWS][64] ue8m0
+  TileExt* sTE = reinterpret_cast<TileExt*>(sSB0 + kDecRing * C::kSB);
   float* sRed = reinterpret_cast<float*>(sTE + kDecRing);
   __nv_bfloat16* sOut = reinterpret_cast<__nv_bfloat16*>(
       reinterpret_cast<uint8_t*>(sRed) + C::kRed);
@@ -929,9 +930,9 @@ __global__ void __launch_bounds__(kDecThreads, 1)
 
   auto flush_sb = [&]() {
     if (pf_slot < 0) return;
-    pf_slot = tid < 128 ? pf_slot : -1;
+    pf_slot = tid < 16 * BROWS ? pf_slot : -1;
     if (pf_slot < 0) return;
-    uint8_t* d = sSB0 + pf_slot * 8 * 64;
+    uint8_t* d = sSB0 + pf_slot * C::kSB;
     const int r = tid >> 4;
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
@@ -973,7 +974,7 @@ __global__ void __launch_bounds__(kDecThreads, 1)
       prefetch_l2_range(reinterpret_cast<const uint8_t*>(tex->ptr[5]) + c0,
                         c1 - c0, tid, kDecThreads);
     }
-    if (pu.up && tid < 128) {
+    if (pu.up && tid < 16 * BROWS) {
       const long long tok = tex->slot[tid >> 4] / a.topk;
       xoff = tok * a.H + (tid & 15) * 16;
 #pragma unroll
@@ -1012,7 +1013,7 @@ __global__ void __launch_bounds__(kDecThreads, 1)
         cp_async4(smem_u32(sS + r * 8), src);
         cp_async4(smem_u32(sS + r * 8 + 4), src + 4);
       }
-      if (pu.up && tid < 128) {
+      if (pu.up && tid < 16 * BROWS) {
         int r = tid >> 4, cc = tid & 15;
         cp_async16(smem_u32(sB + r * 256 + ((cc ^ (r & 7)) << 4)),
                    a.xq + xoff + pks * kDecK, r < pnrows ? 16 : 0);
@@ -1059,7 +1060,7 @@ __global__ void __launch_bounds__(kDecThreads, 1)
     if (!cu.valid) break;
     const TileExt& tex = sTE[cslot];
     const int nrows = tex.nrows, row_start = tex.row_start;
-    uint8_t* sSB = sSB0 + cslot * 8 * 64;
+    uint8_t* sSB = sSB0 + cslot * C::kSB;
     if (!cu.up) {
       // wait for every gate|up unit of this tile, then quantise its h rows
       if (tid == 0) {
@@ -1127,7 +1128,7 @@ __global__ void __launch_bounds__(kDecThreads, 1)
         const int Q = kq * kQ + qi;  // k64 quarter of the stage
         const int kh = Q >> 1, jp = Q & 1;
         const int kc = ks * 2 + kh;
-        const uint32_t sfb = sSB[g * 64 + kc];
+        const uint32_t sfb = sSB[(BROWS == 1 ? 0 : g) * 64 + kc];
         uint32_t sfa[2];
 #pragma unroll
         for (int mi = 0; mi < 2; ++mi)
@@ -1149,16 +1150,14 @@ __global__ void __launch_bounds__(kDecThreads, 1)
         }
         uint32_t b0, b1, b2, b3;
         {
-          int r = lane & 7;
+          int r = BROWS == 1 ? 0 : lane & 7;  // one-row tiles: one token
           if (cu.up) {
             int ch = 8 * kh + 4 * jp + (lane >> 3);
             ldsm_x4(smem_u32(sB + r * 256 + ((ch ^ (r & 7)) << 4)), b0, b1, b2,
                     b3);
           } else {
             int ch = (kc * kBK + 64 * jp) / 16 + (lane >> 3);
-            // one-row tiles: every column reads the tile's single h row
-            ldsm_x4(smem_u32(sBres + (BROWS == 1 ? 0 : r) * ldb + ch * 16), b0,
-                    b1, b2, b3);
+            ldsm_x4(smem_u32(sBres + r * ldb + ch * 16), b0, b1, b2, b3);
           }
         }
 #pragma unroll
@@ -1346,7 +1345,7 @@ void launch_decode_any(const DecodeArgs& a, bool one_row, cudaStream_t s) {
   else if (b1_rows_pro6000(a.H, a.I) == 256)
     launch_decode<IdT, 256, 2, 1>(a, s);
   else
-    launch_decode<IdT, 128, 4, 1>(a, s);
+    launch_decode<IdT, 128, 5, 1>(a, s);
 }
 
 int choose_bt(long long n, int E) {
