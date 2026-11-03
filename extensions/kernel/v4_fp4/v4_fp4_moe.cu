@@ -808,6 +808,7 @@ struct DecodeArgs {
   int* tile_done;       // [max tiles]
   int* rb_done;         // [H / 64]
   float swiglu_limit;
+  int static_sched;  // CTA c owns units c, c + grid, ... (cooperative)
 };
 
 // Decoded work unit.
@@ -901,9 +902,13 @@ __global__ void __launch_bounds__(kDecThreads, 1)
   uint32_t pf_sb[4];
   int pf_slot = -1;
   // The first unit of CTA i is unit i (so the first wave is exactly the head
-  // of the queue); later units come from the atomic queue. Thread 0 keeps one
-  // ticket in flight so the atomic's round trip is never on the critical
-  // path.
+  // of the queue); later units come from the atomic queue, or, for a batch-1
+  // layer launched cooperatively (all CTAs co-resident, so every unit's owner
+  // runs and the minimal-index unfinished unit can always proceed), are
+  // i + grid, i + 2 grid, ...: concurrent units then stay adjacent in memory
+  // and in K, which measured 4-7 % faster at batch 1 (no change at batch 4).
+  // Thread 0 keeps one ticket in flight so the atomic's round trip is never on
+  // the critical path.
   int ticket = blockIdx.x;
 
   auto flush_sb = [&]() {
@@ -924,7 +929,8 @@ __global__ void __launch_bounds__(kDecThreads, 1)
     const int slot = p_count & (kDecRing - 1);
     if (tid == 0) {
       sMisc[slot] = ticket;
-      ticket = gridDim.x + atomicAdd(a.queue, 1);
+      ticket = a.static_sched ? ticket + gridDim.x
+                              : gridDim.x + atomicAdd(a.queue, 1);
     }
     __syncthreads();
     pu = decode_unit(a, sMisc[slot], ntiles, U1, U2, lag);
@@ -1288,11 +1294,22 @@ void launch_decode(const DecodeArgs& a, cudaStream_t s) {
   cfg.dynamicSmemBytes = kDecSmem;
   cfg.stream = s;
   cudaLaunchAttribute attr[1];
-  attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attr[0].val.programmaticStreamSerializationAllowed = 1;
+  DecodeArgs d = a;
+  if (d.static_sched) {
+    attr[0].id = cudaLaunchAttributeCooperative;
+    attr[0].val.cooperative = 1;
+  } else {
+    attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attr[0].val.programmaticStreamSerializationAllowed = 1;
+  }
   cfg.attrs = attr;
   cfg.numAttrs = 1;
-  cudaLaunchKernelEx(&cfg, k, a);
+  if (cudaLaunchKernelEx(&cfg, k, d) != cudaSuccess && d.static_sched) {
+    (void)cudaGetLastError();  // co-residency refused: use the atomic queue
+    d.static_sched = 0;
+    cfg.numAttrs = 0;
+    cudaLaunchKernelEx(&cfg, k, d);
+  }
 }
 
 int choose_bt(long long n, int E) {
@@ -1355,6 +1372,7 @@ void v4_moe_forward_cuda(const void* x, const void* topk_ids, bool ids_int64,
     d.tile_done = counters + 1;
     d.rb_done = counters + 1 + (n_counters - 1 - H / kDecRows);
     d.swiglu_limit = swiglu_limit;
+    d.static_sched = (long long)T * topk <= 8;
     if (ids_int64)
       launch_decode<int64_t>(d, stream);
     else
