@@ -3502,3 +3502,45 @@ processes on the 128-core host.
 | costfit3 | granite3.1-moe-3b | belady/decode/decode | 1024 | 0.9721 | 0.9721 | real | 5993110+dirty |
 
 <!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model granite3.1-moe-3b --dataset belady/decode --ignore-layers 0 --prefill skip | env: python 3.14.8, numpy 2.5.4, Darwin arm64 | commit: 5993110+dirty -->
+| shared_costfit | qwen3-30b-a3b | belady/decode/decode | 128 | 0.2083 | 0.2083 | real | b48438c+dirty |
+| shared_costfit3 | qwen3-30b-a3b | belady/decode/decode | 128 | 0.2083 | 0.2083 | real | b48438c+dirty |
+| shared_costfit | qwen3-30b-a3b | belady/decode/decode | 256 | 0.3273 | 0.3273 | real | b48438c+dirty |
+| shared_costfit3 | qwen3-30b-a3b | belady/decode/decode | 256 | 0.3273 | 0.3273 | real | b48438c+dirty |
+| shared_costfit | qwen3-30b-a3b | belady/decode/decode | 384 | 0.4148 | 0.4148 | real | b48438c+dirty |
+| shared_costfit3 | qwen3-30b-a3b | belady/decode/decode | 384 | 0.4148 | 0.4148 | real | b48438c+dirty |
+| shared_costfit | qwen3-30b-a3b | belady/decode/decode | 512 | 0.4853 | 0.4853 | real | b48438c+dirty |
+| shared_costfit3 | qwen3-30b-a3b | belady/decode/decode | 512 | 0.4853 | 0.4853 | real | b48438c+dirty |
+| shared_costfit | qwen3-30b-a3b | belady/decode/decode | 768 | 0.5905 | 0.5905 | real | b48438c+dirty |
+| shared_costfit3 | qwen3-30b-a3b | belady/decode/decode | 768 | 0.5905 | 0.5905 | real | b48438c+dirty |
+| shared_costfit | qwen3-30b-a3b | belady/decode/decode | 1024 | 0.6674 | 0.6674 | real | b48438c+dirty |
+| shared_costfit3 | qwen3-30b-a3b | belady/decode/decode | 1024 | 0.6674 | 0.6674 | real | b48438c+dirty |
+| shared_costfit | qwen3-30b-a3b | belady/decode/decode | 1536 | 0.8093 | 0.8093 | real | b48438c+dirty |
+| shared_costfit3 | qwen3-30b-a3b | belady/decode/decode | 1536 | 0.8091 | 0.8091 | real | b48438c+dirty |
+| shared_costfit | qwen3-30b-a3b | belady/decode/decode | 2048 | 0.8948 | 0.8948 | real | b48438c+dirty |
+| shared_costfit3 | qwen3-30b-a3b | belady/decode/decode | 2048 | 0.8946 | 0.8946 | real | b48438c+dirty |
+| shared_costfit | qwen3-30b-a3b | belady/decode/decode | 3072 | 0.9684 | 0.9684 | real | b48438c+dirty |
+| shared_costfit3 | qwen3-30b-a3b | belady/decode/decode | 3072 | 0.9684 | 0.9684 | real | b48438c+dirty |
+| shared_costfit | qwen3-30b-a3b | belady/decode/decode | 4096 | 0.9886 | 0.9886 | real | b48438c+dirty |
+| shared_costfit3 | qwen3-30b-a3b | belady/decode/decode | 4096 | 0.9886 | 0.9886 | real | b48438c+dirty |
+| shared_costfit | granite3.1-moe-3b | belady/decode/decode | 128 | 0.2838 | 0.2838 | real | b48438c+dirty |
+| shared_costfit3 | granite3.1-moe-3b | belady/decode/decode | 128 | 0.2838 | 0.2838 | real | b48438c+dirty |
+| shared_costfit | granite3.1-moe-3b | belady/decode/decode | 256 | 0.4682 | 0.4682 | real | b48438c+dirty |
+| shared_costfit3 | granite3.1-moe-3b | belady/decode/decode | 256 | 0.4682 | 0.4682 | real | b48438c+dirty |
+| shared_costfit | granite3.1-moe-3b | belady/decode/decode | 384 | 0.6132 | 0.6132 | real | b48438c+dirty |
+| shared_costfit3 | granite3.1-moe-3b | belady/decode/decode | 384 | 0.6132 | 0.6132 | real | b48438c+dirty |
+| shared_costfit | granite3.1-moe-3b | belady/decode/decode | 512 | 0.7287 | 0.7287 | real | b48438c+dirty |
+| shared_costfit3 | granite3.1-moe-3b | belady/decode/decode | 512 | 0.7287 | 0.7287 | real | b48438c+dirty |
+| shared_costfit | granite3.1-moe-3b | belady/decode/decode | 768 | 0.8864 | 0.8864 | real | b48438c+dirty |
+| shared_costfit3 | granite3.1-moe-3b | belady/decode/decode | 768 | 0.8864 | 0.8864 | real | b48438c+dirty |
+| shared_costfit | granite3.1-moe-3b | belady/decode/decode | 1024 | 0.9721 | 0.9721 | real | b48438c+dirty |
+| shared_costfit3 | granite3.1-moe-3b | belady/decode/decode | 1024 | 0.9721 | 0.9721 | real | b48438c+dirty |
+| shared_costfit | granite3.1-moe-3b | belady/decode/decode | 1536 | 0.9980 | 0.9980 | real | b48438c+dirty |
+| shared_costfit3 | granite3.1-moe-3b | belady/decode/decode | 1536 | 0.9980 | 0.9980 | real | b48438c+dirty |
+| shared_costfit | granite3.1-moe-3b | belady/decode/decode | 2048 | 0.9980 | 0.9980 | real | b48438c+dirty |
+| shared_costfit3 | granite3.1-moe-3b | belady/decode/decode | 2048 | 0.9980 | 0.9980 | real | b48438c+dirty |
+| shared_costfit | granite3.1-moe-3b | belady/decode/decode | 3072 | 0.9980 | 0.9980 | real | b48438c+dirty |
+| shared_costfit3 | granite3.1-moe-3b | belady/decode/decode | 3072 | 0.9980 | 0.9980 | real | b48438c+dirty |
+| shared_costfit | granite3.1-moe-3b | belady/decode/decode | 4096 | 0.9980 | 0.9980 | real | b48438c+dirty |
+| shared_costfit3 | granite3.1-moe-3b | belady/decode/decode | 4096 | 0.9980 | 0.9980 | real | b48438c+dirty |
+
+<!-- exp675a shared-state costfit sweep (Winnie WSL Ubuntu, py3.12.3): shared_costfit == costfit and shared_costfit3 == costfit3 bit-identically on every cell (H1 40/40, comparator 12/12); census economics in census_exp675-*.csv; verdict SHARED-STATE-VALIDATED (ADDENDUM26) -->

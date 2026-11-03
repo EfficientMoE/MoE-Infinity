@@ -1375,6 +1375,8 @@ POLICY_FACTORIES = {
     "decayfit": lambda cap, **kw: _build_decayfit(cap, **kw),
     "costfit": lambda cap, **kw: _build_costfit(cap, **kw),
     "costfit3": lambda cap, **kw: _build_costfit3(cap, **kw),
+    "shared_costfit": lambda cap, **kw: _build_shared_costfit(cap, **kw),
+    "shared_costfit3": lambda cap, **kw: _build_shared_costfit3(cap, **kw),
 }
 
 
@@ -1400,6 +1402,18 @@ def _build_costfit3(cap, **kw):
     return CostFit3Policy(cap, **kw)
 
 
+def _build_shared_costfit(cap, **kw):
+    from .research.policies_shared_costfit import SharedCostFitPolicy
+
+    return SharedCostFitPolicy(cap, **kw)
+
+
+def _build_shared_costfit3(cap, **kw):
+    from .research.policies_shared_costfit import SharedCostFit3Policy
+
+    return SharedCostFit3Policy(cap, **kw)
+
+
 def _build_decayfit(cap, **kw):
     from .research.policies_decayfit import DecayFitPolicy
 
@@ -1422,7 +1436,7 @@ def _build_hotfit(cap, **kw):
 
 #: Policies that accept the model geometry (``num_layers``; ``lcnu`` also
 #: ``prior = top_k / num_experts``) as keyword arguments.
-GEOMETRY_POLICIES = {"layer_lru", "lcnu", "rothead", "hotfit", "shadowfit", "decayfit", "costfit", "costfit3"}
+GEOMETRY_POLICIES = {"layer_lru", "lcnu", "rothead", "hotfit", "shadowfit", "decayfit", "costfit", "costfit3", "shared_costfit", "shared_costfit3"}
 
 
 # Keep a module-level INF for callers that compare against Belady.

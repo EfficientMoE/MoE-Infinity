@@ -1,0 +1,6 @@
+model,dataset,policy,capacity,hit_rate,effective_hit_rate,is_oracle_upper_bound,provenance
+qwen3-30b-a3b,belady/decode/decode,belady,1024,0.832718,0.832718,0,real
+qwen3-30b-a3b,belady/decode/decode,costfit,1024,0.667390,0.667390,0,real
+qwen3-30b-a3b,belady/decode/decode,shared_costfit,1024,0.667390,0.667390,0,real
+qwen3-30b-a3b,belady/decode/decode,costfit3,1024,0.667390,0.667390,0,real
+qwen3-30b-a3b,belady/decode/decode,shared_costfit3,1024,0.667390,0.667390,0,real
