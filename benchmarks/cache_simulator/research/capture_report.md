@@ -684,3 +684,32 @@ modulated by decode length (addendum 4). Caveats: two models, single traces;
 a2.7b/235b streams not measured locally (their non-flip is consistent with
 this story but unverified). Deployable synthesis stands: LCNU default;
 expect a recency takeover only for concentrated, rotating expert demand.
+
+---
+
+## Addendum 6 — within-model prompt-subset test: NOT-SEPARATED (exp656)
+
+exp655's cross-model imbalance gap invites a causal reading; this
+pre-registered test (sha 6691daf8…, frozen 2026-11-03T04:40:02Z) checks it
+within one model. The frozen 30b trace's 8 prompts split by per-prompt Gini:
+HIGH = {2,4,6,7} (mean 0.742), LOW = {0,1,3,5} (mean 0.669); identical fine
+grid re-run on each 4-prompt subset.
+
+- H1 held: HIGH flips — s3fifo strictly best at 1280..1792 (10E..14E).
+- H2 refuted: LOW ALSO flips — s3fifo edges lcnu at 1152 (0.6567 vs 0.6560),
+  then wins decisively from 1280 (0.6975 vs 0.6861) through 1792
+  (0.8147 vs 0.7853).
+- H3 refuted (control): the 7E..9E lcnu sweep breaks on LOW at 9E.
+
+Verdict NOT-SEPARATED, per the pre-committed interpretation: per-prompt
+demand imbalance does NOT predict the flip within qwen3-30b. Across
+exp652-656 the flip boundary is stable at ~10E for every stream variant
+(full 8-prompt, greedy64-truncated, HIGH subset, LOW subset) — the takeover
+is a property of the router's expert-load structure itself, inherited by
+every prompt mix, not of capture length (addendum 4) or prompt-level demand
+concentration (this addendum). The cross-model Gini gap (addendum 5) remains
+descriptively valid but is not the causal driver. Remaining question narrows
+to model-level router properties (load-distribution shape at E=128, k=8,
+48 layers — 235b shares E and k at 94 layers and does not flip through 64E).
+Data: results_real_qwen3-30b-a3b-{hi,lo}.{csv,md}, EXPERIMENTS.md rows
+appended.
