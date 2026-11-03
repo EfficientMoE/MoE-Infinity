@@ -1,6 +1,6 @@
 """Triton kernels for HF-layout GQA attention (runtime/hf_attention.py).
 
-``gqa_decode_attention``: split-KV GQA decode attention over a contiguous
+``gqa_decode_attention_pro6000``: split-KV GQA decode attention over a contiguous
 (HF ``DynamicCache``) KV.  ``apply_attention_sinks``: exact sinks from the
 log-sum-exp of a prefill kernel, one in-place pass.
 
@@ -19,6 +19,15 @@ Fused in the kernel, so they cost no extra pass over the KV:
   additive float), as HF passes for padding / MiniMax-M3 block-sparse /
   GLM DSA index layers,
 * attention sinks (GPT-OSS): ``out *= sigmoid(lse - sink)`` in the merge.
+
+Hardware: the decode kernel (``*_pro6000``) is tuned on the RTX PRO 6000
+Blackwell (sm_120, 188 SMs, 128 MiB L2, 99 KiB smem/block): its tile /
+stage table, the one-wave-on-188-SMs split policy and the 99 KiB stage
+budget are gated with ``hw_profile.supports(RTX_PRO_6000)`` in
+runtime/hf_attention.py.  Other GPUs decode with PyTorch FA2 (native GQA) or,
+with an explicit mask, SDPA with the query group folded (zero-copy GQA).
+``apply_attention_sinks`` is generic (one elementwise pass) and runs
+everywhere.
 """
 
 from __future__ import annotations
@@ -36,7 +45,7 @@ _PARTIAL_FRAC = 0.04  # max partial-result bytes / KV bytes
 
 
 @triton.jit
-def _gqa_decode_split_kernel(
+def _gqa_decode_split_kernel_pro6000(
     Q,
     K,
     V,
@@ -143,7 +152,7 @@ def _gqa_decode_split_kernel(
 
 
 @triton.jit
-def _gqa_decode_merge_kernel(
+def _gqa_decode_merge_kernel_pro6000(
     OUT_P,
     LSE_P,
     SINKS,
@@ -291,8 +300,12 @@ def _num_sms(device_index: int) -> int:
     return torch.cuda.get_device_properties(device_index).multi_processor_count
 
 
-def _config(d: int, g: int) -> tuple[int, int, int, int]:
-    """(BLOCK_N, num_warps, num_stages, waves); swept on sm_120 (RTX PRO 6000).
+def _pro6000_decode_config(d: int, g: int) -> tuple[int, int, int, int]:
+    """(BLOCK_N, num_warps, num_stages, waves) of the decode kernel.
+
+    Swept on the RTX PRO 6000 (188 SMs, 128 MiB L2, 99 KiB smem/block); only
+    used where ``hw_profile.supports(RTX_PRO_6000)`` holds (other GPUs never
+    reach this kernel, see runtime/hf_attention.py).
 
     ``waves``: split programs per SM to aim for.
     """
@@ -303,8 +316,8 @@ def _config(d: int, g: int) -> tuple[int, int, int, int]:
     return 32, 4, 2, 3
 
 
-def gqa_decode_supported(q, k, v, mask=None) -> bool:
-    """Whether :func:`gqa_decode_attention` handles these HF-layout inputs."""
+def gqa_decode_supported_pro6000(q, k, v, mask=None) -> bool:
+    """Whether :func:`gqa_decode_attention_pro6000` handles these HF-layout inputs."""
     if not (q.is_cuda and q.dim() == 4 and q.shape[2] == 1):
         return False
     if q.dtype not in (torch.float16, torch.bfloat16):
@@ -327,7 +340,7 @@ def gqa_decode_supported(q, k, v, mask=None) -> bool:
     return True
 
 
-def gqa_decode_attention(
+def gqa_decode_attention_pro6000(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -358,7 +371,9 @@ def gqa_decode_attention(
     lo = 0 if window is None else max(0, klen - window)
     span = klen - lo
 
-    block_n, num_warps, num_stages, waves = _config(max(d, dv), g)
+    block_n, num_warps, num_stages, waves = _pro6000_decode_config(
+        max(d, dv), g
+    )
     n_bh = bsz * kv_heads
     sms = _num_sms(query.device.index or 0)
     # Keep the partial results (one [G, Dv] row per split, stored in the
@@ -395,7 +410,7 @@ def gqa_decode_attention(
     lse_p = torch.empty(
         (n_bh * splits * g,), device=query.device, dtype=torch.float32
     )
-    _gqa_decode_split_kernel[(splits, n_bh)](
+    _gqa_decode_split_kernel_pro6000[(splits, n_bh)](
         query,
         key,
         value,
@@ -434,7 +449,7 @@ def gqa_decode_attention(
         (bsz, 1, heads, dv), device=query.device, dtype=query.dtype
     )
     lse = torch.empty((bsz, heads), device=query.device, dtype=torch.float32)
-    _gqa_decode_merge_kernel[(n_bh, g)](
+    _gqa_decode_merge_kernel_pro6000[(n_bh, g)](
         out_p,
         lse_p,
         sinks if sinks is not None else lse_p,
@@ -457,6 +472,6 @@ def gqa_decode_attention(
 
 __all__ = [
     "apply_attention_sinks",
-    "gqa_decode_attention",
-    "gqa_decode_supported",
+    "gqa_decode_attention_pro6000",
+    "gqa_decode_supported_pro6000",
 ]

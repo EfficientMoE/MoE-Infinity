@@ -7,9 +7,12 @@ HF ``sdpa`` avoids that only without an explicit mask and has no attention
 sinks (GPT-OSS).  This module provides one attention function, registered with
 the HF attention interface, that
 
-* decode (one query token): a split-KV Triton kernel
-  (``kernel/gqa_attention.py``) that reads every KV byte once, with the
-  sliding window, the key mask and the sinks fused in;
+* decode (one query token) on the RTX PRO 6000: a split-KV Triton kernel
+  (``kernel/gqa_attention.py``, ``*_pro6000``, gated with
+  ``hw_profile.supports(RTX_PRO_6000)``) that reads every KV byte once, with
+  the sliding window, the key mask and the sinks fused in.  Other GPUs decode
+  with FA2 (native GQA) below, or SDPA with the query group folded under a
+  mask;
 * prefill without an explicit mask: PyTorch's built-in FlashAttention-2
   (``aten._flash_attention_forward``): native GQA (K/V never expanded),
   bottom-right causal, in-kernel sliding window;
@@ -79,6 +82,18 @@ def _triton_kernels():
     except Exception:  # no Triton: FA2 / SDPA decode paths below
         return None
     return gqa_attention
+
+
+@functools.lru_cache(maxsize=None)
+def _pro6000_decode_enabled(device_index: int | None) -> bool:
+    """Gate for the split-KV Triton decode kernel, tuned on the RTX PRO 6000.
+
+    Evaluated once per device.  Elsewhere decode takes the generic paths
+    below: FA2 with native GQA (+ LSE sinks), or folded-GQA SDPA under a mask.
+    """
+    from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
+
+    return supports(RTX_PRO_6000, device_index)
 
 
 def _flash_eligible(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> bool:
@@ -288,14 +303,19 @@ def _attention(
     )
     flash = not unsupported and _flash_eligible(query, key, value)
 
-    if qlen == 1 and not unsupported:
+    if (
+        qlen == 1
+        and not unsupported
+        and query.is_cuda
+        and _pro6000_decode_enabled(query.device.index)
+    ):
         decode = _triton_kernels()
-        if decode is not None and decode.gqa_decode_supported(
+        if decode is not None and decode.gqa_decode_supported_pro6000(
             query, key, value, attention_mask
         ):
             # Split-KV Triton kernel: GQA group per program, window / key
             # mask / sinks fused, so the KV is streamed exactly once.
-            out = decode.gqa_decode_attention(
+            out = decode.gqa_decode_attention_pro6000(
                 query,
                 key,
                 value,

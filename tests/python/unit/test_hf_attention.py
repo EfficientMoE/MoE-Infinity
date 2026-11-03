@@ -406,13 +406,15 @@ def _count_paths(monkeypatch):
     if decode is not None:
 
         class _Spy:
-            gqa_decode_supported = staticmethod(decode.gqa_decode_supported)
+            gqa_decode_supported_pro6000 = staticmethod(
+                decode.gqa_decode_supported_pro6000
+            )
             apply_attention_sinks = staticmethod(decode.apply_attention_sinks)
 
             @staticmethod
-            def gqa_decode_attention(*a, **k):
+            def gqa_decode_attention_pro6000(*a, **k):
                 calls["decode"] += 1
-                return decode.gqa_decode_attention(*a, **k)
+                return decode.gqa_decode_attention_pro6000(*a, **k)
 
         monkeypatch.setattr(hf_attention, "_triton_kernels", lambda: _Spy)
 
@@ -479,8 +481,8 @@ def test_gpt_oss_window_128_cuda(monkeypatch):
 @pytest.mark.parametrize("mask", [None, "bool", "additive", "bool_bcast"])
 def test_gqa_decode_kernel(B, H, KVH, L, D, DV, window, sinks, mask):
     from moe_infinity.kernel.gqa_attention import (
-        gqa_decode_attention,
-        gqa_decode_supported,
+        gqa_decode_attention_pro6000,
+        gqa_decode_supported_pro6000,
     )
 
     torch.manual_seed(0)
@@ -503,8 +505,8 @@ def test_gqa_decode_kernel(B, H, KVH, L, D, DV, window, sinks, mask):
             m = torch.zeros(B, 1, 1, L, device=dev, dtype=dt).masked_fill(
                 ~keep, torch.finfo(dt).min
             )
-    assert gqa_decode_supported(q, k, v, m)
-    out, lse = gqa_decode_attention(
+    assert gqa_decode_supported_pro6000(q, k, v, m)
+    out, lse = gqa_decode_attention_pro6000(
         q, k, v, D**-0.5, window=window, sinks=snk, mask=m, return_lse=True
     )
     ref_mask = m
@@ -544,10 +546,82 @@ def test_apply_attention_sinks_kernel(D, strided):
 
 @needs_cuda
 def test_gqa_decode_kernel_fully_masked_row():
-    from moe_infinity.kernel.gqa_attention import gqa_decode_attention
+    from moe_infinity.kernel.gqa_attention import gqa_decode_attention_pro6000
 
     q = torch.randn(1, 8, 1, 64, device="cuda", dtype=torch.bfloat16)
     k = torch.randn(1, 2, 100, 64, device="cuda", dtype=torch.bfloat16)
     keep = torch.zeros(1, 1, 1, 100, device="cuda", dtype=torch.bool)
-    out = gqa_decode_attention(q, k, k, 0.125, mask=keep)
+    out = gqa_decode_attention_pro6000(q, k, k, 0.125, mask=keep)
     assert torch.isfinite(out).all() and out.abs().max() == 0
+
+
+# --------------------------------------------------------------------------
+# hardware gate: the decode kernel is tuned for the RTX PRO 6000 only
+# --------------------------------------------------------------------------
+
+_MIB, _KIB = 1024 * 1024, 1024
+_FAKE_GPUS = {
+    "rtx_pro_6000": dict(
+        major=12,
+        minor=0,
+        multi_processor_count=188,
+        L2_cache_size=128 * _MIB,
+        shared_memory_per_block_optin=99 * _KIB,
+    ),
+    "rtx_5090": dict(
+        major=12,
+        minor=0,
+        multi_processor_count=170,
+        L2_cache_size=96 * _MIB,
+        shared_memory_per_block_optin=99 * _KIB,
+    ),
+    "h100": dict(
+        major=9,
+        minor=0,
+        multi_processor_count=132,
+        L2_cache_size=50 * _MIB,
+        shared_memory_per_block_optin=227 * _KIB,
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "gpu, tuned", [("rtx_pro_6000", True), ("rtx_5090", False), ("h100", False)]
+)
+def test_pro6000_decode_gate(monkeypatch, gpu, tuned):
+    from types import SimpleNamespace
+
+    from moe_infinity.utils import hw_profile
+
+    monkeypatch.delenv("MOE_INFINITY_UNVALIDATED_HW", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda i: SimpleNamespace(**_FAKE_GPUS[gpu]),
+    )
+    hw_profile._gates.cache_clear()
+    hf_attention._pro6000_decode_enabled.cache_clear()
+    try:
+        assert hf_attention._pro6000_decode_enabled(0) is tuned
+        # Generic choices do not depend on the card.
+        cls, cfg = _family("gpt_oss")
+        assert select_attn_implementation(cls, cfg, False) == MOE_GQA
+    finally:
+        hw_profile._gates.cache_clear()
+        hf_attention._pro6000_decode_enabled.cache_clear()
+
+
+@needs_cuda
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+@pytest.mark.parametrize("pad", [False, True])
+def test_model_parity_untuned_gpu_fallback(family, pad, monkeypatch):
+    """With the RTX PRO 6000 gate off, decode runs the generic paths."""
+    calls = _count_paths(monkeypatch)
+    monkeypatch.setattr(
+        hf_attention, "_pro6000_decode_enabled", lambda i: False
+    )
+    _compare_bf16(family, seq=40, pad=pad)
+    assert calls["decode"] == 0
+    assert calls["flash"] + calls["masked"] > 0
