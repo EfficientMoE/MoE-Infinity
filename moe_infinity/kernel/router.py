@@ -458,10 +458,10 @@ PREFILL_GEMM_MIN_TOKENS = 4096
 _I64_MIN = -9223372036854775808
 # The Triton GEMM + top-k kernel replaces cuBLASLt logits + routing (one
 # launch instead of two) where it measured faster on sm_120: few experts
-# (E <= 32: the op streams X) from 2K tokens. For E >= 128 the [BM, E]
+# (E <= 128: the op streams X) from 2K tokens. For E >= 256 the [BM, E]
 # full-row tile re-reads W per tile and the cuBLASLt path stays faster.
 PREFILL_FUSED_MIN_TOKENS = 2048
-PREFILL_FUSED_MAX_EXPERTS = 32
+PREFILL_FUSED_MAX_EXPERTS = 128
 
 
 def _use_prefill_kernel(x, weight, gemm_min_tokens) -> bool:
@@ -671,7 +671,7 @@ def _flag_state(dev):
 _GEMM_CFG: dict = {
     16: (128, 64, 8, 2),
     32: (32, 128, 4, 2),
-    128: (64, 64, 8, 3),
+    128: (64, 64, 8, 4),
     256: (64, 64, 16, 3),
     512: (64, 32, 8, 2),
 }
@@ -679,6 +679,8 @@ _GEMM_CFG: dict = {
 
 def _gemm_config(T, H, E, block_e):
     """(BM, BK, num_warps, num_stages) for the fused prefill kernel."""
+    if block_e == 128 and H >= 6144:
+        return (64, 64, 4, 3)  # MiniMax-M3 (H = 6144) sweep
     cfg = _GEMM_CFG.get(block_e)
     if cfg is not None:
         return cfg
