@@ -44,6 +44,71 @@
 
 namespace moe_gemm {
 
+// Tile order of one GEMM whose operands do not fit in L2 together (`l2` =
+// the part of L2 they may use; `resident` = CTAs resident at once). Keeps a
+// band of g tiles of one operand resident (g = all tiles keeps the whole
+// operand) and streams the other once per band. The resident CTAs also hold
+// ceil(resident / g) bands of the streamed operand in flight (at most all of
+// it), so the band is the largest g whose band plus that in-flight set fits
+// kL2Share of `l2`. If the streamed operand fits in `l2` next to the bands
+// of the other that the resident CTAs hold, it stays resident instead
+// (g = 1) and both are read once. The order that
+// reads less wins. traffic = modelled operand bytes read from
+// DRAM, 0 when everything fits (keep the default order).
+struct RasterPlan {
+  double traffic;
+  bool along_m;  // band along M (B streamed per band), else along N
+  int group;
+};
+
+template <typename Gemm>
+RasterPlan plan_raster(cutlass::gemm::GemmCoord problem, double l2,
+                       int resident) {
+  constexpr double kL2Share = 0.8;
+  using TB = typename Gemm::ThreadblockShape;
+  double const e = sizeof(typename Gemm::Element);
+  double const a = double(problem.m()) * problem.k() * e;
+  double const b = double(problem.n()) * problem.k() * e * Gemm::kAccumulators;
+  RasterPlan best{0, false, 8};
+  double best_footprint = 0;
+  if (a + b <= l2) return best;
+  double const band_a = double(TB::kM) * problem.k() * e;
+  double const band_b = double(TB::kN) * problem.k() * e * Gemm::kAccumulators;
+  int const tiles_m = (problem.m() + TB::kM - 1) / TB::kM;
+  int const tiles_n = (problem.n() + TB::kN - 1) / TB::kN;
+  for (int along_m = 0; along_m < 2; ++along_m) {
+    int const major = along_m ? tiles_m : tiles_n;
+    double const keep = along_m ? band_a : band_b;
+    double const flow = along_m ? band_b : band_a;
+    double const kept = along_m ? a : b, swept = along_m ? b : a;
+    double const budget = kL2Share * l2;
+    auto consider = [&](double traffic, int g, double footprint) {
+      // Ties go to the smaller resident footprint.
+      if (best.traffic == 0 || traffic < best.traffic ||
+          (traffic == best.traffic && footprint < best_footprint)) {
+        best = {traffic, bool(along_m), g};
+        best_footprint = footprint;
+      }
+    };
+    // The streamed operand fits next to the bands of the kept one that the
+    // resident CTAs hold (one per `minor` tile row): both are read once.
+    int const minor = along_m ? tiles_n : tiles_m;
+    int const held = (std::max(resident, 1) + minor - 1) / minor;
+    if (swept + held * keep <= l2)
+      consider(kept + swept, 1, swept + held * keep);
+    // Otherwise the largest band whose in-flight set fits.
+    for (int g = major; g >= 1; --g) {
+      int const inflight = (std::max(resident, 1) + g - 1) / g;
+      double const moving = std::min(inflight * flow, swept);
+      if (g > 1 && g * keep + moving > budget) continue;
+      consider(kept + swept * double((major + g - 1) / g), g,
+               g * keep + moving);
+      break;
+    }
+  }
+  return best;
+}
+
 // act(g, u) applied to the fp32 gate / up accumulators of the dual GEMM.
 // New activations (e.g. clamped SwiGLU) add a functor with the same shape;
 // per-launch constants go in Params.
@@ -200,34 +265,14 @@ struct ExpertGemm {
     return p;
   }
 
-  // Rasterisation when the operands do not fit in L2 together (`l2_bytes`
-  // = the part of L2 they may use): if the smaller operand plus one tile
-  // band of the other fits, keep the smaller one resident and sweep it once
-  // per band of the other (group 1), so both are read from DRAM once.
-  // Otherwise size the groups so one band stays resident.
+  // L2-aware rasterisation, see plan_raster.
   static void fit_raster(Params& p, cutlass::gemm::GemmCoord problem,
-                         double l2_bytes) {
-    double const e = sizeof(Element);
-    double const a = double(problem.m()) * problem.k() * e;
-    double const b = double(problem.n()) * problem.k() * e * kAccumulators;
-    if (a + b <= l2_bytes) return;
-    double const band_a = double(ThreadblockShape::kM) * problem.k() * e;
-    double const band_b =
-        double(ThreadblockShape::kN) * problem.k() * e * kAccumulators;
-    if (a <= b ? a + band_b <= l2_bytes : b + band_a <= l2_bytes) {
-      p.group = 1;
-      p.group_along_m = a > b;  // along M: B swept per M tile
-      return;
+                         double l2_bytes, int resident) {
+    RasterPlan const r = plan_raster<ExpertGemm>(problem, l2_bytes, resident);
+    if (r.traffic > 0) {
+      p.group_along_m = r.along_m;
+      p.group = r.group;
     }
-    // Neither fits: keep a band of g tiles of one operand in half of L2 and
-    // stream the other once per band; pick the side that reads less.
-    double const half = 0.5 * l2_bytes;
-    int const gm = std::clamp(int(half / band_a), 1, p.tiles_m);
-    int const gn = std::clamp(int(half / band_b), 1, p.tiles_n);
-    double const via_m = a + b * double((p.tiles_m + gm - 1) / gm);
-    double const via_n = b + a * double((p.tiles_n + gn - 1) / gn);
-    p.group_along_m = via_m <= via_n;
-    p.group = p.group_along_m ? gm : gn;
   }
 
   static int split_tiles(Params const& p) {

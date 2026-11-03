@@ -209,7 +209,7 @@ void launch(int device, int sms, cutlass::gemm::GemmCoord problem, int splits,
   int const slots = sms * (setup_kernel<Gemm>(device) - 1);
   auto params =
       Gemm::make_params(problem, splits, slots, A, lda, B0, B1, ldb, D, ldd);
-  Gemm::fit_raster(params, problem, l2_bytes);
+  Gemm::fit_raster(params, problem, l2_bytes, slots);
   if (Gemm::split_tiles(params) > 0) {
     size_t floats = Gemm::workspace_floats(params);
     Workspace ws;
@@ -218,7 +218,7 @@ void launch(int device, int sms, cutlass::gemm::GemmCoord problem, int splits,
                        ws)) {
       params =
           Gemm::make_params(problem, 1, slots, A, lda, B0, B1, ldb, D, ldd);
-      Gemm::fit_raster(params, problem, l2_bytes);
+      Gemm::fit_raster(params, problem, l2_bytes, slots);
     } else {
       params.partials = ws.partials;
       params.counters = ws.counters;
@@ -419,9 +419,7 @@ class IntermediateWindow {
     size_t const carve = carve_out(device);
     // Below half resident the carve-out costs the operands more L2 than it
     // saves (mixtral 50K: 367 MB intermediate, Rule F).
-    if (carve == 0 || bytes < (size_t(8) << 20) ||
-        double(bytes) > 2 * kPersistShare * double(carve))
-      return;
+    if (!applies(carve, bytes)) return;
     if (cudaStreamGetAttribute(stream, cudaStreamAttributeAccessPolicyWindow,
                                &saved_) != cudaSuccess)
       return;
@@ -433,8 +431,12 @@ class IntermediateWindow {
     window_.missProp = cudaAccessPropertyStreaming;
     active_ = set(window_);
   }
-  size_t persisting_bytes() const {
-    return active_ ? size_t(double(window_.num_bytes) * window_.hitRatio) : 0;
+  // Bytes of an intermediate of `bytes` that the window keeps in L2.
+  static size_t persisting_bytes(int device, size_t bytes) {
+    size_t const carve = carve_out(device);
+    if (!applies(carve, bytes)) return 0;
+    double const n = double(std::min(bytes, window_max(device)));
+    return size_t(n * std::min(1.0, kPersistShare * double(carve) / n));
   }
   void last_use() {
     if (!active_) return;
@@ -449,6 +451,10 @@ class IntermediateWindow {
   }
 
  private:
+  static bool applies(size_t carve, size_t bytes) {
+    return carve > 0 && bytes >= (size_t(8) << 20) &&
+           double(bytes) <= 2 * kPersistShare * double(carve);
+  }
   bool set(cudaAccessPolicyWindow const& w) {
     cudaStreamAttrValue v{};
     v.accessPolicyWindow = w;
@@ -486,6 +492,31 @@ class IntermediateWindow {
   cudaAccessPolicyWindow window_{};
   bool active_ = false;
 };
+
+// When a GEMM's operands do not fit in L2 together, its DRAM traffic depends
+// on the N tile as much as on the tile order (mixtral 50K down: 128 x 256
+// tiles 1.26 GB, 128 x 128 x 64 tiles 0.91 GB, within 2 % of the time).
+// Switch to the config with the least modelled traffic when the chosen one
+// would read more than 1.25x that.
+template <typename Configs>
+void l2_lean_config(int device, int sms, cutlass::gemm::GemmCoord problem,
+                    double l2, int& cfg, int& splits) {
+  constexpr int kNum = int(std::tuple_size_v<Configs>);
+  double traffic[kNum];
+  for (int c = 0; c < kNum; ++c)
+    visit_config<Configs>(c, [&]<typename Gemm>() {
+      int const resident = sms * (setup_kernel<Gemm>(device) - 1);
+      traffic[c] = moe_gemm::plan_raster<Gemm>(problem, l2, resident).traffic;
+    });
+  if (traffic[cfg] == 0) return;  // fits: keep the tuned choice
+  int best = cfg;
+  for (int c = 0; c < kNum; ++c)
+    if (traffic[c] > 0 && traffic[c] < traffic[best]) best = c;
+  if (traffic[cfg] > 1.25 * traffic[best]) {
+    cfg = best;
+    splits = 1;
+  }
+}
 
 void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
                            torch::Tensor& up_proj, torch::Tensor& down_proj,
@@ -529,6 +560,7 @@ void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
   const int sms = sm_count(device);
 
   constexpr int kSmallM = 64;
+  bool const auto_dual = dual_cfg < 0, auto_down = down_cfg < 0;
   Choice tuned;
   if (dual_cfg < 0 && tuned_config(true, sms, M, I, H, kNumDual, tuned)) {
     dual_cfg = tuned.cfg;
@@ -555,6 +587,19 @@ void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
     down_splits = c.splits;
   }
 
+  // L2 left to the operands: minus the persisting intermediate (gate/up
+  // only).
+  size_t const act_bytes = size_t(M) * I * sizeof(Elem);
+  double const l2 = double(l2_size(device));
+  double const l2_dual =
+      l2 - double(IntermediateWindow::persisting_bytes(device, act_bytes));
+  if (auto_dual)
+    l2_lean_config<DualConfigs>(device, sms, {M, I, H}, l2_dual, dual_cfg,
+                                dual_splits);
+  if (auto_down)
+    l2_lean_config<DownConfigs>(device, sms, {M, H, I}, l2, down_cfg,
+                                down_splits);
+
   auto* x = reinterpret_cast<Elem const*>(hidden.data_ptr());
   auto* wg = reinterpret_cast<Elem const*>(gate_proj.data_ptr());
   auto* wu = reinterpret_cast<Elem const*>(up_proj.data_ptr());
@@ -562,13 +607,10 @@ void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
   auto* act = reinterpret_cast<Elem*>(fused_buf.data_ptr());
   auto* out = reinterpret_cast<Elem*>(output.data_ptr());
 
-  IntermediateWindow window(device, stream, act, size_t(M) * I * sizeof(Elem));
-  // L2 left to the operands: minus the persisting intermediate (gate/up
-  // only) and 8 MB of slack.
-  double const l2 = double(l2_size(device)) - double(8 << 20);
+  IntermediateWindow window(device, stream, act, act_bytes);
   visit_config<DualConfigs>(dual_cfg, [&]<typename Gemm>() {
     launch<Gemm>(device, sms, {M, I, H}, dual_splits, x, H, wg, wu, H, act, I,
-                 stream, l2 - double(window.persisting_bytes()));
+                 stream, l2_dual);
   });
   window.last_use();
   visit_config<DownConfigs>(down_cfg, [&]<typename Gemm>() {
