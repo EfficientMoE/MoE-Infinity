@@ -1315,3 +1315,7 @@ and the three disclosed failed design iterations: `exp673-moei-costfit3/PREREG.m
 ## Addendum 20 (exp669)
 
 **Verdict: IMPROVED** (frozen rule: IMPROVED if H1) — re-eval determinism gate PASS (best config rebuilt post-run on both traces; all recorded cells byte-identical).
+
+## Addendum 21 (exp674)
+
+**Verdict: SAFETY-BROKEN** — the BO point (HL=160975, 4.9x center) improves the mean deficit but violates the no-harm barrier on the synthetic grid. The center calibration stands; the BO objective overfit the worst case to two real traces.
