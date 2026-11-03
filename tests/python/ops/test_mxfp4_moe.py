@@ -111,15 +111,17 @@ def _fp32_reference(x, ids, w, wt):
         (64, 32, 4, 2880, 2880),
     ],
 )
-@pytest.mark.parametrize("path", ["auto", "nosplit", "mma"])
+@pytest.mark.parametrize("path", ["auto", "nosplit", "mma", "bf16x2", "cvt"])
 def test_matches_resident_loop(T, E, k, H, I, path, monkeypatch):
     import moe_infinity.kernel.mxfp4_moe as mm
     from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
 
     if path == "nosplit":
         monkeypatch.setattr(mm, "SPLIT_MAX_TK", 0)
-    if path in ("nosplit", "mma"):
+    if path in ("nosplit", "mma", "bf16x2", "cvt"):
         monkeypatch.setattr(mm, "GEMV_MAX_TK", 0)
+    if path in ("bf16x2", "cvt"):
+        monkeypatch.setattr(mm, "UPCAST", 1 if path == "bf16x2" else 2)
 
     wt = _weights(E, H, I)
     x, ids, w = _route(T, H, E, k)

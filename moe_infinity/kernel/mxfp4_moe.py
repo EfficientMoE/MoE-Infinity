@@ -118,6 +118,128 @@ def _moe_align_kernel(
         running += tl.sum(onehot, axis=0)
 
 
+# E2M1 -> scaled BF16 decoders copied from #312 (EfficientMoE/MoE-Infinity#327,
+# moe_infinity/kernel/mxfp4_gemm.py).
+# TODO(#312): import them from moe_infinity.kernel.mxfp4_gemm once #327 merges.
+
+
+@triton.jit
+def _e2m1_to_bf16(w, s):
+    """4 packed bytes + their 4 e8m0 scales -> (lo, hi) scaled BF16 values.
+
+    Nibble bits go to BF16 bits 6-8 / 15 (value * 2^-126), then two packed
+    BF16 multiplies apply 2^126 and 2^(s-127). Both are exact (powers of two)
+    unless the result leaves the BF16 range, matching the reference.
+    """
+    return tl.inline_asm_elementwise(
+        asm="""
+        {
+        .reg .b32 t0, t1, s0, s1, a, b, c;
+        prmt.b32 t0, $4, 0, 0x4140;
+        prmt.b32 t1, $4, 0, 0x4342;
+        prmt.b32 s0, $5, 0, 0x4140;
+        prmt.b32 s1, $5, 0, 0x4342;
+        shl.b32 s0, s0, 7;
+        shl.b32 s1, s1, 7;
+        mov.b32 c, 0x7E807E80;
+        shl.b32 a, t0, 6; shl.b32 b, t0, 12;
+        and.b32 a, a, 0x01C001C0; and.b32 b, b, 0x80008000; or.b32 a, a, b;
+        mul.rn.bf16x2 a, a, c; mul.rn.bf16x2 $0, a, s0;
+        shl.b32 a, t1, 6; shl.b32 b, t1, 12;
+        and.b32 a, a, 0x01C001C0; and.b32 b, b, 0x80008000; or.b32 a, a, b;
+        mul.rn.bf16x2 a, a, c; mul.rn.bf16x2 $1, a, s1;
+        shl.b32 a, t0, 2; shl.b32 b, t0, 8;
+        and.b32 a, a, 0x01C001C0; and.b32 b, b, 0x80008000; or.b32 a, a, b;
+        mul.rn.bf16x2 a, a, c; mul.rn.bf16x2 $2, a, s0;
+        shl.b32 a, t1, 2; shl.b32 b, t1, 8;
+        and.b32 a, a, 0x01C001C0; and.b32 b, b, 0x80008000; or.b32 a, a, b;
+        mul.rn.bf16x2 a, a, c; mul.rn.bf16x2 $3, a, s1;
+        }
+        """,
+        constraints="=r,=r,=r,=r,r,r",
+        args=[w, s],
+        dtype=(tl.bfloat16, tl.bfloat16),
+        is_pure=True,
+        pack=4,
+    )
+
+
+@triton.jit
+def _e2m1_to_bf16_cvt(w, s):
+    """Same contract as ``_e2m1_to_bf16`` using sm_100a+ ``cvt.rn.f16x2.e2m1x2``
+    (exact E2M1 -> f16), widened to f32, packed to bf16x2, then scaled."""
+    return tl.inline_asm_elementwise(
+        asm="""
+        {
+        .reg .b8 b0, b1, b2, b3;
+        .reg .b16 l0, l1, l2, l3, h0, h1, h2, h3;
+        .reg .b32 p0, p1, p2, p3, s0, s1;
+        .reg .f32 a0, a1, a2, a3, c0, c1, c2, c3;
+        mov.b32 {b0, b1, b2, b3}, $4;
+        cvt.rn.f16x2.e2m1x2 p0, b0;
+        cvt.rn.f16x2.e2m1x2 p1, b1;
+        cvt.rn.f16x2.e2m1x2 p2, b2;
+        cvt.rn.f16x2.e2m1x2 p3, b3;
+        mov.b32 {l0, h0}, p0;
+        mov.b32 {l1, h1}, p1;
+        mov.b32 {l2, h2}, p2;
+        mov.b32 {l3, h3}, p3;
+        cvt.f32.f16 a0, l0; cvt.f32.f16 a1, l1;
+        cvt.f32.f16 a2, l2; cvt.f32.f16 a3, l3;
+        cvt.f32.f16 c0, h0; cvt.f32.f16 c1, h1;
+        cvt.f32.f16 c2, h2; cvt.f32.f16 c3, h3;
+        cvt.rn.bf16x2.f32 p0, a1, a0;
+        cvt.rn.bf16x2.f32 p1, a3, a2;
+        cvt.rn.bf16x2.f32 p2, c1, c0;
+        cvt.rn.bf16x2.f32 p3, c3, c2;
+        prmt.b32 s0, $5, 0, 0x4140;
+        prmt.b32 s1, $5, 0, 0x4342;
+        shl.b32 s0, s0, 7;
+        shl.b32 s1, s1, 7;
+        mul.rn.bf16x2 $0, p0, s0;
+        mul.rn.bf16x2 $1, p1, s1;
+        mul.rn.bf16x2 $2, p2, s0;
+        mul.rn.bf16x2 $3, p3, s1;
+        }
+        """,
+        constraints="=r,=r,=r,=r,r,r",
+        args=[w, s],
+        dtype=(tl.bfloat16, tl.bfloat16),
+        is_pure=True,
+        pack=4,
+    )
+
+
+@triton.jit
+def _mxfp4_mma(
+    a,
+    w,
+    s,
+    acc,
+    W_ROWS: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    UPCAST: tl.constexpr,
+):
+    """acc += a @ dequant(w, s).T for one K tile.
+
+    UPCAST 0: ``tl.dot_scaled`` (Triton's decomposition); 1: #312's bit-trick
+    bf16x2 decode; 2: #312's ``cvt.rn.f16x2.e2m1x2`` decode (sm_100a+).
+    """
+    if UPCAST == 0:
+        return tl.dot_scaled(
+            a, None, "bf16", w.T, s, "e2m1", acc, fast_math=True
+        )
+    sb = tl.broadcast_to(s[:, :, None], (W_ROWS, BLOCK_K // 32, 16)).reshape(
+        W_ROWS, BLOCK_K // 2
+    )
+    if UPCAST == 2:
+        lo, hi = _e2m1_to_bf16_cvt(w, sb)
+    else:
+        lo, hi = _e2m1_to_bf16(w, sb)
+    wb = tl.join(lo, hi).reshape(W_ROWS, BLOCK_K)
+    return tl.dot(a, tl.trans(wb), acc)
+
+
 @triton.jit
 def _mxfp4_dot_k(
     acc,
@@ -130,6 +252,8 @@ def _mxfp4_dot_k(
     k_hi,
     BLOCK_K: tl.constexpr,
     EVEN_N: tl.constexpr,
+    W_ROWS: tl.constexpr,
+    UPCAST: tl.constexpr,
 ):
     """acc += A[:, k_lo:k_hi] @ dequant(W[:, k_lo:k_hi]).T (k_lo % BLOCK_K == 0).
 
@@ -151,9 +275,7 @@ def _mxfp4_dot_k(
         else:
             w = tl.load(w_ptrs, mask=n_mask[:, None], other=0)
             s = tl.load(s_ptrs, mask=n_mask[:, None], other=127)
-        acc = tl.dot_scaled(
-            a, None, "bf16", w.T, s, "e2m1", acc, fast_math=True
-        )
+        acc = _mxfp4_mma(a, w, s, acc, W_ROWS, BLOCK_K, UPCAST)
         a_ptrs += BLOCK_K
         w_ptrs += BLOCK_K // 2
         s_ptrs += BLOCK_K // 32
@@ -172,9 +294,7 @@ def _mxfp4_dot_k(
             mask=n_mask[:, None] & (offs_ks < rem // 32)[None, :],
             other=127,
         )
-        acc = tl.dot_scaled(
-            a, None, "bf16", w.T, s, "e2m1", acc, fast_math=True
-        )
+        acc = _mxfp4_mma(a, w, s, acc, W_ROWS, BLOCK_K, UPCAST)
     return acc
 
 
@@ -205,12 +325,14 @@ def _moe_gemm1_kernel(
     BLOCK_K: tl.constexpr,
     EVEN_N: tl.constexpr,
     USE_PDL: tl.constexpr,
+    UPCAST: tl.constexpr,
+    N_FASTEST: tl.constexpr,
 ):
     if USE_PDL:
         gdc_wait()
         gdc_launch_dependents()
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid_m = tl.program_id(1) if N_FASTEST else tl.program_id(0)
+    pid_n = tl.program_id(0) if N_FASTEST else tl.program_id(1)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     e32 = tl.load(block_expert_ptr + pid_m)
     aid = tl.load(sorted_ids_ptr + rows)
@@ -241,6 +363,8 @@ def _moe_gemm1_kernel(
         K,
         BLOCK_K,
         EVEN_N,
+        2 * BLOCK_N,
+        UPCAST,
     )
 
     bias = tl.load(b_ptr + e * stride_be + offs_wn, mask=wn_mask, other=0.0).to(
@@ -292,9 +416,11 @@ def _moe_gemm2_kernel(
     SPLIT_K: tl.constexpr,
     EVEN_N: tl.constexpr,
     USE_PDL: tl.constexpr,
+    UPCAST: tl.constexpr,
+    N_FASTEST: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid_m = tl.program_id(1) if N_FASTEST else tl.program_id(0)
+    pid_n = tl.program_id(0) if N_FASTEST else tl.program_id(1)
     pid_k = tl.program_id(2)
     if USE_PDL:
         gdc_wait()
@@ -331,6 +457,8 @@ def _moe_gemm2_kernel(
             tl.minimum(k_lo + k_per, K),
             BLOCK_K,
             EVEN_N,
+            BLOCK_N,
+            UPCAST,
         )
 
         rw = tl.load(topk_w_ptr + aid, mask=valid, other=0.0).to(tl.float32)
@@ -438,6 +566,7 @@ def _moe_gemv_kernel(
     SPLIT_K: tl.constexpr,
     SWIGLU: tl.constexpr,
     USE_PDL: tl.constexpr,
+    N_FASTEST: tl.constexpr,
 ):
     """Small-batch grouped MXFP4 GEMV (row blocks of 1-4 tokens).
 
@@ -453,8 +582,8 @@ def _moe_gemv_kernel(
     if USE_PDL:
         gdc_wait()
         gdc_launch_dependents()
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid_m = tl.program_id(1) if N_FASTEST else tl.program_id(0)
+    pid_n = tl.program_id(0) if N_FASTEST else tl.program_id(1)
     pid_k = tl.program_id(2)
     e32 = tl.load(block_expert_ptr + pid_m)
     if e32 >= 0:
@@ -587,6 +716,10 @@ def _block_m(tk: int, num_experts: int) -> int:
 # routed assignments) use the register GEMV kernels (sm_100a+ native e2m1
 # decode) instead of the tensor-core path.
 GEMV_MAX_TK = 8
+# MXFP4 decode of the tensor-core path (see ``_mxfp4_mma``).
+UPCAST = 0
+# Grid order: N tiles of one expert block run next to each other.
+N_FASTEST = True
 
 
 @functools.lru_cache(maxsize=None)
@@ -601,7 +734,7 @@ def _gemv_block_m(tk: int, num_experts: int) -> int:
 
 def _gemv_configs(tk: int, block_m: int):
     """((BLOCK_N, BLOCK_G, warps, split) gemm1, (...) gemm2)."""
-    return (8, 16, 4, 1), (8, 16, 4, 1)
+    return (8, 16, 4, 1), (4, 16, 2, 1)
 
 
 def _fused_moe_gemv(
@@ -642,12 +775,14 @@ def _fused_moe_gemv(
         max_blocks * block_m, inter, dtype=torch.bfloat16, device=x.device
     )
     common = dict(
+        N_FASTEST=N_FASTEST,
         TOP_K=top_k,
         BLOCK_M=block_m,
         USE_PDL=pdl,
         launch_pdl=pdl,
     )
-    _moe_gemv_kernel[(max_blocks, triton.cdiv(2 * inter, bn1), 1)](
+    g1 = (max_blocks, triton.cdiv(2 * inter, bn1), 1)
+    _moe_gemv_kernel[(g1[1], g1[0], 1) if N_FASTEST else g1](
         x.view(torch.int32),
         sorted_ids,
         block_expert,
@@ -678,7 +813,8 @@ def _fused_moe_gemv(
         num_stages=1,
         **common,
     )
-    _moe_gemv_kernel[(max_blocks, triton.cdiv(H, bn2), split)](
+    g2 = (max_blocks, triton.cdiv(H, bn2), split)
+    _moe_gemv_kernel[(g2[1], g2[0], split) if N_FASTEST else g2](
         inter_buf.view(torch.int32),
         sorted_ids,
         block_expert,
@@ -725,7 +861,7 @@ def _configs(tk: int, block_m: int):
     """
     if block_m <= 16:
         g1 = (32, 256, 4, 3)
-        g2 = (64, 256, 4, 2, 3 if tk <= SPLIT_MAX_TK else 1)
+        g2 = (64, 256, 4, 3, 3 if tk <= SPLIT_MAX_TK else 1)
     elif block_m <= 32:
         g1 = (64, 128, 4, 2)
         g2 = (128, 128, 4, 2, 1)
@@ -872,11 +1008,13 @@ def fused_moe_mxfp4(
     sorted_ids, block_expert = moe_align_mxfp4(topk_ids, E, block_m, zero)
     max_blocks = block_expert.numel()
     pdl = _use_pdl(x.device.index or 0)
+    upcast = UPCAST if _native_e2m1(x.device.index or 0) else 0
     inter_buf = torch.empty(
         sorted_ids.numel(), inter, dtype=torch.bfloat16, device=x.device
     )
 
-    _moe_gemm1_kernel[(max_blocks, triton.cdiv(inter, bn1))](
+    n1 = triton.cdiv(inter, bn1)
+    _moe_gemm1_kernel[(n1, max_blocks) if N_FASTEST else (max_blocks, n1)](
         x,
         sorted_ids,
         block_expert,
@@ -902,12 +1040,17 @@ def fused_moe_mxfp4(
         BLOCK_K=bk1,
         EVEN_N=inter % bn1 == 0,
         USE_PDL=pdl,
+        UPCAST=upcast,
+        N_FASTEST=N_FASTEST,
         num_warps=w1,
         num_stages=st1,
         launch_pdl=pdl,
     )
 
-    _moe_gemm2_kernel[(max_blocks, triton.cdiv(H, bn2), split)](
+    n2 = triton.cdiv(H, bn2)
+    _moe_gemm2_kernel[
+        (n2, max_blocks, split) if N_FASTEST else (max_blocks, n2, split)
+    ](
         inter_buf,
         sorted_ids,
         block_expert,
@@ -934,6 +1077,8 @@ def fused_moe_mxfp4(
         SPLIT_K=split,
         EVEN_N=H % bn2 == 0,
         USE_PDL=pdl,
+        UPCAST=upcast,
+        N_FASTEST=N_FASTEST,
         num_warps=w2,
         num_stages=st2,
         launch_pdl=pdl,
