@@ -32,6 +32,11 @@ import triton.language as tl
 
 # keep the block buffers resident (Rule F); toggled for measurement
 L2_PERSIST = True
+# launch configs (RTX_PRO_6000-tuned)
+PREP_WARPS_PRO6000 = 2
+AUX_WARPS_PRO6000 = 8
+PREP_NEUMANN = True
+BLOCK_TOKENS = 2048  # 72 MB of block buffers, under the 80 MB window
 
 
 @triton.jit(do_not_specialize=["T", "t_base", "TB", "NC"])
@@ -155,6 +160,57 @@ def _recur(
     )
 
 
+def _setup_block(q, k, v, gc, beta, bufs, scale, T, t_base, TB, nb, norm_qk):
+    from moe_infinity.kernel.gdn_prep import (
+        gdn_fwd_aux_pro6000_kernel,
+        gdn_fwd_prep_pro6000_kernel,
+    )
+
+    w, u, qg, kd, S = bufs
+    B, _, H, K = k.shape
+    grid = (triton.cdiv(nb, 64), B * H)
+    gdn_fwd_prep_pro6000_kernel[grid](
+        k,
+        v,
+        gc,
+        beta,
+        w,
+        u,
+        w,
+        T,
+        t_base,
+        TB,
+        HV=H,
+        K=K,
+        V=v.shape[-1],
+        BT=64,
+        BC=16,
+        BK=K,
+        NORM_K=norm_qk,
+        BLOCK_OUT=True,
+        NEUMANN=PREP_NEUMANN,
+        num_warps=PREP_WARPS_PRO6000,
+        num_stages=1,
+    )
+    gdn_fwd_aux_pro6000_kernel[grid](
+        q,
+        k,
+        gc,
+        qg,
+        kd,
+        S,
+        scale,
+        T,
+        t_base,
+        TB,
+        HV=H,
+        K=K,
+        BT=64,
+        NORM=norm_qk,
+        num_warps=AUX_WARPS_PRO6000,
+    )
+
+
 def chunk_gated_delta_rule_blocked(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -165,7 +221,7 @@ def chunk_gated_delta_rule_blocked(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     norm_qk: bool = True,
-    block_tokens: int = 2048,
+    block_tokens: int | None = None,
     BV: int = 32,
     num_warps: int = 4,
     num_stages: int = 2,
@@ -174,15 +230,12 @@ def chunk_gated_delta_rule_blocked(
     """GDN forward. ``gc`` is the chunk-local cumsum of the log2 decay
     ([B, T, H] fp32); q / k raw (``norm_qk``) or unit-norm; bf16 [B, T, H, 128].
     """
-    from moe_infinity.kernel.gdn_prep import (
-        gdn_fwd_aux_pro6000_kernel,
-        gdn_fwd_prep_pro6000_kernel,
-    )
-
     if use_cuda is None:
         from moe_infinity.kernel import gdn_recur_cuda
 
         use_cuda = gdn_recur_cuda.available()
+    if block_tokens is None:
+        block_tokens = BLOCK_TOKENS
 
     B, T, H, K = k.shape
     V = v.shape[-1]
@@ -193,58 +246,25 @@ def chunk_gated_delta_rule_blocked(
         if initial_state is not None
         else k.new_zeros(B, H, K, V, dtype=torch.float32)
     )
-    # one allocation so a single persisting-L2 window can cover the buffers
+    # one allocation so a single persisting-L2 window covers every buffer
     n = B * TB * H
-    arena = k.new_empty(n * (3 * K + V + 64))
-    w, u, qg, kd, S = (
+    per = n * (3 * K + V + 64)
+    arena = k.new_empty(per)
+    bufs = tuple(
         t.view(B, TB, H, -1)
         for t in arena.split([n * K, n * V, n * K, n * K, n * 64])
     )
+    starts = list(range(0, T, TB))
+    sizes = [min(TB, T - t) for t in starts]
+    args = (q, k, v, gc, beta)
     if use_cuda and L2_PERSIST:
         from moe_infinity.kernel import gdn_recur_cuda
 
         gdn_recur_cuda.l2_window(arena, arena.numel() * arena.element_size())
-    for t_base in range(0, T, TB):
-        nb = min(TB, T - t_base)
-        gdn_fwd_prep_pro6000_kernel[(triton.cdiv(nb, 64), B * H)](
-            k,
-            v,
-            gc,
-            beta,
-            w,
-            u,
-            w,
-            T,
-            t_base,
-            TB,
-            HV=H,
-            K=K,
-            V=V,
-            BT=64,
-            BC=16,
-            BK=K,
-            NORM_K=norm_qk,
-            BLOCK_OUT=True,
-            num_warps=2,
-            num_stages=1,
-        )
-        gdn_fwd_aux_pro6000_kernel[(triton.cdiv(nb, 64), B * H)](
-            q,
-            k,
-            gc,
-            qg,
-            kd,
-            S,
-            scale,
-            T,
-            t_base,
-            TB,
-            HV=H,
-            K=K,
-            BT=64,
-            NORM=norm_qk,
-            num_warps=4,
-        )
+
+    for t_base, nb in zip(starts, sizes):
+        _setup_block(*args, bufs, scale, T, t_base, TB, nb, norm_qk)
+        w, u, qg, kd, S = bufs
         _recur(
             qg,
             kd,
