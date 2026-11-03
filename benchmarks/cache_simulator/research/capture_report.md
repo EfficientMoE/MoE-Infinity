@@ -1338,3 +1338,12 @@ amplifies clustered misses. Clustering, not expert heterogeneity, is the
 failure mode. Hit-rate proxy is blind to miss temporal structure — all
 prior rankings carry this caveat. Follow-up: anti-clustering candidate +
 (phi,cap) boundary map.
+## Addendum 25 (exp680 stagger): STAG-SAFE-NO-GAIN — cadence is not the lever
+
+RESEGMENT 2048 vs 4096 on exp677-exact streams: identical deficits in 6/6
+cells incl. the 0.439pp peak (where the barrier never fires — cadence
+irrelevant by construction). Center reproduced exp677 exactly (replication
+gate). Alignment exposure flows through inner-policy transition response,
+not switch timing. det=False incident disclosed: module-level seed spawn
+advanced between passes; fixed, rerun det=True, numbers reproduced; no
+publication on det=False. Pivot: sub-block flash-crowd probe.
