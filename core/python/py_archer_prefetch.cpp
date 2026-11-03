@@ -10,6 +10,7 @@
 #include "model/moe.h"
 #include "kernel/ops.h"
 #include "kernel/fused_moe_mlp.h"
+#include "kernel/grouped_moe_prefill.h"
 
 void BindTensorStoreSurface(py::class_<ArcherPrefetchHandle>& cls);
 
@@ -178,6 +179,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                             dual_cfg, dual_splits, down_cfg, down_splits);
       },
       "fused_moe_ffn_into with an explicit tile config per GEMM (tests)");
+  m.def(
+      "grouped_moe_prefill",
+      [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
+         const torch::Tensor& router_weight, const torch::Tensor& expert_table,
+         int64_t inter, int64_t kcap, torch::Tensor out, bool zero_out,
+         int dual_cfg, int down_cfg) {
+        grouped_moe_prefill_cfg(hidden, router_mask, router_weight,
+                                expert_table, inter, kcap, out, zero_out,
+                                dual_cfg, down_cfg,
+                                at::cuda::getCurrentCUDAStream().stream());
+      },
+      py::arg("hidden"), py::arg("router_mask"), py::arg("router_weight"),
+      py::arg("expert_table"), py::arg("inter"), py::arg("kcap"),
+      py::arg("out"), py::arg("zero_out") = false, py::arg("dual_cfg") = -1,
+      py::arg("down_cfg") = -1,
+      "Grouped prefill MoE layer: out += sum_e w[:, e] * FFN_e(hidden) over "
+      "the experts in expert_table (int64 [n, 4]: gate*, up*, down*, id); "
+      "same interface as grouped_moe_decode.");
   m.def("fused_moe_ffn_tile_shapes", &fused_moe_ffn_tile_shapes,
         "Threadblock (M, N, K) of every (gate/up, down) config");
   m.def("fused_moe_ffn_num_configs", &fused_moe_ffn_num_configs,

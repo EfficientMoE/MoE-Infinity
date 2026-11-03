@@ -1,0 +1,499 @@
+// Copyright (c) EfficientMoE.
+// SPDX-License-Identifier: Apache-2.0
+
+// Grouped prefill MoE layer (see grouped_moe_prefill.h and moe_grouped_gemm.h).
+//
+// Launch 1 (routing, cooperative): every block counts the routed (token,
+// expert) pairs of a token range, the grid agrees on per-expert offsets
+// (grid.sync), and every block writes its pairs into the sorted layout:
+// token id and routing weight per row, rows of one expert contiguous. It also
+// publishes the per-expert tile prefix of both GEMMs and zeroes `out` when
+// asked. No host sync: the GEMM grids are persistent and read the counts on
+// the device.
+// Launch 2: grouped gate/up dual GEMM -> act [rows, I] (bf16).
+// Launch 3: grouped down GEMM, out[t] += w · bf16(act · Wdᵀ) (fp32 reductions).
+
+#include "kernel/grouped_moe_prefill.h"
+#include "kernel/moe_grouped_gemm.h"
+
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <cooperative_groups.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <map>
+#include <mutex>
+#include <tuple>
+#include <utility>
+
+namespace cg = cooperative_groups;
+
+namespace {
+
+using Elem = cutlass::bfloat16_t;
+template <int M, int N, int K>
+using Shape = cutlass::gemm::GemmShape<M, N, K>;
+using moe_gemm::GroupedExpert;
+using moe_gemm::GroupedExpertGemm;
+using moe_gemm::GroupedRouting;
+
+// gate/up (dual, gathered A) and down (scatter-add epilogue) configs; the last
+// of each is for layers whose experts get few rows.
+using DualConfigs =
+    std::tuple<GroupedExpertGemm<Elem, Shape<128, 128, 32>, Shape<64, 32, 32>,
+                                 3, true>,  // 8 warps
+               GroupedExpertGemm<Elem, Shape<128, 64, 32>, Shape<64, 32, 32>, 3,
+                                 true>,  // 4 warps
+               GroupedExpertGemm<Elem, Shape<64, 128, 32>, Shape<32, 64, 32>, 3,
+                                 true>>;  // 4 warps
+using DownConfigs =
+    std::tuple<GroupedExpertGemm<Elem, Shape<128, 256, 32>, Shape<64, 64, 32>,
+                                 3, false>,  // 8 warps
+               GroupedExpertGemm<Elem, Shape<128, 128, 32>, Shape<64, 64, 32>,
+                                 3, false>,  // 4 warps
+               GroupedExpertGemm<Elem, Shape<64, 128, 32>, Shape<32, 64, 32>, 4,
+                                 false>>;  // 4 warps
+constexpr int kNumDual = std::tuple_size_v<DualConfigs>;
+constexpr int kNumDown = std::tuple_size_v<DownConfigs>;
+
+template <typename Configs, typename F, size_t... Is>
+void visit(int cfg, F&& f, std::index_sequence<Is...>) {
+  bool done =
+      ((cfg == int(Is)
+            ? (f.template operator()<std::tuple_element_t<Is, Configs>>(), true)
+            : false) ||
+       ...);
+  TORCH_CHECK(done, "grouped_moe_prefill: invalid tile config ", cfg);
+}
+template <typename Configs, typename F>
+void visit(int cfg, F&& f) {
+  visit<Configs>(cfg, std::forward<F>(f),
+                 std::make_index_sequence<std::tuple_size_v<Configs>>{});
+}
+
+// ---------------------------------------------------------------------------
+// Workspace: one growing device buffer per (device, stream), stream-ordered.
+// ---------------------------------------------------------------------------
+
+std::mutex g_mutex;
+std::map<std::pair<int, cudaStream_t>, std::pair<char*, size_t>> g_ws;
+
+char* workspace(int device, cudaStream_t stream, size_t bytes) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  auto& ws = g_ws[{device, stream}];
+  if (ws.second < bytes) {
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    cudaStreamIsCapturing(stream, &capture);
+    TORCH_CHECK(capture == cudaStreamCaptureStatusNone,
+                "grouped_moe_prefill: run once outside graph capture first "
+                "to size the workspace");
+    if (ws.first) cudaFreeAsync(ws.first, stream);
+    ws = {nullptr, 0};
+    size_t grow = std::max(bytes, size_t(64) << 20);
+    TORCH_CHECK(cudaMallocAsync(reinterpret_cast<void**>(&ws.first), grow,
+                                stream) == cudaSuccess,
+                "grouped_moe_prefill: workspace allocation failed");
+    ws.second = grow;
+  }
+  return ws.first;
+}
+
+template <typename Gemm>
+int occupancy(int device) {
+  static std::array<int, 64> occ{};
+  static std::mutex mutex;
+  if (occ[device] > 0) return occ[device];
+  std::lock_guard<std::mutex> lock(mutex);
+  if (occ[device] > 0) return occ[device];
+  auto kernel = moe_gemm::grouped_expert_gemm_kernel<Gemm>;
+  if (Gemm::kSmemBytes >= (48 << 10)) {
+    TORCH_CHECK(cudaFuncSetAttribute(
+                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                    Gemm::kSmemBytes) == cudaSuccess,
+                "grouped_moe_prefill: cannot reserve shared memory");
+  }
+  int blocks = 0;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, kernel, Gemm::kThreads,
+                                                Gemm::kSmemBytes);
+  occ[device] = std::max(blocks, 1);
+  return occ[device];
+}
+
+// ---------------------------------------------------------------------------
+// Routing
+// ---------------------------------------------------------------------------
+
+struct RouteParams {
+  uint8_t const* mask;
+  int64_t mask_ld, mask_cs;
+  void const* rw;
+  int64_t rw_ld, rw_cs;
+  int rw_dtype;  // 0 fp32, 1 bf16, 2 fp16
+  GroupedExpert const* experts;
+  int n, T, E, H;
+  int chunk;           // tokens per block
+  int* block_count;    // [blocks, n]
+  int* block_base;     // [blocks, n]
+  int* total;          // [n]
+  int* offsets;        // [n + 1]
+  int* tokens;         // [rows]
+  float* weights;      // [rows]
+  int* tile_start[2];  // [n + 1] per GEMM
+  int tile_m[2], tiles_n[2];
+  float* out;
+  int64_t ldo;
+  int zero_out;
+};
+
+__device__ __forceinline__ float route_weight(RouteParams const& p, int t,
+                                              int e) {
+  int64_t off = t * p.rw_ld + e * p.rw_cs;
+  if (p.rw_dtype == 0) return static_cast<float const*>(p.rw)[off];
+  if (p.rw_dtype == 1)
+    return __bfloat162float(static_cast<__nv_bfloat16 const*>(p.rw)[off]);
+  return __half2float(static_cast<__half const*>(p.rw)[off]);
+}
+
+// Exclusive prefix over n values by one warp; returns the total in lane 31.
+template <typename F, typename G>
+__device__ void warp_scan(int n, F&& value, G&& store) {
+  int const lane = threadIdx.x % 32;
+  int const per = (n + 31) / 32;
+  int sum = 0;
+  for (int i = 0; i < per; ++i) {
+    int e = lane * per + i;
+    if (e < n) sum += value(e);
+  }
+  int incl = sum;
+#pragma unroll
+  for (int d = 1; d < 32; d <<= 1) {
+    int v = __shfl_up_sync(0xffffffff, incl, d);
+    if (lane >= d) incl += v;
+  }
+  int run = incl - sum;
+  for (int i = 0; i < per; ++i) {
+    int e = lane * per + i;
+    if (e < n) {
+      store(e, run);
+      run += value(e);
+    }
+  }
+  if (lane == 31) store(n, incl);
+}
+
+// Calls f(t, e) for every set mask entry of tokens [t0, t1). Contiguous
+// masks are read 16 bytes at a time.
+template <typename F>
+__device__ void for_each_routed(RouteParams const& p, int t0, int t1, F&& f) {
+  if (t1 <= t0) return;
+  if (p.mask_cs == 1 && p.E % 16 == 0 && p.mask_ld % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(p.mask) % 16 == 0) {
+    int const per_row = p.E / 16;
+    int const vecs = (t1 - t0) * per_row;
+    for (int v = threadIdx.x; v < vecs; v += blockDim.x) {
+      int const t = t0 + v / per_row;
+      int const e0 = (v % per_row) * 16;
+      uint4 const bits =
+          *reinterpret_cast<uint4 const*>(p.mask + int64_t(t) * p.mask_ld + e0);
+      uint32_t const w[4] = {bits.x, bits.y, bits.z, bits.w};
+#pragma unroll
+      for (int k = 0; k < 4; ++k) {
+        uint32_t x = w[k];
+        while (x) {
+          int const byte = (__ffs(x) - 1) / 8;
+          f(t, e0 + k * 4 + byte);
+          x &= ~(0xffu << (8 * byte));
+        }
+      }
+    }
+    return;
+  }
+  int const pairs = (t1 - t0) * p.E;
+  for (int i = threadIdx.x; i < pairs; i += blockDim.x) {
+    int const t = t0 + i / p.E;
+    int const e = i % p.E;
+    if (p.mask[int64_t(t) * p.mask_ld + int64_t(e) * p.mask_cs]) f(t, e);
+  }
+}
+
+__global__ void __launch_bounds__(256) route_kernel(RouteParams p) {
+  cg::grid_group grid = cg::this_grid();
+  extern __shared__ int sm[];
+  int* map = sm;          // [E] expert id -> table row
+  int* cnt = map + p.E;   // [n]
+  int* offs = cnt + p.n;  // [n + 1]
+  int const tid = threadIdx.x;
+  int const b = blockIdx.x;
+  int const t0 = b * p.chunk;
+  int const t1 = min(p.T, t0 + p.chunk);
+
+  for (int e = tid; e < p.E; e += blockDim.x) map[e] = -1;
+  __syncthreads();
+  for (int j = tid; j < p.n; j += blockDim.x) {
+    int64_t id = p.experts[j].expert_id;
+    if (id >= 0 && id < p.E) map[id] = j;
+    cnt[j] = 0;
+  }
+  __syncthreads();
+
+  if (p.zero_out && t1 > t0) {
+    int const vec = p.H / 4;
+    for (int64_t i = tid; i < int64_t(t1 - t0) * vec; i += blockDim.x) {
+      int t = t0 + int(i / vec);
+      int c = int(i % vec) * 4;
+      *reinterpret_cast<float4*>(p.out + t * p.ldo + c) =
+          make_float4(0.f, 0.f, 0.f, 0.f);
+    }
+  }
+
+  for_each_routed(p, t0, t1, [&](int t, int e) {
+    int j = map[e];
+    if (j >= 0) atomicAdd(&cnt[j], 1);
+  });
+  __syncthreads();
+  for (int j = tid; j < p.n; j += blockDim.x)
+    p.block_count[int64_t(b) * p.n + j] = cnt[j];
+  grid.sync();
+
+  // Per expert: exclusive scan over blocks.
+  for (int j = b * blockDim.x + tid; j < p.n; j += gridDim.x * blockDim.x) {
+    int s = 0;
+    for (int bb = 0; bb < gridDim.x; ++bb) {
+      p.block_base[int64_t(bb) * p.n + j] = s;
+      s += p.block_count[int64_t(bb) * p.n + j];
+    }
+    p.total[j] = s;
+  }
+  grid.sync();
+
+  if (tid < 32) {
+    warp_scan(
+        p.n, [&](int e) { return p.total[e]; },
+        [&](int e, int v) { offs[e] = v; });
+  }
+  if (b == 0 && tid >= 32 && tid < 96) {
+    int const g = (tid - 32) / 32;  // tile prefix of GEMM g
+    warp_scan(
+        p.n,
+        [&](int e) {
+          return (p.total[e] + p.tile_m[g] - 1) / p.tile_m[g] * p.tiles_n[g];
+        },
+        [&](int e, int v) { p.tile_start[g][e] = v; });
+  }
+  __syncthreads();
+  if (b == 0)
+    for (int j = tid; j <= p.n; j += blockDim.x) p.offsets[j] = offs[j];
+  for (int j = tid; j < p.n; j += blockDim.x) cnt[j] = 0;
+  __syncthreads();
+
+  for_each_routed(p, t0, t1, [&](int t, int e) {
+    int j = map[e];
+    if (j < 0) return;
+    int r = atomicAdd(&cnt[j], 1);
+    int pos = offs[j] + p.block_base[int64_t(b) * p.n + j] + r;
+    p.tokens[pos] = t;
+    p.weights[pos] = route_weight(p, t, e);
+  });
+}
+
+size_t align_up(size_t x) { return (x + 255) & ~size_t(255); }
+
+int sm_count(int device) {
+  static std::array<int, 64> sms{};
+  if (sms[device] == 0) {
+    int n = 0;
+    cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, device);
+    sms[device] = n;
+  }
+  return sms[device];
+}
+
+}  // namespace
+
+bool grouped_moe_prefill_supported(int64_t tokens, int64_t hidden,
+                                   int64_t inter, int64_t experts) {
+  return tokens > 0 && tokens < (int64_t(1) << 31) / 64 && hidden % 8 == 0 &&
+         inter % 8 == 0 && experts > 0 && experts <= 4096;
+}
+
+void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
+                             const torch::Tensor& router_mask,
+                             const torch::Tensor& router_weight,
+                             const torch::Tensor& expert_table, int64_t inter,
+                             int64_t kcap, torch::Tensor& out, bool zero_out,
+                             int dual_cfg, int down_cfg, cudaStream_t stream) {
+  TORCH_CHECK(hidden.is_cuda() && hidden.scalar_type() == at::kBFloat16 &&
+                  hidden.dim() == 2 && hidden.stride(1) == 1 &&
+                  hidden.stride(0) % 8 == 0,
+              "grouped_moe_prefill: hidden must be bf16 [T, H] with "
+              "16-byte aligned rows");
+  TORCH_CHECK(out.scalar_type() == at::kFloat && out.dim() == 2 &&
+                  out.stride(1) == 1 && out.stride(0) % 4 == 0,
+              "grouped_moe_prefill: out must be fp32 [T, H]");
+  TORCH_CHECK(
+      router_mask.dim() == 2 && (router_mask.scalar_type() == at::kBool ||
+                                 router_mask.scalar_type() == at::kByte),
+      "grouped_moe_prefill: router_mask must be bool/uint8 [T, E]");
+  TORCH_CHECK(
+      router_weight.dim() == 2 && router_weight.sizes() == router_mask.sizes(),
+      "grouped_moe_prefill: router_weight must match router_mask");
+  TORCH_CHECK(expert_table.scalar_type() == at::kLong &&
+                  expert_table.dim() == 2 && expert_table.size(1) == 4 &&
+                  expert_table.is_contiguous(),
+              "grouped_moe_prefill: expert_table must be int64 [n, 4]");
+  int const T = int(hidden.size(0));
+  int const H = int(hidden.size(1));
+  int const I = int(inter);
+  int const E = int(router_mask.size(1));
+  int const n = int(expert_table.size(0));
+  TORCH_CHECK(router_mask.size(0) == T && out.size(0) == T && out.size(1) == H,
+              "grouped_moe_prefill: token / hidden dims mismatch");
+  TORCH_CHECK(grouped_moe_prefill_supported(T, H, I, n),
+              "grouped_moe_prefill: unsupported shape");
+  TORCH_CHECK(kcap >= 1, "grouped_moe_prefill: kcap must be >= 1");
+  if (T == 0 || n == 0) return;
+
+  int const device = hidden.get_device();
+  c10::cuda::CUDAGuard guard(device);
+  int const sms = sm_count(device);
+  int const rw_dtype = router_weight.scalar_type() == at::kFloat      ? 0
+                       : router_weight.scalar_type() == at::kBFloat16 ? 1
+                       : router_weight.scalar_type() == at::kHalf     ? 2
+                                                                      : -1;
+  TORCH_CHECK(rw_dtype >= 0, "grouped_moe_prefill: router_weight dtype");
+
+  // Tile config: rows per expert are known only on the device; T·kcap / n is
+  // their mean when routing is balanced.
+  double const mean_rows = double(T) * kcap / n;
+  auto pick = [&](double const* rate, int const* tm, int count) {
+    int best = 0;
+    double best_eff = 0.0;
+    for (int c = 0; c < count; ++c) {
+      double padded = std::ceil(mean_rows / tm[c]) * tm[c];
+      double eff = rate[c] * mean_rows / padded;
+      if (eff > best_eff) {
+        best_eff = eff;
+        best = c;
+      }
+    }
+    return best;
+  };
+  // Relative MMA rates of the configs on full tiles (sm_120 sweep); padding
+  // of the last M tile of every expert decides between them.
+  static constexpr double kDualRate[] = {1.85, 1.68, 1.45};
+  static constexpr int kDualTm[] = {128, 128, 64};
+  static constexpr double kDownRate[] = {1.70, 1.64, 1.40};
+  static constexpr int kDownTm[] = {128, 128, 64};
+  if (dual_cfg < 0) dual_cfg = pick(kDualRate, kDualTm, kNumDual);
+  if (down_cfg < 0) down_cfg = pick(kDownRate, kDownTm, kNumDown);
+  int tile_m[2], tiles_n[2];
+  visit<DualConfigs>(dual_cfg, [&]<typename G>() {
+    tile_m[0] = G::ThreadblockShape::kM;
+    tiles_n[0] = (I + G::ThreadblockShape::kN - 1) / G::ThreadblockShape::kN;
+  });
+  visit<DownConfigs>(down_cfg, [&]<typename G>() {
+    tile_m[1] = G::ThreadblockShape::kM;
+    tiles_n[1] = (H + G::ThreadblockShape::kN - 1) / G::ThreadblockShape::kN;
+  });
+
+  // Routing grid: <= one block per SM so a cooperative launch always fits.
+  int const blocks = std::max(1, std::min(sms, (T + 63) / 64));
+  int const chunk = (T + blocks - 1) / blocks;
+  int64_t const rows = int64_t(T) * kcap;
+
+  size_t off = 0;
+  auto carve = [&](size_t bytes) {
+    size_t at = off;
+    off += align_up(bytes);
+    return at;
+  };
+  size_t const o_bc = carve(sizeof(int) * size_t(blocks) * n);
+  size_t const o_bb = carve(sizeof(int) * size_t(blocks) * n);
+  size_t const o_tot = carve(sizeof(int) * n);
+  size_t const o_off = carve(sizeof(int) * (n + 1));
+  size_t const o_ts0 = carve(sizeof(int) * (n + 1));
+  size_t const o_ts1 = carve(sizeof(int) * (n + 1));
+  size_t const o_tok = carve(sizeof(int) * rows);
+  size_t const o_w = carve(sizeof(float) * rows);
+  size_t const o_act = carve(sizeof(Elem) * rows * I);
+  char* ws = workspace(device, stream, off);
+
+  RouteParams rp;
+  rp.mask = static_cast<uint8_t const*>(router_mask.data_ptr());
+  rp.mask_ld = router_mask.stride(0);
+  rp.mask_cs = router_mask.stride(1);
+  rp.rw = router_weight.data_ptr();
+  rp.rw_ld = router_weight.stride(0);
+  rp.rw_cs = router_weight.stride(1);
+  rp.rw_dtype = rw_dtype;
+  rp.experts = reinterpret_cast<GroupedExpert const*>(expert_table.data_ptr());
+  rp.n = n;
+  rp.T = T;
+  rp.E = E;
+  rp.H = H;
+  rp.chunk = chunk;
+  rp.block_count = reinterpret_cast<int*>(ws + o_bc);
+  rp.block_base = reinterpret_cast<int*>(ws + o_bb);
+  rp.total = reinterpret_cast<int*>(ws + o_tot);
+  rp.offsets = reinterpret_cast<int*>(ws + o_off);
+  rp.tokens = reinterpret_cast<int*>(ws + o_tok);
+  rp.weights = reinterpret_cast<float*>(ws + o_w);
+  rp.tile_start[0] = reinterpret_cast<int*>(ws + o_ts0);
+  rp.tile_start[1] = reinterpret_cast<int*>(ws + o_ts1);
+  rp.tile_m[0] = tile_m[0];
+  rp.tile_m[1] = tile_m[1];
+  rp.tiles_n[0] = tiles_n[0];
+  rp.tiles_n[1] = tiles_n[1];
+  rp.out = out.data_ptr<float>();
+  rp.ldo = out.stride(0);
+  rp.zero_out = zero_out ? 1 : 0;
+  size_t const route_smem = sizeof(int) * (E + 2 * size_t(n) + 1);
+  {
+    void* args[] = {&rp};
+    cudaError_t err = cudaLaunchCooperativeKernel(
+        reinterpret_cast<void*>(route_kernel), dim3(blocks), dim3(256), args,
+        route_smem, stream);
+    TORCH_CHECK(err == cudaSuccess, "grouped_moe_prefill routing launch: ",
+                cudaGetErrorString(err));
+  }
+
+  auto* act = reinterpret_cast<Elem*>(ws + o_act);
+  auto* x = reinterpret_cast<Elem const*>(hidden.data_ptr());
+  auto const* experts =
+      reinterpret_cast<GroupedExpert const*>(expert_table.data_ptr());
+  GroupedRouting routing{rp.offsets, rp.tokens, rp.weights, nullptr};
+
+  visit<DualConfigs>(dual_cfg, [&]<typename G>() {
+    routing.tile_start = rp.tile_start[0];
+    auto p = G::make_params(n, I, H, int(hidden.stride(0)), experts, routing, x,
+                            act, nullptr, 0);
+    int const grid = sms * occupancy<G>(device);
+    moe_gemm::grouped_expert_gemm_kernel<G>
+        <<<grid, G::kThreads, G::kSmemBytes, stream>>>(p);
+  });
+  visit<DownConfigs>(down_cfg, [&]<typename G>() {
+    routing.tile_start = rp.tile_start[1];
+    auto p = G::make_params(n, H, I, I, experts, routing, act, nullptr,
+                            out.data_ptr<float>(), out.stride(0));
+    int const grid = sms * occupancy<G>(device);
+    moe_gemm::grouped_expert_gemm_kernel<G>
+        <<<grid, G::kThreads, G::kSmemBytes, stream>>>(p);
+  });
+  cudaError_t err = cudaGetLastError();
+  TORCH_CHECK(err == cudaSuccess,
+              "grouped_moe_prefill launch failed: ", cudaGetErrorString(err));
+}
+
+void grouped_moe_prefill(const torch::Tensor& hidden,
+                         const torch::Tensor& router_mask,
+                         const torch::Tensor& router_weight,
+                         const torch::Tensor& expert_table, int64_t inter,
+                         int64_t kcap, torch::Tensor& out, bool zero_out,
+                         cudaStream_t stream) {
+  grouped_moe_prefill_cfg(hidden, router_mask, router_weight, expert_table,
+                          inter, kcap, out, zero_out, -1, -1, stream);
+}
