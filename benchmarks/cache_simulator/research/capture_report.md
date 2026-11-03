@@ -952,3 +952,52 @@ transition band additionally suffers probe-noise oscillation (131 switches at 30
 A correct online criterion must sit between hot-set-fit (too early) and full working set
 (exp659 ceilings) — i.e., the boundary is governed by the *effective* reuse structure (exp660
 half-life), not by static coverage quantiles.
+
+## Addendum 13 — exp664 FlipFit (crossover-statistic discrimination): FAIL
+
+**Prereg** `b1ca30cc` (frozen 2026-11-03T07:18:54Z before
+any computation). Pure measurement over frozen traces + frozen baseline CSVs — no new policy
+simulation, no sweep, hence no EXPERIMENTS.md rows (disclosed deviation). Statistics computed
+online-style: sliding window W=8192, re-evaluated every 4096, first 3 evaluations skipped,
+median over the rest; arbitration model `capacity >= 1.0 x S -> S3FIFO else LCNU`.
+Determinism gate: two independent runs produced byte-identical stats/verdict JSONs.
+
+### Verdict: **FAIL** (H1=False, H2=False, H3=False)
+
+Observed winner-flip bands (frozen CSVs, strict margin 5e-7) and per-statistic medians /
+predicted first-S3FIFO caps:
+
+| model | flip band (last LCNU win, first S3FIFO win] | S1 median | S2 median | S3 median | S4 median | 
+|---|---|---|---| ---|---| ---|---| ---|---| 
+| 30b | (1152, 1280] | 1543 -> cap 1664 (miss) | 1128 -> cap 1152 (miss) | 1430 -> cap 1536 (miss) | 1728 -> cap 1792 (miss) | 
+| granite | (768, 1024] | 951 -> cap 1024 (HIT) | 846 -> cap 1024 (HIT) | 701 -> cap 768 (miss) | 820 -> cap 1024 (HIT) | 
+
+- **H1 FAIL**: primary cov90 on 30b — median 1430 predicts cap
+  1536, one grid step ABOVE the band end
+  (1280). (Coverage 90% overshoots on 30b, the same
+  direction exp663 found for 80%, but now the crossover is bracketed rather than beaten.)
+- **H2 FAIL**: primary cov90 on granite — median 701 predicts cap
+  768, one grid step BELOW the band start
+  (768). Coverage 90% UNDERSHOOTS on granite — the
+  opposite direction from 30b.
+- **H3 FAIL**: secondaries hit granite (S1, S2, S4)
+  but ALL miss 30b (medians 1543/1128/1728
+  vs band (1152, 1280]) — S2 lands one step
+  early, S1/S4 one step late.
+- Brackets: 30b crossover 1280 lies between core>=3
+  (1128) and cov90 (1430);
+  granite crossover lies ABOVE cov95 (820) — the
+  coverage-quantile family overshoots on one model and undershoots on the other, so NO
+  shared quantile at theta=1.0 can pin both.
+
+### Mechanism conclusion
+Static windowed coverage/frequency quantiles — the natural capacity-aware arbitration
+statistics — are refuted as a FAMILY: exp663 (80%, overshoot 30b) + exp664 (90% overshoots
+30b, undershoots granite; repeat/core sets bracket but do not pin) show the crossover is not
+a fixed coverage quantile of the access stream. The measured crossovers are 0.215x distinct
+keys (30b) vs ~0.7x (granite) — the deciding structure is the temporal reuse geometry
+(exp660 half-lives 102 vs 294 steps) interacting with policy internals (S3FIFO's
+queue-ratio/admission dynamics), not the instantaneous hot-set shape. Direction for any
+next algorithmic attempt: arbitration must be temporal (reuse-distance/decay-aware), or
+abandon single-statistic arbitration for direct per-policy online scoring (e.g., shadow
+mini-caches), which sidesteps the crossover-prediction problem entirely.
