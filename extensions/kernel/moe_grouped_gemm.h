@@ -57,19 +57,21 @@ struct GroupedExpertGemm {
   static constexpr bool kDual = Dual;
 
   // gate/up gathers its A rows (tokens); down reads them contiguously.
-  using MmaSingle = typename cutlass::gemm::threadblock::DefaultMma<
+  using DefaultMma = typename cutlass::gemm::threadblock::DefaultMma<
       Element, LayoutA, kAlignment, Element, LayoutB, kAlignment,
       ElementAccumulator, LayoutC, cutlass::arch::OpClassTensorOp,
       cutlass::arch::Sm80, ThreadblockShape, WarpShape, InstructionShape,
       Stages, cutlass::arch::OpMultiplyAdd, false,
       cutlass::gemm::SharedMemoryClearOption::kNone,
       /*GatherA=*/Dual>::ThreadblockMma;
+  using MmaSingle = DefaultMma;
+  static constexpr auto kCacheOpB = DefaultMma::kCacheOpB;
 
   using MmaDual = cutlass::gemm::threadblock::DualMmaMultistage<
       typename MmaSingle::Shape, typename MmaSingle::IteratorA,
-      typename MmaSingle::SmemIteratorA, MmaSingle::kCacheOpA,
+      typename MmaSingle::SmemIteratorA, DefaultMma::kCacheOpA,
       typename MmaSingle::IteratorB, typename MmaSingle::SmemIteratorB,
-      MmaSingle::kCacheOpB, typename MmaSingle::IteratorB,
+      kCacheOpB, typename MmaSingle::IteratorB,
       typename MmaSingle::SmemIteratorB, ElementAccumulator, LayoutC,
       typename MmaSingle::Policy, typename MmaSingle::Policy, Stages,
       cutlass::gemm::SharedMemoryClearOption::kNone>;
@@ -108,6 +110,8 @@ struct GroupedExpertGemm {
     int n;     // experts
     int N, K;  // per-expert GEMM: [rows_e, K] x [K, N]
     int tiles_n;
+    int panels;  // N panels per pass: all experts sweep `panels` N panels
+                 // before the next pass, bounding the output working set
     GroupedExpert const* experts;
     GroupedRouting routing;
     typename IteratorA::Params params_A;
@@ -130,6 +134,7 @@ struct GroupedExpertGemm {
     p.N = N;
     p.K = K;
     p.tiles_n = (N + ThreadblockShape::kN - 1) / ThreadblockShape::kN;
+    p.panels = p.tiles_n;
     p.experts = experts;
     p.routing = routing;
     p.params_A = typename IteratorA::Params(LayoutA(ldA));
@@ -273,15 +278,19 @@ struct GroupedExpertGemm {
 
   CUTLASS_DEVICE
   static void run(Params const& p, KernelStorage& storage) {
-    // Tiles are numbered expert-major, then N panel, then M tile; the routing
-    // kernel published the first tile of every expert.
+    // Tiles are numbered pass-major (groups of `panels` N panels), then
+    // expert, then N panel, then M tile; the routing kernel published the
+    // first tile of every expert within one pass.
     int const* start = p.routing.tile_start;
-    int const total = start[p.n];
+    int const per_pass = start[p.n];
+    int const total = per_pass * (p.tiles_n / p.panels);
     for (int t = blockIdx.x; t < total; t += gridDim.x) {
-      int lo = 0, hi = p.n;  // largest e with start[e] <= t
+      int const pass = t / per_pass;
+      int const tl = t - pass * per_pass;
+      int lo = 0, hi = p.n;  // largest e with start[e] <= tl
       while (hi - lo > 1) {
         int mid = (lo + hi) / 2;
-        if (__ldg(start + mid) <= t)
+        if (__ldg(start + mid) <= tl)
           lo = mid;
         else
           hi = mid;
@@ -290,8 +299,9 @@ struct GroupedExpertGemm {
       int const rows = p.routing.offsets[e + 1] - p.routing.offsets[e];
       int const tiles_m =
           (rows + ThreadblockShape::kM - 1) / ThreadblockShape::kM;
-      int const local = t - start[e];
-      run_tile(p, storage.tiles, e, local % tiles_m, local / tiles_m);
+      int const local = tl - start[e];
+      run_tile(p, storage.tiles, e, local % tiles_m,
+               pass * p.panels + local / tiles_m);
     }
   }
 };

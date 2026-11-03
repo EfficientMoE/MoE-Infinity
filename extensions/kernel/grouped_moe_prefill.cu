@@ -135,15 +135,15 @@ struct RouteParams {
   int rw_dtype;  // 0 fp32, 1 bf16, 2 fp16
   GroupedExpert const* experts;
   int n, T, E, H;
-  int chunk;           // tokens per block
-  int* block_count;    // [blocks, n]
-  int* block_base;     // [blocks, n]
-  int* total;          // [n]
-  int* offsets;        // [n + 1]
-  int* tokens;         // [rows]
-  float* weights;      // [rows]
-  int* tile_start[2];  // [n + 1] per GEMM
-  int tile_m[2], tiles_n[2];
+  int chunk;                  // tokens per block
+  int* block_count;           // [blocks, n]
+  int* block_base;            // [blocks, n]
+  int* total;                 // [n]
+  int* offsets;               // [n + 1]
+  int* tokens;                // [rows]
+  float* weights;             // [rows]
+  int* tile_start[2];         // [n + 1] per GEMM
+  int tile_m[2], tiles_n[2];  // tiles_n = N panels per pass
   float* out;
   int64_t ldo;
   int zero_out;
@@ -300,6 +300,9 @@ __global__ void __launch_bounds__(256) route_kernel(RouteParams p) {
   });
 }
 
+// Output slice per down pass (see panels[1] below).
+constexpr size_t kOutPassBytes = size_t(32) << 20;
+
 size_t align_up(size_t x) { return (x + 255) & ~size_t(255); }
 
 int sm_count(int device) {
@@ -390,16 +393,25 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   static constexpr int kDownTm[] = {128, 128, 64};
   if (dual_cfg < 0) dual_cfg = pick(kDualRate, kDualTm, kNumDual);
   if (down_cfg < 0) down_cfg = pick(kDownRate, kDownTm, kNumDown);
-  int tile_m[2], tiles_n[2];
+  int tile_m[2], tiles_n[2], panels[2];
   visit<DualConfigs>(dual_cfg, [&]<typename G>() {
     tile_m[0] = G::ThreadblockShape::kM;
     tiles_n[0] = (I + G::ThreadblockShape::kN - 1) / G::ThreadblockShape::kN;
+    panels[0] = tiles_n[0];
   });
   visit<DownConfigs>(down_cfg, [&]<typename G>() {
     tile_m[1] = G::ThreadblockShape::kM;
     tiles_n[1] = (H + G::ThreadblockShape::kN - 1) / G::ThreadblockShape::kN;
+    // The scatter-add output is [T, H] fp32. Sweep it in passes of N panels
+    // whose slice (T x panels x kN x 4 B) stays in L2 instead of streaming
+    // the whole accumulator through L2 for every expert.
+    panels[1] = tiles_n[1];
+    while (panels[1] > 1 &&
+           (tiles_n[1] % panels[1] != 0 ||
+            double(T) * panels[1] * G::ThreadblockShape::kN * 4 >
+                double(kOutPassBytes)))
+      --panels[1];
   });
-
   // Routing grid: <= one block per SM so a cooperative launch always fits.
   int const blocks = std::max(1, std::min(sms, (T + 63) / 64));
   int const chunk = (T + blocks - 1) / blocks;
@@ -446,8 +458,8 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
   rp.tile_start[1] = reinterpret_cast<int*>(ws + o_ts1);
   rp.tile_m[0] = tile_m[0];
   rp.tile_m[1] = tile_m[1];
-  rp.tiles_n[0] = tiles_n[0];
-  rp.tiles_n[1] = tiles_n[1];
+  rp.tiles_n[0] = panels[0];
+  rp.tiles_n[1] = panels[1];
   rp.out = out.data_ptr<float>();
   rp.ldo = out.stride(0);
   rp.zero_out = zero_out ? 1 : 0;
@@ -479,6 +491,7 @@ void grouped_moe_prefill_cfg(const torch::Tensor& hidden,
     routing.tile_start = rp.tile_start[1];
     auto p = G::make_params(n, H, I, I, experts, routing, act, nullptr,
                             out.data_ptr<float>(), out.stride(0));
+    p.panels = panels[1];
     int const grid = sms * occupancy<G>(device);
     moe_gemm::grouped_expert_gemm_kernel<G>
         <<<grid, G::kThreads, G::kSmemBytes, stream>>>(p);
