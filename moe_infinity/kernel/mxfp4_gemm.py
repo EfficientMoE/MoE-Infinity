@@ -903,8 +903,9 @@ def _small_m_cuda(x_2d, weight_packed, weight_scales, bias, output) -> bool:
     ext = _small_m_ext()
     if not ext:
         return False
-    # variant: 2 = 16 warps x 16 rows (narrow N), 5 = 16 warps x 32 rows.
-    variant = 5 if weight_packed.shape[0] >= 4096 else 2
+    # variant (see mxfp4_gemv.cu): 1 = 8 warps x 16 rows, 2 = 16 warps x 16
+    # rows; picked with the gate statistic on RTX PRO 6000 (N = 5760 / 2880).
+    variant = 1 if weight_packed.shape[0] >= 4096 else 2
     return ext.mxfp4_gemv_small(
         x_2d, weight_packed, weight_scales, bias, output, variant
     )
