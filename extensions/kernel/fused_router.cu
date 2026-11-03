@@ -4,12 +4,13 @@
 // active-expert flags in pinned host memory -- so the dispatcher never has to
 // reduce the mask or copy it back, and nothing on the path syncs the host.
 //
-//   T <= kFusedMaxTokens: ONE cooperative launch.
+//   T <= kFusedMaxTokens: ONE launch.
 //     phase 1  split-K x expert-tile x token-tile work items (WMMA bf16/fp16,
 //              fp32 accumulate) write fp32 partials;
-//     grid barrier;
-//     phase 2  every CTA reduces the partials of its tokens in a fixed order
-//              (deterministic) and routes them, one warp per token.
+//     hand-off the last CTA (one tile) or the last min(T, grid) CTAs to
+//              finish phase 1 route (no grid barrier);
+//     phase 2  each router reduces the partials of its tokens in a fixed
+//              order (deterministic) and routes them.
 //   larger T: cuBLAS tensor-core logits + one routing launch.
 //
 // Selection math mirrors the torch routers (expf / log1pf / sqrtf / IEEE
@@ -73,6 +74,10 @@ constexpr int kFusedMaxTokens = 1024;
 #endif
 // From this many tokens wide routers use the fused CUTLASS GEMM + top-k.
 constexpr int kWideMinTokens = ROUTER_WIDE_MIN_T;
+#ifndef ROUTER_WIDE_BIG_WAVES
+  #define ROUTER_WIDE_BIG_WAVES 4
+#endif
+constexpr int kWideBigWaves = ROUTER_WIDE_BIG_WAVES;
 constexpr int64_t kFusedMaxElems = 196608;  // T * E, see fused_route
 // One CTA reduces all partials when T * E is this small (decode b1).
 #ifndef ROUTER_SINGLE_ELEMS
@@ -82,15 +87,16 @@ constexpr int kSingleTileMaxElems = ROUTER_SINGLE_ELEMS;
 
 enum Scoring : int { kSoftmax = 0, kSigmoid = 1, kSqrtSoftplus = 2 };
 
-// Persistent per-(device, stream) state: grid barrier words, the publish
+// Persistent per-(device, stream) state: hand-off counters, the publish
 // counter and a zeroed device copy of the active-expert flags. Every field
 // is restored to zero by the kernel that used it.
 struct alignas(16) RouteState {
   unsigned int bar_count;
-  unsigned int bar_gen;
+  unsigned int bar_gen;  // unused
   unsigned int publish_count;
   unsigned int tile_count;
   int flags[kMaxE];
+  unsigned int bar_leave;
 };
 
 struct EpilogueParams {
@@ -167,27 +173,12 @@ __device__ __forceinline__ float warp_sum(float v) {
 //      leaves (top logit, 1 / sum, denominator) in smem;
 //   3. every thread writes the dense mask / weights.
 // logit(i) returns the logit of element i = r * E + e.
-#ifdef ROUTER_GT
-__device__ unsigned long long gt_mark[16];
-  #define GT_MARK(k)                                         \
-    if (threadIdx.x == 0) {                                  \
-      unsigned long long g_;                                 \
-      asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(g_)); \
-      gt_mark[k] = g_;                                       \
-    }
-#else
-  #define GT_MARK(k)
-#endif
 template <int VPL, int SC, typename LogitFn>
 __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
                                            const EpilogueParams& p, float* st,
                                            uint32_t* kt, bool* chosen,
                                            int* flag_sink) {
   __shared__ float rowinfo[kWarps][3];
-#ifdef ROUTER_CLK
-  __shared__ long long clk7;
-  if (threadIdx.x == 0) clk7 = clock64();
-#endif
   const int E = p.E;
   const int n = rows * E;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
@@ -233,12 +224,7 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
     }
   }
   __syncthreads();
-  GT_MARK(0)
 
-#ifdef ROUTER_CLK
-  __shared__ long long clk[8];
-  if (threadIdx.x == 0) clk[0] = clock64();
-#endif
   if (warp < rows && p.n_group > 1) {
     uint32_t* krow = kt + warp * E;
     {
@@ -287,9 +273,6 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
   __syncthreads();
 
   int my_id = 0;
-#ifdef ROUTER_CLK
-  if (threadIdx.x == 0) clk[1] = clock64();
-#endif
   // Top-k: warp r scans row r. Lane l owns experts l, l + 32, ... in
   // registers; each step takes the warp argmax (larger key, then lower
   // index -- torch's tie order) and removes it from the owner lane.
@@ -313,69 +296,60 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
       // among the elements >= tau; those (usually ~K..2K) are ranked all
       // pairs at once. More than 64 candidates: the rounds below.
       bool done_sel = false;
-#ifndef ROUTER_NO_FASTSEL
       {
         __shared__ uint64_t sbuf[kWarps][64];
         __shared__ int ssel[kWarps][kMaxK];
         const int K = p.K;
         uint64_t ck[VPL];
-  #pragma unroll
+#pragma unroll
         for (int i = 0; i < VPL; ++i) {
           const int e = lane + 32 * i;
           ck[i] = e < E ? (static_cast<uint64_t>(key[i]) << 32) |
                               (0xFFFFFFFFu - static_cast<uint32_t>(e))
                         : 0ull;
         }
-        uint64_t m = ck[0];
-  #pragma unroll
-        for (int i = 1; i < VPL; ++i) m = ck[i] > m ? ck[i] : m;
-        GT_MARK(3)
-
-  #ifdef ROUTER_CLK
-        if (threadIdx.x == 0) clk[4] = clock64();
-  #endif
+        uint64_t mt[VPL];
+#pragma unroll
+        for (int i = 0; i < VPL; ++i) mt[i] = ck[i];
+#pragma unroll
+        for (int w2 = VPL / 2; w2 > 0; w2 >>= 1)
+#pragma unroll
+          for (int i = 0; i < w2; ++i)
+            mt[i] = mt[i + w2] > mt[i] ? mt[i + w2] : mt[i];
+        const uint64_t m = mt[0];
 
         sbuf[warp][lane] = m;
         __syncwarp();
         int r = 0;
-  #pragma unroll 8
+#pragma unroll 8
         for (int j = 0; j < 32; ++j) r += sbuf[warp][j] > m;
         const unsigned bal = __ballot_sync(0xffffffffu, r == K - 1);
         const uint64_t tau =
             bal ? __shfl_sync(0xffffffffu, m, __ffs(bal) - 1) : 0ull;
-        GT_MARK(4)
 
-  #ifdef ROUTER_CLK
-        if (threadIdx.x == 0) clk[5] = clock64();
-  #endif
-
-        int cnt = 0;
-  #pragma unroll
-        for (int i = 0; i < VPL; ++i) cnt += ck[i] != 0ull && ck[i] >= tau;
-        int incl = cnt;
-  #pragma unroll
-        for (int o = 1; o < 32; o <<= 1) {
-          const int v = __shfl_up_sync(0xffffffffu, incl, o);
-          if (lane >= o) incl += v;
+        // Compaction offsets from one ballot per slot (no scan chain).
+        unsigned bal_i[VPL];
+#pragma unroll
+        for (int i = 0; i < VPL; ++i)
+          bal_i[i] = __ballot_sync(0xffffffffu, ck[i] != 0ull && ck[i] >= tau);
+        const unsigned lt = (1u << lane) - 1u;
+        int total = 0, slot_pos[VPL];
+#pragma unroll
+        for (int i = 0; i < VPL; ++i) {
+          slot_pos[i] = total + __popc(bal_i[i] & lt);
+          total += __popc(bal_i[i]);
         }
-        const int total = __shfl_sync(0xffffffffu, incl, 31);
-        GT_MARK(5)
-
-  #ifdef ROUTER_CLK
-        if (threadIdx.x == 0) clk[6] = clock64();
-  #endif
 
         __syncwarp();
         if (total <= 64) {
-          int pos = incl - cnt;
-  #pragma unroll
+#pragma unroll
           for (int i = 0; i < VPL; ++i)
-            if (ck[i] != 0ull && ck[i] >= tau) sbuf[warp][pos++] = ck[i];
+            if ((bal_i[i] >> lane) & 1u) sbuf[warp][slot_pos[i]] = ck[i];
           __syncwarp();
           for (int c = lane; c < total; c += 32) {
             const uint64_t v = sbuf[warp][c];
             int rr = 0;
-  #pragma unroll 8
+#pragma unroll 8
             for (int j = 0; j < total; ++j) rr += sbuf[warp][j] > v;
             if (rr < K)
               ssel[warp][rr] =
@@ -383,19 +357,12 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
           }
           __syncwarp();
           if (lane < K) my_id = ssel[warp][lane];
-          GT_MARK(6)
           done_sel = true;
         }
       }
-#endif
-      if (!done_sel)
-#ifdef ROUTER_NO_TOPK
-  #pragma unroll 1
-        for (int k = 0; k < 1; ++k) {
-#else
-  #pragma unroll 1
+      if (!done_sel) {
+#pragma unroll 1
         for (int k = 0; k < p.K; ++k) {
-#endif
           // Lane-local argmax as a tree (depth log2 VPL instead of a VPL-long
           // dependency chain: ~4x shorter per round at VPL = 16). Adjacent
           // pairs keep the lower slot on ties.
@@ -425,12 +392,9 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
           }
           if (lane == k) my_id = idx;
         }
+      }
     }
-#ifdef ROUTER_CLK
-    if (threadIdx.x == 0) clk[3] = clock64();
-#endif
     __syncwarp();
-    GT_MARK(7)
     if (lane < p.K) crow[my_id] = true;
     float my_w = lane < p.K ? srow[my_id] : 0.f;
     const float top_logit = __shfl_sync(0xffffffffu, my_w, 0);  // rank 0
@@ -463,16 +427,8 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
     }
   }
   __syncthreads();
-  GT_MARK(1)
 
-#ifdef ROUTER_CLK
-  if (threadIdx.x == 0) clk[2] = clock64();
-#endif
-#ifdef ROUTER_NO_DENSE
-  if (false) {
-#else
   if (p.mask != nullptr) {
-#endif
     for (int i = tid; i < n; i += blockDim.x) {
       const int r = rows == 1 ? 0 : i / E;
       const bool on = chosen[i];
@@ -488,12 +444,6 @@ __device__ __forceinline__ void route_rows(LogitFn logit, int t0, int rows,
     }
   }
   __syncthreads();
-  GT_MARK(2)
-#ifdef ROUTER_CLK
-  if (threadIdx.x == 0 && t0 == 0)
-    printf("RCLK load+max %lld tau %lld scan %lld rank %lld\n", clk[4] - clk[1],
-           clk[5] - clk[4], clk[6] - clk[5], clk[3] - clk[6]);
-#endif
 }
 
 // Tell the host ring this launch's slot writes are done (see FlagRing).
@@ -526,22 +476,42 @@ __device__ void publish_flags(const EpilogueParams& p, unsigned int n_ctas) {
   signal_done(p);
 }
 
-__device__ void grid_barrier(RouteState* st) {
+// Hand-off for multi-row decode: instead of a grid barrier, the LAST R CTAs
+// to finish phase 1 route (R = min(T, grid)); earlier CTAs exit at once.
+// The last arrival starts routing without waiting; the other R - 1 poll the
+// arrival count, which reaches the grid size moments later. Returns this
+// CTA's rank among the routers, or -1. Routers call leave_routers() when
+// done; the last resets the counters (the next launch on the stream starts
+// after this one ends).
+__device__ int last_arrivals(RouteState* st, int R) {
+  __shared__ int s_rank;
   __syncthreads();
   if (threadIdx.x == 0) {
-    volatile unsigned int* gen = &st->bar_gen;
-    const unsigned int g = *gen;
     __threadfence();
-    if (atomicAdd(&st->bar_count, 1u) == gridDim.x - 1) {
-      st->bar_count = 0;
+    const unsigned int a = atomicAdd(&st->bar_count, 1u);
+    const int r = static_cast<int>(a) - static_cast<int>(gridDim.x - R);
+    s_rank = r;
+    if (r >= 0) {
+      if (a != gridDim.x - 1) {
+        volatile unsigned int* c = &st->bar_count;
+        while (*c < gridDim.x) {
+        }
+      }
       __threadfence();
-      atomicAdd(&st->bar_gen, 1u);
-    } else {
-      while (*gen == g) __nanosleep(20);
     }
-    __threadfence();
   }
   __syncthreads();
+  return s_rank;
+}
+
+// Called by each router after routing (off the critical path): the last one
+// to leave resets the hand-off counters.
+__device__ void leave_routers(RouteState* st, int R) {
+  if (threadIdx.x == 0 &&
+      atomicAdd(&st->bar_leave, 1u) == static_cast<unsigned int>(R - 1)) {
+    st->bar_count = 0;
+    st->bar_leave = 0;
+  }
 }
 
 struct DecodeArgs {
@@ -562,7 +532,7 @@ struct DecodeArgs {
 //   (A 64x128 tile with 2x2 warp fragments measured slower at T=256: fewer
 //   items -> fewer SMs streaming the gate weight.)
 #ifndef ROUTER_STAGES16
-  #define ROUTER_STAGES16 3
+  #define ROUTER_STAGES16 5
 #endif
 constexpr int kBE16 = ROUTER_BE16;
 constexpr int kBE64 = ROUTER_BE64;
@@ -764,22 +734,15 @@ __device__ void reduce_and_route(const DecodeArgs& a, const EpilogueParams& p,
                         want_flags ? sflags : nullptr);
   }
   // Host pre-zeroed the pinned flags; set the experts this CTA routed to.
-#ifdef ROUTER_NO_FLAGS
-  if (false)
-#else
   if (want_flags && t_begin < t_end)
-#endif
     for (int e = threadIdx.x; e < E; e += kThreads)
       if (sflags[e]) p.flags_host[e] = true;
   signal_done(p);
 }
 
-// T <= BT (one token tile): no grid barrier -- the last CTA to finish its
-// phase-1 items routes every token. Larger T: cooperative launch, grid
-// barrier, phase 2 spread over all CTAs.
-#ifdef ROUTER_GT
-__device__ unsigned long long gt_dbg[1024];
-#endif
+// T <= BT (one token tile): the last CTA to finish its phase-1 items routes
+// every token. Larger T: cooperative launch (co-residency for the hand-off
+// wait), the last min(T, grid) CTAs to arrive route one token range each.
 template <typename Tin, int BT, int VPL, int SC, bool kSingleTile>
 __global__ void __launch_bounds__(kThreads)
     fused_route_pro6000_kernel(DecodeArgs a, EpilogueParams p) {
@@ -810,10 +773,6 @@ __global__ void __launch_bounds__(kThreads)
     asm volatile("cp.async.commit_group;\n" ::);
     q.bias = sbias;
   }
-#ifdef ROUTER_GT
-  __shared__ unsigned long long gt0;
-  if (threadIdx.x == 0) asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(gt0));
-#endif
   const int n_items = a.n_t * a.n_e * a.n_split;
   for (int item = blockIdx.x; item < n_items; item += gridDim.x)
     logits_item<Tin, BT>(a, p, item, smem);
@@ -824,60 +783,18 @@ __global__ void __launch_bounds__(kThreads)
     if (threadIdx.x == 0)
       last = atomicAdd(&p.state->tile_count, 1u) == gridDim.x - 1;
     __syncthreads();
-#ifdef ROUTER_GT
-    if (threadIdx.x == 0) {
-      unsigned long long g1;
-      asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(g1));
-      gt_dbg[blockIdx.x * 2] = gt0;
-      gt_dbg[blockIdx.x * 2 + 1] = g1;
-    }
-#endif
     if (!last) return;
     __threadfence();
-#ifdef ROUTER_NO_ROUTE
-    if (threadIdx.x == 0) p.state->tile_count = 0;
-    signal_done(p);
-    return;
-#endif
-#ifdef ROUTER_GT
-    unsigned long long g2, g3;
-    if (threadIdx.x == 0) asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(g2));
-#endif
     reduce_and_route<VPL, SC>(a, q, 0, p.T, smem);
     if (threadIdx.x == 0) p.state->tile_count = 0;
-#ifdef ROUTER_GT
-    if (threadIdx.x == 0) {
-      asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(g3));
-      unsigned long long mn = ~0ull, mx0 = 0, mx1 = 0;
-      for (int b = 0; b < gridDim.x - 1; ++b) {
-        mn = min(mn, gt_dbg[2 * b]);
-        mx0 = max(mx0, gt_dbg[2 * b]);
-        mx1 = max(mx1, gt_dbg[2 * b + 1]);
-      }
-      printf(
-          "GT3 max %llu tau %llu scan %llu rank %llu ->w %llu weights %llu\n",
-          gt_mark[3] - gt_mark[0], gt_mark[4] - gt_mark[3],
-          gt_mark[5] - gt_mark[4], gt_mark[6] - gt_mark[5],
-          gt_mark[7] - gt_mark[6], gt_mark[1] - gt_mark[7]);
-      printf("GT2 score %llu topk %llu dense %llu flags+ %llu\n",
-             gt_mark[0] - g2, gt_mark[1] - gt_mark[0], gt_mark[2] - gt_mark[1],
-             g3 - gt_mark[2]);
-      printf(
-          "GT grid %d start_spread %llu last_p1_end %llu my_p1_end %llu "
-          "route_start %llu end %llu\n",
-          gridDim.x, mx0 - mn, mx1 - mn, gt_dbg[2 * blockIdx.x + 1] - mn,
-          g2 - mn, g3 - mn);
-    }
-#endif
   } else {
-    grid_barrier(p.state);
-#ifdef ROUTER_NO_ROUTE
-    if (blockIdx.x == 0) signal_done(p);
-    return;
-#endif
-    const int tpc = (p.T + gridDim.x - 1) / gridDim.x;
-    const int t_begin = blockIdx.x * tpc;
+    const int R = min(p.T, static_cast<int>(gridDim.x));
+    const int rank = last_arrivals(p.state, R);
+    if (rank < 0) return;
+    const int tpc = (p.T + R - 1) / R;
+    const int t_begin = rank * tpc;
     reduce_and_route<VPL, SC>(a, q, t_begin, min(p.T, t_begin + tpc), smem);
+    leave_routers(p.state, R);
   }
 }
 
@@ -1181,7 +1098,10 @@ void launch_fused(const at::Tensor& x, const at::Tensor& w, int H,
   const int max_split = std::max(1, H / kHC);
   // Wide rows (E > 320): fewer partial planes keep the single-token
   // reduction short; measured ~1 us faster for E = 384 / 512 decode.
-  const int split_cap = E > 320 ? kMaxSplit / 2 : kMaxSplit;
+  // Wide rows (E > 320) in the single-CTA hand-off (b1): fewer partial planes
+  // keep its reduction short. Multi-row decode spreads the reduction over
+  // R CTAs, so it takes more splits (more CTAs streaming the weight).
+  const int split_cap = E > 320 && kSingleTile ? kMaxSplit / 2 : kMaxSplit;
   int split = std::max(1, std::min({max_split, split_cap, sms / (n_t * n_e)}));
   int h_per_split = ((H + split - 1) / split + kHC - 1) / kHC * kHC;
   split = (H + h_per_split - 1) / h_per_split;
@@ -1421,13 +1341,19 @@ std::vector<at::Tensor> fused_route(
       T > kFusedMaxTokens ||
       (gemm_min_tokens > 0 ? T >= gemm_min_tokens
                            : (T > 256 && T * E > kFusedMaxElems));
-  // The fused CUTLASS GEMM + top-k wins while its 64-token tiles fit in one
-  // wave (measured: 9K tokens 1.1-1.4x faster than cuBLASLt + routing); past
-  // that the per-tile epilogue does not overlap the next tile's mainloop and
-  // cuBLASLt + routing is as fast or faster.
+  // Fused CUTLASS GEMM + top-k, E in (128, 256] (pro6000 tile table):
+  //  - 64-token tiles while they fit one wave of SMs (4K-12K tokens: 1.1-1.4x
+  //    faster than cuBLASLt + routing);
+  //  - 128-token tiles from kWideBigWaves waves of them (200K: 0.80-0.87 of
+  //    the tensor-core roof vs 0.61-0.79 for cuBLASLt + routing);
+  //  - cuBLASLt + routing in between (a 2-3 wave tail costs the fused
+  //    kernel as much as its fusion saves).
   const int sms = at::cuda::getDeviceProperties(device)->multiProcessorCount;
-  if (use_gemm && T >= kWideMinTokens && (T + 63) / 64 <= sms &&
-      try_launch_wide(x, w, static_cast<int>(H), p, sc, stream, device)) {
+  const bool wide_one_wave = (T + 63) / 64 <= sms;
+  const bool wide_big = (T + 127) / 128 >= kWideBigWaves * sms;
+  if (use_gemm && T >= kWideMinTokens && (wide_one_wave || wide_big) &&
+      try_launch_wide(x, w, static_cast<int>(H), p, sc, wide_big, stream,
+                      device)) {
     // fused CUTLASS GEMM + top-k (one launch), E in (128, 512]
   } else if (use_gemm) {
     // Tensor-core logits (cuBLASLt, no split-K so the layer stays at two
