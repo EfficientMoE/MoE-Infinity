@@ -220,7 +220,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            &ExpertDispatcher::SetOverlapComputeTimingEnabled)
       .def("drain_compute_samples", &ExpertDispatcher::DrainComputeSamples)
       .def("set_expected_queue", &ExpertDispatcher::SetExpectedQueue)
-      .def("wait_expert", &ExpertDispatcher::WaitHiddenStates)
+      // Release the GIL while blocked: a worker that drops the last C++
+      // reference to a Python-owned tensor needs it to finish the layer.
+      .def("wait_expert", &ExpertDispatcher::WaitHiddenStates,
+           py::call_guard<py::gil_scoped_release>())
       .def("dispatch_experts", &ExpertDispatcher::DispatchExperts)
       .def("take_last_active_experts", &ExpertDispatcher::TakeLastActiveExperts)
       .def("get_routing_stats", &ExpertDispatcher::GetRoutingStats)

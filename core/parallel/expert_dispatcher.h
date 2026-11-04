@@ -380,6 +380,7 @@ class ExpertDispatcher : public base::noncopyable {
                     std::exception_ptr error,
                     const std::vector<FailureContext>& contexts = {}) noexcept;
   void CompleteOne(std::uint64_t generation) noexcept;
+  void NotifyPendingWaiters() noexcept;
 
   static void CUDART_CB CompletionWaitsConsumedCallback(void* opaque);
   void CompletionRetirementFunc();

@@ -1995,9 +1995,17 @@ void ExpertDispatcher::FailDispatch(
   last_active_experts_count_.store(0, std::memory_order_relaxed);
   pending_.store(0, std::memory_order_release);
   route_pending_.store(false, std::memory_order_release);
-  pending_cv_.notify_all();
+  NotifyPendingWaiters();
   route_callback_cv_.notify_all();
   retirement_callback_cv_.notify_all();
+}
+
+void ExpertDispatcher::NotifyPendingWaiters() noexcept {
+  // pending_ and route_pending_ change outside pending_mutex_. Taking it
+  // here orders the change against a waiter's predicate check, so the
+  // notification cannot land between that check and the wait (lost wakeup).
+  { std::lock_guard<std::mutex> lock(pending_mutex_); }
+  pending_cv_.notify_all();
 }
 
 void ExpertDispatcher::CompleteOne(std::uint64_t generation) noexcept {
@@ -2006,7 +2014,7 @@ void ExpertDispatcher::CompleteOne(std::uint64_t generation) noexcept {
   size_t previous = pending_.fetch_sub(1, std::memory_order_acq_rel);
   if (previous <= 1) {
     pending_.store(0, std::memory_order_release);
-    pending_cv_.notify_all();
+    NotifyPendingWaiters();
   }
 }
 
@@ -2099,7 +2107,7 @@ void ExpertDispatcher::RouteFunc() noexcept {
               std::chrono::steady_clock::now() - started);
       last_route_handoff_us_.store(elapsed.count(), std::memory_order_relaxed);
       route_pending_.store(false, std::memory_order_release);
-      pending_cv_.notify_all();
+      NotifyPendingWaiters();
     } catch (...) {
       FailDispatch(args.generation, std::current_exception(), routed_contexts);
     }
