@@ -79,4 +79,8 @@ p.write_text(t.replace(target, "- STATUS: DONE (exit 0)\n- **Result:**\n```\n" +
 git add -- LEDGER.md && bash <leak_scan> --staged && git commit -m "exp686a settle"
 ```
 
-- STATUS: NEXT
+- STATUS: DONE (exit 0)
+- **Result:**
+```
+VERDICT: VIS_ONLY | det: True | repl: exp681+exp685 exact | center_ring10 rec_def -0.71/-1.10/-1.37/-0.73pp at cap512 (beats lcnu ALL 4) but burst_def +5-6pp fails ladder | center_zb: barrier hypothesis REFUTED (zero-barrier rec_def 6.982 == center at home; scoreboard itself mistimes) | center_lazy dead dose (never adopted, safety violated) | center_ghost vis+recov but worse rec (+0.90 home) | elapsed 943s | freeze c05c4d5
+```
