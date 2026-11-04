@@ -16,9 +16,12 @@ import pytest
 
 from benchmarks.cache_simulator.belady_cache_simulator import belady_simulate
 from benchmarks.cache_simulator.policies import (
+    BYPASS_POLICIES,
     GEOMETRY_POLICIES,
+    LCNU_POLICIES,
     ORACLE_POLICIES,
     POLICY_FACTORIES,
+    LayerCycleNextUsePolicy,
     LRUPolicy,
     build_policy,
     simulate,
@@ -28,6 +31,8 @@ from benchmarks.cache_simulator.prefetchers import (
     ORACLE_PREFETCHERS,
     PREFETCHER_FACTORIES,
     CoActivationPrefetcher,
+    KNNPrefetcher,
+    LogisticPrefetcher,
     OraclePrefetcher,
     PrefetchCachePolicy,
     PrefetchPolicy,
@@ -78,7 +83,7 @@ def evictor(name, cap, layers=LAYERS):
     kwargs = {}
     if name in GEOMETRY_POLICIES:
         kwargs["num_layers"] = layers
-    if name == "lcnu":
+    if name in LCNU_POLICIES:
         kwargs["prior"] = TOPK / EXPERTS
     return build_policy(name, cap, **kwargs)
 
@@ -147,12 +152,13 @@ def test_silent_prefetcher_reproduces_evictor(name, admission):
 # --------------------------------------------------------------------------- #
 # Invariants for every combination
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("ev_name", SWEEP_EVICTORS)
+@pytest.mark.parametrize("ev_name", SWEEP_EVICTORS + ("lcnu_b",))
 def test_invariants_every_combination(ev_name):
-    rng = random.Random(hash(ev_name) % 1000)
+    rng = random.Random(sum(map(ord, ev_name)))
     accesses = decode_trace(rng, 50)
+    bypass = ev_name in BYPASS_POLICIES
     for cap in (2, 5, 8, 14):
-        belady_hits = belady_simulate(accesses, cap)[0]
+        belady_hits = belady_simulate(accesses, cap, bypass=bypass)[0]
         for pf_name in PREFETCHER_FACTORIES:
             for admission in ADMISSION_MODES:
                 slots = max(1, cap // 4) if admission == "buffer" else 0
@@ -442,3 +448,153 @@ def test_presets_and_stall_floor():
     )
     assert stall_floor_s(10, 4, _link(tx=1.0, compute=0.5)) == 8.0
     assert stall_floor_s(1, 4, _link(tx=1.0, compute=0.5)) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Round 3: more predictors, LCNU admission control and prefill handling
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"depth": 2},
+        {"depth": 3, "decay": 0.5},
+        {"scoring": "bayes"},
+        {"depth": 2, "scoring": "bayes"},
+    ],
+)
+def test_coactivation_variants_are_causal(kwargs):
+    prefix = decode_trace(random.Random(11), 12)
+    future_a = decode_trace(random.Random(12), 8)
+    future_b = list(reversed(decode_trace(random.Random(13), 8)))
+    cut = len(prefix) // TOPK
+
+    def make():
+        return CoActivationPrefetcher(
+            horizon=2,
+            budget=4,
+            num_layers=LAYERS,
+            num_experts=EXPERTS,
+            **kwargs,
+        )
+
+    pred_a = _predictions(make(), prefix + future_a)
+    pred_b = _predictions(make(), prefix + future_b)
+    assert pred_a[: cut - 1] == pred_b[: cut - 1]
+    assert any(c for p in pred_a[: cut - 1] for _, _, c in p)
+
+
+def _cross_layer_trace(steps):
+    """Layer 1 always routes ``(e + 1) % 4`` after layer 0 routes ``e``."""
+    rng = random.Random(14)
+    out = []
+    for _ in range(steps):
+        e = rng.randrange(4)
+        out += [(0, e), (1, (e + 1) % 4)]
+    return out
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: LogisticPrefetcher(
+            horizon=1, budget=1, num_layers=2, num_experts=4, lr=0.5, top_k=1
+        ),
+        lambda: KNNPrefetcher(
+            horizon=1, budget=1, num_layers=2, num_experts=4, context=1, top_k=1
+        ),
+        lambda: CoActivationPrefetcher(
+            horizon=1, budget=1, num_layers=2, num_experts=4, scoring="bayes"
+        ),
+    ],
+)
+def test_new_predictors_learn_a_cross_layer_rule(make):
+    pf = make()
+    trace = _cross_layer_trace(200)
+    preds = _predictions(pf, trace)
+    # After a warm-up, the layer-1 prediction made after each layer-0 visit
+    # is the rule's expert.
+    right = total = 0
+    for i, pred in enumerate(preds[100:], start=100):
+        if trace[i][0] != 0:
+            continue
+        ((_, layer, cands),) = pred
+        assert layer == 1
+        total += 1
+        right += bool(cands) and cands[0][0] == (1, (trace[i][1] + 1) % 4)
+    assert right == total > 0
+
+
+def test_min_score_filters_low_confidence_candidates():
+    pf = CoActivationPrefetcher(
+        horizon=1, budget=4, num_layers=2, num_experts=4, min_score=0.6
+    )
+    trace = _cross_layer_trace(50)
+    for pred in _predictions(pf, trace)[10:]:
+        for _, _, cands in pred:
+            assert all(score >= 0.6 for _, score in cands)
+
+
+def test_lcnu_bypass_keeps_the_sooner_needed_expert():
+    # cap 1, one layer: A is routed on every visit, B once. With bypass the
+    # one-off B is served without displacing A.
+    trace = [(0, 0), (0, 1), (0, 0), (0, 0)]
+    plain = LayerCycleNextUsePolicy(1, num_layers=1, prior=0.5)
+    bypass = LayerCycleNextUsePolicy(
+        1, num_layers=1, prior=0.5, bypass="always"
+    )
+    for key in [(0, 0)] * 6:  # make A frequent
+        plain.on_access(key)
+        bypass.on_access(key)
+    for key in trace:
+        plain.on_access(key)
+        bypass.on_access(key)
+    assert bypass.hits > plain.hits
+    assert (0, 0) in bypass.resident
+
+
+def _union_trace(rng, requests=4, steps=6):
+    """Per request: one wide prefill visit per layer, then decode visits."""
+    out = []
+    for _ in range(requests):
+        for layer in range(LAYERS):
+            out += [(layer, e) for e in rng.sample(range(EXPERTS), 6)]
+        out += decode_trace(rng, steps)
+    return out
+
+
+def test_lcnu_prefill_handling():
+    rng = random.Random(15)
+    trace = _union_trace(rng)
+    decode_only = decode_trace(random.Random(16), 30)
+    for cap in (2, 4, 8):
+        # On decode-only streams the prefill variants are plain LCNU.
+        ref = simulate(evictor("lcnu", cap), decode_only)[0]
+        for name in ("lcnu_p",):
+            pol = build_policy(
+                name,
+                cap,
+                num_layers=LAYERS,
+                prior=TOPK / EXPERTS,
+                decode_width=TOPK,
+            )
+            assert simulate(pol, decode_only)[0] == ref
+        # With prefill visits: bounded by Belady with bypass.
+        bound = belady_simulate(trace, cap, bypass=True)[0]
+        for name in ("lcnu_p", "lcnu_b"):
+            pol = build_policy(
+                name,
+                cap,
+                num_layers=LAYERS,
+                prior=TOPK / EXPERTS,
+                decode_width=TOPK,
+            )
+            hits, misses, _ = simulate(pol, trace)
+            assert hits <= bound and hits + misses == len(trace)
+    # prefill_weight=0: a prefill-only expert gets no routing evidence.
+    pol = LayerCycleNextUsePolicy(
+        64, num_layers=LAYERS, prior=0.25, decode_width=TOPK, prefill_weight=0.0
+    )
+    simulate(pol, trace)
+    prefill_only = {k for k in trace[: LAYERS * 6]} - set(trace[LAYERS * 6 :])
+    for key in prefill_only:
+        assert pol._count[key] == 0

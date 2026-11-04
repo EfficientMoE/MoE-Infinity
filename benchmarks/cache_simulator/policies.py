@@ -160,6 +160,10 @@ class CachePolicy(ABC):
     def _prepare_speculative(self, key: Key) -> None:
         """Initialise per-key state a speculative (prefetch) insert needs."""
 
+    def admits(self, key: Key) -> bool:
+        """Whether a demand miss on ``key`` is cached (default: always)."""
+        return True
+
     # -- core --------------------------------------------------------------- #
     def _admit(self, key: Key, protect: Sequence[Key]) -> None:
         """Insert ``key`` as a demand resident, evicting until within cap."""
@@ -1359,6 +1363,12 @@ class LayerLRUPolicy(_SelfManagedPolicy):
         self._insert(key)
 
 
+#: LCNU admission control: never bypass (original), bypass prefill misses
+#: only, or bypass any miss whose expected next use is no sooner than the
+#: victim's.
+LCNU_BYPASS = ("never", "prefill", "always")
+
+
 class LayerCycleNextUsePolicy(_SelfManagedPolicy):
     """LCNU: evict the expert whose expected next use is farthest away.
 
@@ -1401,6 +1411,9 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
         prior: float = 1.0 / 16,
         num_layers: Optional[int] = None,
         cycle_aware: bool = True,
+        bypass: str = "never",
+        prefill_weight: float = 1.0,
+        decode_width: Optional[int] = None,
     ):
         super().__init__(capacity)
         if not 0.0 < alpha < 1.0:
@@ -1411,11 +1424,23 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
             raise ValueError("prior must be in (0, 1]")
         if num_layers is not None and num_layers < 1:
             raise ValueError("num_layers must be >= 1")
+        if bypass not in LCNU_BYPASS:
+            raise ValueError(f"bypass must be one of {LCNU_BYPASS}")
+        if not 0.0 <= prefill_weight <= 1.0:
+            raise ValueError("prefill_weight must be in [0, 1]")
+        if decode_width is not None and decode_width < 1:
+            raise ValueError("decode_width must be >= 1")
         self.alpha = alpha
         self.beta = beta
         self.prior = prior
         self.num_layers = num_layers
         self.cycle_aware = cycle_aware
+        # Admission control and prefill handling (defaults: original LCNU).
+        self.bypass = bypass
+        self.prefill_weight = prefill_weight
+        self.decode_width = decode_width
+        self._prefill_starts: Set[int] = set()
+        self._in_prefill = False
         self._log_keep = math.log1p(-alpha)
         self._last: Dict[Key, int] = {}  # layer-visit index of last routing
         self._ema: Dict[Key, float] = {}
@@ -1456,6 +1481,16 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
             out.append(p if p > 1e-12 else 1e-12)
         return out
 
+    def bind_trace(self, accesses: Sequence[Key]) -> None:
+        super().bind_trace(accesses)
+        self._prefill_starts = set()
+        if self.decode_width is not None:
+            # A visit routing more distinct experts than one token can is a
+            # prefill pass (the engine knows the forward mode at the gate).
+            for _, start, end in layer_segments(accesses):
+                if end - start > self.decode_width:
+                    self._prefill_starts.add(start)
+
     def _record_access(self, key: Key) -> None:
         layer = key[0]
         if layer > self._max_layer:
@@ -1464,12 +1499,29 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
                 self._cand.clear()
         if layer != self._cur:
             self._cur = layer
+            self._in_prefill = self._index in self._prefill_starts
             self._visits[layer] += 1
             self._stale.add(layer)
             self._used_now = set()
         visit = self._visits[layer]
         last = self._last.get(key)
-        if last is None:
+        if self._in_prefill and self.prefill_weight != 1.0:
+            # Prefill evidence counts ``prefill_weight`` of a routing event.
+            w = self.prefill_weight
+            if last is None:
+                self._ema[key] = (
+                    1.0 - self.alpha
+                ) * self.prior + self.alpha * w
+                self._count[key] = w
+                self._first[key] = visit - 1
+            elif visit > last:
+                gap = visit - last
+                self._ema[key] = (
+                    self._ema[key] * math.exp(self._log_keep * gap)
+                    + self.alpha * w
+                )
+                self._count[key] += w
+        elif last is None:
             self._ema[key] = (1.0 - self.alpha) * self.prior + self.alpha
             self._count[key] = 1
             self._first[key] = visit - 1
@@ -1481,6 +1533,29 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
             self._count[key] += 1
         self._last[key] = visit
         self._used_now.add(key)
+
+    def _bypassing(self) -> bool:
+        return self.bypass == "always" or (
+            self.bypass == "prefill" and self._in_prefill
+        )
+
+    def _score(self, layer: int, key: Key) -> float:
+        """LCNU's expected next use of ``key`` (layer-steps)."""
+        return self._distance(layer, key) + self.cycle * (
+            1.0 / self.routing_probability(key) - 1.0
+        )
+
+    def admits(self, key: Key) -> bool:
+        """Whether a miss on ``key`` should be cached (admission control).
+
+        With ``bypass`` active a missed expert whose expected next use is no
+        sooner than the victim's is used without being cached (an engine's
+        transient expert slot), the online analogue of Belady with bypass.
+        """
+        if not self._bypassing() or not self.resident:
+            return True
+        layer, victim = self._victim()
+        return self._score(key[0], key) < self._score(layer, victim)
 
     def _layer_candidate(self, layer: int, cycle: int) -> Tuple[float, Key]:
         """Max of ``cycle * (1/p - 1)`` over the layer's residents."""
@@ -1563,6 +1638,10 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
     def _on_miss(self, key: Key) -> None:
         if len(self.resident) >= self.capacity:
             layer, old = self._victim()
+            if self._bypassing() and self._score(key[0], key) >= self._score(
+                layer, old
+            ):
+                return  # served from a transient slot, not cached
             self._by_layer[layer].discard(old)
             if layer != self._cur:
                 self._stale.add(layer)
@@ -1614,11 +1693,28 @@ POLICY_FACTORIES = {
     "w_tinylfu": lambda cap, **kw: WTinyLFUPolicy(cap, **kw),
     "layer_lru": lambda cap, **kw: LayerLRUPolicy(cap, **kw),
     "lcnu": lambda cap, **kw: LayerCycleNextUsePolicy(cap, **kw),
+    # LCNU with decode-only routing statistics: prefill passes (visits wider
+    # than ``decode_width``) give no routing evidence.
+    "lcnu_p": lambda cap, **kw: LayerCycleNextUsePolicy(
+        cap, **{"prefill_weight": 0.0, **kw}
+    ),
+    # ... plus admission control: a miss whose expected next use is no
+    # sooner than the victim's is not cached.
+    "lcnu_b": lambda cap, **kw: LayerCycleNextUsePolicy(
+        cap, **{"bypass": "always", "prefill_weight": 0.0, **kw}
+    ),
 }
 
 #: Policies that accept the model geometry (``num_layers``; ``lcnu`` also
 #: ``prior = top_k / num_experts``) as keyword arguments.
-GEOMETRY_POLICIES = {"layer_lru", "lcnu"}
+GEOMETRY_POLICIES = {"layer_lru", "lcnu", "lcnu_p", "lcnu_b"}
+
+#: LCNU variants (take ``prior`` and ``decode_width`` too).
+LCNU_POLICIES = {"lcnu", "lcnu_p", "lcnu_b"}
+
+#: Policies that may serve a miss without caching it (compare with
+#: ``belady_simulate(..., bypass=True)``).
+BYPASS_POLICIES = {"lcnu_b"}
 
 
 # Keep a module-level INF for callers that compare against Belady.

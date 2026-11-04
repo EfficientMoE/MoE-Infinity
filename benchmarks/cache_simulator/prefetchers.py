@@ -31,10 +31,20 @@ changing the future of a trace):
   arXiv:2401.14361; Klotski, arXiv:2502.06888): ``P(e' at layer l+d | e at
   layer l)`` counted over past tokens; the experts just routed vote for each
   upcoming layer.
+  ``depth`` uses the last few visits as evidence and ``scoring="bayes"``
+  combines it naive-Bayes style.
 * ``HybridPrefetcher`` (``hybrid``) - weighted sum of the three scores.
+* ``LogisticPrefetcher`` (``logistic``) - online logistic regression on the
+  routed set, the target layer's previous-token indicator and its EMA.
+* ``KNNPrefetcher`` (``knn``) - nearest neighbours over routing trajectories:
+  past tokens whose last ``context`` layers routed most like the current
+  token vote for the next layer's experts.
 * ``SameIdPrefetcher`` (``same_id``) - the MoE-Infinity engine's current
   ``speculative_prefetch``: the current layer's top experts, same expert ids,
   at the next layer (``moe_infinity/memory/expert_prefetcher.py``).
+
+Every predictor accepts ``min_score``: candidates scoring below it are not
+proposed (an adaptive budget; scores are routing-probability-like).
 
 Oracle bound (``uses_oracle = True``, an UPPER BOUND, not a policy):
 
@@ -90,6 +100,7 @@ Pure Python over flat ``(layer, expert)`` keys plus numpy; no torch.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import Deque, Dict, List, Optional, Sequence, Set, Tuple
@@ -136,6 +147,7 @@ class PrefetchPolicy(ABC):
         budget: int = 8,
         num_layers: Optional[int] = None,
         num_experts: Optional[int] = None,
+        min_score: float = 0.0,
     ):
         if horizon < 1:
             raise ValueError("horizon must be >= 1")
@@ -145,8 +157,13 @@ class PrefetchPolicy(ABC):
             raise ValueError("num_layers must be >= 1")
         if num_experts is not None and num_experts < 1:
             raise ValueError("num_experts must be >= 1")
+        if min_score < 0:
+            raise ValueError("min_score must be >= 0")
         self.horizon = horizon
         self.budget = budget
+        #: Adaptive budget: candidates scoring below this are not proposed
+        #: (scores are routing-probability-like for every online predictor).
+        self.min_score = min_score
         self.num_layers = num_layers
         self.num_experts = num_experts or 0
         self._max_layer = -1
@@ -190,10 +207,13 @@ class PrefetchPolicy(ABC):
             return []
         cycle = max(self.cycle, 1)
         out: List[Prediction] = []
+        floor = self.min_score
         for d in range(1, min(self.horizon, cycle) + 1):
             layer = (self._layer + d) % cycle
-            cands = self._predict(layer, d)
-            out.append((d, layer, cands[: self.budget]))
+            cands = self._predict(layer, d)[: self.budget]
+            if floor > 0.0:
+                cands = [c for c in cands if c[1] >= floor]
+            out.append((d, layer, cands))
         return out
 
     def _close(self) -> None:
@@ -238,8 +258,10 @@ class PreviousTokenPrefetcher(PrefetchPolicy):
 
     name = "prev_token"
 
-    def __init__(self, horizon=1, budget=8, num_layers=None, num_experts=None):
-        super().__init__(horizon, budget, num_layers, num_experts)
+    def __init__(
+        self, horizon=1, budget=8, num_layers=None, num_experts=None, **kw
+    ):
+        super().__init__(horizon, budget, num_layers, num_experts, **kw)
         self._last: Dict[int, List[Key]] = {}
 
     def _learn(self, layer: int, keys: List[Key]) -> None:
@@ -278,8 +300,9 @@ class FrequencyPrefetcher(PrefetchPolicy):
         num_layers=None,
         num_experts=None,
         alpha: float = 0.3,
+        **kw,
     ):
-        super().__init__(horizon, budget, num_layers, num_experts)
+        super().__init__(horizon, budget, num_layers, num_experts, **kw)
         if not 0.0 < alpha <= 1.0:
             raise ValueError("alpha must be in (0, 1]")
         self.alpha = alpha
@@ -311,6 +334,10 @@ class FrequencyPrefetcher(PrefetchPolicy):
         return ranked
 
 
+#: Co-activation scoring rules.
+COACT_SCORING = ("mean", "bayes")
+
+
 class CoActivationPrefetcher(PrefetchPolicy):
     """Online cross-layer co-activation (EAM-style) prefetch.
 
@@ -318,20 +345,54 @@ class CoActivationPrefetcher(PrefetchPolicy):
     ``d`` steps after a visit of layer ``l`` that routed ``e`` (over the
     continuous layer cycle, so the last layers of a token predict the first
     layers of the next); ``N[l, d][e]`` counts the visits of ``l`` routing
-    ``e``. After a visit of ``l`` with routed set ``S``, expert ``e'`` of the
-    visit ``d`` steps ahead scores ``mean_{e in S} C[l, d][e, e'] /
-    N[l, d][e]``, the average conditional routing probability. Unseen rows
-    predict nothing (no oracle fallback).
+    ``e``. Unseen rows predict nothing (no oracle fallback).
+
+    The evidence is the routed sets ``S_j`` of the last ``depth`` visits
+    (``j = 0`` is the visit that just closed), weighted ``decay ** j``
+    (Klotski uses several preceding layers). ``scoring``:
+
+    * ``mean`` - expert ``e'`` of the visit ``d`` steps ahead scores the
+      average conditional routing probability ``mean_{e in S_j}
+      C[l_j, d + j][e, e'] / N[l_j, d + j][e]``, averaged over ``j``.
+    * ``bayes`` - naive Bayes: ``log pi(e') + sum_j w_j sum_{e in S_j}
+      log(P(e' | e) / pi(e'))`` with ``P(e' | e)`` smoothed toward the target
+      layer's routing frequency ``pi`` (``smoothing`` pseudo-visits), turned
+      into probabilities that sum to the routed-set size.
     """
 
     name = "coactivation"
 
-    def __init__(self, horizon=1, budget=8, num_layers=None, num_experts=None):
-        super().__init__(horizon, budget, num_layers, num_experts)
+    def __init__(
+        self,
+        horizon=1,
+        budget=8,
+        num_layers=None,
+        num_experts=None,
+        depth: int = 1,
+        decay: float = 1.0,
+        scoring: str = "mean",
+        smoothing: float = 1.0,
+        **kw,
+    ):
+        super().__init__(horizon, budget, num_layers, num_experts, **kw)
+        if depth < 1:
+            raise ValueError("depth must be >= 1")
+        if not 0.0 < decay <= 1.0:
+            raise ValueError("decay must be in (0, 1]")
+        if scoring not in COACT_SCORING:
+            raise ValueError(f"scoring must be one of {COACT_SCORING}")
+        if smoothing <= 0:
+            raise ValueError("smoothing must be > 0")
+        self.depth = depth
+        self.decay = decay
+        self.scoring = scoring
+        self.smoothing = smoothing
+        self._span = horizon + depth - 1
         self._count: Dict[Tuple[int, int], np.ndarray] = {}
         self._norm: Dict[Tuple[int, int], np.ndarray] = {}
-        self._history: Deque[Tuple[int, np.ndarray]] = deque(maxlen=horizon)
-        self._cur: Optional[Tuple[int, np.ndarray]] = None
+        self._history: Deque[Tuple[int, np.ndarray]] = deque(maxlen=self._span)
+        self._marg: Dict[int, np.ndarray] = {}
+        self._layer_visits: Dict[int, int] = {}
         self._cache: Dict[int, Optional[np.ndarray]] = {}
 
     def _grow(self, num_experts: int) -> None:
@@ -340,6 +401,8 @@ class CoActivationPrefetcher(PrefetchPolicy):
             self._count[k] = np.pad(mat, ((0, pad), (0, pad)))
         for k, vec in self._norm.items():
             self._norm[k] = np.pad(vec, (0, pad))
+        for k, vec in self._marg.items():
+            self._marg[k] = np.pad(vec, (0, pad))
         super()._grow(num_experts)
 
     def _learn(self, layer: int, keys: List[Key]) -> None:
@@ -354,22 +417,62 @@ class CoActivationPrefetcher(PrefetchPolicy):
             mat[np.ix_(src, dst)] += 1.0
             self._norm[slot][src] += 1.0
         self._history.append((layer, dst))
-        self._cur = (layer, dst)
+        if self.scoring == "bayes":
+            marg = self._marg.get(layer)
+            if marg is None:
+                marg = self._marg[layer] = np.zeros(n)
+            marg[dst] += 1.0
+            self._layer_visits[layer] = self._layer_visits.get(layer, 0) + 1
         self._cache = {}
+
+    def _prior(self, layer: int, size: int) -> Optional[np.ndarray]:
+        marg = self._marg.get(layer)
+        if marg is None:
+            return None
+        n = self.num_experts
+        base = size / n
+        return (marg + base) / (self._layer_visits[layer] + 1.0)
 
     def scores(self, layer: int, d: int) -> Optional[np.ndarray]:
         if d in self._cache:
             return self._cache[d]
-        out = None
-        if self._cur is not None:
-            src_layer, src = self._cur
-            mat = self._count.get((src_layer, d))
-            if mat is not None and src.size:
-                norm = self._norm[(src_layer, d)][src]
+        hist = self._history
+        total = None
+        weight = 0.0
+        prior = None
+        if self.scoring == "bayes" and hist:
+            prior = self._prior(layer, max(hist[-1][1].size, 1))
+        for j in range(min(self.depth, len(hist))):
+            src_layer, src = hist[-1 - j]
+            slot = (src_layer, d + j)
+            mat = self._count.get(slot)
+            if mat is None or not src.size:
+                continue
+            norm = self._norm[slot][src]
+            w = self.decay**j
+            if self.scoring == "mean":
                 seen = norm > 0
-                if seen.any():
-                    rows = mat[src[seen]] / norm[seen, None]
-                    out = rows.sum(axis=0) / src.size
+                if not seen.any():
+                    continue
+                part = (mat[src[seen]] / norm[seen, None]).sum(
+                    axis=0
+                ) / src.size
+            else:
+                if prior is None:
+                    continue
+                k = self.smoothing
+                cond = (mat[src] + k * prior) / (norm[:, None] + k)
+                part = (np.log(cond) - np.log(prior)).sum(axis=0)
+            total = w * part if total is None else total + w * part
+            weight += w
+        out = None
+        if total is not None:
+            if self.scoring == "mean":
+                out = total / weight
+            else:
+                logit = np.log(prior) + total
+                prob = np.exp(logit - logit.max())
+                out = np.minimum(prob * (hist[-1][1].size / prob.sum()), 1.0)
         self._cache[d] = out
         return out
 
@@ -381,7 +484,9 @@ class HybridPrefetcher(PrefetchPolicy):
     """Weighted sum of previous-token, EMA-frequency and co-activation scores.
 
     All three are routing-probability-like scores in ``[0, 1]``:
-    ``w_prev * prev_token + w_freq * ema + w_coact * coactivation``.
+    ``w_prev * prev_token + w_freq * ema + w_coact * coactivation`` (so a
+    ``min_score`` threshold is on that scale, at most ``sum(weights)``).
+    ``depth`` / ``decay`` / ``scoring`` configure the co-activation part.
     """
 
     name = "hybrid"
@@ -394,8 +499,12 @@ class HybridPrefetcher(PrefetchPolicy):
         num_experts=None,
         weights: Sequence[float] = (1.0, 1.0, 1.0),
         alpha: float = 0.3,
+        depth: int = 1,
+        decay: float = 1.0,
+        scoring: str = "mean",
+        **kw,
     ):
-        super().__init__(horizon, budget, num_layers, num_experts)
+        super().__init__(horizon, budget, num_layers, num_experts, **kw)
         if len(weights) != 3 or any(w < 0 for w in weights) or not any(weights):
             raise ValueError("weights must be 3 non-negative values, not all 0")
         self.weights = tuple(float(w) for w in weights)
@@ -406,7 +515,13 @@ class HybridPrefetcher(PrefetchPolicy):
             horizon, budget, num_layers, num_experts, alpha=alpha
         )
         self.coact = CoActivationPrefetcher(
-            horizon, budget, num_layers, num_experts
+            horizon,
+            budget,
+            num_layers,
+            num_experts,
+            depth=depth,
+            decay=decay,
+            scoring=scoring,
         )
         self._parts = (self.prev, self.freq, self.coact)
 
@@ -438,6 +553,274 @@ class HybridPrefetcher(PrefetchPolicy):
         return _top(layer, total, self.budget)
 
 
+class LogisticPrefetcher(PrefetchPolicy):
+    """Online logistic regression on routing features (learned predictor).
+
+    For the visit ``d`` steps after a visit of layer ``l`` with routed set
+    ``S``, expert ``e'`` gets ``P = sigmoid(b[e'] + sum_{e in S} W[e, e'] +
+    w_prev * prev(e') + w_ema * ema(e'))``: a learned co-activation table
+    ``W`` (one per ``(l, d)``) with a per-expert bias, plus the target layer's
+    previous-token indicator and EMA (rate ``alpha``) with learned scalar
+    weights. Trained by SGD on the log-loss (rate ``lr``, L2 ``l2`` on the
+    touched rows) when the target visit closes; features are those available
+    at prediction time. Initialized at the routing prior.
+    """
+
+    name = "logistic"
+
+    def __init__(
+        self,
+        horizon=1,
+        budget=8,
+        num_layers=None,
+        num_experts=None,
+        lr: float = 0.05,
+        l2: float = 0.0,
+        alpha: float = 0.4,
+        top_k: int = 8,
+        **kw,
+    ):
+        super().__init__(horizon, budget, num_layers, num_experts, **kw)
+        if lr <= 0:
+            raise ValueError("lr must be > 0")
+        if l2 < 0:
+            raise ValueError("l2 must be >= 0")
+        self.lr = lr
+        self.l2 = l2
+        self.alpha = alpha
+        self.top_k = top_k
+        self._W: Dict[Tuple[int, int], np.ndarray] = {}
+        self._b: Dict[Tuple[int, int], np.ndarray] = {}
+        self._wf: Dict[Tuple[int, int], np.ndarray] = {}  # [w_prev, w_ema]
+        self._prev: Dict[int, np.ndarray] = {}
+        self._ema: Dict[int, np.ndarray] = {}
+        self._history: Deque[Tuple[int, np.ndarray]] = deque(maxlen=horizon)
+        self._cache: Dict[int, Optional[np.ndarray]] = {}
+
+    def _grow(self, num_experts: int) -> None:
+        pad = num_experts - self.num_experts
+        prior = self._prior_logit(num_experts)
+        for k, mat in self._W.items():
+            self._W[k] = np.pad(mat, ((0, pad), (0, pad)))
+        for k, vec in self._b.items():
+            self._b[k] = np.concatenate([vec, np.full(pad, prior)])
+        for store in (self._prev, self._ema):
+            for k, vec in store.items():
+                store[k] = np.pad(vec, (0, pad))
+        super()._grow(num_experts)
+
+    def _prior_logit(self, n: int) -> float:
+        p = min(max(self.top_k / max(n, 1), 1e-3), 0.5)
+        return math.log(p / (1.0 - p))
+
+    def _features(self, layer: int) -> Tuple[np.ndarray, np.ndarray]:
+        n = self.num_experts
+        prev = self._prev.get(layer)
+        ema = self._ema.get(layer)
+        return (
+            prev if prev is not None else np.zeros(n),
+            ema if ema is not None else np.zeros(n),
+        )
+
+    def _logit(self, slot, src, layer) -> np.ndarray:
+        n = self.num_experts
+        W = self._W.get(slot)
+        if W is None:
+            W = self._W[slot] = np.zeros((n, n))
+            self._b[slot] = np.full(n, self._prior_logit(n))
+            self._wf[slot] = np.zeros(2)
+        prev, ema = self._features(layer)
+        wf = self._wf[slot]
+        return self._b[slot] + W[src].sum(axis=0) + wf[0] * prev + wf[1] * ema
+
+    def _learn(self, layer: int, keys: List[Key]) -> None:
+        dst = np.fromiter((e for _, e in keys), dtype=np.intp, count=len(keys))
+        n = self.num_experts
+        y = np.zeros(n)
+        y[dst] = 1.0
+        lr, l2 = self.lr, self.l2
+        prev, ema = self._features(layer)
+        for d, (src_layer, src) in enumerate(reversed(self._history), start=1):
+            slot = (src_layer, d)
+            logit = self._logit(slot, src, layer)
+            grad = y - 1.0 / (1.0 + np.exp(-logit))
+            W = self._W[slot]
+            if l2:
+                W[src] *= 1.0 - lr * l2
+            W[src] += lr * grad
+            self._b[slot] += lr * grad
+            self._wf[slot] += lr * np.array([grad @ prev / n, grad @ ema / n])
+        # Update the target-layer features after learning (causal order).
+        p = self._prev.get(layer)
+        if p is None:
+            p = self._prev[layer] = np.zeros(n)
+        p[:] = 0.0
+        p[dst] = 1.0
+        e = self._ema.get(layer)
+        if e is None:
+            e = self._ema[layer] = np.zeros(n)
+        e *= 1.0 - self.alpha
+        e[dst] += self.alpha
+        self._history.append((layer, dst))
+        self._cache = {}
+
+    def scores(self, layer: int, d: int) -> Optional[np.ndarray]:
+        if d in self._cache:
+            return self._cache[d]
+        out = None
+        if self._history:
+            src_layer, src = self._history[-1]
+            if src.size:
+                logit = self._logit((src_layer, d), src, layer)
+                out = 1.0 / (1.0 + np.exp(-logit))
+        self._cache[d] = out
+        return out
+
+    def _predict(self, layer: int, d: int) -> List[Candidate]:
+        return _top(layer, self.scores(layer, d), self.budget)
+
+
+class KNNPrefetcher(PrefetchPolicy):
+    """Nearest-neighbour routing trajectories (token-level EAM matching).
+
+    For every layer ``l`` a ring buffer keeps the last ``bank`` tokens'
+    routing at layers ``l - context + 1 .. l`` (the signature) and, once
+    known, at ``l + 1 .. l + horizon`` (the targets). After a visit of ``l``
+    the current token's signature is matched against the bank by overlap
+    (shared (layer, expert) pairs); the ``neighbors`` best matches vote, with
+    weight ``overlap ** power``, for each expert of the target visit. The
+    score is the weighted fraction of neighbours that routed the expert
+    (MoE-Infinity's activation-matrix matching, arXiv:2401.14361, at token
+    rather than request granularity). Signatures are stored transposed
+    (feature x bank) so a query sums ``8 x context`` contiguous rows.
+    """
+
+    name = "knn"
+
+    def __init__(
+        self,
+        horizon=1,
+        budget=8,
+        num_layers=None,
+        num_experts=None,
+        bank: int = 4096,
+        neighbors: int = 32,
+        context: int = 2,
+        power: float = 2.0,
+        top_k: int = 8,
+        **kw,
+    ):
+        super().__init__(horizon, budget, num_layers, num_experts, **kw)
+        if bank < 1 or neighbors < 1 or context < 1:
+            raise ValueError("bank, neighbors and context must be >= 1")
+        self.bank = bank
+        self.neighbors = neighbors
+        self.context = context
+        self.power = power
+        self.width = top_k
+        # Per anchor layer: signatures (features x bank), targets
+        # (bank x horizon x width), fill count and ring head.
+        self._sig: Dict[int, np.ndarray] = {}
+        self._tgt: Dict[int, np.ndarray] = {}
+        self._fill: Dict[int, int] = {}
+        self._head: Dict[int, int] = {}
+        self._rows: Dict[int, List[Optional[np.ndarray]]] = {}
+        self._recent: Deque[Tuple[int, np.ndarray]] = deque(maxlen=context)
+        self._pending: Deque[Tuple[int, int]] = deque(maxlen=horizon)
+        self._query: Optional[np.ndarray] = None
+        self._query_layer: Optional[int] = None
+        self._cache: Dict[int, Optional[np.ndarray]] = {}
+
+    def _grow(self, num_experts: int) -> None:
+        old = self.num_experts
+        for layer, sig in self._sig.items():
+            rows = sig.reshape(self.context, old, sig.shape[1])
+            rows = np.pad(rows, ((0, 0), (0, num_experts - old), (0, 0)))
+            self._sig[layer] = rows.reshape(-1, sig.shape[1])
+        for rows in self._rows.values():
+            for i, q in enumerate(rows):
+                if q is not None:
+                    j, e = np.divmod(q, old)
+                    rows[i] = j * num_experts + e
+        super()._grow(num_experts)
+
+    def _slot(self, layer: int, query: Optional[np.ndarray]) -> int:
+        sig = self._sig.get(layer)
+        if sig is None:
+            sig = self._sig[layer] = np.zeros(
+                (self.context * self.num_experts, self.bank), dtype=np.uint8
+            )
+            self._tgt[layer] = np.full(
+                (self.bank, self.horizon, self.width), -1, dtype=np.int16
+            )
+            self._fill[layer] = 0
+            self._head[layer] = 0
+            self._rows[layer] = [None] * self.bank
+        head = self._head[layer]
+        self._head[layer] = (head + 1) % self.bank
+        self._fill[layer] = min(self._fill[layer] + 1, self.bank)
+        old = self._rows[layer][head]
+        if old is not None:
+            sig[old, head] = 0
+        if query is not None:
+            sig[query, head] = 1
+        self._rows[layer][head] = query
+        self._tgt[layer][head] = -1
+        return head
+
+    def _learn(self, layer: int, keys: List[Key]) -> None:
+        experts = np.fromiter(
+            (e for _, e in keys), dtype=np.intp, count=len(keys)
+        )
+        # Fill the targets of the anchors d visits back.
+        for d, (anchor_layer, row) in enumerate(reversed(self._pending), 1):
+            tgt = self._tgt[anchor_layer][row, d - 1]
+            k = min(experts.size, self.width)
+            tgt[:k] = experts[:k]
+        self._recent.append((layer, experts))
+        n = self.num_experts
+        query = [ex + j * n for j, (_, ex) in enumerate(reversed(self._recent))]
+        self._query = np.concatenate(query) if query else None
+        self._query_layer = layer
+        row = self._slot(layer, self._query)
+        self._pending.append((layer, row))
+        self._cache = {}
+
+    def scores(self, layer: int, d: int) -> Optional[np.ndarray]:
+        if d in self._cache:
+            return self._cache[d]
+        out = None
+        anchor = self._query_layer
+        if anchor is not None and self._query is not None:
+            fill = self._fill.get(anchor, 0)
+            tgt = self._tgt[anchor][:fill, d - 1]
+            known = tgt[:, 0] >= 0
+            if known.any():
+                sig = self._sig[anchor]
+                sim = sig[self._query, :fill].sum(axis=0, dtype=np.int32)
+                sim[~known] = -1
+                k = min(self.neighbors, int(known.sum()))
+                idx = np.argpartition(-sim, k - 1)[:k]
+                idx = idx[sim[idx] > 0]
+                if idx.size:
+                    w = sim[idx].astype(np.float64) ** self.power
+                    votes = tgt[idx]
+                    mask = votes >= 0
+                    out = (
+                        np.bincount(
+                            votes[mask],
+                            weights=np.repeat(w, mask.sum(axis=1)),
+                            minlength=self.num_experts,
+                        )
+                        / w.sum()
+                    )
+        self._cache[d] = out
+        return out
+
+    def _predict(self, layer: int, d: int) -> List[Candidate]:
+        return _top(layer, self.scores(layer, d), self.budget)
+
+
 class SameIdPrefetcher(PrefetchPolicy):
     """The engine's ``speculative_prefetch``: same expert ids, next layer.
 
@@ -449,8 +832,10 @@ class SameIdPrefetcher(PrefetchPolicy):
 
     name = "same_id"
 
-    def __init__(self, horizon=1, budget=2, num_layers=None, num_experts=None):
-        super().__init__(horizon, budget, num_layers, num_experts)
+    def __init__(
+        self, horizon=1, budget=2, num_layers=None, num_experts=None, **kw
+    ):
+        super().__init__(horizon, budget, num_layers, num_experts, **kw)
         self._cur: List[Key] = []
 
     def _learn(self, layer: int, keys: List[Key]) -> None:
@@ -470,8 +855,10 @@ class OraclePrefetcher(PrefetchPolicy):
     uses_oracle = True
     name = "oracle"
 
-    def __init__(self, horizon=1, budget=8, num_layers=None, num_experts=None):
-        super().__init__(horizon, budget, num_layers, num_experts)
+    def __init__(
+        self, horizon=1, budget=8, num_layers=None, num_experts=None, **kw
+    ):
+        super().__init__(horizon, budget, num_layers, num_experts, **kw)
         self._segs: List[Tuple[int, List[Key]]] = []
 
     def bind_trace(self, accesses: Sequence[Key]) -> None:
@@ -496,6 +883,8 @@ PREFETCHER_FACTORIES = {
     "coactivation": CoActivationPrefetcher,
     "hybrid": HybridPrefetcher,
     "same_id": SameIdPrefetcher,
+    "logistic": LogisticPrefetcher,
+    "knn": KNNPrefetcher,
     "oracle": OraclePrefetcher,
 }
 
@@ -568,6 +957,11 @@ class PrefetchCachePolicy(CachePolicy):
     ``estimator`` (``do_no_harm``) is the LCNU next-use model; by default the
     evictor itself if it is LCNU, else a capacity-0 LCNU shadow with
     ``num_layers`` / ``prior``.
+
+    ``issue_budget`` caps the prefetches issued per target visit; it
+    defaults to the prefetcher's ``budget`` (the number of top predictions
+    to keep resident). A smaller cap over a deeper ranking is a *transfer*
+    budget: the best non-resident candidates, as many as the link can move.
     """
 
     def __init__(
@@ -580,7 +974,11 @@ class PrefetchCachePolicy(CachePolicy):
         pin_fraction: float = 0.5,
         num_layers: Optional[int] = None,
         prior: Optional[float] = None,
+        issue_budget: Optional[int] = None,
     ):
+        if issue_budget is not None and issue_budget < 1:
+            raise ValueError("issue_budget must be >= 1")
+        self.issue_budget = issue_budget
         if admission not in ADMISSION_MODES:
             raise ValueError(
                 f"admission must be one of {ADMISSION_MODES}, got {admission!r}"
@@ -775,7 +1173,7 @@ class PrefetchCachePolicy(CachePolicy):
             return
         v = self._visit
         ev = self.evictor
-        budget = self.prefetcher.budget
+        budget = self.issue_budget or self.prefetcher.budget
         same_queue = self.admission == "same_queue"
         if same_queue and not self._self_managed:
             self._batch = {k for _, _, cands in preds for k, _ in cands}
@@ -844,6 +1242,8 @@ class PrefetchCachePolicy(CachePolicy):
             and self.admission in _SHARED
             and len(ev.resident) + len(self.staged) >= self.capacity
         ):
+            if not ev.admits(key):
+                return  # the evictor serves it from a transient slot
             self._room_for_demand()
         if self._self_managed:
             ev._on_miss(key)
@@ -903,6 +1303,10 @@ class PrefetchCachePolicy(CachePolicy):
                 ev._prepare_speculative(key)
                 self._spec[key] = self._new_pid(key, tv, d, rank)
                 ev._on_miss(key)
+                if key not in ev.resident:  # the evictor declined it
+                    del self._spec[key]
+                    self._unissue_last()
+                    return False
                 return True
             if len(ev.resident) >= ev.capacity:
                 victim = ev._select_victim(self._batch)
@@ -961,6 +1365,20 @@ class PrefetchCachePolicy(CachePolicy):
         self.pf_removed.append(-1)
         self.prefetch_issued += 1
         return pid
+
+    def _unissue_last(self) -> None:
+        """Forget the prefetch id just created (it was never admitted)."""
+        for arr in (
+            self.pf_key,
+            self.pf_issue,
+            self.pf_target,
+            self.pf_dist,
+            self.pf_rank,
+            self.pf_used,
+            self.pf_removed,
+        ):
+            arr.pop()
+        self.prefetch_issued -= 1
 
     def _stage(self, key: Key, tv: int, d: int, rank: int) -> None:
         pid = self._new_pid(key, tv, d, rank)
@@ -1049,22 +1467,32 @@ def build_composed(
     num_layers: Optional[int] = None,
     prior: Optional[float] = None,
     pin_fraction: float = 0.5,
+    top_k: Optional[int] = None,
+    evictor_kwargs: Optional[Dict[str, object]] = None,
+    issue_budget: Optional[int] = None,
 ) -> PrefetchCachePolicy:
     """``PrefetchCachePolicy`` over ``build_policy(evictor_name, ...)``.
 
     ``capacity`` is the TOTAL number of expert slots; in ``buffer`` mode the
-    evictor gets ``capacity - buffer_slots`` of them.
+    evictor gets ``capacity - buffer_slots`` of them. LCNU variants also get
+    ``prior`` and ``decode_width = top_k`` (visits routing more experts are
+    prefill passes); ``evictor_kwargs`` override any of these.
     """
     from benchmarks.cache_simulator.policies import (
         GEOMETRY_POLICIES,
+        LCNU_POLICIES,
         build_policy,
     )
 
-    kwargs = {}
+    kwargs: Dict[str, object] = {}
     if evictor_name in GEOMETRY_POLICIES and num_layers is not None:
         kwargs["num_layers"] = num_layers
-        if evictor_name == "lcnu" and prior is not None:
+    if evictor_name in LCNU_POLICIES:
+        if prior is not None:
             kwargs["prior"] = prior
+        if top_k is not None:
+            kwargs["decode_width"] = top_k
+    kwargs.update(evictor_kwargs or {})
     slots = capacity
     if admission == "buffer" and prefetcher is not None:
         if not 0 < buffer_slots < capacity:
@@ -1079,6 +1507,7 @@ def build_composed(
         pin_fraction=pin_fraction,
         num_layers=num_layers,
         prior=prior,
+        issue_budget=issue_budget,
     )
 
 

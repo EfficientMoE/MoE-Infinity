@@ -49,7 +49,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from benchmarks.cache_simulator.belady_cache_simulator import belady_simulate
 from benchmarks.cache_simulator.policies import (
+    BYPASS_POLICIES,
     GEOMETRY_POLICIES,
+    LCNU_POLICIES,
     build_policy,
     simulate,
 )
@@ -79,6 +81,8 @@ Key = Tuple[int, int]
 
 EVICTORS = ("lru", "lfu", "lirs", "s3fifo", "w_tinylfu", "layer_lru", "lcnu")
 PREFETCHERS = ("prev_token", "topk_ema", "coactivation", "hybrid", "same_id")
+#: Round-3 predictors (``--prefetchers`` accepts them too).
+MORE_PREFETCHERS = ("logistic", "knn")
 
 #: Per-layer compute measured by ``research/measure_layer.py`` on the capture
 #: host (RTX PRO 6000 Blackwell, CUDA graph, batch-1 GEMVs of one layer's
@@ -178,13 +182,16 @@ def _buffer_slots(adm_params, pf, cap: int) -> int:
 
 
 def run_job(job: Tuple[str, str, str, int]) -> Dict[str, object]:
-    ev_name, spec, adm_spec, cap = job
+    ev_spec, spec, adm_spec, cap = job
     t0 = time.time()
-    if ev_name == "belady":
-        hits = belady_simulate(_TRACE, cap)[0]
-        return {"evictor": "belady", "capacity": cap, "hits": hits}
+    if ev_spec in ("belady", "belady_bypass"):
+        hits = belady_simulate(_TRACE, cap, bypass=ev_spec == "belady_bypass")[
+            0
+        ]
+        return {"evictor": ev_spec, "capacity": cap, "hits": hits}
     pf, _ = _make_prefetcher(spec, int(_GEOM["top_k"]))
     adm, adm_params = parse_spec(adm_spec)
+    ev_name, ev_params = parse_spec(ev_spec)
     slots = _buffer_slots(adm_params, pf, cap) if adm == "buffer" and pf else 0
     pol = build_composed(
         ev_name,
@@ -197,18 +204,33 @@ def run_job(job: Tuple[str, str, str, int]) -> Dict[str, object]:
         pin_fraction=float(adm_params.get("frac", 0.5))
         if adm == "pin"
         else 0.5,
+        top_k=int(_GEOM["top_k"]),
+        evictor_kwargs=ev_params,
+        issue_budget=int(adm_params["issue"])
+        if "issue" in adm_params
+        else None,
     )
     hits, misses, rate = simulate(pol, _TRACE)
     return _row(job, pol, hits, misses, slots, time.time() - t0)
+
+
+def _bypasses(ev_spec: str) -> bool:
+    """Whether the evictor may serve a miss without caching it."""
+    name, params = parse_spec(ev_spec)
+    if "bypass" in params:
+        return params["bypass"] != "never"
+    return name in BYPASS_POLICIES
 
 
 def _row(job, pol: PrefetchCachePolicy, hits, misses, slots, secs):
     ev_name, spec, adm_spec, cap = job
     n = len(_TRACE)
     tokens = _GEOM["tokens"]
-    belady_hits = _BELADY.get(cap)
-    if belady_hits is not None:
-        assert hits <= belady_hits, f"{job} beat Belady: {hits} > {belady_hits}"
+    belady_hits = _BELADY.get(("belady", cap))
+    bypass_hits = _BELADY.get(("belady_bypass", cap))
+    bound = bypass_hits if _bypasses(ev_name) else belady_hits
+    if bound is not None:
+        assert hits <= bound, f"{job} beat its Belady bound: {hits} > {bound}"
     row: Dict[str, object] = {
         "evictor": ev_name,
         "prefetcher": spec,
@@ -217,6 +239,9 @@ def _row(job, pol: PrefetchCachePolicy, hits, misses, slots, secs):
         "buffer_slots": slots,
         "hit_rate": hits / n,
         "belady_hit_rate": (belady_hits / n) if belady_hits is not None else "",
+        "belady_bypass_hit_rate": (bypass_hits / n)
+        if bypass_hits is not None
+        else "",
         "covered_rate": pol.prefetch_covered / n,
         "effective_hit_rate": (hits + pol.prefetch_covered) / n,
         "issued_per_token": pol.prefetch_issued / tokens,
@@ -239,8 +264,8 @@ def _row(job, pol: PrefetchCachePolicy, hits, misses, slots, secs):
         row[f"stall_ms_{name}"] = rep.stall_per_token_s * 1e3
         row[f"xfer_per_tok_{name}"] = rep.transfers_per_token
         row[f"wasted_xfer_per_tok_{name}"] = rep.wasted_transfers / tokens
-        if belady_hits is not None:
-            floor = stall_floor_s(n - belady_hits, pol.visits, link)
+        if bound is not None:
+            floor = stall_floor_s(n - bound, pol.visits, link)
             row[f"stall_floor_ms_{name}"] = floor / tokens * 1e3
         if name != NOMINAL:
             continue
@@ -266,8 +291,13 @@ def run_jobs(jobs, workers: int):
 
 
 def _cost(job) -> float:
-    ev_name, spec, adm, cap = job
-    weight = {"belady": 3, "lcnu": 4, "lfu": 2 + cap / 1024}.get(ev_name, 1)
+    ev_spec, spec, adm, cap = job
+    ev_name = parse_spec(ev_spec)[0]
+    weight = {"lfu": 2 + cap / 1024}.get(ev_name, 1)
+    if ev_name.startswith("belady") or ev_name in LCNU_POLICIES:
+        weight = 4
+    if spec.startswith(("knn", "logistic")):
+        weight *= 2
     return weight * (2 if spec != "none" else 1)
 
 
@@ -275,9 +305,14 @@ def sweep(trace, geom, links, jobs, workers) -> List[Dict[str, object]]:
     """Belady per capacity first (for the assertion), then every job."""
     caps = sorted({job[3] for job in jobs})
     _init(trace, geom, links, {})
+    kinds = ["belady"]
+    if any(_bypasses(job[0]) for job in jobs):
+        kinds.append("belady_bypass")
     belady = {
-        r["capacity"]: r["hits"]
-        for r in run_jobs([("belady", "", "", c) for c in caps], workers)
+        (r["evictor"], r["capacity"]): r["hits"]
+        for r in run_jobs(
+            [(k, "", "", c) for k in kinds for c in caps], workers
+        )
     }
     _init(trace, geom, links, belady)
     order = sorted(jobs, key=_cost, reverse=True)
@@ -303,12 +338,13 @@ class _Silent(PrefetchPolicy):
 
 def _identity_job(job: Tuple[str, int, str]) -> Tuple[str, int, str, int]:
     ev_name, cap, variant = job
-    kwargs = {}
-    if ev_name in GEOMETRY_POLICIES:
+    name, kwargs = parse_spec(ev_name)
+    if name in GEOMETRY_POLICIES:
         kwargs["num_layers"] = int(_GEOM["num_layers"])
-    if ev_name == "lcnu":
+    if name in LCNU_POLICIES:
         kwargs["prior"] = _GEOM["top_k"] / _GEOM["num_experts"]
-    policy = build_policy(ev_name, cap, **kwargs)
+        kwargs.setdefault("decode_width", int(_GEOM["top_k"]))
+    policy = build_policy(name, cap, **kwargs)
     if variant != "alone":
         pf = None
         adm = "same_queue"
