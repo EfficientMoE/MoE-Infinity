@@ -1762,7 +1762,9 @@ bool GroupedWeightOk(const torch::Tensor& w, int device, int64_t rows,
 
 }  // namespace
 
-void ExpertDispatcher::SetGroupedDecode(bool enabled, int top_k) {
+void ExpertDispatcher::SetGroupedDecode(bool enabled, int top_k,
+                                        int activation_kind) {
+  grouped_activation_kind_.store(activation_kind, std::memory_order_release);
   grouped_enabled_.store(enabled, std::memory_order_release);
   grouped_top_k_.store(std::max(0, top_k), std::memory_order_release);
 }
@@ -1779,6 +1781,10 @@ bool ExpertDispatcher::GroupedEligible(const ExpertNodePtr& expert_node,
   }
   if (expert_type_ != DEEPSEEK_MOE_DENSE_ACT_DENSE &&
       expert_type_ != MIXTRAL_MOE_DENSE_ACT_DENSE) {
+    return false;
+  }
+  // The grouped kernels implement silu(gate) * up only.
+  if (grouped_activation_kind_.load(std::memory_order_acquire) != 0) {
     return false;
   }
   if (fp8_in_store_ || dtype_to_torch(dtype_) != torch::kBFloat16 ||

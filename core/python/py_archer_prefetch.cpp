@@ -235,7 +235,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("take_last_active_experts", &ExpertDispatcher::TakeLastActiveExperts)
       .def("get_routing_stats", &ExpertDispatcher::GetRoutingStats)
       .def("set_grouped_decode", &ExpertDispatcher::SetGroupedDecode,
-           py::arg("enabled"), py::arg("top_k") = 0)
+           py::arg("enabled"), py::arg("top_k") = 0,
+           py::arg("activation_kind") = 0)
       .def("_set_dispatch_fault_for_test",
            &ExpertDispatcher::SetDispatchFaultForTest)
       .def("_fail_dispatch_for_test", &ExpertDispatcher::FailDispatchForTest)

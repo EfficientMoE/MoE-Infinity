@@ -1452,6 +1452,7 @@ class OffloadEngine(object):
                 )
                 if hasattr(self.expert_dispatcher, "set_grouped_decode"):
                     from moe_infinity.runtime.grouped_moe_pro6000 import (
+                        grouped_decode_activation_kind,
                         grouped_decode_pro6000_enabled,
                     )
 
@@ -1462,6 +1463,7 @@ class OffloadEngine(object):
                     self.expert_dispatcher.set_grouped_decode(
                         grouped_decode_pro6000_enabled(),
                         int(top_k or 0),
+                        grouped_decode_activation_kind(self.config),
                     )
 
                 for name, param in model.named_parameters(recurse=True):

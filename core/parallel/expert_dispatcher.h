@@ -361,8 +361,10 @@ class ExpertDispatcher : public base::noncopyable {
   // tokens. RTX PRO 6000 only (Gate::kRtxPro6000); other devices keep
   // per-expert execution. MOE_GROUPED_DECODE=0 disables it at construction.
   // top_k bounds the routed experts per token and sizes the activation
-  // workspace (0 = num_experts).
-  void SetGroupedDecode(bool enabled, int top_k);
+  // workspace (0 = num_experts). activation_kind follows MoEActivationKind
+  // (0 = SiLU, 1 = clamped SiLU, 2 = SwiGLU-OAI, < 0 = unknown); the grouped
+  // kernels implement SiLU only, so any other kind keeps per-expert execution.
+  void SetGroupedDecode(bool enabled, int top_k, int activation_kind = 0);
   void SetDispatchFaultForTest(const std::string& stage);
   void FailDispatchForTest(std::uint64_t generation,
                            const std::string& message);
@@ -548,6 +550,7 @@ class ExpertDispatcher : public base::noncopyable {
   // construction. Other devices keep per-expert execution.
   std::vector<bool> grouped_pro6000_ok_;
   std::atomic<int> grouped_top_k_{0};
+  std::atomic<int> grouped_activation_kind_{0};
   std::atomic<std::int64_t> grouped_batches_{0};
   std::atomic<std::int64_t> grouped_experts_{0};
   // Per-device [1] int64 zero index: the single-token accumulate uses an

@@ -344,3 +344,25 @@ def test_grouped_path_failure_rethrows_and_recovers(native_moe, fault):
     out = _dispatch(dispatcher, x, mask, weights, native=True)
     _assert_bf16_close(out, _per_expert_reference(x, mask, weights, experts))
     assert dispatcher.get_routing_stats()["grouped_batches"] >= 1
+
+
+@requires_cuda
+@requires_pro6000
+@pytest.mark.parametrize("activation_kind", [1, 2, -1])
+def test_non_silu_experts_stay_per_expert(native_moe, activation_kind):
+    """Clamped SiLU / SwiGLU-OAI / unknown activations are not grouped."""
+    torch.cuda.set_device(0)
+    num_experts, hidden, inter, tokens = 4, 256, 64, 3
+    gen = torch.Generator().manual_seed(9)
+    dispatcher, _ = native_moe(num_experts, hidden, inter, gen)
+    dispatcher.set_grouped_decode(True, 2, activation_kind)
+    x = torch.randn(tokens, hidden, generator=gen).bfloat16().cuda()
+    mask = torch.zeros(tokens, num_experts, dtype=torch.bool)
+    mask[:, :2] = True
+    mask = mask.cuda()
+    for _ in range(2):  # second dispatch: experts resident
+        _dispatch(dispatcher, x, mask, mask.float() * 0.5, native=True)
+    assert dispatcher.get_routing_stats()["grouped_experts"] == 0
+    dispatcher.set_grouped_decode(True, 2, 0)
+    _dispatch(dispatcher, x, mask, mask.float() * 0.5, native=True)
+    assert dispatcher.get_routing_stats()["grouped_experts"] == 2

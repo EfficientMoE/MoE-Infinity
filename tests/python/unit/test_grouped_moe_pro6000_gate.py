@@ -82,3 +82,42 @@ def test_native_dispatcher_and_kernel_check_the_pro6000_gate():
         _REPO / "extensions/kernel/grouped_moe_decode_pro6000.cu"
     ).read_text()
     assert "Gate::kRtxPro6000" in kernel
+
+
+@pytest.mark.parametrize(
+    "config, kind",
+    [
+        (SimpleNamespace(model_type="qwen3_moe", hidden_act="silu"), 0),
+        (SimpleNamespace(model_type="mixtral", hidden_act="silu"), 0),
+        (
+            SimpleNamespace(
+                model_type="glm5_flash", hidden_act="silu", swiglu_limit=7.0
+            ),
+            1,
+        ),
+        (
+            SimpleNamespace(
+                model_type="minimax_m3_vl",
+                text_config=SimpleNamespace(
+                    model_type="minimax_m3_vl_text", hidden_act="silu"
+                ),
+            ),
+            2,
+        ),
+        (SimpleNamespace(model_type="x", hidden_act="gelu"), -1),
+    ],
+)
+def test_activation_kind_matches_expert_activation_rules(config, kind):
+    from moe_infinity.runtime.grouped_moe_pro6000 import (
+        grouped_decode_activation_kind,
+    )
+
+    assert grouped_decode_activation_kind(config) == kind
+
+
+def test_dispatcher_rejects_non_silu_activation():
+    dispatcher = (_REPO / "core/parallel/expert_dispatcher.cpp").read_text()
+    eligible = re.search(
+        r"bool ExpertDispatcher::GroupedEligible\(.*?\n}\n", dispatcher, re.S
+    ).group(0)
+    assert "grouped_activation_kind_" in eligible
