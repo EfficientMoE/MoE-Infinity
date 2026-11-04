@@ -42,15 +42,24 @@ def b_e(fam):
 
 
 def load_decode_keys(pt):
-    """Decode-access keys in order, mirroring exp704's loader (read-only)."""
+    """Decode-access keys in order, mirroring exp704's loader (read-only).
+
+    DEVIATIONS D1: decode records store (L, seq_pos=1, k); reshape to
+    (L, -1) exactly as run_policies_real.py:169-174 does. Keys keep
+    multiplicity (each of the k routed experts per layer is one access).
+    """
     import torch
     s = torch.load(str(pt), map_location="cpu", weights_only=False)
     keys = []
     for r in s["records"]:
         if r["forward_mode"] == 1:      # prefill
             continue
-        for l, e in r["topk_ids_of_layer"].tolist():
-            keys.append((l, e))
+        tensor = r["topk_ids_of_layer"]
+        num_layers = tensor.shape[0]
+        flattened = tensor.reshape(num_layers, -1)
+        for l in range(num_layers):
+            for e in flattened[l].tolist():
+                keys.append((l, int(e)))
     return keys
 
 
@@ -61,11 +70,18 @@ def ws20(keys):
 
 
 def spread_recompute(trace_json):
-    """max-min of whole-hit over arms, in pp, per cap."""
+    """max-min of burst-window hits over arms, in pp, per cap.
+
+    DEVIATIONS D2: sealed exp704 spread_pp is defined over BURST hits
+    (run_capacitymap.py:138-141), not whole hits. Frozen C4c assumed
+    whole; the frozen-track run caught this (ANCHOR-FAIL, exit 5).
+    Repaired anchor uses the sealed definition; tolerance unchanged
+    (0.01) though exact-0 reproduction was pre-verified at all 27 caps.
+    """
     out = {}
     for cap, cell in trace_json["policy_grid"].items():
-        whole = [a["whole"] for a in cell.values()]
-        out[int(cap)] = (max(whole) - min(whole)) * 100.0
+        burst = [a["burst"] for a in cell.values()]
+        out[int(cap)] = (max(burst) - min(burst)) * 100.0
     return out
 
 
