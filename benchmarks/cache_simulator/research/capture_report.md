@@ -1409,3 +1409,6 @@ SringLCNU (revisit annex + churn ring on LCNU) == ssr_10 to 4dp at every cap: th
 
 ## exp697 — earn-then-immune (HARM by gate artifact; interior point found, ledger #219)
 Churn-collapse prediction REFUTED: ETI = strict interior point. d4096 cap1024 +1.35pp burst/-0.68pp rec vs ring; cap2048 +2.59/-0.51; cap4096 +0.37/+0.02. Exchange ~0.3pp rec per pp burst (5-10x flatter than lcnu->ring). Mechanism exact: recovery carried by class-c carry-in hits (+55/+106 = the deltas to the 4th decimal). HARM gate anchored to lcnu burst (registration error, self-caught, disclosed). det True; REPL exact; ADDENDUM41 (40 taken by exp682 lane); freeze c8bb520. exp698 registered: ETI fraction sweep.
+
+## exp698 — ETI fraction sweep (FLAT_FRONTIER; beyond-pole points; ledger #220)
+9-variant sweep traces a smooth interior family (annex drives burst, ring gates rec). No DOMINANT_POINT (honest negative). Flat exchange confirmed: eti_0510 0.45/0.17pp/pp, eti_1010 0.50/0.20 at cap1024/2048. BEYOND-POLE: cap4096 eti_2020 0.4285/0.9517 beats ssr pole +1.57pp burst at +0.03pp rec. Runner verdict STEEPENS = unit bug in flat check (dr/db>=-0.01 vs registered >=-1.0), self-caught, sealed JSON not edited, corrected per binding spec. det True; anchors==exp694; eti_1010==exp697 (cross-exp determinism); ADDENDUM42; freeze 71ef7db. exp699: beyond-pole existence test.
