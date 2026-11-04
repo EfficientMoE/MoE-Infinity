@@ -254,3 +254,119 @@ python -m benchmarks.cache_simulator.research.run_policies_real \
     --capacities 256 512 1024 2048 3072 4096 6144 \
     --tag qwen3_30b --out benchmarks/cache_simulator/research
 ```
+
+---
+
+# Addendum — 2026-11-01 run: Qwen3-235B-A22B-Instruct-2507-FP8 (THE TARGET)
+
+The 235B window finally opened (all 6 GPUs free). This is the real capture of
+the #289 target model, no longer a proxy.
+
+## GPU availability — unblocked
+
+At the start of this run `nvidia-smi` showed **all 6** RTX PRO 6000 Blackwell
+GPUs free (~0 MiB, 0% util), 767 GB free on `/mnt/raid0nvme0`. Used GPUs
+**0,1,2,3** (`CUDA_VISIBLE_DEVICES=0,1,2,3`) for `--tp 4`. (`num_key_value_heads
+= 4`, so TP4 divides the KV heads exactly; TP6 would not.)
+
+## Launch / download
+
+- `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8` is **ungated** — the config and
+  weights downloaded anonymously (no `HF_TOKEN`); the usual HF
+  unauthenticated-rate-limit warning is harmless. **No auth blocker.**
+- `--tp-size 4 --dp-size 1 --expert-distribution-recorder-mode per_token
+  --disable-cuda-graph --chunked-prefill-size 8192 --mem-fraction-static 0.85`,
+  `SGLANG_ENABLE_JIT_DEEPGEMM=1`, SGLang 0.5.20.
+- **TP4 came up cleanly on sm_120**: all 4 ranks init torch distributed,
+  "Detected fp8 checkpoint", weights streamed to ~85 GB/GPU incl. KV cache,
+  "The server is fired up", healthy. Greedy decode ~12 tok/s (no tuned
+  per-SKU MoE config; routing unaffected). This is the first 4-GPU FP8 run
+  validated on these cards.
+
+## Geometry / id verification (from config.json + dumps)
+
+| field | value |
+| --- | --- |
+| architecture | `Qwen3MoeForCausalLM` |
+| decoder layers | 94 (all MoE, `mlp_only_layers=[]`) ⇒ `ignore_layers=0` |
+| routed experts | 128 |
+| experts per token | 8 (fills the recorder's 8-slot buffer; no `-1` padding) |
+| FP8 | e4m3 block-wise (128x128); `mlp.gate` NOT quantized ⇒ routing is exact |
+| cache-key space | 94 x 128 = 12032 |
+
+Dumps: `topk_ids_of_layer` is `[94, seq_len, 8]` int32, expert ids in
+`[0, 127]`, `last_physical_to_logical_map` is `[94, 128]` and **identity**
+(`ep_num_redundant_experts=0`) ⇒ physical == logical, converter remap is a
+verified no-op. Record 0 prefill (`forward_mode=1`), records 1..64 decode.
+
+## Dataset
+
+- **100 MMLU** questions (`cais/mmlu` all/test, first 100 in fixed order),
+  4-choice MC prompts, greedy (`temperature=0`), `max_new_tokens=64`, batch
+  size 1 per dump.
+- `--tp 4` → all 4 ranks dump the (replicated, non-DP) routing: 100 prompts
+  produced 397 raw `.pt` (97 prompts x4 + 3 prompts x3, a late-flush race on
+  the final prompt dropped 3 rank copies but every prompt kept >=3 identical
+  copies). De-duplicated by routing-content hash to **100** (verified all 100
+  have 65 records each).
+- Converted + merged into one access-stream `.pt`.
+
+## Decode-only vs merged-stream pitfall (important)
+
+A per-request dump has `records = [prefill, decode_1..decode_T]`. Merging 100
+requests gives `records` with **one prefill pass per request** (100 prefill +
+6400 decode = 6500 records here). The naive replay
+(`extract_access_sequence(include_prefill=False)`) drops only the **global**
+`records[0]`, so 99 prefill passes stay in the stream — ~5.19M of the ~10.0M
+accesses. Those inflate the "decode" hit rate (e.g. cap=512 reads **0.6987**
+with the contamination vs the correct **0.4898**). **Do not use the merged
+stream's naive replay for decode numbers.** The correct decode-only stream
+keeps every `seq_len==1` record and drops all prefill passes:
+**4,812,800** accesses, **10,551 / 12,032** distinct keys (87.7%).
+
+## Validation (acceptance criteria)
+
+1. **Schema**: 65 records = 1 prefill `[94, 60, 8]` + 64 decode `[94, 1, 8]`,
+   int32, ids in `[0, 127]`. OK.
+2. **Belady sane + monotonic** (decode-only, `ignore_layers=0`):
+   cap 256/512/1024/2048/4096/8192 -> 0.3067 / 0.4898 / 0.6581 / 0.8082 /
+   0.9320 / 0.9947. In (0,1), non-decreasing. OK. (Reproduced bit-for-bit by a
+   per-record `seq_len==1` decode filter and by the vectorized `opt_mrc`.)
+3. **Belady-ceiling invariant**: enforced by the decode-only policy study.
+4. **Coverage**: 10,551 / 12,032 keys (87.7%); 64 decode steps/request.
+
+## 235B status: CAPTURED (full policy study on `feat/cache-policy-lcnu`)
+
+The 235B target is now captured end to end on real hardware — the #289 "235B
+GPU-pending" status from PRs #293/#294 is resolved. This document records the
+**capture provenance** and the verified decode-only Belady ceiling. The full
+decode-only **policy x capacity study** on this capture (many eviction policies
++ a new LCNU policy, Belady asserted) lives on branch `feat/cache-policy-lcnu`
+(`research/results_real_qwen3_235b_decode.md`, `research/decode_policy_study.md`),
+along with the per-record decode-detection fix to `run_policies_real.py` /
+`mrc.py` that makes merged-stream replays decode-correct. The contaminated
+merged-stream policy table was deliberately **not** published.
+
+## Exact commands (235B run)
+
+```bash
+export HF_HOME=/mnt/raid0nvme0/leyang/hf_cache
+export SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR=<raw_dir>
+export SGLANG_ENABLE_JIT_DEEPGEMM=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+python -m sglang.launch_server \
+    --model-path Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 --trust-remote-code \
+    --tp-size 4 --dp-size 1 \
+    --expert-distribution-recorder-mode per_token --disable-cuda-graph \
+    --chunked-prefill-size 8192 --mem-fraction-static 0.85 \
+    --host 127.0.0.1 --port 30000
+python drive_capture_mmlu.py --port 30000 --max-new-tokens 64 --num-prompts 100
+# de-dup 397 -> 100 by routing content, then convert + sweep:
+python -m benchmarks.cache_simulator.convert_sglang_traces \
+    --inputs "<dedup_dir>/*.pt" --to belady --out <belady_dir>/stream.pt --merge
+python -m benchmarks.cache_simulator.research.run_policies_real \
+    --files "<belady_dir>/stream.pt" --model qwen3-235b \
+    --dataset mmlu100-greedy64 --ignore-layers 0 \
+    --capacities 512 1024 2048 4096 6144 8192 12032 \
+    --tag qwen3_235b --out benchmarks/cache_simulator/research
+```
