@@ -52,7 +52,12 @@
   cap512.
 
 ## Run block (filled by adjudicator; sealed after settle)
-- STATUS: NEXT
+- STATUS: DONE (exit 0)
+- **Result:**
+```
+VERDICT: REC_ONLY | det: True | repl: exp681+exp685+exp686a exact | ALL 3 T-arms (twoway_lr, twoway_cf, fit3_cf) converge to the ring10 endpoint at home (burst 0.0288, rec 0.6853, sw=1-2 no thrash): removing s3fifo does not keep lcnu through burst; ring's decayed rate dominates post-loop so burst ALWAYS inherits the ring (burst_def 5.96pp home, worst 9.23pp) | confirmation windows irrelevant (single early switch, nothing to confirm) | recov -0.73pp home + safety PASS all arms | elapsed 1545s | freeze fd8b92d -> repair c50a310 (repl-gate arm names costfit/ringfit3_10)
+```
+
 
 - FREEZE: fd8b92d (pushed)
 - REPAIR (pre-run, disclosed): replication gate reference arm names fixed — exp681 JSON keys the arm "costfit" and exp686a keys it "ringfit3_10"; grid/adjudicator/bars untouched. First launch crashed at the gate (KeyError, exit 1, no verdict); relaunched on fixed code. Freeze for executed code: this commit.

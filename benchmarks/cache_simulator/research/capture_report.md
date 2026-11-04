@@ -1386,3 +1386,6 @@ RingProbationLCNU (FIFO nursery drains ONLY when full; citizens by LCNU scoring;
 
 ## exp689 — ring visibility arms (VIS_ONLY, ledger #212)
 center_ring10: rec beats lcnu ALL 4 cap512 cells (-0.71/-1.10/-1.37/-0.73pp) with sealed barrier, pays burst +5-6pp -> ladder fails; center_zb REFUTES barrier hypothesis (zero-barrier still collapses rec at home == center); center_lazy dead dose composite-level; center_ghost dominated. Convergent frontier with exp686a/exp687: burst wants LCNU inner, recovery wants RING, s3fifo never best in either critical window. exp690: 2-way lcnu+ring composite + double-window confirmation. ADDENDUM33, freeze c05c4d5, det+repl exact.
+
+## exp690 — 2-way + confirmation arms (REC_ONLY, ledger #213)
+ALL 3 T-arms (twoway_lr/twoway_cf/fit3_cf) converge to the standalone ring10 endpoint at home (burst 0.0288, rec 0.6853; sw=1-2, zero thrash): removing s3fifo does NOT keep lcnu through burst — ring decayed rate dominates post-loop so burst always inherits the ring (burst_def 5.96pp home, worst 9.23pp). Double-window confirmation is a no-op (single early switch). Recov (-0.73pp) + safety PASS. Triple repl exact (exp681/685/686a); det. Conclusion: rate-scored menus cannot time the handoff; burst edge belongs to the LCNU inner itself. exp691 registered: miss-signal adoption freeze. ADDENDUM34; freeze fd8b92d -> repair c50a310.
