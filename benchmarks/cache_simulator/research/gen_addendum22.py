@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """exp676 addendum generator — all values read from exp676-drift.json."""
+
 import json
 from pathlib import Path
 
@@ -10,11 +11,17 @@ for st in d["grid"]:
     for cap, c in st["caps"].items():
         bt = max(c["lcnu"]["trans"], c["s3fifo"]["trans"])
         bp = max(c["lcnu"]["post"], c["s3fifo"]["post"])
-        rows.append({"dir": st["dir"], "W": st["width"], "cap": int(cap),
-                     "d_trans": round((bt - c["costfit"]["trans"]) * 100, 3),
-                     "d_post": round((bp - c["costfit"]["post"]) * 100, 3),
-                     "sw": c["costfit"]["max_sw_win"],
-                     "acc": c["costfit"]["loop"] == c["costfit"]["prop"]})
+        rows.append(
+            {
+                "dir": st["dir"],
+                "W": st["width"],
+                "cap": int(cap),
+                "d_trans": round((bt - c["costfit"]["trans"]) * 100, 3),
+                "d_post": round((bp - c["costfit"]["post"]) * 100, 3),
+                "sw": c["costfit"]["max_sw_win"],
+                "acc": c["costfit"]["loop"] == c["costfit"]["prop"],
+            }
+        )
 worst_t = max(rows, key=lambda r: r["d_trans"])
 worst_p = max(rows, key=lambda r: r["d_post"])
 loc = [r["d_trans"] for r in rows if "l0.6" in r["dir"] or "l0.0" in r["dir"]]
@@ -86,6 +93,12 @@ W sweep at the failing edge: locality-drop direction, W in {{1024, 2048, 4096,
 out = D / "ADDENDUM22.md"
 out.write_text(md)
 import hashlib
-print("ADDENDUM22.md", hashlib.sha256(out.read_bytes()).hexdigest()[:8], "bytes", len(md))
+
+print(
+    "ADDENDUM22.md",
+    hashlib.sha256(out.read_bytes()).hexdigest()[:8],
+    "bytes",
+    len(md),
+)
 for k in ("worst_trans", "worst_post"):
     print(k, worst_t["d_trans"] if k == "worst_trans" else worst_p["d_post"])

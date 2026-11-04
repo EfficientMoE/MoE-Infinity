@@ -26,6 +26,7 @@ Bars (frozen in LEDGER.md before launch):
 Verdict: PROB-WINS > PROB-MECH > PROB-NULL > PROB-HARM.
 Exit codes: 0 settled | 2 det | 3 acc | 4 replication.
 """
+
 import importlib.util
 import json
 import sys
@@ -36,10 +37,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path.home() / "warp-work/moei-granite3b"))
 from benchmarks.cache_simulator.policies import (  # noqa: E402
-    LayerCycleNextUsePolicy, build_policy)
+    LayerCycleNextUsePolicy,
+    build_policy,
+)
 
 spec = importlib.util.spec_from_file_location(
-    "st", str(Path.home() / "warp-work/exp681-moei-crowd/run_crowd.py"))
+    "st", str(Path.home() / "warp-work/exp681-moei-crowd/run_crowd.py")
+)
 st = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(st)
 rd = st.rd
@@ -77,7 +81,8 @@ class ProbCostFit(CostFitPolicy):
     def __init__(self, capacity, num_layers=1, prior=1.0 / 16):
         super().__init__(capacity, num_layers=num_layers, prior=prior)
         self._inners["lcnu"] = ProbationLCNU(
-            capacity, prior=prior, num_layers=num_layers)
+            capacity, prior=prior, num_layers=num_layers
+        )
 
 
 def evaluate(keys, seg):
@@ -95,9 +100,11 @@ def evaluate(keys, seg):
         for name in ARMS:
             pol = builders[name]()
             h = np.array([pol.on_access(k) for k in keys], dtype=bool)
-            cell[name] = {"loop": float(h.mean()),
-                          "burst": float(h[burst].mean()),
-                          "rec": float(h[rec].mean())}
+            cell[name] = {
+                "loop": float(h.mean()),
+                "burst": float(h[burst].mean()),
+                "rec": float(h[rec].mean()),
+            }
         c2 = builders["center"]()
         h2 = np.array([c2.on_access(k) for k in keys], dtype=bool)
         cell["center"]["loop2"] = float(h2.mean())
@@ -108,8 +115,8 @@ def evaluate(keys, seg):
 def run_all():
     grid, t0 = [], time.time()
     seeds = np.random.default_rng(68120261103).spawn(2)  # exp681 scheme, FRESH
-    base_seed = int(seeds[0].integers(0, 2 ** 63))
-    crowd_seed = int(seeds[1].integers(0, 2 ** 63))
+    base_seed = int(seeds[0].integers(0, 2**63))
+    crowd_seed = int(seeds[1].integers(0, 2**63))
     for d in st.BURSTS:
         keys, seg, mid = st.crowd_stream(base_seed, crowd_seed, st.N, d)
         grid.append({"d": d, "caps": evaluate(keys, seg)})
@@ -118,8 +125,11 @@ def run_all():
 
 
 def replication_check(grid):
-    ref = json.loads((Path.home()
-                      / "warp-work/exp681-moei-crowd/exp681-crowd.json").read_text())
+    ref = json.loads(
+        (
+            Path.home() / "warp-work/exp681-moei-crowd/exp681-crowd.json"
+        ).read_text()
+    )
     refc = {}
     for cell in ref["grid"]:
         refc[cell["d"]] = cell["caps"]
@@ -128,8 +138,10 @@ def replication_check(grid):
             r = refc[cell["d"]][cap]["costfit"]
             for m in ("loop", "burst", "rec"):
                 if c["center"][m] != r[m]:
-                    return (f"repl mismatch d={cell['d']} cap={cap} {m}: "
-                            f"{c['center'][m]} != {r[m]}")
+                    return (
+                        f"repl mismatch d={cell['d']} cap={cap} {m}: "
+                        f"{c['center'][m]} != {r[m]}"
+                    )
     return None
 
 
@@ -141,20 +153,32 @@ def adjudicate(grid):
                 return {"bad": "acc", "d": cell["d"], "cap": cap}
             row = {"d": cell["d"], "cap": int(cap)}
             for a in ARMS:
-                row[a] = {m: round(c[a][m], 6) for m in ("loop", "burst", "rec")}
-            row["pl_vs_l_burst_pp"] = round((c["prob_lcnu"]["burst"]
-                                             - c["lcnu"]["burst"]) * 100, 3)
-            row["pl_vs_l_loop_pp"] = round((c["prob_lcnu"]["loop"]
-                                            - c["lcnu"]["loop"]) * 100, 3)
-            row["pl_vs_l_rec_pp"] = round((c["prob_lcnu"]["rec"]
-                                           - c["lcnu"]["rec"]) * 100, 3)
-            row["cp_vs_cf_rec_pp"] = round((c["center_prob"]["rec"]
-                                            - c["center"]["rec"]) * 100, 3)
+                row[a] = {
+                    m: round(c[a][m], 6) for m in ("loop", "burst", "rec")
+                }
+            row["pl_vs_l_burst_pp"] = round(
+                (c["prob_lcnu"]["burst"] - c["lcnu"]["burst"]) * 100, 3
+            )
+            row["pl_vs_l_loop_pp"] = round(
+                (c["prob_lcnu"]["loop"] - c["lcnu"]["loop"]) * 100, 3
+            )
+            row["pl_vs_l_rec_pp"] = round(
+                (c["prob_lcnu"]["rec"] - c["lcnu"]["rec"]) * 100, 3
+            )
+            row["cp_vs_cf_rec_pp"] = round(
+                (c["center_prob"]["rec"] - c["center"]["rec"]) * 100, 3
+            )
             row["cp_vs_best_loop_pp"] = round(
-                (c["center_prob"]["loop"]
-                 - max(c["lcnu"]["loop"], c["center"]["loop"])) * 100, 3)
-            row["cp_vs_l_loop_pp"] = round((c["center_prob"]["loop"]
-                                            - c["lcnu"]["loop"]) * 100, 3)
+                (
+                    c["center_prob"]["loop"]
+                    - max(c["lcnu"]["loop"], c["center"]["loop"])
+                )
+                * 100,
+                3,
+            )
+            row["cp_vs_l_loop_pp"] = round(
+                (c["center_prob"]["loop"] - c["lcnu"]["loop"]) * 100, 3
+            )
             if row["pl_vs_l_burst_pp"] < -0.5 or row["pl_vs_l_loop_pp"] < -0.5:
                 flags["h1"] = False
             if row["pl_vs_l_rec_pp"] < -0.5 or row["cp_vs_cf_rec_pp"] < -0.5:
@@ -172,9 +196,14 @@ def adjudicate(grid):
         v = "PROB-HARM"
     else:
         v = "PROB-NULL"
-    return {"verdict": v, "h1": flags["h1"], "h2": flags["h2"],
-            "h3_wins": f"{flags['h3n']}/8", "h3_all": flags["h3_all"],
-            "rows": rows}
+    return {
+        "verdict": v,
+        "h1": flags["h1"],
+        "h2": flags["h2"],
+        "h3_wins": f"{flags['h3n']}/8",
+        "h3_all": flags["h3_all"],
+        "rows": rows,
+    }
 
 
 if __name__ == "__main__":
@@ -192,19 +221,46 @@ if __name__ == "__main__":
     res["det"] = json.dumps(g1) == json.dumps(g2)
     res["repl"] = True
     res["grid"] = g1
-    res["rules"] = {"streams": "exp681 exact (68120261103)",
-                    "arms": ARMS,
-                    "bars": {"REPL": "center == exp681 costfit per-cell exact",
-                             "H1": "prob_lcnu burst&loop >= lcnu-0.5pp ALL",
-                             "H2": "prob rec >= refs-0.5pp ALL",
-                             "H3": "center_prob >= max(lcnu,center) in >=4/8 AND >= lcnu-0.5pp ALL"}}
+    res["rules"] = {
+        "streams": "exp681 exact (68120261103)",
+        "arms": ARMS,
+        "bars": {
+            "REPL": "center == exp681 costfit per-cell exact",
+            "H1": "prob_lcnu burst&loop >= lcnu-0.5pp ALL",
+            "H2": "prob rec >= refs-0.5pp ALL",
+            "H3": "center_prob >= max(lcnu,center) in >=4/8 AND >= lcnu-0.5pp ALL",
+        },
+    }
     res["elapsed_s"] = round(time.time() - t0, 1)
     (D / "exp684-prob.json").write_text(json.dumps(res, indent=1))
-    print("VERDICT:", res["verdict"], "| det:", res["det"], "| repl: True",
-          "| h1:", res["h1"], "| h2:", res["h2"], "| h3 wins:", res["h3_wins"],
-          "| h3_all:", res["h3_all"])
+    print(
+        "VERDICT:",
+        res["verdict"],
+        "| det:",
+        res["det"],
+        "| repl: True",
+        "| h1:",
+        res["h1"],
+        "| h2:",
+        res["h2"],
+        "| h3 wins:",
+        res["h3_wins"],
+        "| h3_all:",
+        res["h3_all"],
+    )
     for r in res["rows"]:
-        print("cell:", {k: r[k] for k in ("d", "cap", "pl_vs_l_burst_pp",
-                                          "pl_vs_l_rec_pp", "cp_vs_cf_rec_pp",
-                                          "cp_vs_best_loop_pp")})
+        print(
+            "cell:",
+            {
+                k: r[k]
+                for k in (
+                    "d",
+                    "cap",
+                    "pl_vs_l_burst_pp",
+                    "pl_vs_l_rec_pp",
+                    "cp_vs_cf_rec_pp",
+                    "cp_vs_best_loop_pp",
+                )
+            },
+        )
     sys.exit(0 if res["det"] else 2)

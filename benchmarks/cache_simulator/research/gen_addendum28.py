@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Programmatic ADDENDUM28 generator for exp682 (doorkeeper on stationary)."""
+
 import json
 from pathlib import Path
 
@@ -63,4 +64,6 @@ L = [
 ]
 out = "\n".join(L)
 (D / "ADDENDUM28.md").write_text(out)
-print(f"ADDENDUM28.md {len(out.encode())} bytes | h2bad {R['h2_bad']}/16 | h3bad {R['h3_bad']} | worst hit {worst_hit['d_hit_pp']}pp")
+print(
+    f"ADDENDUM28.md {len(out.encode())} bytes | h2bad {R['h2_bad']}/16 | h3bad {R['h3_bad']} | worst hit {worst_hit['d_hit_pp']}pp"
+)

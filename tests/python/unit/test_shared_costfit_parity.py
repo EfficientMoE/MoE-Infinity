@@ -105,7 +105,9 @@ def test_view_missing_key_semantics_match_dict():
     assert v.get(k, "dflt") == "dflt"
     assert (k in v) is False
     # del of an absent key: KeyError, and it must not create a record.
-    assert _outcome(lambda: v.__delitem__(k)) == _outcome(lambda: d.__delitem__(k))
+    assert _outcome(lambda: v.__delitem__(k)) == _outcome(
+        lambda: d.__delitem__(k)
+    )
     assert t.table == {}
 
 
@@ -116,7 +118,9 @@ def test_view_delete_only_occupied_slot_drops_record():
     assert set(t.table) == {k}
     assert k in b and k not in a and k not in c
     del b[k]
-    assert k not in t.table, "record must be dropped when its last slot is unset"
+    assert (
+        k not in t.table
+    ), "record must be dropped when its last slot is unset"
     assert k not in b
     assert _outcome(lambda: b[k])[1] is KeyError
     assert b.get(k, -1) == -1
@@ -253,12 +257,18 @@ def gen_bursty(n=20000, seed=12) -> List[Key]:
     out: List[Key] = []
     while len(out) < n:
         key = (rng.randrange(NUM_LAYERS), rng.randrange(2400))
-        run = rng.choice((1, 2, 3, 8, 40, 150)) if rng.random() < 0.5 else rng.randint(1, 10)
+        run = (
+            rng.choice((1, 2, 3, 8, 40, 150))
+            if rng.random() < 0.5
+            else rng.randint(1, 10)
+        )
         out.extend([key] * run)
     return out[:n]
 
 
-def gen_hot_rotation(k: int, n=20000, seed=13, experts=64, hot=6, topk=2) -> List[Key]:
+def gen_hot_rotation(
+    k: int, n=20000, seed=13, experts=64, hot=6, topk=2
+) -> List[Key]:
     """Layer-cycled top-k routing from per-layer hot sets, rotated every k accesses."""
     rng = random.Random(seed * 7919 + k)
     hs = {l: rng.sample(range(experts), hot) for l in range(NUM_LAYERS)}
@@ -269,7 +279,10 @@ def gen_hot_rotation(k: int, n=20000, seed=13, experts=64, hot=6, topk=2) -> Lis
             for e in rng.sample(list(pool), topk):
                 out.append((l, e))
                 if len(out) % k == 0:
-                    hs = {ll: rng.sample(range(experts), hot) for ll in range(NUM_LAYERS)}
+                    hs = {
+                        ll: rng.sample(range(experts), hot)
+                        for ll in range(NUM_LAYERS)
+                    }
     return out[:n]
 
 
@@ -291,7 +304,9 @@ def gen_first_touch_flood(n=20000) -> List[Key]:
     return [(i % NUM_LAYERS, i // NUM_LAYERS) for i in range(n)]
 
 
-def gen_regime_flip(n=64000, seed=0, seg=16384, rotate_p=1.0, experts=64, hot=6, topk=2) -> List[Key]:
+def gen_regime_flip(
+    n=64000, seed=0, seg=16384, rotate_p=1.0, experts=64, hot=6, topk=2
+) -> List[Key]:
     """Alternate stable / fast-rotating segments so the arbiters actually switch."""
     rng = random.Random(seed)
     hs = {l: rng.sample(range(experts), hot) for l in range(NUM_LAYERS)}
@@ -371,7 +386,9 @@ def _leaf_state(leaf, universe) -> tuple:
         fields = LCNU_FIELDS
         orders = (
             tuple(leaf.resident),
-            tuple(sorted((l, tuple(sorted(s))) for l, s in leaf._by_layer.items())),
+            tuple(
+                sorted((l, tuple(sorted(s))) for l, s in leaf._by_layer.items())
+            ),
             tuple(sorted(leaf._visits.items())),
             leaf._cur,
             tuple(sorted(leaf._used_now)),
@@ -379,7 +396,9 @@ def _leaf_state(leaf, universe) -> tuple:
     per_key = []
     for f in fields:
         d = getattr(leaf, f)
-        per_key.append((f, tuple((k, k in d, d[k] if k in d else None) for k in universe)))
+        per_key.append(
+            (f, tuple((k, k in d, d[k] if k in d else None) for k in universe))
+        )
     per_key = tuple(per_key)
     return (leaf.hits, leaf.misses, orders, per_key)
 
@@ -412,8 +431,16 @@ def run_case(name: str, cap: int, accesses) -> dict:
         "sw_mass": pol._sw_mass,
         "rothead": None
         if rothead is None
-        else (rothead.choice, rothead.switches, rothead.hits, rothead.misses, tuple(rothead.buffer)),
-        "leaves": tuple((path, _leaf_state(leaf, universe)) for path, leaf in _leaves(pol)),
+        else (
+            rothead.choice,
+            rothead.switches,
+            rothead.hits,
+            rothead.misses,
+            tuple(rothead.buffer),
+        ),
+        "leaves": tuple(
+            (path, _leaf_state(leaf, universe)) for path, leaf in _leaves(pol)
+        ),
     }
 
 
@@ -438,8 +465,14 @@ def test_parity_on_adversarial_streams(stream_name, cap, pair):
     b = cached_case(shared_name, cap, stream_name)
 
     # The shared run must really be shared (else parity is vacuous).
-    assert type(a["policy"]) is (CostFitPolicy if sealed_name == "costfit" else CostFit3Policy)
-    assert type(b["policy"]) is (SharedCostFitPolicy if shared_name == "shared_costfit" else SharedCostFit3Policy)
+    assert type(a["policy"]) is (
+        CostFitPolicy if sealed_name == "costfit" else CostFit3Policy
+    )
+    assert type(b["policy"]) is (
+        SharedCostFitPolicy
+        if shared_name == "shared_costfit"
+        else SharedCostFit3Policy
+    )
     for _, leaf in _leaves(a["policy"]):
         assert type(leaf) in (LayerCycleNextUsePolicy, S3FIFOPolicy)
     for _, leaf in _leaves(b["policy"]):
@@ -473,14 +506,20 @@ def test_matrix_exercises_the_interesting_paths():
     """Guard against a vacuous parity matrix: the streams must actually hit
     evictions, outer switches (both directions), and every costfit3 choice."""
     flood = cached_case("costfit", 64, "first_touch_flood")
-    assert flood["hits"] == 0 and flood["misses"] == len(stream("first_touch_flood"))
+    assert flood["hits"] == 0 and flood["misses"] == len(
+        stream("first_touch_flood")
+    )
     assert all(k[0] == 0 for k in stream("single_layer"))
     for sname in STREAMS:
         for cap in CAPACITIES:
             r = cached_case("costfit3", cap, sname)
             if cap == 8:
                 assert r["evictions"], (sname, cap)
-    cf_switches = max(cached_case("costfit", c, s)["switches"] for s in STREAMS for c in CAPACITIES)
+    cf_switches = max(
+        cached_case("costfit", c, s)["switches"]
+        for s in STREAMS
+        for c in CAPACITIES
+    )
     assert cf_switches >= 2, "no costfit case switched back"
     cf3_adopted = {
         n
@@ -490,7 +529,9 @@ def test_matrix_exercises_the_interesting_paths():
         if v
     }
     rothead_internal = max(
-        cached_case("costfit3", c, s)["rothead"][1] for s in STREAMS for c in CAPACITIES
+        cached_case("costfit3", c, s)["rothead"][1]
+        for s in STREAMS
+        for c in CAPACITIES
     )
     assert "s3fifo" in cf3_adopted or "rothead" in cf3_adopted, cf3_adopted
     assert rothead_internal >= 1
@@ -516,7 +557,9 @@ def test_parity_tiny_capacities(cap):
     """Degenerate S3-FIFO geometry (s_cap=1, m_cap in {0,1,2,9})."""
     acc = stream("bursty")[:6000] + stream("rotation_k17")[:6000]
     for sealed, shared in PAIRS:
-        assert fingerprint(run_case(sealed, cap, acc)) == fingerprint(run_case(shared, cap, acc))
+        assert fingerprint(run_case(sealed, cap, acc)) == fingerprint(
+            run_case(shared, cap, acc)
+        )
 
 
 # =========================================================================== #
@@ -577,7 +620,11 @@ def _assert_table_invariant(shared_pol, sealed_pol, accesses):
             assert occupied == set(sealed_dict), (path, f)
             assert {k: v[k] for k in occupied} == sealed_dict, (path, f)
             if isinstance(leaf, S3FIFOPolicy):
-                assert occupied == set(leaf.resident) == set(leaf.small) | set(leaf.main)
+                assert (
+                    occupied
+                    == set(leaf.resident)
+                    == set(leaf.small) | set(leaf.main)
+                )
                 assert occupied.isdisjoint(leaf.ghost)
             else:
                 assert occupied == universe
@@ -586,7 +633,10 @@ def _assert_table_invariant(shared_pol, sealed_pol, accesses):
     assert set(table.table) == union == universe
 
 
-@pytest.mark.parametrize("stream_name", ["uniform_shrink_expand", "first_touch_flood", "rotation_k17"])
+@pytest.mark.parametrize(
+    "stream_name",
+    ["uniform_shrink_expand", "first_touch_flood", "rotation_k17"],
+)
 @pytest.mark.parametrize("pair", PAIRS, ids=lambda p: p[1])
 def test_slot_lifecycle_composite(stream_name, pair):
     sealed_name, shared_name = pair
@@ -596,9 +646,14 @@ def test_slot_lifecycle_composite(stream_name, pair):
         _assert_table_invariant(b["policy"], a["policy"], stream(stream_name))
 
 
-@pytest.mark.parametrize("stream_name", ["uniform_shrink_expand", "first_touch_flood", "bursty", "rotation_k97"])
+@pytest.mark.parametrize(
+    "stream_name",
+    ["uniform_shrink_expand", "first_touch_flood", "bursty", "rotation_k97"],
+)
 @pytest.mark.parametrize("cap", [1, 8, 64])
-def test_slot_lifecycle_standalone_s3fifo_frees_forgotten_keys(stream_name, cap):
+def test_slot_lifecycle_standalone_s3fifo_frees_forgotten_keys(
+    stream_name, cap
+):
     """Without LCNU history in the table, records must track residency exactly:
     keys sitting in ghost or dropped out of ghost own NO record. Checked at
     every step (prefix), against a sealed S3FIFO stepped in lockstep."""
@@ -639,7 +694,11 @@ def test_registration_build_policy_classes():
     # geometry forwarded identically to the sealed builds
     for pol in (p, q):
         lc = pol._inners["lcnu"]
-        assert lc.num_layers == NUM_LAYERS and lc.prior == PRIOR and pol.capacity == 16
+        assert (
+            lc.num_layers == NUM_LAYERS
+            and lc.prior == PRIOR
+            and pol.capacity == 16
+        )
     assert q._inners["rothead"].lcnu.num_layers == NUM_LAYERS
     assert q._inners["rothead"].lcnu.prior == PRIOR
 
@@ -647,7 +706,10 @@ def test_registration_build_policy_classes():
 def test_registration_geometry_and_policy_order():
     assert {"shared_costfit", "shared_costfit3"} <= GEOMETRY_POLICIES
     order = run_policies_real.POLICY_ORDER
-    assert order.count("shared_costfit") == 1 and order.count("shared_costfit3") == 1
+    assert (
+        order.count("shared_costfit") == 1
+        and order.count("shared_costfit3") == 1
+    )
     i3 = order.index("costfit3")
     assert order.index("shared_costfit") > i3
     assert order.index("shared_costfit3") > i3
@@ -664,7 +726,9 @@ def test_registration_geometry_and_policy_order():
 # =========================================================================== #
 # 5. Determinism / isolation
 # =========================================================================== #
-@pytest.mark.parametrize("name", ["costfit", "shared_costfit", "costfit3", "shared_costfit3"])
+@pytest.mark.parametrize(
+    "name", ["costfit", "shared_costfit", "costfit3", "shared_costfit3"]
+)
 def test_determinism_same_case_twice(name):
     acc = stream("rotation_k97")
     r1 = fingerprint(run_case(name, 64, acc))

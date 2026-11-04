@@ -53,4 +53,3 @@ exp673) in which the self-limiting property held with zero violations.
 Cost model, parameters (exp667 center), registration points, prereg sha,
 and the three disclosed failed design iterations: `exp673-moei-costfit3/PREREG.md`
 (frozen pre-run, `f7378dd3`). Data: `research/exp673-costfit3.json`.
-

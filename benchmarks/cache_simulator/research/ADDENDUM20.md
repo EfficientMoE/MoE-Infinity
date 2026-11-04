@@ -37,4 +37,3 @@ memory). Mapping fixed to the prereg range before freeze.
 exp674 (prereg frozen): does the winner transfer to exp670's out-of-family synthetic
 grid (streams sha-asserted identical), vs center and vs HL-only? Settles whether the
 NEW-AREA half-life is mechanism or real-trace overfit.
-

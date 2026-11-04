@@ -1434,9 +1434,21 @@ def _build_hotfit(cap, **kw):
 
     return HotFitPolicy(cap, **kw)
 
+
 #: Policies that accept the model geometry (``num_layers``; ``lcnu`` also
 #: ``prior = top_k / num_experts``) as keyword arguments.
-GEOMETRY_POLICIES = {"layer_lru", "lcnu", "rothead", "hotfit", "shadowfit", "decayfit", "costfit", "costfit3", "shared_costfit", "shared_costfit3"}
+GEOMETRY_POLICIES = {
+    "layer_lru",
+    "lcnu",
+    "rothead",
+    "hotfit",
+    "shadowfit",
+    "decayfit",
+    "costfit",
+    "costfit3",
+    "shared_costfit",
+    "shared_costfit3",
+}
 
 
 # Keep a module-level INF for callers that compare against Belady.

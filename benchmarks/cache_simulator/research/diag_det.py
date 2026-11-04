@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Diagnose exp680 det=False: run both grids, deep-diff every cell/arm/field."""
+
 import importlib.util
 import json
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location(
-    "st", str(Path(__file__).parent / "run_stagger.py"))
+    "st", str(Path(__file__).parent / "run_stagger.py")
+)
 st = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(st)
 
@@ -14,7 +16,9 @@ def diff(a, b, path="", out=None):
     if out is None:
         out = []
     if type(a) is not type(b):
-        out.append(f"{path}: TYPE {type(a).__name__} vs {type(b).__name__} ({a!r} | {b!r})")
+        out.append(
+            f"{path}: TYPE {type(a).__name__} vs {type(b).__name__} ({a!r} | {b!r})"
+        )
     elif isinstance(a, dict):
         for k in set(a) | set(b):
             diff(a.get(k), b.get(k), f"{path}.{k}", out)
@@ -40,5 +44,12 @@ print("grids identical:", js1 == js2, "| lens:", len(js1), len(js2))
 if js1 != js2:
     for i, (c1, c2) in enumerate(zip(js1, js2)):
         if c1 != c2:
-            print("first char diff at", i, ":", js1[max(0,i-80):i+40], "||", js2[max(0,i-80):i+40])
+            print(
+                "first char diff at",
+                i,
+                ":",
+                js1[max(0, i - 80) : i + 40],
+                "||",
+                js2[max(0, i - 80) : i + 40],
+            )
             break

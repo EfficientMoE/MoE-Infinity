@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
 """Generate ADDENDUM20.md from exp669-bo.json + bo-trials.jsonl. Programmatic only."""
+
 import json
 from pathlib import Path
 
 D = Path(__file__).parent
 d = json.loads((D / "exp669-bo.json").read_text())
-trials = [json.loads(l) for l in (D / "bo-trials.jsonl").read_text().splitlines() if l.strip()]
+trials = [
+    json.loads(l)
+    for l in (D / "bo-trials.jsonl").read_text().splitlines()
+    if l.strip()
+]
 feas = [t for t in trials if t["feasible"]]
 best = min(feas, key=lambda t: t["f"])
 bp = d["best_params"]
 
 # worst deficit + max switches at the best point (from its recorded per-model cells)
-worst = max(c["deficit_pp"]
-            for m in best["per_model"].values() for c in m["caps"].values())
+worst = max(
+    c["deficit_pp"]
+    for m in best["per_model"].values()
+    for c in m["caps"].values()
+)
 max_sw = best["g_max_switches"]
 
 h1 = d["best_feasible_f"] < 0.062
 h2 = not (16384 <= bp["half_life"] <= 65536)
 h3 = d["pearson_pred_vs_obs"] >= 0.5
-verdict = "IMPROVED" if h1 else ("INFORMATIVE-NO-IMPROVEMENT" if h3 else "UNINFORMATIVE")
+verdict = (
+    "IMPROVED"
+    if h1
+    else ("INFORMATIVE-NO-IMPROVEMENT" if h3 else "UNINFORMATIVE")
+)
 
 lines = [
     "# Addendum 20 — exp669: Bayesian optimization of CostFit (MARGIN, GAMMA, HALF_LIFE)",
@@ -70,4 +82,6 @@ lines = [
 ]
 (D / "ADDENDUM20.md").write_text("\n".join(lines) + "\n")
 print(f"ADDENDUM20.md written: {len(lines)} lines")
-print(f"verdict={verdict} h1={h1} h2={h2} h3={h3} worst={worst} max_sw={max_sw} best_trial={best['trial']}")
+print(
+    f"verdict={verdict} h1={h1} h2={h2} h3={h3} worst={worst} max_sw={max_sw} best_trial={best['trial']}"
+)

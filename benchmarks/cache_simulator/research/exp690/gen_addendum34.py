@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """gen_addendum34.py — programmatic addendum for exp690 (REC_ONLY)."""
+
 import json
 from pathlib import Path
 
@@ -11,8 +12,10 @@ assert r["rec_only"] == ["twoway_lr", "twoway_cf", "fit3_cf"]
 
 home = [x for x in r["rows"] if x["d"] == 4096 and x["cap"] == 512][0]
 worst = max(x["twoway_lr_burst_def_pp"] for x in r["rows"])
-sws = {a: sorted({x[a]["sw"] for x in r["rows"]}) for a in
-       ("twoway_lr", "twoway_cf", "fit3_cf")}
+sws = {
+    a: sorted({x[a]["sw"] for x in r["rows"]})
+    for a in ("twoway_lr", "twoway_cf", "fit3_cf")
+}
 
 md = f"""# Addendum 34 — exp690: 2-way lcnu+ring and double-window confirmation (REC_ONLY)
 

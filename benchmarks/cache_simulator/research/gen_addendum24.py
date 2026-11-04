@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Programmatic ADDENDUM24 generator for exp678 (no hand-transcribed values)."""
+
 import json
 from pathlib import Path
 
@@ -11,14 +12,24 @@ rows = []
 for st in R["grid"]:
     c = st["cell"]
     bt = min(c["lcnu"]["time"], c["s3fifo"]["time"])
-    rows.append((st["skew"], st["cap"], st["kappa"], st["phi"],
-                 (c["costfit"]["time"] - bt) / bt * 100))
+    rows.append(
+        (
+            st["skew"],
+            st["cap"],
+            st["kappa"],
+            st["phi"],
+            (c["costfit"]["time"] - bt) / bt * 100,
+        )
+    )
 worst = max(rows, key=lambda r: r[4])
 viol = [r for r in rows if r[4] > 1.0]
 v = viol[0]
 # mechanism numbers from the violating cell
-stv = next(s for s in R["grid"]
-           if (s["skew"], s["cap"], s["kappa"], s["phi"]) == tuple(v[:4]))
+stv = next(
+    s
+    for s in R["grid"]
+    if (s["skew"], s["cap"], s["kappa"], s["phi"]) == tuple(v[:4])
+)
 cv = stv["cell"]
 N = 638_976
 miss_cf = round((1 - cv["costfit"]["hit"]) * N)
@@ -73,5 +84,7 @@ L = [
 ]
 out = "\n".join(L)
 (D / "ADDENDUM24.md").write_text(out)
-print(f"ADDENDUM24.md {len(out.encode())} bytes | viol {len(viol)}/24:",
-      [(x[0], x[1], x[2], x[3], round(x[4], 3)) for x in viol])
+print(
+    f"ADDENDUM24.md {len(out.encode())} bytes | viol {len(viol)}/24:",
+    [(x[0], x[1], x[2], x[3], round(x[4], 3)) for x in viol],
+)

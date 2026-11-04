@@ -31,10 +31,10 @@ from benchmarks.cache_simulator.policies import (
 
 Key = Tuple[int, int]
 
-PROBE_WINDOW = 2048        # accesses per frequency window
-RESEGMENT = 4096           # re-evaluate the probe every N accesses
-COVERAGE = 0.80            # fraction of window accesses the hot set must cover
-ALPHA = 1.0                # capacity multiplier on N_hot
+PROBE_WINDOW = 2048  # accesses per frequency window
+RESEGMENT = 4096  # re-evaluate the probe every N accesses
+COVERAGE = 0.80  # fraction of window accesses the hot set must cover
+ALPHA = 1.0  # capacity multiplier on N_hot
 
 
 class HotFitPolicy(CachePolicy):
@@ -51,7 +51,9 @@ class HotFitPolicy(CachePolicy):
 
     def __init__(self, capacity: int, num_layers: int = 1, prior: float = 0.05):
         super().__init__(capacity)
-        self.lcnu = LayerCycleNextUsePolicy(capacity, num_layers=num_layers, prior=prior)
+        self.lcnu = LayerCycleNextUsePolicy(
+            capacity, num_layers=num_layers, prior=prior
+        )
         self.s3fifo = S3FIFOPolicy(capacity)
         self.buffer: deque = deque(maxlen=PROBE_WINDOW)
         self.choice = "lcnu"

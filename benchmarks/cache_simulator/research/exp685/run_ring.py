@@ -39,6 +39,7 @@ Dual-Pareto bars (pre-committed, per Michael's ladder):
 Verdicts: BOTH_PASS > IN_BURST_FIXED_ONLY > RECOVERY_KEPT_ONLY > RING-HARM.
 Exit codes: 0 settled | 2 det | 3 acc | 4 repl1 | 5 repl2.
 """
+
 import importlib.util
 import json
 import sys
@@ -49,14 +50,18 @@ import numpy as np
 
 sys.path.insert(0, str(Path.home() / "warp-work/moei-granite3b"))
 from benchmarks.cache_simulator.policies import (  # noqa: E402
-    LayerCycleNextUsePolicy, build_policy)
+    LayerCycleNextUsePolicy,
+    build_policy,
+)
 
 spec = importlib.util.spec_from_file_location(
-    "st", str(Path.home() / "warp-work/exp681-moei-crowd/run_crowd.py"))
+    "st", str(Path.home() / "warp-work/exp681-moei-crowd/run_crowd.py")
+)
 st = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(st)
 spec82 = importlib.util.spec_from_file_location(
-    "d82", str(Path.home() / "warp-work/exp682-moei-door/run_door.py"))
+    "d82", str(Path.home() / "warp-work/exp682-moei-door/run_door.py")
+)
 d82 = importlib.util.module_from_spec(spec82)
 spec82.loader.exec_module(d82)
 rd = st.rd
@@ -105,12 +110,11 @@ class RingProbationLCNU(LayerCycleNextUsePolicy):
 class RingCostFit(CostFitPolicy):
     """Frozen composite with RingProbationLCNU as the lcnu inner (t=0)."""
 
-    def __init__(self, capacity, num_layers=1, prior=1.0 / 16,
-                 ring_frac=0.25):
+    def __init__(self, capacity, num_layers=1, prior=1.0 / 16, ring_frac=0.25):
         super().__init__(capacity, num_layers=num_layers, prior=prior)
         self._inners["lcnu"] = RingProbationLCNU(
-            capacity, ring_frac=ring_frac, prior=prior,
-            num_layers=num_layers)
+            capacity, ring_frac=ring_frac, prior=prior, num_layers=num_layers
+        )
 
 
 def evaluate(keys, seg):
@@ -134,9 +138,11 @@ def evaluate(keys, seg):
         for name in ARMS:
             pol = builders[name]()
             h = np.array([pol.on_access(k) for k in keys], dtype=bool)
-            cell[name] = {"loop": float(h.mean()),
-                          "burst": float(h[burst].mean()),
-                          "rec": float(h[rec].mean())}
+            cell[name] = {
+                "loop": float(h.mean()),
+                "burst": float(h[burst].mean()),
+                "rec": float(h[rec].mean()),
+            }
         c2 = center(cap)
         h2 = np.array([c2.on_access(k) for k in keys], dtype=bool)
         cell["center"]["loop2"] = float(h2.mean())
@@ -147,8 +153,8 @@ def evaluate(keys, seg):
 def run_all():
     grid, t0 = [], time.time()
     seeds = np.random.default_rng(68120261103).spawn(2)  # exp681 scheme, FRESH
-    base_seed = int(seeds[0].integers(0, 2 ** 63))
-    crowd_seed = int(seeds[1].integers(0, 2 ** 63))
+    base_seed = int(seeds[0].integers(0, 2**63))
+    crowd_seed = int(seeds[1].integers(0, 2**63))
     for d in st.BURSTS:
         keys, seg, mid = st.crowd_stream(base_seed, crowd_seed, st.N, d)
         grid.append({"d": d, "caps": evaluate(keys, seg)})
@@ -157,10 +163,17 @@ def run_all():
 
 
 def replication_check(grid):
-    r1 = json.loads((Path.home()
-                     / "warp-work/exp681-moei-crowd/exp681-crowd.json").read_text())
-    r3 = json.loads((Path.home() / "warp-work/exp683-moei-doorcrowd/"
-                     "exp683-doorcrowd.json").read_text())
+    r1 = json.loads(
+        (
+            Path.home() / "warp-work/exp681-moei-crowd/exp681-crowd.json"
+        ).read_text()
+    )
+    r3 = json.loads(
+        (
+            Path.home() / "warp-work/exp683-moei-doorcrowd/"
+            "exp683-doorcrowd.json"
+        ).read_text()
+    )
     ref1 = {c["d"]: c["caps"] for c in r1["grid"]}
     ref3 = {c["d"]: c["caps"] for c in r3["grid"]}
     for cell in grid:
@@ -168,20 +181,29 @@ def replication_check(grid):
             a = ref1[cell["d"]][cap]["costfit"]
             for m in ("loop", "burst", "rec"):
                 if c["center"][m] != a[m]:
-                    return 4, (f"repl1 d={cell['d']} cap={cap} {m}: "
-                               f"{c['center'][m]} != {a[m]}")
+                    return 4, (
+                        f"repl1 d={cell['d']} cap={cap} {m}: "
+                        f"{c['center'][m]} != {a[m]}"
+                    )
             b = ref3[cell["d"]][cap]["door4096"]
             for m in ("loop", "burst", "rec"):
                 if c["door4096"][m] != b[m]:
-                    return 5, (f"repl2 d={cell['d']} cap={cap} {m}: "
-                               f"{c['door4096'][m]} != {b[m]}")
+                    return 5, (
+                        f"repl2 d={cell['d']} cap={cap} {m}: "
+                        f"{c['door4096'][m]} != {b[m]}"
+                    )
     return 0, None
 
 
 def adjudicate(grid):
     rows = []
-    f = {"burst": True, "burst_def": True, "recov": True, "safety": True,
-         "recov_n": 0}
+    f = {
+        "burst": True,
+        "burst_def": True,
+        "recov": True,
+        "safety": True,
+        "recov_n": 0,
+    }
     for cell in grid:
         for cap, c in cell["caps"].items():
             if c["center"]["loop"] != c["center"]["loop2"]:
@@ -189,18 +211,23 @@ def adjudicate(grid):
             bb = c["lcnu"]["burst"]
             row = {"d": cell["d"], "cap": int(cap)}
             for a in ARMS:
-                row[a] = {m: round(c[a][m], 6) for m in ("loop", "burst", "rec")}
-            row["cr_vs_l_burst_pp"] = round((c["center_ring25"]["burst"]
-                                             - bb) * 100, 3)
+                row[a] = {
+                    m: round(c[a][m], 6) for m in ("loop", "burst", "rec")
+                }
+            row["cr_vs_l_burst_pp"] = round(
+                (c["center_ring25"]["burst"] - bb) * 100, 3
+            )
             bd_cf = (bb - c["center"]["burst"]) * 100
             bd_cr = (bb - c["center_ring25"]["burst"]) * 100
             row["burst_def_cf_pp"] = round(bd_cf, 3)
             row["burst_def_cr_pp"] = round(bd_cr, 3)
             rd_l = (c["lcnu"]["rec"] - c["lcnu"]["rec"]) * 100
-            row["rec_def_cr_pp"] = round((c["lcnu"]["rec"]
-                                          - c["center_ring25"]["rec"]) * 100, 3)
-            row["ring25_vs_l_rec_pp"] = round((c["ring25"]["rec"]
-                                               - c["lcnu"]["rec"]) * 100, 3)
+            row["rec_def_cr_pp"] = round(
+                (c["lcnu"]["rec"] - c["center_ring25"]["rec"]) * 100, 3
+            )
+            row["ring25_vs_l_rec_pp"] = round(
+                (c["ring25"]["rec"] - c["lcnu"]["rec"]) * 100, 3
+            )
             for a in ("ring10", "ring25", "center_ring25"):
                 if (c[a]["loop"] - c["lcnu"]["loop"]) * 100 < -0.5:
                     f["safety"] = False
@@ -210,7 +237,11 @@ def adjudicate(grid):
                 f["burst_def"] = False
             if row["ring25_vs_l_rec_pp"] < -0.5:
                 f["recov"] = False
-            if cell["d"] == 4096 and int(cap) == 512 and row["rec_def_cr_pp"] <= 2.5:
+            if (
+                cell["d"] == 4096
+                and int(cap) == 512
+                and row["rec_def_cr_pp"] <= 2.5
+            ):
                 f["recov_n"] += 1
             rows.append(row)
     if f["burst_def"] and f["recov"] and f["safety"] and f["recov_n"] == 1:
@@ -239,19 +270,42 @@ if __name__ == "__main__":
     res["det"] = json.dumps(g1) == json.dumps(g2)
     res["repl"] = "exp681+exp683 exact"
     res["grid"] = g1
-    res["rules"] = {"streams": "exp681 exact (68120261103)",
-                    "arms": ARMS,
-                    "bars": {"REPL1": "center == exp681 costfit exact (exit 4)",
-                             "REPL2": "door4096 == exp683 exact (exit 5)",
-                             "BURST": "cr burst >= lcnu-0.5 ALL & def <= cf def ALL",
-                             "RECOV": "cr rec_def <= 2.5pp @d4096/cap512 & ring25 rec >= lcnu-0.5 ALL",
-                             "SAFETY": "ring loops >= lcnu-0.5 ALL"}}
+    res["rules"] = {
+        "streams": "exp681 exact (68120261103)",
+        "arms": ARMS,
+        "bars": {
+            "REPL1": "center == exp681 costfit exact (exit 4)",
+            "REPL2": "door4096 == exp683 exact (exit 5)",
+            "BURST": "cr burst >= lcnu-0.5 ALL & def <= cf def ALL",
+            "RECOV": "cr rec_def <= 2.5pp @d4096/cap512 & ring25 rec >= lcnu-0.5 ALL",
+            "SAFETY": "ring loops >= lcnu-0.5 ALL",
+        },
+    }
     res["elapsed_s"] = round(time.time() - t0, 1)
     (D / "exp685-ring.json").write_text(json.dumps(res, indent=1))
-    print("VERDICT:", res["verdict"], "| det:", res["det"], "| repl:",
-          res["repl"], "| bars:", res["bars"])
+    print(
+        "VERDICT:",
+        res["verdict"],
+        "| det:",
+        res["det"],
+        "| repl:",
+        res["repl"],
+        "| bars:",
+        res["bars"],
+    )
     for r in res["rows"]:
-        print("cell:", {k: r[k] for k in ("d", "cap", "cr_vs_l_burst_pp",
-                                          "burst_def_cr_pp", "rec_def_cr_pp",
-                                          "ring25_vs_l_rec_pp")})
+        print(
+            "cell:",
+            {
+                k: r[k]
+                for k in (
+                    "d",
+                    "cap",
+                    "cr_vs_l_burst_pp",
+                    "burst_def_cr_pp",
+                    "rec_def_cr_pp",
+                    "ring25_vs_l_rec_pp",
+                )
+            },
+        )
     sys.exit(0 if res["det"] else 2)

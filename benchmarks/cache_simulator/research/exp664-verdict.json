@@ -1,57 +1,57 @@
 {
- "per_model": {
-  "qwen30b": {
-   "band": [
-    1152,
-    1280
-   ],
-   "hits": {
-    "S1": false,
-    "S2": false,
-    "S3": false,
-    "S4": false
-   },
-   "medians": {
-    "S1": 1543,
-    "S2": 1128,
-    "S3": 1430,
-    "S4": 1728
-   },
-   "predicted": {
-    "S1": 1664,
-    "S2": 1152,
-    "S3": 1536,
-    "S4": 1792
-   }
+  "per_model": {
+    "qwen30b": {
+      "band": [
+        1152,
+        1280
+      ],
+      "hits": {
+        "S1": false,
+        "S2": false,
+        "S3": false,
+        "S4": false
+      },
+      "medians": {
+        "S1": 1543,
+        "S2": 1128,
+        "S3": 1430,
+        "S4": 1728
+      },
+      "predicted": {
+        "S1": 1664,
+        "S2": 1152,
+        "S3": 1536,
+        "S4": 1792
+      }
+    },
+    "granite": {
+      "band": [
+        768,
+        1024
+      ],
+      "hits": {
+        "S1": true,
+        "S2": true,
+        "S3": false,
+        "S4": true
+      },
+      "medians": {
+        "S1": 951,
+        "S2": 846,
+        "S3": 701,
+        "S4": 820
+      },
+      "predicted": {
+        "S1": 1024,
+        "S2": 1024,
+        "S3": 768,
+        "S4": 1024
+      }
+    }
   },
-  "granite": {
-   "band": [
-    768,
-    1024
-   ],
-   "hits": {
-    "S1": true,
-    "S2": true,
-    "S3": false,
-    "S4": true
-   },
-   "medians": {
-    "S1": 951,
-    "S2": 846,
-    "S3": 701,
-    "S4": 820
-   },
-   "predicted": {
-    "S1": 1024,
-    "S2": 1024,
-    "S3": 768,
-    "S4": 1024
-   }
-  }
- },
- "H1_primary_cov90_30b": false,
- "H2_primary_cov90_granite": false,
- "H3_secondary_hits_both": [],
- "H3_pass": false,
- "verdict": "FAIL"
+  "H1_primary_cov90_30b": false,
+  "H2_primary_cov90_granite": false,
+  "H3_secondary_hits_both": [],
+  "H3_pass": false,
+  "verdict": "FAIL"
 }

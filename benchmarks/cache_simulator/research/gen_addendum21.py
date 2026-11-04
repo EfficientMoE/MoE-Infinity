@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Generate ADDENDUM21.md from exp674-hl-transfer.json. Programmatic only."""
+
 import json
 from pathlib import Path
 
@@ -9,8 +10,12 @@ bp = d["bo_params"]
 sv = [v for v in d["violations"] if v["mode"].startswith("SAFETY")]
 worst = max(sv, key=lambda v: v["deficit_pp"])
 n_skew14 = sum(1 for v in sv if v["cfg"]["s"] == 1.4)
-beats = sum(1 for st in d["grid"] for c in st["caps"].values()
-            if c["cf_bo"]["rate"] > c["cf_center"]["rate"])
+beats = sum(
+    1
+    for st in d["grid"]
+    for c in st["caps"].values()
+    if c["cf_bo"]["rate"] > c["cf_center"]["rate"]
+)
 tot = sum(len(st["caps"]) for st in d["grid"])
 hl = round(bp["half_life"])
 
@@ -54,4 +59,6 @@ lines = [
 ]
 (D / "ADDENDUM21.md").write_text("\n".join(lines) + "\n")
 print(f"ADDENDUM21.md written: {len(lines)} lines")
-print(f"verdict={d['verdict']} safety_cells={len(sv)} worst={worst['deficit_pp']} beats={beats}/{tot} skew14={n_skew14}")
+print(
+    f"verdict={d['verdict']} safety_cells={len(sv)} worst={worst['deficit_pp']} beats={beats}/{tot} skew14={n_skew14}"
+)

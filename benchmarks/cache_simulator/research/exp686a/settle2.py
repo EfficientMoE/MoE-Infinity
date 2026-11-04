@@ -4,14 +4,17 @@ block's python step (disclosed: the fenced block's display-escaped \"
 form is a SyntaxError when executed verbatim under `sh -c`; measurement
 completed BEFORE the settle step, JSON untouched, so the Result block is
 reconstructed from exp686a-ringfit3.json rather than the lost $OUT)."""
+
 import json
 import pathlib
 
 D = pathlib.Path("/Users/mfethe/warp-work/exp686a-moei-ringfit3")
 p = D / "LEDGER.md"
 text = p.read_text()
-target = ("- STATUS: NEXT  # (marker INSIDE the fenced example; "
-          "tail marker below is authoritative)")
+target = (
+    "- STATUS: NEXT  # (marker INSIDE the fenced example; "
+    "tail marker below is authoritative)"
+)
 assert target in text, "no STATUS: NEXT marker"
 
 R = json.loads((D / "exp686a-ringfit3.json").read_text())
@@ -37,8 +40,11 @@ for r in R["rows"]:
         f"{r['loop_vs_l_ringfit3_10_pp']:+.2f} adopt burst={a10['burst']} "
         f"rec={a10['rec']} sw={a10['sw']} | lazy2 rdef "
         f"{r['rec_def_lazy2_pp']:+.2f} loop_vs_l "
-        f"{r['loop_vs_l_lazy2_pp']:+.2f}")
-out = ("- STATUS: DONE (exit 0; settle re-executed with quoting fix — "
-       "disclosed)\n- **Result:**\n```\n" + "\n".join(lines) + "\n```")
+        f"{r['loop_vs_l_lazy2_pp']:+.2f}"
+    )
+out = (
+    "- STATUS: DONE (exit 0; settle re-executed with quoting fix — "
+    "disclosed)\n- **Result:**\n```\n" + "\n".join(lines) + "\n```"
+)
 p.write_text(text.replace(target, out, 1))
 print("LEDGER settled:", p, len(out), "bytes")

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Programmatic ADDENDUM32 generator for exp686a (ring first-class candidacy)."""
+
 import json
 from pathlib import Path
 
@@ -9,14 +10,20 @@ assert R["verdict"] == "IN_BURST_KEPT_VISIBLE" and R["det"]
 assert R["repl"] == "exp681 costfit + exp685 ring10/ring25 exact"
 
 home = [r for r in R["rows"] if r["d"] == 4096 and r["cap"] == 512][0]
-g10_ladder = [(r["d"], r["cap"], r["burst_def_ringfit3_10_pp"],
-               r["burst_def_cf_pp"]) for r in R["rows"]
-              if r["burst_def_ringfit3_10_pp"] > r["burst_def_cf_pp"]]
-rf3_equal_cells = [r for r in R["rows"]
-                   if r["rec_def_ringfit3_pp"] == r["rec_def_cf_pp"]]
+g10_ladder = [
+    (r["d"], r["cap"], r["burst_def_ringfit3_10_pp"], r["burst_def_cf_pp"])
+    for r in R["rows"]
+    if r["burst_def_ringfit3_10_pp"] > r["burst_def_cf_pp"]
+]
+rf3_equal_cells = [
+    r for r in R["rows"] if r["rec_def_ringfit3_pp"] == r["rec_def_cf_pp"]
+]
 a10_home = home["adopt_ringfit3_10"]
-adopt512 = [r for r in R["rows"] if r["cap"] == 512
-            and r["adopt_ringfit3_10"]["rec"] == "ring"]
+adopt512 = [
+    r
+    for r in R["rows"]
+    if r["cap"] == 512 and r["adopt_ringfit3_10"]["rec"] == "ring"
+]
 sd = {s["d"]: s for s in R["stride_diag"]}
 
 L = [

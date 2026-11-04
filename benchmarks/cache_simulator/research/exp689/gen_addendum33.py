@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """gen_addendum33.py — programmatic addendum for exp689 (VIS_ONLY)."""
+
 import json
 from pathlib import Path
 
@@ -11,7 +12,8 @@ assert r["repl"] == "exp681+exp685 exact"
 home = [x for x in r["rows"] if x["d"] == 4096 and x["cap"] == 512][0]
 cap512 = [x for x in r["rows"] if x["cap"] == 512]
 rec_line = " ".join(
-    f"d{x['d']}:{x['center_ring10_rec_def_pp']:+.2f}" for x in cap512)
+    f"d{x['d']}:{x['center_ring10_rec_def_pp']:+.2f}" for x in cap512
+)
 worst_burst = max(x["center_ring10_burst_def_pp"] for x in r["rows"])
 zb_home = home["center_zb_rec_def_pp"]
 lazy = r["arm_bars"]["center_lazy"]

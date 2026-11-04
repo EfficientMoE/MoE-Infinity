@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Programmatic ADDENDUM31 generator for exp685 (bounded nursery ring)."""
+
 import json
 from pathlib import Path
 
@@ -9,11 +10,15 @@ assert R["verdict"] == "IN_BURST_FIXED_ONLY" and R["det"]
 assert R["repl"] == "exp681+exp683 exact"
 
 g = {(c["d"], int(k)): v for c in R["grid"] for k, v in c["caps"].items()}
-home = g[(4096, 512)]           # the gating cell
-worst_def = max(
-    (r for r in R["rows"] if r["burst_def_cr_pp"] > 0),
-    key=lambda r: r["burst_def_cr_pp"]) if any(
-    r["burst_def_cr_pp"] > 0 for r in R["rows"]) else R["rows"][0]
+home = g[(4096, 512)]  # the gating cell
+worst_def = (
+    max(
+        (r for r in R["rows"] if r["burst_def_cr_pp"] > 0),
+        key=lambda r: r["burst_def_cr_pp"],
+    )
+    if any(r["burst_def_cr_pp"] > 0 for r in R["rows"])
+    else R["rows"][0]
+)
 pp = lambda x: f"{x * 100:+.2f}pp"
 
 L = [

@@ -1,1284 +1,1284 @@
 {
- "verdict": "GENERALIZES",
- "H1": true,
- "H2": true,
- "H3": true,
- "informative_cells": 59,
- "primary_informative_streams": 9,
- "uninformative_streams": 0,
- "violations": [],
- "grid": [
-  {
-   "cfg": {
-    "s": 0.8,
-    "lam": 0.0,
-    "E": 128,
-    "L": 48
-   },
-   "seed": "ec1309d5",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.102706,
-      "prop": 0.102706,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.177665,
-      "prop": 0.177665,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.177362,
-      "prop": 0.177362,
-      "switches": 1
-     }
+  "verdict": "GENERALIZES",
+  "H1": true,
+  "H2": true,
+  "H3": true,
+  "informative_cells": 59,
+  "primary_informative_streams": 9,
+  "uninformative_streams": 0,
+  "violations": [],
+  "grid": [
+    {
+      "cfg": {
+        "s": 0.8,
+        "lam": 0.0,
+        "E": 128,
+        "L": 48
+      },
+      "seed": "ec1309d5",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.102706,
+            "prop": 0.102706,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.177665,
+            "prop": 0.177665,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.177362,
+            "prop": 0.177362,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.201978,
+            "prop": 0.201978,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.262438,
+            "prop": 0.262438,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.262153,
+            "prop": 0.262153,
+            "switches": 1
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.347189,
+            "prop": 0.347189,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.365893,
+            "prop": 0.365893,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.365795,
+            "prop": 0.365795,
+            "switches": 1
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.513814,
+            "prop": 0.513814,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.489137,
+            "prop": 0.489137,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.513832,
+            "prop": 0.513832,
+            "switches": 2
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.684932,
+            "prop": 0.684932,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.63866,
+            "prop": 0.63866,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.684932,
+            "prop": 0.684932,
+            "switches": 0
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.868659,
+            "prop": 0.868659,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.853021,
+            "prop": 0.853021,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.868659,
+            "prop": 0.868659,
+            "switches": 0
+          }
+        }
+      }
     },
-    "256": {
-     "lcnu": {
-      "rate": 0.201978,
-      "prop": 0.201978,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.262438,
-      "prop": 0.262438,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.262153,
-      "prop": 0.262153,
-      "switches": 1
-     }
+    {
+      "cfg": {
+        "s": 0.8,
+        "lam": 0.3,
+        "E": 128,
+        "L": 48
+      },
+      "seed": "4e437859",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.117581,
+            "prop": 0.117581,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.177246,
+            "prop": 0.177246,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.176947,
+            "prop": 0.176947,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.227211,
+            "prop": 0.227211,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.266372,
+            "prop": 0.266372,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.266081,
+            "prop": 0.266081,
+            "switches": 1
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.382908,
+            "prop": 0.382908,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.381836,
+            "prop": 0.381836,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.38176,
+            "prop": 0.38176,
+            "switches": 1
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.549938,
+            "prop": 0.549938,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.526161,
+            "prop": 0.526161,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.549448,
+            "prop": 0.549448,
+            "switches": 2
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.714189,
+            "prop": 0.714189,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.700933,
+            "prop": 0.700933,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.713739,
+            "prop": 0.713739,
+            "switches": 2
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.883605,
+            "prop": 0.883605,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.887239,
+            "prop": 0.887239,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.886692,
+            "prop": 0.886692,
+            "switches": 1
+          }
+        }
+      }
     },
-    "512": {
-     "lcnu": {
-      "rate": 0.347189,
-      "prop": 0.347189,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.365893,
-      "prop": 0.365893,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.365795,
-      "prop": 0.365795,
-      "switches": 1
-     }
+    {
+      "cfg": {
+        "s": 0.8,
+        "lam": 0.6,
+        "E": 128,
+        "L": 48
+      },
+      "seed": "20dbff87",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.136302,
+            "prop": 0.136302,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.186129,
+            "prop": 0.186129,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.18583,
+            "prop": 0.18583,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.257435,
+            "prop": 0.257435,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.286809,
+            "prop": 0.286809,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.286515,
+            "prop": 0.286515,
+            "switches": 1
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.422444,
+            "prop": 0.422444,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.42069,
+            "prop": 0.42069,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.420686,
+            "prop": 0.420686,
+            "switches": 2
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.588796,
+            "prop": 0.588796,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.584797,
+            "prop": 0.584797,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.588636,
+            "prop": 0.588636,
+            "switches": 2
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.743298,
+            "prop": 0.743298,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.762101,
+            "prop": 0.762101,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.761911,
+            "prop": 0.761911,
+            "switches": 1
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.898088,
+            "prop": 0.898088,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.913292,
+            "prop": 0.913292,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.912975,
+            "prop": 0.912975,
+            "switches": 1
+          }
+        }
+      }
     },
-    "1024": {
-     "lcnu": {
-      "rate": 0.513814,
-      "prop": 0.513814,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.489137,
-      "prop": 0.489137,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.513832,
-      "prop": 0.513832,
-      "switches": 2
-     }
+    {
+      "cfg": {
+        "s": 1.1,
+        "lam": 0.0,
+        "E": 128,
+        "L": 48
+      },
+      "seed": "e6579c1c",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.294413,
+            "prop": 0.294413,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.336502,
+            "prop": 0.336502,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.336021,
+            "prop": 0.336021,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.410496,
+            "prop": 0.410496,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.454686,
+            "prop": 0.454686,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.454371,
+            "prop": 0.454371,
+            "switches": 1
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.566077,
+            "prop": 0.566077,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.573003,
+            "prop": 0.573003,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.572968,
+            "prop": 0.572968,
+            "switches": 1
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.708076,
+            "prop": 0.708076,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.687489,
+            "prop": 0.687489,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.708225,
+            "prop": 0.708225,
+            "switches": 2
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.826284,
+            "prop": 0.826284,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.798003,
+            "prop": 0.798003,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.826284,
+            "prop": 0.826284,
+            "switches": 0
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.931292,
+            "prop": 0.931292,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.923647,
+            "prop": 0.923647,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.931292,
+            "prop": 0.931292,
+            "switches": 0
+          }
+        }
+      }
     },
-    "2048": {
-     "lcnu": {
-      "rate": 0.684932,
-      "prop": 0.684932,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.63866,
-      "prop": 0.63866,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.684932,
-      "prop": 0.684932,
-      "switches": 0
-     }
+    {
+      "cfg": {
+        "s": 1.1,
+        "lam": 0.3,
+        "E": 128,
+        "L": 48
+      },
+      "seed": "8b32f83f",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.301402,
+            "prop": 0.301402,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.336379,
+            "prop": 0.336379,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.335931,
+            "prop": 0.335931,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.427503,
+            "prop": 0.427503,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.45541,
+            "prop": 0.45541,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.455106,
+            "prop": 0.455106,
+            "switches": 1
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.589837,
+            "prop": 0.589837,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.582338,
+            "prop": 0.582338,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.589853,
+            "prop": 0.589853,
+            "switches": 2
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.729649,
+            "prop": 0.729649,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.71312,
+            "prop": 0.71312,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.729165,
+            "prop": 0.729165,
+            "switches": 2
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.842595,
+            "prop": 0.842595,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.837547,
+            "prop": 0.837547,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.842495,
+            "prop": 0.842495,
+            "switches": 2
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.939183,
+            "prop": 0.939183,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.940783,
+            "prop": 0.940783,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.939183,
+            "prop": 0.939183,
+            "switches": 0
+          }
+        }
+      }
     },
-    "4096": {
-     "lcnu": {
-      "rate": 0.868659,
-      "prop": 0.868659,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.853021,
-      "prop": 0.853021,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.868659,
-      "prop": 0.868659,
-      "switches": 0
-     }
+    {
+      "cfg": {
+        "s": 1.1,
+        "lam": 0.6,
+        "E": 128,
+        "L": 48
+      },
+      "seed": "06308398",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.313398,
+            "prop": 0.313398,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.341842,
+            "prop": 0.341842,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.341334,
+            "prop": 0.341334,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.450493,
+            "prop": 0.450493,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.46914,
+            "prop": 0.46914,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.468828,
+            "prop": 0.468828,
+            "switches": 1
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.618294,
+            "prop": 0.618294,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.610947,
+            "prop": 0.610947,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.617739,
+            "prop": 0.617739,
+            "switches": 2
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.755023,
+            "prop": 0.755023,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.753447,
+            "prop": 0.753447,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.753281,
+            "prop": 0.753281,
+            "switches": 1
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.859566,
+            "prop": 0.859566,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.874474,
+            "prop": 0.874474,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.874238,
+            "prop": 0.874238,
+            "switches": 1
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.948006,
+            "prop": 0.948006,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.954064,
+            "prop": 0.954064,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.953503,
+            "prop": 0.953503,
+            "switches": 1
+          }
+        }
+      }
+    },
+    {
+      "cfg": {
+        "s": 1.4,
+        "lam": 0.0,
+        "E": 128,
+        "L": 48
+      },
+      "seed": "a4953e41",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.477357,
+            "prop": 0.477357,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.51287,
+            "prop": 0.51287,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.512516,
+            "prop": 0.512516,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.622299,
+            "prop": 0.622299,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.643843,
+            "prop": 0.643843,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.643644,
+            "prop": 0.643644,
+            "switches": 1
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.756383,
+            "prop": 0.756383,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.753079,
+            "prop": 0.753079,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.756305,
+            "prop": 0.756305,
+            "switches": 2
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.851932,
+            "prop": 0.851932,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.839439,
+            "prop": 0.839439,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.851666,
+            "prop": 0.851666,
+            "switches": 2
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.918826,
+            "prop": 0.918826,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.906858,
+            "prop": 0.906858,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.918826,
+            "prop": 0.918826,
+            "switches": 0
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.967785,
+            "prop": 0.967785,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.965688,
+            "prop": 0.965688,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.967785,
+            "prop": 0.967785,
+            "switches": 0
+          }
+        }
+      }
+    },
+    {
+      "cfg": {
+        "s": 1.4,
+        "lam": 0.3,
+        "E": 128,
+        "L": 48
+      },
+      "seed": "73c6fc7d",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.48781,
+            "prop": 0.48781,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.515598,
+            "prop": 0.515598,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.515371,
+            "prop": 0.515371,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.637084,
+            "prop": 0.637084,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.647482,
+            "prop": 0.647482,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.64728,
+            "prop": 0.64728,
+            "switches": 1
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.772765,
+            "prop": 0.772765,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.762369,
+            "prop": 0.762369,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.772267,
+            "prop": 0.772267,
+            "switches": 2
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.865486,
+            "prop": 0.865486,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.860296,
+            "prop": 0.860296,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.865533,
+            "prop": 0.865533,
+            "switches": 2
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.927342,
+            "prop": 0.927342,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.928497,
+            "prop": 0.928497,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.928161,
+            "prop": 0.928161,
+            "switches": 1
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.972299,
+            "prop": 0.972299,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.973111,
+            "prop": 0.973111,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.972299,
+            "prop": 0.972299,
+            "switches": 0
+          }
+        }
+      }
+    },
+    {
+      "cfg": {
+        "s": 1.4,
+        "lam": 0.6,
+        "E": 128,
+        "L": 48
+      },
+      "seed": "c1e635b9",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.496318,
+            "prop": 0.496318,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.519284,
+            "prop": 0.519284,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.519008,
+            "prop": 0.519008,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.653513,
+            "prop": 0.653513,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.657203,
+            "prop": 0.657203,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.65703,
+            "prop": 0.65703,
+            "switches": 1
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.790471,
+            "prop": 0.790471,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.785492,
+            "prop": 0.785492,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.790206,
+            "prop": 0.790206,
+            "switches": 2
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.879121,
+            "prop": 0.879121,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.884129,
+            "prop": 0.884129,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.88395,
+            "prop": 0.88395,
+            "switches": 1
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.936029,
+            "prop": 0.936029,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.945234,
+            "prop": 0.945234,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.944896,
+            "prop": 0.944896,
+            "switches": 1
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.976465,
+            "prop": 0.976465,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.978137,
+            "prop": 0.978137,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.976465,
+            "prop": 0.976465,
+            "switches": 0
+          }
+        }
+      }
+    },
+    {
+      "cfg": {
+        "s": 1.1,
+        "lam": 0.3,
+        "E": 32,
+        "L": 32
+      },
+      "seed": "df84484f",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.488136,
+            "prop": 0.488136,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.509672,
+            "prop": 0.509672,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.509339,
+            "prop": 0.509339,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.682677,
+            "prop": 0.682677,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.668097,
+            "prop": 0.668097,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.682017,
+            "prop": 0.682017,
+            "switches": 2
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.859088,
+            "prop": 0.859088,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.843625,
+            "prop": 0.843625,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.859011,
+            "prop": 0.859011,
+            "switches": 0
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          }
+        }
+      }
+    },
+    {
+      "cfg": {
+        "s": 1.4,
+        "lam": 0.6,
+        "E": 32,
+        "L": 32
+      },
+      "seed": "f9ab8c9e",
+      "caps": {
+        "128": {
+          "lcnu": {
+            "rate": 0.656615,
+            "prop": 0.656615,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.66081,
+            "prop": 0.66081,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.660476,
+            "prop": 0.660476,
+            "switches": 1
+          }
+        },
+        "256": {
+          "lcnu": {
+            "rate": 0.81782,
+            "prop": 0.81782,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.806475,
+            "prop": 0.806475,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.816746,
+            "prop": 0.816746,
+            "switches": 2
+          }
+        },
+        "512": {
+          "lcnu": {
+            "rate": 0.928487,
+            "prop": 0.928487,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.929799,
+            "prop": 0.929799,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.929576,
+            "prop": 0.929576,
+            "switches": 1
+          }
+        },
+        "1024": {
+          "lcnu": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          }
+        },
+        "4096": {
+          "lcnu": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "s3fifo": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          },
+          "costfit": {
+            "rate": 0.998396,
+            "prop": 0.998396,
+            "switches": 0
+          }
+        }
+      }
     }
-   }
-  },
-  {
-   "cfg": {
-    "s": 0.8,
-    "lam": 0.3,
-    "E": 128,
-    "L": 48
-   },
-   "seed": "4e437859",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.117581,
-      "prop": 0.117581,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.177246,
-      "prop": 0.177246,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.176947,
-      "prop": 0.176947,
-      "switches": 1
-     }
-    },
-    "256": {
-     "lcnu": {
-      "rate": 0.227211,
-      "prop": 0.227211,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.266372,
-      "prop": 0.266372,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.266081,
-      "prop": 0.266081,
-      "switches": 1
-     }
-    },
-    "512": {
-     "lcnu": {
-      "rate": 0.382908,
-      "prop": 0.382908,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.381836,
-      "prop": 0.381836,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.38176,
-      "prop": 0.38176,
-      "switches": 1
-     }
-    },
-    "1024": {
-     "lcnu": {
-      "rate": 0.549938,
-      "prop": 0.549938,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.526161,
-      "prop": 0.526161,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.549448,
-      "prop": 0.549448,
-      "switches": 2
-     }
-    },
-    "2048": {
-     "lcnu": {
-      "rate": 0.714189,
-      "prop": 0.714189,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.700933,
-      "prop": 0.700933,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.713739,
-      "prop": 0.713739,
-      "switches": 2
-     }
-    },
-    "4096": {
-     "lcnu": {
-      "rate": 0.883605,
-      "prop": 0.883605,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.887239,
-      "prop": 0.887239,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.886692,
-      "prop": 0.886692,
-      "switches": 1
-     }
-    }
-   }
-  },
-  {
-   "cfg": {
-    "s": 0.8,
-    "lam": 0.6,
-    "E": 128,
-    "L": 48
-   },
-   "seed": "20dbff87",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.136302,
-      "prop": 0.136302,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.186129,
-      "prop": 0.186129,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.18583,
-      "prop": 0.18583,
-      "switches": 1
-     }
-    },
-    "256": {
-     "lcnu": {
-      "rate": 0.257435,
-      "prop": 0.257435,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.286809,
-      "prop": 0.286809,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.286515,
-      "prop": 0.286515,
-      "switches": 1
-     }
-    },
-    "512": {
-     "lcnu": {
-      "rate": 0.422444,
-      "prop": 0.422444,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.42069,
-      "prop": 0.42069,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.420686,
-      "prop": 0.420686,
-      "switches": 2
-     }
-    },
-    "1024": {
-     "lcnu": {
-      "rate": 0.588796,
-      "prop": 0.588796,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.584797,
-      "prop": 0.584797,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.588636,
-      "prop": 0.588636,
-      "switches": 2
-     }
-    },
-    "2048": {
-     "lcnu": {
-      "rate": 0.743298,
-      "prop": 0.743298,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.762101,
-      "prop": 0.762101,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.761911,
-      "prop": 0.761911,
-      "switches": 1
-     }
-    },
-    "4096": {
-     "lcnu": {
-      "rate": 0.898088,
-      "prop": 0.898088,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.913292,
-      "prop": 0.913292,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.912975,
-      "prop": 0.912975,
-      "switches": 1
-     }
-    }
-   }
-  },
-  {
-   "cfg": {
-    "s": 1.1,
-    "lam": 0.0,
-    "E": 128,
-    "L": 48
-   },
-   "seed": "e6579c1c",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.294413,
-      "prop": 0.294413,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.336502,
-      "prop": 0.336502,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.336021,
-      "prop": 0.336021,
-      "switches": 1
-     }
-    },
-    "256": {
-     "lcnu": {
-      "rate": 0.410496,
-      "prop": 0.410496,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.454686,
-      "prop": 0.454686,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.454371,
-      "prop": 0.454371,
-      "switches": 1
-     }
-    },
-    "512": {
-     "lcnu": {
-      "rate": 0.566077,
-      "prop": 0.566077,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.573003,
-      "prop": 0.573003,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.572968,
-      "prop": 0.572968,
-      "switches": 1
-     }
-    },
-    "1024": {
-     "lcnu": {
-      "rate": 0.708076,
-      "prop": 0.708076,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.687489,
-      "prop": 0.687489,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.708225,
-      "prop": 0.708225,
-      "switches": 2
-     }
-    },
-    "2048": {
-     "lcnu": {
-      "rate": 0.826284,
-      "prop": 0.826284,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.798003,
-      "prop": 0.798003,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.826284,
-      "prop": 0.826284,
-      "switches": 0
-     }
-    },
-    "4096": {
-     "lcnu": {
-      "rate": 0.931292,
-      "prop": 0.931292,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.923647,
-      "prop": 0.923647,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.931292,
-      "prop": 0.931292,
-      "switches": 0
-     }
-    }
-   }
-  },
-  {
-   "cfg": {
-    "s": 1.1,
-    "lam": 0.3,
-    "E": 128,
-    "L": 48
-   },
-   "seed": "8b32f83f",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.301402,
-      "prop": 0.301402,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.336379,
-      "prop": 0.336379,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.335931,
-      "prop": 0.335931,
-      "switches": 1
-     }
-    },
-    "256": {
-     "lcnu": {
-      "rate": 0.427503,
-      "prop": 0.427503,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.45541,
-      "prop": 0.45541,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.455106,
-      "prop": 0.455106,
-      "switches": 1
-     }
-    },
-    "512": {
-     "lcnu": {
-      "rate": 0.589837,
-      "prop": 0.589837,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.582338,
-      "prop": 0.582338,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.589853,
-      "prop": 0.589853,
-      "switches": 2
-     }
-    },
-    "1024": {
-     "lcnu": {
-      "rate": 0.729649,
-      "prop": 0.729649,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.71312,
-      "prop": 0.71312,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.729165,
-      "prop": 0.729165,
-      "switches": 2
-     }
-    },
-    "2048": {
-     "lcnu": {
-      "rate": 0.842595,
-      "prop": 0.842595,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.837547,
-      "prop": 0.837547,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.842495,
-      "prop": 0.842495,
-      "switches": 2
-     }
-    },
-    "4096": {
-     "lcnu": {
-      "rate": 0.939183,
-      "prop": 0.939183,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.940783,
-      "prop": 0.940783,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.939183,
-      "prop": 0.939183,
-      "switches": 0
-     }
-    }
-   }
-  },
-  {
-   "cfg": {
-    "s": 1.1,
-    "lam": 0.6,
-    "E": 128,
-    "L": 48
-   },
-   "seed": "06308398",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.313398,
-      "prop": 0.313398,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.341842,
-      "prop": 0.341842,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.341334,
-      "prop": 0.341334,
-      "switches": 1
-     }
-    },
-    "256": {
-     "lcnu": {
-      "rate": 0.450493,
-      "prop": 0.450493,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.46914,
-      "prop": 0.46914,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.468828,
-      "prop": 0.468828,
-      "switches": 1
-     }
-    },
-    "512": {
-     "lcnu": {
-      "rate": 0.618294,
-      "prop": 0.618294,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.610947,
-      "prop": 0.610947,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.617739,
-      "prop": 0.617739,
-      "switches": 2
-     }
-    },
-    "1024": {
-     "lcnu": {
-      "rate": 0.755023,
-      "prop": 0.755023,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.753447,
-      "prop": 0.753447,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.753281,
-      "prop": 0.753281,
-      "switches": 1
-     }
-    },
-    "2048": {
-     "lcnu": {
-      "rate": 0.859566,
-      "prop": 0.859566,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.874474,
-      "prop": 0.874474,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.874238,
-      "prop": 0.874238,
-      "switches": 1
-     }
-    },
-    "4096": {
-     "lcnu": {
-      "rate": 0.948006,
-      "prop": 0.948006,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.954064,
-      "prop": 0.954064,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.953503,
-      "prop": 0.953503,
-      "switches": 1
-     }
-    }
-   }
-  },
-  {
-   "cfg": {
-    "s": 1.4,
-    "lam": 0.0,
-    "E": 128,
-    "L": 48
-   },
-   "seed": "a4953e41",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.477357,
-      "prop": 0.477357,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.51287,
-      "prop": 0.51287,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.512516,
-      "prop": 0.512516,
-      "switches": 1
-     }
-    },
-    "256": {
-     "lcnu": {
-      "rate": 0.622299,
-      "prop": 0.622299,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.643843,
-      "prop": 0.643843,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.643644,
-      "prop": 0.643644,
-      "switches": 1
-     }
-    },
-    "512": {
-     "lcnu": {
-      "rate": 0.756383,
-      "prop": 0.756383,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.753079,
-      "prop": 0.753079,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.756305,
-      "prop": 0.756305,
-      "switches": 2
-     }
-    },
-    "1024": {
-     "lcnu": {
-      "rate": 0.851932,
-      "prop": 0.851932,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.839439,
-      "prop": 0.839439,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.851666,
-      "prop": 0.851666,
-      "switches": 2
-     }
-    },
-    "2048": {
-     "lcnu": {
-      "rate": 0.918826,
-      "prop": 0.918826,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.906858,
-      "prop": 0.906858,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.918826,
-      "prop": 0.918826,
-      "switches": 0
-     }
-    },
-    "4096": {
-     "lcnu": {
-      "rate": 0.967785,
-      "prop": 0.967785,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.965688,
-      "prop": 0.965688,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.967785,
-      "prop": 0.967785,
-      "switches": 0
-     }
-    }
-   }
-  },
-  {
-   "cfg": {
-    "s": 1.4,
-    "lam": 0.3,
-    "E": 128,
-    "L": 48
-   },
-   "seed": "73c6fc7d",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.48781,
-      "prop": 0.48781,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.515598,
-      "prop": 0.515598,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.515371,
-      "prop": 0.515371,
-      "switches": 1
-     }
-    },
-    "256": {
-     "lcnu": {
-      "rate": 0.637084,
-      "prop": 0.637084,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.647482,
-      "prop": 0.647482,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.64728,
-      "prop": 0.64728,
-      "switches": 1
-     }
-    },
-    "512": {
-     "lcnu": {
-      "rate": 0.772765,
-      "prop": 0.772765,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.762369,
-      "prop": 0.762369,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.772267,
-      "prop": 0.772267,
-      "switches": 2
-     }
-    },
-    "1024": {
-     "lcnu": {
-      "rate": 0.865486,
-      "prop": 0.865486,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.860296,
-      "prop": 0.860296,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.865533,
-      "prop": 0.865533,
-      "switches": 2
-     }
-    },
-    "2048": {
-     "lcnu": {
-      "rate": 0.927342,
-      "prop": 0.927342,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.928497,
-      "prop": 0.928497,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.928161,
-      "prop": 0.928161,
-      "switches": 1
-     }
-    },
-    "4096": {
-     "lcnu": {
-      "rate": 0.972299,
-      "prop": 0.972299,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.973111,
-      "prop": 0.973111,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.972299,
-      "prop": 0.972299,
-      "switches": 0
-     }
-    }
-   }
-  },
-  {
-   "cfg": {
-    "s": 1.4,
-    "lam": 0.6,
-    "E": 128,
-    "L": 48
-   },
-   "seed": "c1e635b9",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.496318,
-      "prop": 0.496318,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.519284,
-      "prop": 0.519284,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.519008,
-      "prop": 0.519008,
-      "switches": 1
-     }
-    },
-    "256": {
-     "lcnu": {
-      "rate": 0.653513,
-      "prop": 0.653513,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.657203,
-      "prop": 0.657203,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.65703,
-      "prop": 0.65703,
-      "switches": 1
-     }
-    },
-    "512": {
-     "lcnu": {
-      "rate": 0.790471,
-      "prop": 0.790471,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.785492,
-      "prop": 0.785492,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.790206,
-      "prop": 0.790206,
-      "switches": 2
-     }
-    },
-    "1024": {
-     "lcnu": {
-      "rate": 0.879121,
-      "prop": 0.879121,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.884129,
-      "prop": 0.884129,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.88395,
-      "prop": 0.88395,
-      "switches": 1
-     }
-    },
-    "2048": {
-     "lcnu": {
-      "rate": 0.936029,
-      "prop": 0.936029,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.945234,
-      "prop": 0.945234,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.944896,
-      "prop": 0.944896,
-      "switches": 1
-     }
-    },
-    "4096": {
-     "lcnu": {
-      "rate": 0.976465,
-      "prop": 0.976465,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.978137,
-      "prop": 0.978137,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.976465,
-      "prop": 0.976465,
-      "switches": 0
-     }
-    }
-   }
-  },
-  {
-   "cfg": {
-    "s": 1.1,
-    "lam": 0.3,
-    "E": 32,
-    "L": 32
-   },
-   "seed": "df84484f",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.488136,
-      "prop": 0.488136,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.509672,
-      "prop": 0.509672,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.509339,
-      "prop": 0.509339,
-      "switches": 1
-     }
-    },
-    "256": {
-     "lcnu": {
-      "rate": 0.682677,
-      "prop": 0.682677,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.668097,
-      "prop": 0.668097,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.682017,
-      "prop": 0.682017,
-      "switches": 2
-     }
-    },
-    "512": {
-     "lcnu": {
-      "rate": 0.859088,
-      "prop": 0.859088,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.843625,
-      "prop": 0.843625,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.859011,
-      "prop": 0.859011,
-      "switches": 0
-     }
-    },
-    "1024": {
-     "lcnu": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     }
-    },
-    "2048": {
-     "lcnu": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     }
-    },
-    "4096": {
-     "lcnu": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     }
-    }
-   }
-  },
-  {
-   "cfg": {
-    "s": 1.4,
-    "lam": 0.6,
-    "E": 32,
-    "L": 32
-   },
-   "seed": "f9ab8c9e",
-   "caps": {
-    "128": {
-     "lcnu": {
-      "rate": 0.656615,
-      "prop": 0.656615,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.66081,
-      "prop": 0.66081,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.660476,
-      "prop": 0.660476,
-      "switches": 1
-     }
-    },
-    "256": {
-     "lcnu": {
-      "rate": 0.81782,
-      "prop": 0.81782,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.806475,
-      "prop": 0.806475,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.816746,
-      "prop": 0.816746,
-      "switches": 2
-     }
-    },
-    "512": {
-     "lcnu": {
-      "rate": 0.928487,
-      "prop": 0.928487,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.929799,
-      "prop": 0.929799,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.929576,
-      "prop": 0.929576,
-      "switches": 1
-     }
-    },
-    "1024": {
-     "lcnu": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     }
-    },
-    "2048": {
-     "lcnu": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     }
-    },
-    "4096": {
-     "lcnu": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "s3fifo": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     },
-     "costfit": {
-      "rate": 0.998396,
-      "prop": 0.998396,
-      "switches": 0
-     }
-    }
-   }
+  ],
+  "determinism_two_runs": true,
+  "rules": {
+    "caps": [
+      128,
+      256,
+      512,
+      1024,
+      2048,
+      4096
+    ],
+    "skews": [
+      0.8,
+      1.1,
+      1.4
+    ],
+    "localities": [
+      0.0,
+      0.3,
+      0.6
+    ],
+    "n_acc": 638208,
+    "recency_H": 2048,
+    "window_R": 4096,
+    "center": [
+      0.005,
+      0.0025,
+      32768
+    ]
   }
- ],
- "determinism_two_runs": true,
- "rules": {
-  "caps": [
-   128,
-   256,
-   512,
-   1024,
-   2048,
-   4096
-  ],
-  "skews": [
-   0.8,
-   1.1,
-   1.4
-  ],
-  "localities": [
-   0.0,
-   0.3,
-   0.6
-  ],
-  "n_acc": 638208,
-  "recency_H": 2048,
-  "window_R": 4096,
-  "center": [
-   0.005,
-   0.0025,
-   32768
-  ]
- }
 }

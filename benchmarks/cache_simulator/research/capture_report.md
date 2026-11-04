@@ -967,10 +967,10 @@ Determinism gate: two independent runs produced byte-identical stats/verdict JSO
 Observed winner-flip bands (frozen CSVs, strict margin 5e-7) and per-statistic medians /
 predicted first-S3FIFO caps:
 
-| model | flip band (last LCNU win, first S3FIFO win] | S1 median | S2 median | S3 median | S4 median | 
-|---|---|---|---| ---|---| ---|---| ---|---| 
-| 30b | (1152, 1280] | 1543 -> cap 1664 (miss) | 1128 -> cap 1152 (miss) | 1430 -> cap 1536 (miss) | 1728 -> cap 1792 (miss) | 
-| granite | (768, 1024] | 951 -> cap 1024 (HIT) | 846 -> cap 1024 (HIT) | 701 -> cap 768 (miss) | 820 -> cap 1024 (HIT) | 
+| model | flip band (last LCNU win, first S3FIFO win] | S1 median | S2 median | S3 median | S4 median |
+|---|---|---|---| ---|---| ---|---| ---|---|
+| 30b | (1152, 1280] | 1543 -> cap 1664 (miss) | 1128 -> cap 1152 (miss) | 1430 -> cap 1536 (miss) | 1728 -> cap 1792 (miss) |
+| granite | (768, 1024] | 951 -> cap 1024 (HIT) | 846 -> cap 1024 (HIT) | 701 -> cap 768 (miss) | 820 -> cap 1024 (HIT) |
 
 - **H1 FAIL**: primary cov90 on 30b — median 1430 predicts cap
   1536, one grid step ABOVE the band end

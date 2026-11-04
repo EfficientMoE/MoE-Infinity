@@ -234,7 +234,22 @@ def geometry_kwargs(name: str, stats: Dict[str, int]) -> Dict[str, float]:
         return {}
     kwargs: Dict[str, float] = {"num_layers": stats["num_layers"]}
     num_experts = stats["max_expert_id"] + 1
-    if name in ("lcnu", "rothead", "hotfit", "shadowfit", "decayfit", "costfit", "costfit3", "shared_costfit", "shared_costfit3") and stats["top_k"] > 0 and num_experts > 0:
+    if (
+        name
+        in (
+            "lcnu",
+            "rothead",
+            "hotfit",
+            "shadowfit",
+            "decayfit",
+            "costfit",
+            "costfit3",
+            "shared_costfit",
+            "shared_costfit3",
+        )
+        and stats["top_k"] > 0
+        and num_experts > 0
+    ):
         kwargs["prior"] = min(1.0, stats["top_k"] / num_experts)
     return kwargs
 

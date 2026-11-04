@@ -34,6 +34,7 @@ Bars (per-arm conjunction on ssr_*):
 Verdicts: BOTH_PASS > REC_ONLY > BURST_ONLY > NO-SIGNAL > HARM.
 Exit codes: 0 settled | 2 det | 3 acc | 4 repl1 | 6 repl3.
 """
+
 import importlib.util
 import json
 import sys
@@ -46,7 +47,8 @@ sys.path.insert(0, str(Path.home() / "warp-work/moei-granite3b"))
 from benchmarks.cache_simulator.policies import build_policy  # noqa: E402
 
 spec85 = importlib.util.spec_from_file_location(
-    "x85", str(Path.home() / "warp-work/exp685-moei-ring/run_ring.py"))
+    "x85", str(Path.home() / "warp-work/exp685-moei-ring/run_ring.py")
+)
 x85 = importlib.util.module_from_spec(spec85)
 sys.modules["x85"] = x85
 spec85.loader.exec_module(x85)
@@ -72,7 +74,7 @@ class SecondSightLCNU(LayerCycleNextUsePolicy):
         if not 0.0 < annex_frac < 1.0:
             raise ValueError("annex_frac in (0,1)")
         self._annex_cap = max(1, int(round(annex_frac * capacity)))
-        self._annex = {}   # key -> None, insertion order = admission order
+        self._annex = {}  # key -> None, insertion order = admission order
         self._ever = set()  # keys admitted at least once (revisit memory)
 
     def _on_hit(self, key):
@@ -139,9 +141,11 @@ def evaluate(keys, seg):
         for name in ARMS:
             pol = mk_arm(name, cap)
             h = np.array([pol.on_access(k) for k in keys], dtype=bool)
-            cell[name] = {"loop": float(h.mean()),
-                          "burst": float(h[burst].mean()),
-                          "rec": float(h[rec].mean())}
+            cell[name] = {
+                "loop": float(h.mean()),
+                "burst": float(h[burst].mean()),
+                "rec": float(h[rec].mean()),
+            }
         c2 = build_policy("costfit", cap, num_layers=rd.L, prior=8 / rd.E)
         h2 = np.array([c2.on_access(k) for k in keys], dtype=bool)
         cell["center"]["loop2"] = float(h2.mean())
@@ -152,8 +156,8 @@ def evaluate(keys, seg):
 def run_all():
     grid, t0 = [], time.time()
     seeds = np.random.default_rng(68120261103).spawn(2)  # exp681 scheme, FRESH
-    base_seed = int(seeds[0].integers(0, 2 ** 63))
-    crowd_seed = int(seeds[1].integers(0, 2 ** 63))
+    base_seed = int(seeds[0].integers(0, 2**63))
+    crowd_seed = int(seeds[1].integers(0, 2**63))
     for d in st.BURSTS:
         keys, seg, mid = st.crowd_stream(base_seed, crowd_seed, st.N, d)
         grid.append({"d": d, "caps": evaluate(keys, seg)})
@@ -162,29 +166,40 @@ def run_all():
 
 
 def replication_check(grid):
-    r1 = json.loads((Path.home()
-                     / "warp-work/exp681-moei-crowd/exp681-crowd.json").read_text())
-    r5 = json.loads((Path.home() / "warp-work/exp685-moei-ring/"
-                     "exp685-ring.json").read_text())
+    r1 = json.loads(
+        (
+            Path.home() / "warp-work/exp681-moei-crowd/exp681-crowd.json"
+        ).read_text()
+    )
+    r5 = json.loads(
+        (
+            Path.home() / "warp-work/exp685-moei-ring/" "exp685-ring.json"
+        ).read_text()
+    )
     ref1 = {c["d"]: c["caps"] for c in r1["grid"]}
     ref5 = {c["d"]: c["caps"] for c in r5["grid"]}
     for cell in grid:
         for cap, c in cell["caps"].items():
             for ref, arm, refname, code in (
-                    (ref1, "center", "costfit", 4),
-                    (ref5, "ring10", "ring10", 6)):
+                (ref1, "center", "costfit", 4),
+                (ref5, "ring10", "ring10", 6),
+            ):
                 a = ref[cell["d"]][cap][refname]
                 for m in ("loop", "burst", "rec"):
                     if c[arm][m] != a[m]:
-                        return code, (f"repl d={cell['d']} cap={cap} {arm} "
-                                      f"{m}: {c[arm][m]} != {a[m]}")
+                        return code, (
+                            f"repl d={cell['d']} cap={cap} {arm} "
+                            f"{m}: {c[arm][m]} != {a[m]}"
+                        )
     return 0, None
 
 
 def adjudicate(grid):
     rows = []
-    arm = {a: {"recov": False, "burst_def": True, "stretch": False,
-               "safety": True} for a in T_ARMS}
+    arm = {
+        a: {"recov": False, "burst_def": True, "stretch": False, "safety": True}
+        for a in T_ARMS
+    }
     for cell in grid:
         for cap, c in cell["caps"].items():
             if c["center"]["loop"] != c["center"]["loop2"]:
@@ -192,15 +207,19 @@ def adjudicate(grid):
             bb = c["lcnu"]["burst"]
             row = {"d": cell["d"], "cap": int(cap)}
             for a in ARMS:
-                row[a] = {m: round(c[a][m], 6) for m in ("loop", "burst", "rec")}
+                row[a] = {
+                    m: round(c[a][m], 6) for m in ("loop", "burst", "rec")
+                }
             row["cf_burst_def_pp"] = round((bb - c["center"]["burst"]) * 100, 3)
             row["cf_rec_def_pp"] = round(
-                (c["lcnu"]["rec"] - c["center"]["rec"]) * 100, 3)
+                (c["lcnu"]["rec"] - c["center"]["rec"]) * 100, 3
+            )
             for a in T_ARMS:
                 f = arm[a]
                 row[f"{a}_burst_def_pp"] = round((bb - c[a]["burst"]) * 100, 3)
                 row[f"{a}_rec_def_pp"] = round(
-                    (c["lcnu"]["rec"] - c[a]["rec"]) * 100, 3)
+                    (c["lcnu"]["rec"] - c[a]["rec"]) * 100, 3
+                )
                 if (c[a]["loop"] - c["lcnu"]["loop"]) * 100 < -0.5:
                     f["safety"] = False
                 if row[f"{a}_burst_def_pp"] > row["cf_burst_def_pp"] + 1e-9:
@@ -211,8 +230,10 @@ def adjudicate(grid):
                     if row[f"{a}_burst_def_pp"] <= 1.5:
                         f["stretch"] = True
             rows.append(row)
+
     def ok(a, *ks):
         return all(arm[a][k] for k in ks)
+
     winners = [a for a in T_ARMS if ok(a, "recov", "burst_def", "safety")]
     rec_only = [a for a in T_ARMS if ok(a, "recov", "safety")]
     burst_only = [a for a in T_ARMS if ok(a, "burst_def", "safety")]
@@ -226,8 +247,14 @@ def adjudicate(grid):
         v = "NO-SIGNAL"
     else:
         v = "HARM"
-    return {"verdict": v, "winners": winners, "rec_only": rec_only,
-            "burst_only": burst_only, "arm_bars": arm, "rows": rows}
+    return {
+        "verdict": v,
+        "winners": winners,
+        "rec_only": rec_only,
+        "burst_only": burst_only,
+        "arm_bars": arm,
+        "rows": rows,
+    }
 
 
 if __name__ == "__main__":
@@ -245,19 +272,37 @@ if __name__ == "__main__":
     res["det"] = json.dumps(g1) == json.dumps(g2)
     res["repl"] = "exp681+exp685 exact"
     res["grid"] = g1
-    res["rules"] = {"streams": "exp681 exact (68120261103)",
-                    "arms": ARMS,
-                    "bars": {"REPL1": "center == exp681 exact (exit 4)",
-                             "REPL3": "ring10 == exp685 exact (exit 6)",
-                             "RECOV": "arm rec_def <= 3.5pp @d4096/cap512",
-                             "BURST": "arm burst_def <= center's ALL cells",
-                             "SAFETY": "loop >= lcnu-0.5pp ALL"}}
+    res["rules"] = {
+        "streams": "exp681 exact (68120261103)",
+        "arms": ARMS,
+        "bars": {
+            "REPL1": "center == exp681 exact (exit 4)",
+            "REPL3": "ring10 == exp685 exact (exit 6)",
+            "RECOV": "arm rec_def <= 3.5pp @d4096/cap512",
+            "BURST": "arm burst_def <= center's ALL cells",
+            "SAFETY": "loop >= lcnu-0.5pp ALL",
+        },
+    }
     res["elapsed_s"] = round(time.time() - t0, 1)
     (D / "exp693-ssr.json").write_text(json.dumps(res, indent=1))
-    print("VERDICT:", res["verdict"], "| winners:", res["winners"],
-          "| det:", res["det"], "| repl:", res["repl"])
+    print(
+        "VERDICT:",
+        res["verdict"],
+        "| winners:",
+        res["winners"],
+        "| det:",
+        res["det"],
+        "| repl:",
+        res["repl"],
+    )
     for r in res["rows"]:
-        print("cell:", {"d": r["d"], "cap": r["cap"],
-                        **{f"{a}_rec": r[f"{a}_rec_def_pp"] for a in T_ARMS},
-                        "burst_def": {a: r[f"{a}_burst_def_pp"] for a in T_ARMS}})
+        print(
+            "cell:",
+            {
+                "d": r["d"],
+                "cap": r["cap"],
+                **{f"{a}_rec": r[f"{a}_rec_def_pp"] for a in T_ARMS},
+                "burst_def": {a: r[f"{a}_burst_def_pp"] for a in T_ARMS},
+            },
+        )
     sys.exit(0 if res["det"] else 2)

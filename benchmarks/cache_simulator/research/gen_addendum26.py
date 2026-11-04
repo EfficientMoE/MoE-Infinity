@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Programmatic ADDENDUM26 generator for exp681 (flash-crowd probe)."""
+
 import json
 from pathlib import Path
 
@@ -54,7 +55,9 @@ L = [
     "|---:|---:|---:|---:|---:|",
 ]
 for r in sorted(rows, key=lambda x: (x["d"], x["cap"])):
-    L.append(f"| {r['d']} | {r['cap']} | {r['d_burst_pp']:.3f} | {r['d_rec_pp']:.3f} | {r['sw']} |")
+    L.append(
+        f"| {r['d']} | {r['cap']} | {r['d_burst_pp']:.3f} | {r['d_rec_pp']:.3f} | {r['sw']} |"
+    )
 L += [
     "",
     "## Third failure mode; convergence",
@@ -75,4 +78,6 @@ L += [
 ]
 out = "\n".join(L)
 (D / "ADDENDUM26.md").write_text(out)
-print(f"ADDENDUM26.md {len(out.encode())} bytes | worst burst {worst_b['d_burst_pp']}pp (d{worst_b['d']}/cap{worst_b['cap']}) | worst rec {worst_r['d_rec_pp']}pp")
+print(
+    f"ADDENDUM26.md {len(out.encode())} bytes | worst burst {worst_b['d_burst_pp']}pp (d{worst_b['d']}/cap{worst_b['cap']}) | worst rec {worst_r['d_rec_pp']}pp"
+)

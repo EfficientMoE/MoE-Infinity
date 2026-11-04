@@ -55,6 +55,7 @@ Bars (pre-committed; exit codes):
 Verdicts: WINDOWED-HANDOFF > RECOVERY-ONLY > STRUCTURAL-SPLIT >
 NO-GAIN > HARM/THRASH.
 """
+
 import importlib.util
 import json
 import sys
@@ -66,18 +67,28 @@ import numpy as np
 sys.path.insert(0, str(Path.home() / "warp-work/moei-granite3b"))
 from benchmarks.cache_simulator.policies import build_policy  # noqa: E402
 from benchmarks.cache_simulator.research.policies_costfit3 import (  # noqa: E402
-    CostFit3Policy)
+    CostFit3Policy,
+)
 
 spec85 = importlib.util.spec_from_file_location(
-    "r85", str(Path.home() / "warp-work/exp685-moei-ring/run_ring.py"))
+    "r85", str(Path.home() / "warp-work/exp685-moei-ring/run_ring.py")
+)
 r85 = importlib.util.module_from_spec(spec85)
 spec85.loader.exec_module(r85)
 st, rd = r85.st, r85.rd
 RingProbationLCNU = r85.RingProbationLCNU
 
 D = Path(__file__).parent
-ARMS = ["lcnu", "s3fifo", "center", "ring10", "ring25", "ringfit3_10",
-        "windowfit3_10", "windowfit3_25"]
+ARMS = [
+    "lcnu",
+    "s3fifo",
+    "center",
+    "ring10",
+    "ring25",
+    "ringfit3_10",
+    "windowfit3_10",
+    "windowfit3_25",
+]
 NEW_ARMS = ["windowfit3_10", "windowfit3_25"]
 
 
@@ -86,12 +97,11 @@ class RingFit3(CostFit3Policy):
 
     Identical to exp686a's RingFit3 (ring .10 configuration): every
     parameter inherited UNEDITED from the sealed class; only _inners
-    differs (rothead -> ring). Re-declared here so REPL3 anchors THIS
+    differs (rothead -> ring). Redeclared here so REPL3 anchors THIS
     file's base against exp686a published numbers.
     """
 
-    def __init__(self, capacity, num_layers=1, prior=1.0 / 16,
-                 ring_frac=0.10):
+    def __init__(self, capacity, num_layers=1, prior=1.0 / 16, ring_frac=0.10):
         self.capacity = capacity
         self.choice = "lcnu"
         self.switches = 0
@@ -99,11 +109,16 @@ class RingFit3(CostFit3Policy):
         self._since = 0
         self._decay = 0.5 ** (1.0 / self.HALF_LIFE)
         self._inners = {
-            "lcnu": build_policy("lcnu", capacity, num_layers=num_layers,
-                                 prior=prior),
+            "lcnu": build_policy(
+                "lcnu", capacity, num_layers=num_layers, prior=prior
+            ),
             "s3fifo": build_policy("s3fifo", capacity),
-            "ring": RingProbationLCNU(capacity, num_layers=num_layers,
-                                      prior=prior, ring_frac=ring_frac),
+            "ring": RingProbationLCNU(
+                capacity,
+                num_layers=num_layers,
+                prior=prior,
+                ring_frac=ring_frac,
+            ),
         }
         self._mass = {n: [0.0, 0.0] for n in self._inners}
         self._sw_mass = 0.0
@@ -170,7 +185,12 @@ class WindowFit3(RingFit3):
             if r is not None and (rc is None or r > rc):
                 chg, rc = name, r
         barrier = self.MARGIN + self.GAMMA * self._sw_mass
-        if ri is not None and chg is not None and rc is not None and rc - ri >= barrier:
+        if (
+            ri is not None
+            and chg is not None
+            and rc is not None
+            and rc - ri >= barrier
+        ):
             self.choice = chg
             self.switches += 1
             self.choice_switches[chg] += 1
@@ -185,10 +205,14 @@ def unit_checks():
     no switch; challenger DECAYED 0.9 but window 0.5 -> NO switch (the
     single-edit discriminator: windowed decision ignores decayed lead).
     """
+
     def fresh():
         p = WindowFit3(512, num_layers=rd.L, prior=8 / rd.E, ring_frac=0.10)
-        p._mass = {"lcnu": [500.0, 1000.0], "s3fifo": [0.0, 0.0],
-                   "ring": [0.0, 0.0]}
+        p._mass = {
+            "lcnu": [500.0, 1000.0],
+            "s3fifo": [0.0, 0.0],
+            "ring": [0.0, 0.0],
+        }
         p._win = {"lcnu": [0, 0], "s3fifo": [0, 0], "ring": [0, 0]}
         return p
 
@@ -258,14 +282,18 @@ def evaluate(keys, seg, mid, d):
                 ch = getattr(pol, "choice", None)
                 if ch is not None and (not tl or tl[-1][1] != ch):
                     tl.append((i, ch))
-            entry = {"loop": float(h.mean()), "burst": float(h[burst].mean()),
-                     "rec": float(h[rec].mean())}
+            entry = {
+                "loop": float(h.mean()),
+                "burst": float(h[burst].mean()),
+                "rec": float(h[rec].mean()),
+            }
             if hasattr(pol, "switches"):
                 entry["switches"] = int(pol.switches)
                 entry["tl"] = tl
                 entry["choice_switches"] = {
-                    str(a): int(b) for a, b in
-                    getattr(pol, "choice_switches", {}).items()}
+                    str(a): int(b)
+                    for a, b in getattr(pol, "choice_switches", {}).items()
+                }
                 eff = getattr(pol, "effective_hit_rate", None)
                 entry["acc"] = bool(eff is not None and eff == entry["loop"])
             cell[name] = entry
@@ -279,9 +307,9 @@ def evaluate(keys, seg, mid, d):
 def run_all(bursts=None):
     grid, t0 = [], time.time()
     seeds = np.random.default_rng(68120261103).spawn(2)  # exp681 scheme, FRESH
-    base_seed = int(seeds[0].integers(0, 2 ** 63))
-    crowd_seed = int(seeds[1].integers(0, 2 ** 63))
-    for d in (bursts if bursts else st.BURSTS):
+    base_seed = int(seeds[0].integers(0, 2**63))
+    crowd_seed = int(seeds[1].integers(0, 2**63))
+    for d in bursts if bursts else st.BURSTS:
         keys, seg, mid = st.crowd_stream(base_seed, crowd_seed, st.N, d)
         grid.append({"d": d, "mid": mid, "caps": evaluate(keys, seg, mid, d)})
         print(f"d={d} done [{time.time() - t0:.0f}s]", flush=True)
@@ -294,12 +322,18 @@ def repl_check_cell(cell, ref1, ref5, ref6a):
         a = ref1[cell["d"]][cap]["costfit"]
         for m in ("loop", "burst", "rec"):
             if c["center"][m] != a[m]:
-                return 4, f"repl1 d={cell['d']} cap={cap} {m}: {c['center'][m]} != {a[m]}"
+                return (
+                    4,
+                    f"repl1 d={cell['d']} cap={cap} {m}: {c['center'][m]} != {a[m]}",
+                )
         for arm in ("ring10", "ring25"):
             b = ref5[cell["d"]][cap][arm]
             for m in ("loop", "burst", "rec"):
                 if c[arm][m] != b[m]:
-                    return 5, f"repl2 d={cell['d']} cap={cap} {arm} {m}: {c[arm][m]} != {b[m]}"
+                    return (
+                        5,
+                        f"repl2 d={cell['d']} cap={cap} {arm} {m}: {c[arm][m]} != {b[m]}",
+                    )
         g = ref6a[cell["d"]][cap]["ringfit3_10"]
         e = c["ringfit3_10"]
         for m in ("loop", "burst", "rec"):
@@ -312,15 +346,27 @@ def repl_check_cell(cell, ref1, ref5, ref6a):
 
 
 def load_refs():
-    r1 = json.loads((Path.home() /
-                     "warp-work/exp681-moei-crowd/exp681-crowd.json").read_text())
-    r5 = json.loads((Path.home() /
-                     "warp-work/exp685-moei-ring/exp685-ring.json").read_text())
-    r6a = json.loads((Path.home() /
-                      "warp-work/exp686a-moei-ringfit3/exp686a-ringfit3.json").read_text())
-    return ({c["d"]: c["caps"] for c in r1["grid"]},
-            {c["d"]: c["caps"] for c in r5["grid"]},
-            {c["d"]: c["caps"] for c in r6a["grid"]})
+    r1 = json.loads(
+        (
+            Path.home() / "warp-work/exp681-moei-crowd/exp681-crowd.json"
+        ).read_text()
+    )
+    r5 = json.loads(
+        (
+            Path.home() / "warp-work/exp685-moei-ring/exp685-ring.json"
+        ).read_text()
+    )
+    r6a = json.loads(
+        (
+            Path.home()
+            / "warp-work/exp686a-moei-ringfit3/exp686a-ringfit3.json"
+        ).read_text()
+    )
+    return (
+        {c["d"]: c["caps"] for c in r1["grid"]},
+        {c["d"]: c["caps"] for c in r5["grid"]},
+        {c["d"]: c["caps"] for c in r6a["grid"]},
+    )
 
 
 def adjudicate(grid):
@@ -334,13 +380,25 @@ def adjudicate(grid):
             lc = c["lcnu"]
             row = {"d": cell["d"], "cap": int(cap)}
             for a in ARMS:
-                row[a] = {m: round(c[a][m], 6) for m in ("loop", "burst", "rec")}
-            row["burst_def_cf_pp"] = round((lc["burst"] - c["center"]["burst"]) * 100, 3)
-            row["rec_def_cf_pp"] = round((lc["rec"] - c["center"]["rec"]) * 100, 3)
+                row[a] = {
+                    m: round(c[a][m], 6) for m in ("loop", "burst", "rec")
+                }
+            row["burst_def_cf_pp"] = round(
+                (lc["burst"] - c["center"]["burst"]) * 100, 3
+            )
+            row["rec_def_cf_pp"] = round(
+                (lc["rec"] - c["center"]["rec"]) * 100, 3
+            )
             for a in NEW_ARMS:
-                row[f"rec_def_{a}_pp"] = round((lc["rec"] - c[a]["rec"]) * 100, 3)
-                row[f"burst_def_{a}_pp"] = round((lc["burst"] - c[a]["burst"]) * 100, 3)
-                row[f"loop_vs_l_{a}_pp"] = round((c[a]["loop"] - lc["loop"]) * 100, 3)
+                row[f"rec_def_{a}_pp"] = round(
+                    (lc["rec"] - c[a]["rec"]) * 100, 3
+                )
+                row[f"burst_def_{a}_pp"] = round(
+                    (lc["burst"] - c[a]["burst"]) * 100, 3
+                )
+                row[f"loop_vs_l_{a}_pp"] = round(
+                    (c[a]["loop"] - lc["loop"]) * 100, 3
+                )
                 if row[f"loop_vs_l_{a}_pp"] < -0.5:
                     f["h3"] = False
                 if c[a].get("switches", 0) > 6:
@@ -351,7 +409,8 @@ def adjudicate(grid):
                     "burst": choice_at(c[a]["tl"], cell["mid"]),
                     "rec": choice_at(c[a]["tl"], cell["mid"] + cell["d"]),
                     "sw": c[a]["switches"],
-                    "sw_by": c[a]["choice_switches"]}
+                    "sw_by": c[a]["choice_switches"],
+                }
             if cell["d"] == 4096 and int(cap) == 512:
                 f["h1"] = bool(row["rec_def_windowfit3_10_pp"] <= 2.5)
                 row["h1_rec_def_pp"] = row["rec_def_windowfit3_10_pp"]
@@ -359,16 +418,26 @@ def adjudicate(grid):
                 tl = c["windowfit3_10"]["tl"]
                 inc_mid = choice_at(tl, cell["mid"] - 1)
                 sw_idx = [i for i, _ in tl]
-                window = [i for i in sw_idx
-                          if cell["mid"] - 4096 <= i <= cell["mid"] + 8192]
+                window = [
+                    i
+                    for i in sw_idx
+                    if cell["mid"] - 4096 <= i <= cell["mid"] + 8192
+                ]
                 first_ring_after_mid = next(
-                    (i for i, ch in tl if i >= cell["mid"] and ch == "ring"), None)
-                h0 = {"incumbent_at_mid": inc_mid,
-                      "switch_indices_near_mid": window,
-                      "first_ring_adoption_gte_mid": first_ring_after_mid,
-                      "recovery_end": cell["mid"] + cell["d"] + st.WIN,
-                      "tl_full": [[int(i), ch] for i, ch in tl]}
-            if row["burst_def_windowfit3_10_pp"] > row["burst_def_cf_pp"] + 1e-9:
+                    (i for i, ch in tl if i >= cell["mid"] and ch == "ring"),
+                    None,
+                )
+                h0 = {
+                    "incumbent_at_mid": inc_mid,
+                    "switch_indices_near_mid": window,
+                    "first_ring_adoption_gte_mid": first_ring_after_mid,
+                    "recovery_end": cell["mid"] + cell["d"] + st.WIN,
+                    "tl_full": [[int(i), ch] for i, ch in tl],
+                }
+            if (
+                row["burst_def_windowfit3_10_pp"]
+                > row["burst_def_cf_pp"] + 1e-9
+            ):
                 f["h2"] = False
             rows.append(row)
     if f["h1"] and f["h2"] and f["h3"] and f["h4"] and f["acc"]:
@@ -398,18 +467,21 @@ def refine_verdict(res):
     # (window-aligned d=4096 burst), so adoption before rec_end is
     # impossible and H1 fails by boundary arithmetic, not by tuning.
     adopted_in_recovery = any(
-        ch == "ring" and mid <= i < rec_end for i, ch in h0["tl_full"])
+        ch == "ring" and mid <= i < rec_end for i, ch in h0["tl_full"]
+    )
     if inc in ("lcnu", "s3fifo") and not adopted_in_recovery:
         res["verdict"] = "STRUCTURAL-SPLIT"
         res["h0"]["mechanism"] = (
             "ring first adoptable only at/after recovery end "
             f"(first ring >= mid: {fra}, recovery ends {rec_end}); "
-            "window-aligned burst makes mid-recovery adoption impossible")
+            "window-aligned burst makes mid-recovery adoption impossible"
+        )
         return res
     res["verdict"] = "NO-GAIN"
     res["h0"]["mechanism"] = (
         "windowed scoreboard changed adoption timing but not the "
-        "H1 outcome through some path other than boundary alignment")
+        "H1 outcome through some path other than boundary alignment"
+    )
     return res
 
 
@@ -420,27 +492,31 @@ if __name__ == "__main__":
     if err:
         print("UNIT FAIL:", err)
         sys.exit(7)
-    print("unit: 3/3 bite (window drives challenge; decayed lead ignored)",
-          flush=True)
+    print(
+        "unit: 3/3 bite (window drives challenge; decayed lead ignored)",
+        flush=True,
+    )
     ref1, ref5, ref6a = load_refs()
     if smoke:
         seeds = np.random.default_rng(68120261103).spawn(2)
-        base_seed = int(seeds[0].integers(0, 2 ** 63))
-        crowd_seed = int(seeds[1].integers(0, 2 ** 63))
+        base_seed = int(seeds[0].integers(0, 2**63))
+        crowd_seed = int(seeds[1].integers(0, 2**63))
         keys, seg, mid = st.crowd_stream(base_seed, crowd_seed, st.N, 256)
-        cell = {"d": 256, "mid": mid,
-                "caps": evaluate(keys, seg, mid, 256)}
+        cell = {"d": 256, "mid": mid, "caps": evaluate(keys, seg, mid, 256)}
         rc, msg = repl_check_cell(cell, ref1, ref5, ref6a)
         if rc:
             print(msg)
             sys.exit(rc)
         for cap, c in cell["caps"].items():
-            print(f"smoke d256/cap{cap}: anchors OK; "
-                  f"windowfit3_10 loop={c['windowfit3_10']['loop']:.6f} "
-                  f"burst={c['windowfit3_10']['burst']:.6f} "
-                  f"rec={c['windowfit3_10']['rec']:.6f} "
-                  f"sw={c['windowfit3_10']['switches']} "
-                  f"tl={c['windowfit3_10']['tl']}", flush=True)
+            print(
+                f"smoke d256/cap{cap}: anchors OK; "
+                f"windowfit3_10 loop={c['windowfit3_10']['loop']:.6f} "
+                f"burst={c['windowfit3_10']['burst']:.6f} "
+                f"rec={c['windowfit3_10']['rec']:.6f} "
+                f"sw={c['windowfit3_10']['switches']} "
+                f"tl={c['windowfit3_10']['tl']}",
+                flush=True,
+            )
         print("SMOKE OK")
         sys.exit(0)
 
@@ -457,7 +533,9 @@ if __name__ == "__main__":
     res = refine_verdict(res)
     g2 = run_all()
     res["det"] = json.dumps(g1) == json.dumps(g2)
-    res["repl"] = "exp681 costfit + exp685 ring10/ring25 + exp686a ringfit3_10 exact"
+    res["repl"] = (
+        "exp681 costfit + exp685 ring10/ring25 + exp686a ringfit3_10 exact"
+    )
     res["grid"] = g1
     res["prediction"] = (
         "pre-registered: STRUCTURAL-SPLIT or NO-GAIN at home cell (mid "
@@ -467,9 +545,11 @@ if __name__ == "__main__":
         "0.029-0.088 vs incumbent decayed ~0.6+barrier); genuine "
         "uncertainty: pre-burst ring re-adoption via window noise (-> H2 "
         "fails instead, rf3_10 tradeoff) and asymmetric-evidence switch "
-        "stability (H4 risk) across the 8 cells")
+        "stability (H4 risk) across the 8 cells"
+    )
     res["rules"] = {
-        "streams": "exp681 exact (68120261103)", "arms": ARMS,
+        "streams": "exp681 exact (68120261103)",
+        "arms": ARMS,
         "bars": {
             "REPL1": "center == exp681 costfit exact (exit 4)",
             "REPL2": "ring10+ring25 == exp685 exact (exit 5)",
@@ -480,18 +560,39 @@ if __name__ == "__main__":
             "H3": "windowfit3* loop >= lcnu-0.5pp ALL cells",
             "H4": "windowfit3* switches <= 6; credited==loop; center loop2",
             "H0": "structural sub-adjudication at home cell (measured)",
-            "det": "byte-identical double grid (exit 2)"},
+            "det": "byte-identical double grid (exit 2)",
+        },
         "verdicts": "WINDOWED-HANDOFF > RECOVERY-ONLY > "
-                    "STRUCTURAL-SPLIT > NO-GAIN > HARM/THRASH"}
+        "STRUCTURAL-SPLIT > NO-GAIN > HARM/THRASH",
+    }
     res["elapsed_s"] = round(time.time() - t0, 1)
     (D / "exp687-windowed.json").write_text(json.dumps(res, indent=1))
-    print("VERDICT:", res["verdict"], "| det:", res["det"], "| repl:",
-          res["repl"], "| bars:", res["bars"])
+    print(
+        "VERDICT:",
+        res["verdict"],
+        "| det:",
+        res["det"],
+        "| repl:",
+        res["repl"],
+        "| bars:",
+        res["bars"],
+    )
     for r in res["rows"]:
-        print("cell:", {k: r[k] for k in (
-            "d", "cap", "burst_def_cf_pp", "burst_def_windowfit3_10_pp",
-            "rec_def_cf_pp", "rec_def_windowfit3_10_pp",
-            "loop_vs_l_windowfit3_10_pp")})
+        print(
+            "cell:",
+            {
+                k: r[k]
+                for k in (
+                    "d",
+                    "cap",
+                    "burst_def_cf_pp",
+                    "burst_def_windowfit3_10_pp",
+                    "rec_def_cf_pp",
+                    "rec_def_windowfit3_10_pp",
+                    "loop_vs_l_windowfit3_10_pp",
+                )
+            },
+        )
         for a in NEW_ARMS:
             print("  adopt:", a, r[f"adopt_{a}"])
     print("h0:", res.get("h0"))

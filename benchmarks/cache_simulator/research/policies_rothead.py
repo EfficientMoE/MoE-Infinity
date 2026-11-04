@@ -30,9 +30,9 @@ from benchmarks.cache_simulator.policies import (
 
 Key = Tuple[int, int]
 
-PROBE_WINDOW = 2048        # accesses per probe window
-RESEGMENT = 4096           # re-evaluate the probe every N accesses
-THRESH_J1 = 0.59           # exp660 J(1) midpoint: below => fast rotation
+PROBE_WINDOW = 2048  # accesses per probe window
+RESEGMENT = 4096  # re-evaluate the probe every N accesses
+THRESH_J1 = 0.59  # exp660 J(1) midpoint: below => fast rotation
 
 
 class RotHeadPolicy(CachePolicy):
@@ -49,7 +49,9 @@ class RotHeadPolicy(CachePolicy):
 
     def __init__(self, capacity: int, num_layers: int = 1, prior: float = 0.05):
         super().__init__(capacity)
-        self.lcnu = LayerCycleNextUsePolicy(capacity, num_layers=num_layers, prior=prior)
+        self.lcnu = LayerCycleNextUsePolicy(
+            capacity, num_layers=num_layers, prior=prior
+        )
         self.s3fifo = S3FIFOPolicy(capacity)
         self.buffer: deque = deque(maxlen=2 * PROBE_WINDOW)
         self.choice = "lcnu"

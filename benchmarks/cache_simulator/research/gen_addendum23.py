@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Programmatic ADDENDUM23 generator for exp677 (no hand-transcribed values)."""
+
 import json
 from pathlib import Path
 
@@ -13,8 +14,15 @@ for st in R["grid"]:
         c = st["caps"][cap]
         bt = max(c["lcnu"]["trans"], c["s3fifo"]["trans"])
         bp = max(c["lcnu"]["post"], c["s3fifo"]["post"])
-        rows.append((st["width"], cap, (bt - c["costfit"]["trans"]) * 100,
-                     (bp - c["costfit"]["post"]) * 100, c["costfit"]["max_sw_win"]))
+        rows.append(
+            (
+                st["width"],
+                cap,
+                (bt - c["costfit"]["trans"]) * 100,
+                (bp - c["costfit"]["post"]) * 100,
+                c["costfit"]["max_sw_win"],
+            )
+        )
 
 worst_t = max(rows, key=lambda r: r[2])
 n_nonzero = sum(1 for r in rows if r[2] > 0)
@@ -73,4 +81,6 @@ lines += [
 ]
 out = "\n".join(lines)
 (D / "ADDENDUM23.md").write_text(out)
-print(f"ADDENDUM23.md {len(out.encode())} bytes | worst trans {worst_t[2]:.3f}pp @ W={worst_t[0]} cap={worst_t[1]} | nonzero {n_nonzero}/12 | mono {R['monotone_shrinking_w_increases_deficit']}")
+print(
+    f"ADDENDUM23.md {len(out.encode())} bytes | worst trans {worst_t[2]:.3f}pp @ W={worst_t[0]} cap={worst_t[1]} | nonzero {n_nonzero}/12 | mono {R['monotone_shrinking_w_increases_deficit']}"
+)

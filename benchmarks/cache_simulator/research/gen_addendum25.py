@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Programmatic ADDENDUM25 generator for exp680 (no hand-transcribed values)."""
+
 import json
 from pathlib import Path
 
@@ -57,8 +58,10 @@ L = [
     "|---:|---:|---:|---:|---:|---:|",
 ]
 for r in sorted(rows, key=lambda x: (x["width"], x["cap"])):
-    L.append(f"| {r['width']} | {r['cap']} | {r['d_center_trans_pp']:.3f} | "
-             f"{r['d_stag_trans_pp']:.3f} | {r['sw_center']} | {r['sw_stag']} |")
+    L.append(
+        f"| {r['width']} | {r['cap']} | {r['d_center_trans_pp']:.3f} | "
+        f"{r['d_stag_trans_pp']:.3f} | {r['sw_center']} | {r['sw_stag']} |"
+    )
 L += [
     "",
     "## Next (pre-registered pivot)",
@@ -76,4 +79,6 @@ L += [
 ]
 out = "\n".join(L)
 (D / "ADDENDUM25.md").write_text(out)
-print(f"ADDENDUM25.md {len(out.encode())} bytes | identical-deficit cells {n_same}/6 | peak {peak['d_center_trans_pp']}")
+print(
+    f"ADDENDUM25.md {len(out.encode())} bytes | identical-deficit cells {n_same}/6 | peak {peak['d_center_trans_pp']}"
+)

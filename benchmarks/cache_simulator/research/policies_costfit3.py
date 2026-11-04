@@ -37,7 +37,9 @@ class CostFit3Policy:
     RESEGMENT = 4096
     uses_oracle = False
 
-    def __init__(self, capacity: int, num_layers: int = 1, prior: float = 1.0 / 16):
+    def __init__(
+        self, capacity: int, num_layers: int = 1, prior: float = 1.0 / 16
+    ):
         self.capacity = capacity
         self.choice = "lcnu"
         self.switches = 0
@@ -45,9 +47,13 @@ class CostFit3Policy:
         self._since = 0
         self._decay = 0.5 ** (1.0 / self.HALF_LIFE)
         self._inners = {
-            "lcnu": build_policy("lcnu", capacity, num_layers=num_layers, prior=prior),
+            "lcnu": build_policy(
+                "lcnu", capacity, num_layers=num_layers, prior=prior
+            ),
             "s3fifo": build_policy("s3fifo", capacity),
-            "rothead": build_policy("rothead", capacity, num_layers=num_layers, prior=prior),
+            "rothead": build_policy(
+                "rothead", capacity, num_layers=num_layers, prior=prior
+            ),
         }
         # decayed [hit_mass, access_mass] per inner; decayed switch mass
         self._mass = {n: [0.0, 0.0] for n in self._inners}
@@ -102,7 +108,12 @@ class CostFit3Policy:
             if r is not None and (rc is None or r > rc):
                 chg, rc = name, r
         barrier = self.MARGIN + self.GAMMA * self._sw_mass
-        if ri is not None and chg is not None and rc is not None and rc - ri >= barrier:
+        if (
+            ri is not None
+            and chg is not None
+            and rc is not None
+            and rc - ri >= barrier
+        ):
             self.choice = chg
             self.switches += 1
             self.choice_switches[chg] += 1

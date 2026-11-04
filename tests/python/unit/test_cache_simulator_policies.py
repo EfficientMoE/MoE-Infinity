@@ -361,7 +361,9 @@ def test_costfit3_n_way_arbitration_accounting():
     # no-regression vs the sealed 2-way arbiter on the same stream
     pol_c2 = build_policy("costfit", cap, num_layers=6, prior=2 / 16)
     hits_c2 = sum(1 for k in accesses if pol_c2.on_access(k))
-    assert hits >= hits_c2 - len(accesses) * 0.001  # within 0.1% of stream length
+    assert (
+        hits >= hits_c2 - len(accesses) * 0.001
+    )  # within 0.1% of stream length
 
 
 def test_full_capacity_only_compulsory_misses():

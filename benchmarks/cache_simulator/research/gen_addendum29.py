@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Programmatic ADDENDUM29 generator for exp683 (door under flash crowds)."""
+
 import json
 from pathlib import Path
 
@@ -57,4 +58,6 @@ L = [
 ]
 out = "\n".join(L)
 (D / "ADDENDUM29.md").write_text(out)
-print(f"ADDENDUM29.md {len(out.encode())} bytes | rec flips {len(rec_flip)} | worst burst delta {worst['door_burst_def']-worst['cf_burst_def']:+.2f}pp")
+print(
+    f"ADDENDUM29.md {len(out.encode())} bytes | rec flips {len(rec_flip)} | worst burst delta {worst['door_burst_def']-worst['cf_burst_def']:+.2f}pp"
+)

@@ -31,13 +31,17 @@ class ShadowFitPolicy:
     RESEGMENT = 4096
     uses_oracle = False
 
-    def __init__(self, capacity: int, num_layers: int = 1, prior: float = 1.0 / 16):
+    def __init__(
+        self, capacity: int, num_layers: int = 1, prior: float = 1.0 / 16
+    ):
         self.capacity = capacity
         self.choice = "lcnu"
         self.switches = 0
         self._since = 0
         self._inners = {
-            "lcnu": build_policy("lcnu", capacity, num_layers=num_layers, prior=prior),
+            "lcnu": build_policy(
+                "lcnu", capacity, num_layers=num_layers, prior=prior
+            ),
             "s3fifo": build_policy("s3fifo", capacity),
         }
         self._cum = {"lcnu": [0, 0], "s3fifo": [0, 0]}  # [hits, total]

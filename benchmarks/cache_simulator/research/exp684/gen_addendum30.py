@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Programmatic ADDENDUM30 generator for exp684 (ring-less probation)."""
+
 import json
 from pathlib import Path
 
