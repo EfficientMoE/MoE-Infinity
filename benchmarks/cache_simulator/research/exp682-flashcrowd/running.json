@@ -10,5 +10,6 @@
     "prereg_sha256_16": "eccac5a24effd2fe"
   },
   "gate_at_launch": "Data avail 96 GiB >= 15 GiB",
-  "next_hint": "verdict -> ADDENDUM + research/ copy + commit push mfethe1 exp651/qwen30b-results; follow-up branches preregistered in PREREG.md"
+  "next_hint":
+      "verdict -> ADDENDUM + research/ copy + commit push mfethe1 exp651/qwen30b-results; follow-up branches preregistered in PREREG.md"
 }

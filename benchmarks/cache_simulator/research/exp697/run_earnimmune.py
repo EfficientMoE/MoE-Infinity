@@ -42,6 +42,7 @@ Gates: repl lcnu/ring10/ssr_10 == exp694 exactly (d4096 all caps,
 exit 4); det eti cap2048 d4096 double-pass (exit 2); consistency:
 class counts identical across arms (exit 3). Exit 0 settled.
 """
+
 import importlib.util
 import json
 import sys
@@ -52,12 +53,14 @@ import numpy as np
 
 HOME = Path.home()
 spec94 = importlib.util.spec_from_file_location(
-    "x94", str(HOME / "warp-work/exp694-moei-capmap/run_capmap.py"))
+    "x94", str(HOME / "warp-work/exp694-moei-capmap/run_capmap.py")
+)
 x94 = importlib.util.module_from_spec(spec94)
 sys.modules["x94"] = x94
 spec94.loader.exec_module(x94)
 from benchmarks.cache_simulator.policies import (  # noqa: E402
-    LayerCycleNextUsePolicy)
+    LayerCycleNextUsePolicy,
+)
 
 D = Path(__file__).parent
 CAPS = [512, 1024, 2048, 4096, 8192]
@@ -155,8 +158,11 @@ def pass_metrics(pol, keys, seg, rid):
         if k not in seen:
             seen[k] = rid[i]
     n_b = st["a"][0] + st["b"][0] + st["c"][0]
-    return {"burst": (st["a"][1] + st["b"][1] + st["c"][1]) / n_b,
-            "rec": st["rec"][1] / st["rec"][0], "cls": st}
+    return {
+        "burst": (st["a"][1] + st["b"][1] + st["c"][1]) / n_b,
+        "rec": st["rec"][1] / st["rec"][0],
+        "cls": st,
+    }
 
 
 def mk_arm(arm, cap):
@@ -168,8 +174,11 @@ def mk_arm(arm, cap):
 
 def main():
     t0 = time.time()
-    ref = json.loads((HOME / "warp-work/exp694-moei-capmap/"
-                      "exp694-capmap.json").read_text())
+    ref = json.loads(
+        (
+            HOME / "warp-work/exp694-moei-capmap/" "exp694-capmap.json"
+        ).read_text()
+    )
     ref_cells = {c["d"]: c["caps"] for c in ref["map_grid"]}
     out = {"exp": "exp697-earnimmune", "cells": []}
     repl_ok, det_ok = True, True
@@ -186,8 +195,10 @@ def main():
                 cc[arm] = m
                 if arm in ref_cells[d][str(cap)]:
                     r = ref_cells[d][str(cap)][arm]
-                    if (abs(m["burst"] - r["burst"]) > 1e-12
-                            or abs(m["rec"] - r["rec"]) > 1e-12):
+                    if (
+                        abs(m["burst"] - r["burst"]) > 1e-12
+                        or abs(m["rec"] - r["rec"]) > 1e-12
+                    ):
                         print(f"REPL FAIL d={d} cap={cap} {arm}")
                         repl_ok = False
                 if arm == "eti_10" and d == 4096 and cap == 2048:
@@ -199,12 +210,14 @@ def main():
             elif sig != base_counts:
                 print(f"CONSISTENCY FAIL d={d} cap={cap}")
                 sys.exit(3)
-            cell["caps"][str(cap)] = {a: {"burst": cc[a]["burst"],
-                                          "rec": cc[a]["rec"],
-                                          "cls": {x: cc[a]["cls"][x]
-                                                  for x in
-                                                  ("a", "b", "c")}}
-                                      for a in cc}
+            cell["caps"][str(cap)] = {
+                a: {
+                    "burst": cc[a]["burst"],
+                    "rec": cc[a]["rec"],
+                    "cls": {x: cc[a]["cls"][x] for x in ("a", "b", "c")},
+                }
+                for a in cc
+            }
         out["cells"].append(cell)
         print(f"d={d} done [{time.time()-t0:.0f}s]", flush=True)
     if not repl_ok:
@@ -215,24 +228,32 @@ def main():
     if m2 != det_ref:
         det_ok = False
     m = out["cells"][0]["caps"]
+
     def g(cap, arm, f):
         return m[str(cap)][arm][f]
-    harm = all(g(c, "eti_10", "rec") >= g(c, "lcnu", "rec") - 0.001
-               and g(c, "eti_10", "burst") >= g(c, "lcnu", "burst") - 0.005
-               for c in CAPS)
+
+    harm = all(
+        g(c, "eti_10", "rec") >= g(c, "lcnu", "rec") - 0.001
+        and g(c, "eti_10", "burst") >= g(c, "lcnu", "burst") - 0.005
+        for c in CAPS
+    )
     strong = any(
         g(c, "eti_10", "rec") >= g(c, "ring10", "rec") + 0.001
         and g(c, "eti_10", "burst") >= g(c, "ring10", "burst") + 0.001
-        for c in (1024, 2048))
+        for c in (1024, 2048)
+    )
     primary = any(
         g(c, "eti_10", "rec") >= g(c, "ring10", "rec") - 0.001
         and g(c, "eti_10", "burst") >= g(c, "ring10", "burst") + 0.010
-        for c in (1024, 2048))
-    coll_ring = (all(
+        for c in (1024, 2048)
+    )
+    coll_ring = all(
         abs(g(c, "eti_10", "burst") - g(c, "ring10", "burst")) < 0.010
-        for c in (1024, 2048))
-        and all(g(c, "eti_10", "rec") >= g(c, "ring10", "rec") - 0.001
-                for c in (1024, 2048)))
+        for c in (1024, 2048)
+    ) and all(
+        g(c, "eti_10", "rec") >= g(c, "ring10", "rec") - 0.001
+        for c in (1024, 2048)
+    )
     if not harm:
         verdict = "HARM"
     elif strong:
@@ -243,19 +264,45 @@ def main():
         verdict = "COLLAPSES_TO_RING"
     else:
         verdict = "MIXED"
-    mech = {str(c): (g(c, "eti_10", "cls")["c"][1],
-                     g(c, "ring10", "cls")["c"][1]) for c in (1024, 2048)}
-    out.update({"verdict": verdict, "harm": harm, "strong": strong,
-                "primary": primary, "collapses_to_ring": coll_ring,
-                "det": det_ok, "mech_c_hits": mech,
-                "elapsed_s": round(time.time() - t0, 1)})
+    mech = {
+        str(c): (g(c, "eti_10", "cls")["c"][1], g(c, "ring10", "cls")["c"][1])
+        for c in (1024, 2048)
+    }
+    out.update(
+        {
+            "verdict": verdict,
+            "harm": harm,
+            "strong": strong,
+            "primary": primary,
+            "collapses_to_ring": coll_ring,
+            "det": det_ok,
+            "mech_c_hits": mech,
+            "elapsed_s": round(time.time() - t0, 1),
+        }
+    )
     (D / "exp697-earnimmune.json").write_text(json.dumps(out, indent=1))
-    print("VERDICT:", verdict, "| strong", strong, "| primary", primary,
-          "| coll_ring", coll_ring, "| harm-ok", harm, "| det", det_ok)
+    print(
+        "VERDICT:",
+        verdict,
+        "| strong",
+        strong,
+        "| primary",
+        primary,
+        "| coll_ring",
+        coll_ring,
+        "| harm-ok",
+        harm,
+        "| det",
+        det_ok,
+    )
     for cap in CAPS:
-        print(f"cap{cap:5d} " + " ".join(
-            f"{a}:{g(cap,a,'burst'):.4f}/{g(cap,a,'rec'):.4f}"
-            for a in ("lcnu", "ring10", "ssr_10", "eti_10")))
+        print(
+            f"cap{cap:5d} "
+            + " ".join(
+                f"{a}:{g(cap,a,'burst'):.4f}/{g(cap,a,'rec'):.4f}"
+                for a in ("lcnu", "ring10", "ssr_10", "eti_10")
+            )
+        )
     sys.exit(0 if det_ok else 2)
 
 

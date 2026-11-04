@@ -35,6 +35,7 @@ Gates: repl lcnu/ring10/ssr_10/center == exp694-capmap.json exactly
 (exit 2); consistency: class counts identical across arms (exit 3).
 Exit 0 settled.
 """
+
 import importlib.util
 import json
 import sys
@@ -45,12 +46,14 @@ import numpy as np
 
 HOME = Path.home()
 spec94 = importlib.util.spec_from_file_location(
-    "x94", str(HOME / "warp-work/exp694-moei-capmap/run_capmap.py"))
+    "x94", str(HOME / "warp-work/exp694-moei-capmap/run_capmap.py")
+)
 x94 = importlib.util.module_from_spec(spec94)
 sys.modules["x94"] = x94
 spec94.loader.exec_module(x94)
 from benchmarks.cache_simulator.policies import (  # noqa: E402
-    LayerCycleNextUsePolicy)
+    LayerCycleNextUsePolicy,
+)
 
 D = Path(__file__).parent
 CAPS = [512, 1024, 2048, 4096, 8192]
@@ -173,8 +176,11 @@ def mk_arm(arm, cap):
 
 def main():
     t0 = time.time()
-    ref = json.loads((HOME / "warp-work/exp694-moei-capmap/"
-                      "exp694-capmap.json").read_text())
+    ref = json.loads(
+        (
+            HOME / "warp-work/exp694-moei-capmap/" "exp694-capmap.json"
+        ).read_text()
+    )
     ref_cells = {c["d"]: c["caps"] for c in ref["map_grid"]}
     out = {"exp": "exp696-sring", "cells": []}
     repl_ok, det_ok = True, True
@@ -190,8 +196,10 @@ def main():
                 cc[arm] = m
                 if arm in ref_cells[d][str(cap)]:
                     r = ref_cells[d][str(cap)][arm]
-                    if (abs(m["burst"] - r["burst"]) > 1e-12
-                            or abs(m["rec"] - r["rec"]) > 1e-12):
+                    if (
+                        abs(m["burst"] - r["burst"]) > 1e-12
+                        or abs(m["rec"] - r["rec"]) > 1e-12
+                    ):
                         print(f"REPL FAIL d={d} cap={cap} {arm}")
                         repl_ok = False
                 if arm == "sring_10" and d == 4096 and cap == 2048:
@@ -203,12 +211,14 @@ def main():
             elif sig != base_counts:
                 print(f"CONSISTENCY FAIL d={d} cap={cap}")
                 sys.exit(3)
-            cell["caps"][str(cap)] = {a: {"burst": cc[a]["burst"],
-                                          "rec": cc[a]["rec"],
-                                          "cls": {x: cc[a]["cls"][x]
-                                                  for x in
-                                                  ("a", "b", "c")}}
-                                      for a in cc}
+            cell["caps"][str(cap)] = {
+                a: {
+                    "burst": cc[a]["burst"],
+                    "rec": cc[a]["rec"],
+                    "cls": {x: cc[a]["cls"][x] for x in ("a", "b", "c")},
+                }
+                for a in cc
+            }
         out["cells"].append(cell)
         print(f"d={d} done [{time.time()-t0:.0f}s]", flush=True)
     if not repl_ok:
@@ -217,24 +227,32 @@ def main():
     rid = burst_runs(seg)
     m2 = pass_metrics(mk_arm("sring_10", 2048), keys, seg, rid)
     if (m2["cls"] != det_ref["cls"]) or abs(
-            m2["burst"] - det_ref["burst"]) > 1e-12:
+        m2["burst"] - det_ref["burst"]
+    ) > 1e-12:
         det_ok = False
     m = out["cells"][0]["caps"]
+
     def g(cap, arm, f):
         return m[str(cap)][arm][f]
+
     def pp(x):
         return x * 100
-    harm = all(g(c, "sring_10", "rec") >= g(c, "lcnu", "rec") - 0.001
-               and g(c, "sring_10", "burst") >= g(c, "lcnu", "burst") - 0.005
-               for c in CAPS)
+
+    harm = all(
+        g(c, "sring_10", "rec") >= g(c, "lcnu", "rec") - 0.001
+        and g(c, "sring_10", "burst") >= g(c, "lcnu", "burst") - 0.005
+        for c in CAPS
+    )
     primary = any(
         g(c, "sring_10", "rec") >= g(c, "ring10", "rec") + 0.001
         and g(c, "sring_10", "burst") >= g(c, "ring10", "burst") + 0.001
-        for c in (1024, 2048))
+        for c in (1024, 2048)
+    )
     secondary = any(
         g(c, "sring_10", "rec") >= g(c, "ring10", "rec") - 0.001
         and g(c, "sring_10", "burst") >= g(c, "ring10", "burst") + 0.010
-        for c in (1024, 2048))
+        for c in (1024, 2048)
+    )
     if not harm:
         verdict = "HARM"
     elif primary:
@@ -243,18 +261,42 @@ def main():
         verdict = "ADDITIVE_REFUND"
     else:
         verdict = "TRADE_UNCHANGED"
-    mech = {str(c): (g(c, "sring_10", "cls")["c"][1],
-                     g(c, "ring10", "cls")["c"][1]) for c in (1024, 2048)}
-    out.update({"verdict": verdict, "harm": harm, "primary": primary,
-                "secondary": secondary, "det": det_ok, "mech_c_hits": mech,
-                "elapsed_s": round(time.time() - t0, 1)})
+    mech = {
+        str(c): (g(c, "sring_10", "cls")["c"][1], g(c, "ring10", "cls")["c"][1])
+        for c in (1024, 2048)
+    }
+    out.update(
+        {
+            "verdict": verdict,
+            "harm": harm,
+            "primary": primary,
+            "secondary": secondary,
+            "det": det_ok,
+            "mech_c_hits": mech,
+            "elapsed_s": round(time.time() - t0, 1),
+        }
+    )
     (D / "exp696-sring.json").write_text(json.dumps(out, indent=1))
-    print("VERDICT:", verdict, "| primary", primary, "| secondary",
-          secondary, "| harm-ok", harm, "| det", det_ok)
+    print(
+        "VERDICT:",
+        verdict,
+        "| primary",
+        primary,
+        "| secondary",
+        secondary,
+        "| harm-ok",
+        harm,
+        "| det",
+        det_ok,
+    )
     for cap in CAPS:
-        print(f"cap{cap:5d} " + " ".join(
-            f"{a}:{g(cap,a,'burst'):.4f}/{g(cap,a,'rec'):.4f}"
-            for a in ("lcnu", "ring10", "ssr_10", "sring_10")))
+        print(
+            f"cap{cap:5d} "
+            + " ".join(
+                f"{a}:{g(cap,a,'burst'):.4f}/{g(cap,a,'rec'):.4f}"
+                for a in ("lcnu", "ring10", "ssr_10", "sring_10")
+            )
+        )
     sys.exit(0 if det_ok else 2)
 
 

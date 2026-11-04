@@ -33,6 +33,7 @@ Exit: 0 settled | 2 det | 3 consistency | 4 repl.
 Arms: lcnu, ring10. Caps: 512/1024/2048/4096/8192. Depths: 4096 (main),
 1024 (control). N full 638,976; exp681 streams via run_capmap machinery.
 """
+
 import importlib.util
 import json
 import sys
@@ -43,7 +44,8 @@ import numpy as np
 
 HOME = Path.home()
 spec94 = importlib.util.spec_from_file_location(
-    "x94", str(HOME / "warp-work/exp694-moei-capmap/run_capmap.py"))
+    "x94", str(HOME / "warp-work/exp694-moei-capmap/run_capmap.py")
+)
 x94 = importlib.util.module_from_spec(spec94)
 sys.modules["x94"] = x94
 spec94.loader.exec_module(x94)
@@ -96,8 +98,11 @@ def classified_pass(pol, keys, seg, rid):
 
 def main():
     t0 = time.time()
-    ref = json.loads((HOME / "warp-work/exp694-moei-capmap/"
-                      "exp694-capmap.json").read_text())
+    ref = json.loads(
+        (
+            HOME / "warp-work/exp694-moei-capmap/" "exp694-capmap.json"
+        ).read_text()
+    )
     ref_cells = {c["d"]: c["caps"] for c in ref["map_grid"]}
     out = {"exp": "exp695-flooddecomp", "cells": []}
     det_ok = True
@@ -112,15 +117,29 @@ def main():
             for arm in ARMS:
                 pol = x94.mk_arm(arm, cap)
                 st = classified_pass(pol, keys, seg, rid)
-                cc[arm] = {"a_cnt": st["a"][0], "a_hits": st["a"][1],
-                           "b_cnt": st["b"][0], "b_hits": st["b"][1],
-                           "c_cnt": st["c"][0], "c_hits": st["c"][1],
-                           "tot_cnt": st["tot"][0], "tot_hits": st["tot"][1]}
+                cc[arm] = {
+                    "a_cnt": st["a"][0],
+                    "a_hits": st["a"][1],
+                    "b_cnt": st["b"][0],
+                    "b_hits": st["b"][1],
+                    "c_cnt": st["c"][0],
+                    "c_hits": st["c"][1],
+                    "tot_cnt": st["tot"][0],
+                    "tot_hits": st["tot"][1],
+                }
                 if base_counts is None:
-                    base_counts = (st["a"][0], st["b"][0], st["c"][0],
-                                   st["tot"][0])
-                elif (st["a"][0], st["b"][0], st["c"][0],
-                      st["tot"][0]) != base_counts:
+                    base_counts = (
+                        st["a"][0],
+                        st["b"][0],
+                        st["c"][0],
+                        st["tot"][0],
+                    )
+                elif (
+                    st["a"][0],
+                    st["b"][0],
+                    st["c"][0],
+                    st["tot"][0],
+                ) != base_counts:
                     print(f"CONSISTENCY FAIL d={d} cap={cap} {arm}")
                     sys.exit(3)
             # repl gate vs exp694 (d4096 only: exp694 home depth)
@@ -131,8 +150,10 @@ def main():
                     # rec needs the seg==4 rate: recompute cheaply? use
                     # stored? run one more plain pass for rec only.
                     if abs(my_burst - r[arm]["burst"]) > 1e-12:
-                        print(f"REPL FAIL d=4096 cap={cap} {arm} burst "
-                              f"{my_burst} != {r[arm]['burst']}")
+                        print(
+                            f"REPL FAIL d=4096 cap={cap} {arm} burst "
+                            f"{my_burst} != {r[arm]['burst']}"
+                        )
                         repl_ok = False
             cell["caps"][str(cap)] = cc
         out["cells"].append(cell)
@@ -144,20 +165,37 @@ def main():
     rid = burst_runs(seg)
     st2 = classified_pass(x94.mk_arm("lcnu", 2048), keys, seg, rid)
     refc = out["cells"][0]["caps"]["2048"]["lcnu"]
-    if (st2["a"][0], st2["a"][1], st2["b"][0], st2["b"][1],
-            st2["c"][0], st2["c"][1]) != (refc["a_cnt"], refc["a_hits"],
-                                          refc["b_cnt"], refc["b_hits"],
-                                          refc["c_cnt"], refc["c_hits"]):
+    if (
+        st2["a"][0],
+        st2["a"][1],
+        st2["b"][0],
+        st2["b"][1],
+        st2["c"][0],
+        st2["c"][1],
+    ) != (
+        refc["a_cnt"],
+        refc["a_hits"],
+        refc["b_cnt"],
+        refc["b_hits"],
+        refc["c_cnt"],
+        refc["c_hits"],
+    ):
         det_ok = False
     # adjudicate on d4096
     main_cells = out["cells"][0]["caps"]
+
     def rate(cap, arm, cls):
         c = main_cells[str(cap)][arm]
         return (c[f"{cls}_hits"] / c[f"{cls}_cnt"]) if c[f"{cls}_cnt"] else 0.0
-    b_delta = (main_cells["4096"]["lcnu"]["b_hits"]
-               - main_cells["512"]["lcnu"]["b_hits"])
-    tot_delta = (main_cells["4096"]["lcnu"]["tot_hits"]
-                 - main_cells["512"]["lcnu"]["tot_hits"])
+
+    b_delta = (
+        main_cells["4096"]["lcnu"]["b_hits"]
+        - main_cells["512"]["lcnu"]["b_hits"]
+    )
+    tot_delta = (
+        main_cells["4096"]["lcnu"]["tot_hits"]
+        - main_cells["512"]["lcnu"]["tot_hits"]
+    )
     h1 = tot_delta > 0 and b_delta / tot_delta >= 0.80
     h2 = True
     for cap in (1024, 2048):
@@ -165,23 +203,48 @@ def main():
             h2 = False
         if rate(cap, "ring10", "b") >= rate(cap, "lcnu", "b"):
             h2 = False
-    verdict = ("MECH_CONFIRMED" if (h1 and h2)
-               else "PARTIAL" if (h1 or h2) else "REFUTED")
-    out.update({"verdict": verdict, "h1": h1, "h2": h2,
-                "b_share_of_growth": round(b_delta / tot_delta, 4)
-                if tot_delta else None,
-                "det": det_ok, "repl": "exp694 exact (burst, d4096 all caps)",
-                "elapsed_s": round(time.time() - t0, 1)})
+    verdict = (
+        "MECH_CONFIRMED"
+        if (h1 and h2)
+        else "PARTIAL"
+        if (h1 or h2)
+        else "REFUTED"
+    )
+    out.update(
+        {
+            "verdict": verdict,
+            "h1": h1,
+            "h2": h2,
+            "b_share_of_growth": round(b_delta / tot_delta, 4)
+            if tot_delta
+            else None,
+            "det": det_ok,
+            "repl": "exp694 exact (burst, d4096 all caps)",
+            "elapsed_s": round(time.time() - t0, 1),
+        }
+    )
     (D / "exp695-flooddecomp.json").write_text(json.dumps(out, indent=1))
-    print("VERDICT:", verdict, "| H1:", h1, "| H2:", h2,
-          "| b_share:", out["b_share_of_growth"], "| det:", det_ok)
+    print(
+        "VERDICT:",
+        verdict,
+        "| H1:",
+        h1,
+        "| H2:",
+        h2,
+        "| b_share:",
+        out["b_share_of_growth"],
+        "| det:",
+        det_ok,
+    )
     for cap in CAPS:
         c = main_cells[str(cap)]
-        print(f"cap{cap:5d} lcnu a={c['lcnu']['a_hits']}/{c['lcnu']['a_cnt']}"
-              f" b={c['lcnu']['b_hits']}/{c['lcnu']['b_cnt']}"
-              f" c={c['lcnu']['c_hits']}/{c['lcnu']['c_cnt']}"
-              f" | ring b={c['ring10']['b_hits']}/{c['ring10']['b_cnt']}"
-              f" c={c['ring10']['c_hits']}/{c['ring10']['c_cnt']}")
+        print(
+            f"cap{cap:5d} lcnu a={c['lcnu']['a_hits']}/{c['lcnu']['a_cnt']}"
+            f" b={c['lcnu']['b_hits']}/{c['lcnu']['b_cnt']}"
+            f" c={c['lcnu']['c_hits']}/{c['lcnu']['c_cnt']}"
+            f" | ring b={c['ring10']['b_hits']}/{c['ring10']['b_cnt']}"
+            f" c={c['ring10']['c_hits']}/{c['ring10']['c_cnt']}"
+        )
     sys.exit(0 if det_ok else 2)
 
 
