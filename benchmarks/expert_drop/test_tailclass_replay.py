@@ -30,7 +30,9 @@ import pytest
 RESULTS = Path(__file__).resolve().parent / "results"
 ARMS = ("off", "mass20")
 BANDS = ("p0_50", "p50_90", "p90_99", "p99_100")
-FLOAT_TOL = 1e-12  # identical ops on identical inputs; absorbs JSON formatting only
+FLOAT_TOL = (
+    1e-12  # identical ops on identical inputs; absorbs JSON formatting only
+)
 
 
 def _decompose(latency: dict) -> dict:
@@ -67,12 +69,19 @@ def _decompose(latency: dict) -> dict:
 
     tail_total = sum(pp["band_tokens"]["p99_100"] for pp in per_prompt)
     shares = np.array(
-        [pp["band_tokens"]["p99_100"] / tail_total if tail_total else 0.0 for pp in per_prompt]
+        [
+            pp["band_tokens"]["p99_100"] / tail_total if tail_total else 0.0
+            for pp in per_prompt
+        ]
     )
     order = np.argsort(-shares, kind="stable")
     return {
         "num_tokens": len(flat),
-        "percentiles": {"p50": float(p50), "p90": float(p90), "p99": float(p99)},
+        "percentiles": {
+            "p50": float(p50),
+            "p90": float(p90),
+            "p99": float(p99),
+        },
         "per_prompt": per_prompt,
         "tail_concentration": {
             "tail_tokens": tail_total,
@@ -89,7 +98,9 @@ def _decompose(latency: dict) -> dict:
 
 def _load(arm: str) -> tuple[dict, dict]:
     latency = json.loads((RESULTS / f"tailclass_qwen_{arm}.json").read_text())
-    report = json.loads((RESULTS / f"tailclass_qwen_{arm}_report.json").read_text())
+    report = json.loads(
+        (RESULTS / f"tailclass_qwen_{arm}_report.json").read_text()
+    )
     return latency, report
 
 
@@ -104,27 +115,37 @@ def test_report_replays_from_latency(arm: str) -> None:
 
     assert report["num_tokens"] == rec["num_tokens"] == latency["samples"]
     for key, value in rec["percentiles"].items():
-        _assert_close(value, report["itl_percentiles_ms"][key], f"{arm} percentile {key}")
+        _assert_close(
+            value, report["itl_percentiles_ms"][key], f"{arm} percentile {key}"
+        )
 
     # Band token counts are latency-derived; per-band fetch statistics need
     # the trace dump and are intentionally not replayed here.
     for band in BANDS:
         recomputed = sum(pp["band_tokens"][band] for pp in rec["per_prompt"])
-        assert recomputed == report["bands"][band]["tokens"], f"{arm} band {band} count"
+        assert (
+            recomputed == report["bands"][band]["tokens"]
+        ), f"{arm} band {band} count"
 
     assert len(rec["per_prompt"]) == len(report["per_prompt"])
     for mine, theirs in zip(rec["per_prompt"], report["per_prompt"]):
         for key in ("prompt", "tokens", "band_tokens"):
-            assert mine[key] == theirs[key], f"{arm} prompt {mine['prompt']} {key}"
+            assert (
+                mine[key] == theirs[key]
+            ), f"{arm} prompt {mine['prompt']} {key}"
         for key in ("itl_ms_mean", "itl_ms_p50", "itl_ms_max"):
-            _assert_close(mine[key], theirs[key], f"{arm} prompt {mine['prompt']} {key}")
+            _assert_close(
+                mine[key], theirs[key], f"{arm} prompt {mine['prompt']} {key}"
+            )
 
     mine, theirs = rec["tail_concentration"], report["tail_concentration"]
     for key in ("tail_tokens", "prompts", "top3_prompts"):
         assert mine[key] == theirs[key], f"{arm} tail_concentration {key}"
     for key in ("top3_share", "effective_prompt_count"):
         _assert_close(mine[key], theirs[key], f"{arm} tail_concentration {key}")
-    for i, (a, b) in enumerate(zip(mine["per_prompt_share"], theirs["per_prompt_share"])):
+    for i, (a, b) in enumerate(
+        zip(mine["per_prompt_share"], theirs["per_prompt_share"])
+    ):
         _assert_close(a, b, f"{arm} tail share[{i}]")
 
 
@@ -139,13 +160,25 @@ def test_paired_compare_replays() -> None:
     delta_pct = (mine - base) / base * 100.0
 
     assert len(delta_pct) == len(pc["per_prompt_mean_itl_delta_pct"])
-    for i, (a, b) in enumerate(zip(delta_pct, pc["per_prompt_mean_itl_delta_pct"])):
+    for i, (a, b) in enumerate(
+        zip(delta_pct, pc["per_prompt_mean_itl_delta_pct"])
+    ):
         _assert_close(float(a), b, f"paired delta[{i}]")
-    _assert_close(float(np.median(delta_pct)), pc["median_delta_pct"], "paired median")
-    _assert_close(float(np.mean(delta_pct)), pc["mean_delta_pct"], "paired mean")
+    _assert_close(
+        float(np.median(delta_pct)), pc["median_delta_pct"], "paired median"
+    )
+    _assert_close(
+        float(np.mean(delta_pct)), pc["mean_delta_pct"], "paired mean"
+    )
     assert int((delta_pct < 0).sum()) == pc["prompts_improved"]
-    assert sorted(mass["tail_concentration"]["top3_prompts"]) == pc["tail_top3_this"]
-    assert sorted(off["tail_concentration"]["top3_prompts"]) == pc["tail_top3_other"]
+    assert (
+        sorted(mass["tail_concentration"]["top3_prompts"])
+        == pc["tail_top3_this"]
+    )
+    assert (
+        sorted(off["tail_concentration"]["top3_prompts"])
+        == pc["tail_top3_other"]
+    )
     assert pc["tail_top3_overlap"] == len(
         set(pc["tail_top3_this"]) & set(pc["tail_top3_other"])
     )
@@ -168,7 +201,9 @@ def test_pinned_295_findings() -> None:
     pc = mass["paired_compare"]
     assert pc["tail_top3_overlap"] == 0
     assert pc["prompts_improved"] == 14
-    assert pc["median_delta_pct"] == pytest.approx(-3.4205412263433645, abs=1e-6)
+    assert pc["median_delta_pct"] == pytest.approx(
+        -3.4205412263433645, abs=1e-6
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - manual smoke without pytest
