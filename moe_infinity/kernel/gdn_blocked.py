@@ -39,6 +39,8 @@ PREP_NEUMANN = True
 # CUDA recurrence variant: 0 = 4 MMA warps, 2 = + 4 cp.async producer warps
 # (round 7: 9K recurrence 345 -> 293 us, 12K 436 -> 389, 50K neutral)
 RECUR_VARIANT_PRO6000 = 2
+# WY build: "triton" (gdn_prep) or "cuda" (csrc/gdn_wy.cu)
+SETUP_WY_PRO6000 = "triton"
 BLOCK_TOKENS = 2048  # 72 MB of block buffers, under the 80 MB window
 
 
@@ -174,29 +176,34 @@ def _setup_block(q, k, v, gc, beta, bufs, scale, T, t_base, TB, nb, norm_qk):
     w, u, qg, kd, S = bufs
     B, _, H, K = k.shape
     grid = (triton.cdiv(nb, 64), B * H)
-    gdn_fwd_prep_pro6000_kernel[grid](
-        k,
-        v,
-        gc,
-        beta,
-        w,
-        u,
-        w,
-        T,
-        t_base,
-        TB,
-        HV=H,
-        K=K,
-        V=v.shape[-1],
-        BT=64,
-        BC=16,
-        BK=K,
-        NORM_K=norm_qk,
-        BLOCK_OUT=True,
-        NEUMANN=PREP_NEUMANN,
-        num_warps=PREP_WARPS_PRO6000,
-        num_stages=1,
-    )
+    if SETUP_WY_PRO6000 == "cuda":
+        from moe_infinity.kernel import gdn_recur_cuda
+
+        gdn_recur_cuda.wy(k, v, gc, beta, w, u, t_base, nb, norm_qk)
+    else:
+        gdn_fwd_prep_pro6000_kernel[grid](
+            k,
+            v,
+            gc,
+            beta,
+            w,
+            u,
+            w,
+            T,
+            t_base,
+            TB,
+            HV=H,
+            K=K,
+            V=v.shape[-1],
+            BT=64,
+            BC=16,
+            BK=K,
+            NORM_K=norm_qk,
+            BLOCK_OUT=True,
+            NEUMANN=PREP_NEUMANN,
+            num_warps=PREP_WARPS_PRO6000,
+            num_stages=1,
+        )
     gdn_fwd_aux_pro6000_kernel[grid](
         q,
         k,

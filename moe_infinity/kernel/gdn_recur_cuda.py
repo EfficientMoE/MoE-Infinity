@@ -21,6 +21,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 _SRC = Path(__file__).with_name("csrc") / "gdn_recur.cu"
+_SRC_WY = Path(__file__).with_name("csrc") / "gdn_wy.cu"
 
 _CPP = r"""
 #include <torch/extension.h>
@@ -67,8 +68,20 @@ std::vector<int64_t> l2_limits() {
   cudaDeviceGetAttribute(&maxw, cudaDevAttrMaxAccessPolicyWindowSize, dev);
   return {maxp, maxw};
 }
+void gdn_wy_launch(const void*, const void*, const float*, const void*, void*,
+                   void*, int, int, int, int, int, int, bool, cudaStream_t);
+void wy(torch::Tensor k, torch::Tensor v, torch::Tensor gc, torch::Tensor beta,
+        torch::Tensor w, torch::Tensor u, int64_t t_base, int64_t nb,
+        bool norm) {
+  int B = k.size(0), T = k.size(1), H = k.size(2), TB = w.size(1);
+  gdn_wy_launch(k.data_ptr(), v.data_ptr(), gc.data_ptr<float>(),
+                beta.data_ptr(), w.data_ptr(), u.data_ptr(), B, H, T,
+                (int)t_base, TB, (int)nb, norm,
+                c10::cuda::getCurrentCUDAStream());
+}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("recur", &recur);
+  m.def("wy", &wy);
   m.def("l2_window", &l2_window);
   m.def("l2_limits", &l2_limits);
 }
@@ -96,7 +109,7 @@ def _module():
         cpp.write_text(_CPP)
     return load(
         name=f"moe_gdn_recur_pro6000_sm{arch}",
-        sources=[str(cpp), str(_SRC)],
+        sources=[str(cpp), str(_SRC), str(_SRC_WY)],
         extra_cuda_cflags=[
             "-O3",
             f"-gencode=arch=compute_{arch},code=sm_{arch}",
@@ -132,3 +145,8 @@ def l2_window(buf, nbytes: int) -> None:
 
 def l2_limits() -> tuple[int, int]:
     return tuple(_module().l2_limits())
+
+
+def wy(k, v, gc, beta, w, u, t_base: int, nb: int, norm: bool) -> None:
+    """WY build (kkt + solve + w / u) of one token block into w / u."""
+    _module().wy(k, v, gc, beta, w, u, t_base, nb, norm)
