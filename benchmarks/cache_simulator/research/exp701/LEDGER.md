@@ -35,3 +35,6 @@ Runner imports and repl-leg logic exercised at mini scale in-line
 (part-1 numbers reproduced from sealed JSON before any new compute).
 
 - STATUS: NEXT
+- FREEZE: 817fac9 (prereg; part 1 sealed from exp700 JSON)
+
+- RUN1 DISCLOSURE: d=5120 crashed the sealed generator (burst-draw array sized 4096 = BURSTS axis ceiling; IndexError at crowd_stream). d-axis is generator-capped at 4096; extending the sealed generator deferred (own experiment). RESCOPE v2: d3072 row + d4096 cap cross-section {1280,1536,2560,3072,5120}; bars unchanged (RIDGE_CREST: all probes <= 11.91+0.5pp).

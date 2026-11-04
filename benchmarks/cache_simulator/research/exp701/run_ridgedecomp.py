@@ -39,8 +39,12 @@ spec97.loader.exec_module(x97)
 
 D = Path(__file__).parent
 ARMS = ["lcnu", "ring10", "ssr_10", "eti_2020"]
-PROBE_D = [3072, 5120]
+# d=5120 crashed the sealed generator (burst-draw array capped at
+# 4096 = BURSTS axis ceiling; IndexError, disclosed in LEDGER).
+# In-range re-scope: d3072 row + full cap cross-section at d4096.
+PROBE_D = [3072]
 PROBE_CAP = [1536, 2048, 2560]
+XSEC_CAP = [1280, 1536, 2560, 3072, 5120]  # cap profile at d4096
 
 
 def mk_arm(arm, cap):
@@ -95,7 +99,7 @@ def main():
             print(f"REPL FAIL d4096 cap2048 {arm}")
             sys.exit(4)
     print(f"repl leg done [{time.time()-t0:.0f}s]", flush=True)
-    # off-grid probes
+    # off-grid probes: d3072 row + d4096 cap cross-section
     repl_probe = None
     for d in PROBE_D:
         leg = leg_for(d, PROBE_CAP)
@@ -103,6 +107,9 @@ def main():
         if repl_probe is None:
             repl_probe = (d, leg)
         print(f"d={d} done [{time.time()-t0:.0f}s]", flush=True)
+    xsec = leg_for(4096, XSEC_CAP)
+    out["xsec_d4096"] = xsec
+    print(f"d=4096 xsec done [{time.time()-t0:.0f}s]", flush=True)
     # det double-pass on first probe cell
     d0 = PROBE_D[0]
     keys, seg, _ = x94.stream_for(d0)
@@ -115,19 +122,19 @@ def main():
     # adjudicate
     spreads = {f"{d}x{c}": round(spread(out["probes"][str(d)][str(c)]), 3)
                for d in PROBE_D for c in PROBE_CAP}
+    spreads.update({f"4096x{c}": round(spread(xsec[str(c)]), 3)
+                    for c in XSEC_CAP})
     crest_holds = all(v <= crest + 0.5 for v in spreads.values())
     out.update({"verdict": ("RIDGE_CREST" if crest_holds else "RIDGE_RISING"),
                 "probe_spread_pp": spreads, "det": True,
                 "elapsed_s": round(time.time() - t0, 1)})
     (D / "exp701-ridgedecomp.json").write_text(json.dumps(out, indent=1))
     print("VERDICT:", out["verdict"], "| crest:", crest)
-    for d in PROBE_D:
-        print(f"d={d}:", " ".join(f"c{c}:{spreads[f'{d}x{c}']:.2f}"
-                                  for c in PROBE_CAP))
-    for d in PROBE_D:
-        g = out["probes"][str(d)]["2048"]
-        print(f"d={d} c2048:", " ".join(f"{a}:{g[a]['burst']:.4f}"
-                                        for a in ARMS))
+    for k, v in spreads.items():
+        print(f"  {k}: {v:.2f}")
+    g = xsec["2048"]
+    print("d4096 c2048:", " ".join(f"{a}:{g[a]['burst']:.4f}"
+                                    for a in ARMS))
     sys.exit(0)
 
 
