@@ -15,7 +15,7 @@ for r in rows:
     by_cap.setdefault(r["cap"], []).append(r)
 
 L = [
-    "# Addendum 26 — exp681 sub-block flash-crowd probe (CROWD-H1)",
+    "# Addendum 27 — exp681 sub-block flash-crowd probe (CROWD-H1)",
     "",
     "exp677 localized harm to arbitration-interval alignment; exp680 ruled",
     "out cadence. exp681 tested the remaining axis: a cold-crowd burst (layer",
