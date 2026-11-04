@@ -33,3 +33,6 @@ Depth legs d256/d1024 execute; saturation arms coincide at mini
 d1024 cap2048 = 0.2236/0.7874 (sane).
 
 - STATUS: NEXT
+- FREEZE: 839c7e2 (prereg + smoke)
+
+- RUN1: exit 3 — consistency gate as registered was impossible (class totals scale with d; signatures 6+4+4086=4096, 1+0+255=256, 2+0+1022=1024 prove data correct). No results observed before abort (adjudication/metrics print after the gate). GATE V2: within-depth totals equality across caps + sum==d. Bars unchanged.
