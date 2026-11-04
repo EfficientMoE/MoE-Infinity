@@ -598,3 +598,37 @@ def test_lcnu_prefill_handling():
     prefill_only = {k for k in trace[: LAYERS * 6]} - set(trace[LAYERS * 6 :])
     for key in prefill_only:
         assert pol._count[key] == 0
+
+
+@pytest.mark.parametrize("name", ["knn", "coactivation", "hybrid", "logistic"])
+def test_decode_width_ignores_prefill_visits(name):
+    rng = random.Random(17)
+    union = _union_trace(rng)
+    decode = [k for i, k in enumerate(union) if not _in_wide_visit(union, i)]
+
+    def make():
+        return build_prefetcher(
+            name,
+            horizon=1,
+            budget=4,
+            num_layers=LAYERS,
+            num_experts=EXPERTS,
+            decode_width=TOPK,
+        )
+
+    with_prefill = [p for p in _predictions(make(), union) if p]
+    decode_only = [p for p in _predictions(make(), decode) if p]
+    # Prefill visits yield no predictions and teach nothing.
+    assert with_prefill == decode_only[: len(with_prefill)]
+    assert len(with_prefill) >= len(decode_only) - 1
+
+
+def _in_wide_visit(trace, i):
+    layer = trace[i][0]
+    lo = i
+    while lo > 0 and trace[lo - 1][0] == layer:
+        lo -= 1
+    hi = i
+    while hi + 1 < len(trace) and trace[hi + 1][0] == layer:
+        hi += 1
+    return hi - lo + 1 > TOPK

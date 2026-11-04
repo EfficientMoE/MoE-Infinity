@@ -148,9 +148,12 @@ class PrefetchPolicy(ABC):
         num_layers: Optional[int] = None,
         num_experts: Optional[int] = None,
         min_score: float = 0.0,
+        decode_width: Optional[int] = None,
     ):
         if horizon < 1:
             raise ValueError("horizon must be >= 1")
+        if decode_width is not None and decode_width < 1:
+            raise ValueError("decode_width must be >= 1")
         if budget < 1:
             raise ValueError("budget must be >= 1")
         if num_layers is not None and num_layers < 1:
@@ -164,6 +167,11 @@ class PrefetchPolicy(ABC):
         #: Adaptive budget: candidates scoring below this are not proposed
         #: (scores are routing-probability-like for every online predictor).
         self.min_score = min_score
+        #: Decode-only prediction: a visit routing more than ``decode_width``
+        #: experts is a prefill pass; it is neither learned from nor
+        #: predicted after (the engine knows the forward mode).
+        self.decode_width = decode_width
+        self._skip = False
         self.num_layers = num_layers
         self.num_experts = num_experts or 0
         self._max_layer = -1
@@ -203,7 +211,7 @@ class PrefetchPolicy(ABC):
         """Close the open visit; candidates for the next ``horizon`` visits."""
         if self._open:
             self._close()
-        if self._layer is None:
+        if self._layer is None or self._skip:
             return []
         cycle = max(self.cycle, 1)
         out: List[Prediction] = []
@@ -218,7 +226,10 @@ class PrefetchPolicy(ABC):
 
     def _close(self) -> None:
         self._open = False
-        self._learn(self._layer, self._keys)
+        width = self.decode_width
+        self._skip = width is not None and len(self._keys) > width
+        if not self._skip:
+            self._learn(self._layer, self._keys)
         self.visits += 1
 
     # -- hooks -------------------------------------------------------------- #
