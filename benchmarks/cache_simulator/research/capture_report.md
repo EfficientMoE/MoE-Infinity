@@ -1398,3 +1398,5 @@ First BOTH_PASS in the composite program: all 3 annex fracs (5/10/15%) pass burs
 
 ## exp694 — capacity-scaling map of burst/recovery frontier (DUAL_STABLE, ledger #216)
 Caps 512-8192 x d{1024,4096} x lcnu/center/ring10/ssr_10. Ring dual advantage PEAKS at cap1024 (+8.86pp burst, +2.34pp rec — rec edge triples vs cap512) and cap2048 (+9.23/+1.44); dissolves cap4096 (+0.88/+0.20); total convergence at cap8192 (all arms 0.9985-1.0). lcnu absolute burst penalty GROWS with capacity (0.0884->0.4099). CostFit == lcnu byte-equal at cap>=1024 (arbitration no-op). ssr never beats lcnu at burst (any cap). Frontier is a MID-CAP phenomenon: worst 1.5-4x working set, moot at saturation. det True; repl exp681+exp685 exact; ADDENDUM37; freeze f3b4795. exp695 registered: lcnu victim-ranking pathology under flood.
+
+## exp694 erratum — sign convention: burst_adv positive = ring SACRIFICES burst (deployment-hint paragraph in the exp694 entry above misread it as a gain; corrected in ADDENDUM37 erratum). Table/verdict unchanged (bars were pre-registered with the correct sign).
