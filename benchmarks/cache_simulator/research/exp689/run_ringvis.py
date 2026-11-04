@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""exp686a: make the ring visible — ring10 inner + lazy promotion + ghost history.
+"""exp689: make the ring visible — ring10 inner + lazy promotion + ghost history.
 
 exp685 measured: the composite's ONLY failed gate was recovery at
 d4096/cap512 (+6.982pp == exp681 center), and center_ring25 was
@@ -288,7 +288,7 @@ if __name__ == "__main__":
                              "STRETCH": "cr10 burst_def <= 1.5pp @d4096/cap512",
                              "SAFETY": "loops >= lcnu-0.5pp ALL"}}
     res["elapsed_s"] = round(time.time() - t0, 1)
-    (D / "exp686a-ringvis.json").write_text(json.dumps(res, indent=1))
+    (D / "exp689-ringvis.json").write_text(json.dumps(res, indent=1))
     print("VERDICT:", res["verdict"], "| winners:", res["winners"],
           "| det:", res["det"], "| repl:", res["repl"])
     for r in res["rows"]:
