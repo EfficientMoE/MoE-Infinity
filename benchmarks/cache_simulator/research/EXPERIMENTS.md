@@ -262,8 +262,6 @@ Rows appended by `benchmarks/cache_simulator/research/run_policies.py`. All trac
 | multi_layer_ahead | uniform-stress-synthetic | synthetic | 384 | 0.7472 | 0.9984 | synthetic | b0aff90 |
 | activation_matrix | uniform-stress-synthetic | synthetic | 384 | 0.5021 | 0.8057 | synthetic | b0aff90 |
 
-<!-- run: python -m benchmarks.cache_simulator.research.run_policies | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: b0aff90 -->
-
 ## Acceleration — Task C (#292)
 
 Hardware H1: `python=3.12.3, x86_64, 128 cores, numpy=2.4.4,
@@ -2275,26 +2273,6 @@ processes on the 128-core host.
 | stride_prefetch | qwen3-30b-a3b | handcrafted8-greedy512/decode | 896 | 0.5981 | 0.9988 | real | 224034e |
 | multi_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 896 | 0.5965 | 0.9991 | real | 224034e |
 | activation_matrix | qwen3-30b-a3b | handcrafted8-greedy512/decode | 896 | 0.4133 | 0.7783 | real | 224034e |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.8327 | 0.8327 | real | 224034e |
-| lru | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6413 | 0.6413 | real | 224034e |
-| lfu | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.4670 | 0.4670 | real | 224034e |
-| lfu_k | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6413 | 0.6413 | real | 224034e |
-| model_tracing | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.4807 | 0.4807 | real | 224034e |
-| score | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6413 | 0.6413 | real | 224034e |
-| lhu | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6254 | 0.6254 | real | 224034e |
-| arc | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6418 | 0.6418 | real | 224034e |
-| 2q | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6474 | 0.6474 | real | 224034e |
-| lru_k | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6427 | 0.6427 | real | 224034e |
-| lirs | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6453 | 0.6453 | real | 224034e |
-| s3fifo | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6547 | 0.6547 | real | 224034e |
-| sieve | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.2514 | 0.2514 | real | 224034e |
-| w_tinylfu | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6330 | 0.6330 | real | 224034e |
-| layer_lru | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6430 | 0.6430 | real | 224034e |
-| lcnu | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6685 | 0.6685 | real | 224034e |
-| single_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6404 | 0.9994 | real | 224034e |
-| stride_prefetch | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6407 | 0.9993 | real | 224034e |
-| multi_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6397 | 0.9994 | real | 224034e |
-| activation_matrix | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.4601 | 0.7942 | real | 224034e |
 | belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1152 | 0.8577 | 0.8577 | real | 224034e |
 | lru | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1152 | 0.6808 | 0.6808 | real | 224034e |
 | lfu | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1152 | 0.5079 | 0.5079 | real | 224034e |
@@ -2355,26 +2333,6 @@ processes on the 128-core host.
 | stride_prefetch | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1408 | 0.7539 | 0.9994 | real | 224034e |
 | multi_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1408 | 0.7532 | 0.9996 | real | 224034e |
 | activation_matrix | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1408 | 0.5940 | 0.8383 | real | 224034e |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.9124 | 0.9124 | real | 224034e |
-| lru | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7877 | 0.7877 | real | 224034e |
-| lfu | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.6164 | 0.6164 | real | 224034e |
-| lfu_k | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7877 | 0.7877 | real | 224034e |
-| model_tracing | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.6320 | 0.6320 | real | 224034e |
-| score | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7877 | 0.7877 | real | 224034e |
-| lhu | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7634 | 0.7634 | real | 224034e |
-| arc | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7915 | 0.7915 | real | 224034e |
-| 2q | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7865 | 0.7865 | real | 224034e |
-| lru_k | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7970 | 0.7970 | real | 224034e |
-| lirs | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7947 | 0.7947 | real | 224034e |
-| s3fifo | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.8083 | 0.8083 | real | 224034e |
-| sieve | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.4235 | 0.4235 | real | 224034e |
-| w_tinylfu | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7629 | 0.7629 | real | 224034e |
-| layer_lru | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7819 | 0.7819 | real | 224034e |
-| lcnu | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7871 | 0.7871 | real | 224034e |
-| single_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7871 | 0.9996 | real | 224034e |
-| stride_prefetch | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7873 | 0.9995 | real | 224034e |
-| multi_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.7867 | 0.9996 | real | 224034e |
-| activation_matrix | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.6353 | 0.8515 | real | 224034e |
 | belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1664 | 0.9253 | 0.9253 | real | 224034e |
 | lru | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1664 | 0.8172 | 0.8172 | real | 224034e |
 | lfu | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1664 | 0.6483 | 0.6483 | real | 224034e |
@@ -3100,26 +3058,6 @@ processes on the 128-core host.
 | stride_prefetch | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 896 | 0.5892 | 0.9988 | real | b094474 |
 | multi_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 896 | 0.5875 | 0.9990 | real | b094474 |
 | activation_matrix | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 896 | 0.4062 | 0.7736 | real | b094474 |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.8263 | 0.8263 | real | b094474 |
-| lru | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6320 | 0.6320 | real | b094474 |
-| lfu | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.4633 | 0.4633 | real | b094474 |
-| lfu_k | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6320 | 0.6320 | real | b094474 |
-| model_tracing | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.4754 | 0.4754 | real | b094474 |
-| score | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6320 | 0.6320 | real | b094474 |
-| lhu | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6183 | 0.6183 | real | b094474 |
-| arc | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6352 | 0.6352 | real | b094474 |
-| 2q | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6399 | 0.6399 | real | b094474 |
-| lru_k | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6372 | 0.6372 | real | b094474 |
-| lirs | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6397 | 0.6397 | real | b094474 |
-| s3fifo | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6476 | 0.6476 | real | b094474 |
-| sieve | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.2566 | 0.2566 | real | b094474 |
-| w_tinylfu | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6286 | 0.6286 | real | b094474 |
-| layer_lru | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6336 | 0.6336 | real | b094474 |
-| lcnu | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6626 | 0.6626 | real | b094474 |
-| single_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6310 | 0.9993 | real | b094474 |
-| stride_prefetch | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6314 | 0.9993 | real | b094474 |
-| multi_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.6302 | 0.9993 | real | b094474 |
-| activation_matrix | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1024 | 0.4520 | 0.7892 | real | b094474 |
 | belady | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1152 | 0.8516 | 0.8516 | real | b094474 |
 | lru | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1152 | 0.6711 | 0.6711 | real | b094474 |
 | lfu | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1152 | 0.5041 | 0.5041 | real | b094474 |
@@ -3180,26 +3118,6 @@ processes on the 128-core host.
 | stride_prefetch | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1408 | 0.7439 | 0.9994 | real | b094474 |
 | multi_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1408 | 0.7429 | 0.9995 | real | b094474 |
 | activation_matrix | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1408 | 0.5861 | 0.8339 | real | b094474 |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.9073 | 0.9073 | real | b094474 |
-| lru | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7776 | 0.7776 | real | b094474 |
-| lfu | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.6125 | 0.6125 | real | b094474 |
-| lfu_k | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7776 | 0.7776 | real | b094474 |
-| model_tracing | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.6267 | 0.6267 | real | b094474 |
-| score | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7776 | 0.7776 | real | b094474 |
-| lhu | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7564 | 0.7564 | real | b094474 |
-| arc | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7847 | 0.7847 | real | b094474 |
-| 2q | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7790 | 0.7790 | real | b094474 |
-| lru_k | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7910 | 0.7910 | real | b094474 |
-| lirs | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7890 | 0.7890 | real | b094474 |
-| s3fifo | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.8012 | 0.8012 | real | b094474 |
-| sieve | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.4167 | 0.4167 | real | b094474 |
-| w_tinylfu | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7580 | 0.7580 | real | b094474 |
-| layer_lru | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7714 | 0.7714 | real | b094474 |
-| lcnu | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7862 | 0.7862 | real | b094474 |
-| single_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7769 | 0.9995 | real | b094474 |
-| stride_prefetch | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7772 | 0.9995 | real | b094474 |
-| multi_layer_ahead | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.7764 | 0.9995 | real | b094474 |
-| activation_matrix | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1536 | 0.6269 | 0.8470 | real | b094474 |
 | belady | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1664 | 0.9207 | 0.9207 | real | b094474 |
 | lru | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1664 | 0.8070 | 0.8070 | real | b094474 |
 | lfu | qwen3-30b-a3b | handcrafted8-greedy512/decode+prefill-union | 1664 | 0.6443 | 0.6443 | real | b094474 |
@@ -3245,25 +3163,15 @@ processes on the 128-core host.
 
 | policy | model | dataset | capacity | hit_rate | eff_hit_rate | provenance | commit |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 128 | 0.3067 | 0.3067 | real | 647ed87+dirty |
 | rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 128 | 0.0019 | 0.0019 | real | 647ed87+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 256 | 0.4977 | 0.4977 | real | 647ed87+dirty |
 | rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 256 | 0.0708 | 0.0708 | real | 647ed87+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 384 | 0.6012 | 0.6012 | real | 647ed87+dirty |
 | rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 384 | 0.3602 | 0.3602 | real | 647ed87+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 512 | 0.6722 | 0.6722 | real | 647ed87+dirty |
 | rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 512 | 0.4233 | 0.4233 | real | 647ed87+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 768 | 0.7682 | 0.7682 | real | 647ed87+dirty |
 | rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 768 | 0.5428 | 0.5428 | real | 647ed87+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.8327 | 0.8327 | real | 647ed87+dirty |
 | rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6547 | 0.6547 | real | 647ed87+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.9124 | 0.9124 | real | 647ed87+dirty |
 | rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.8082 | 0.8082 | real | 647ed87+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 2048 | 0.9532 | 0.9532 | real | 647ed87+dirty |
 | rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 2048 | 0.8955 | 0.8955 | real | 647ed87+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 3072 | 0.9856 | 0.9856 | real | 647ed87+dirty |
 | rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 3072 | 0.9685 | 0.9685 | real | 647ed87+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 4096 | 0.9935 | 0.9935 | real | 647ed87+dirty |
 | rothead | qwen3-30b-a3b | handcrafted8-greedy512/decode | 4096 | 0.9889 | 0.9889 | real | 647ed87+dirty |
 
 <!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model qwen3-30b-a3b --dataset handcrafted8-greedy512 --ignore-layers 0 --prefill skip | env: python 3.14.8, numpy 2.5.4, Darwin arm64 | commit: 647ed87+dirty -->
@@ -3295,25 +3203,15 @@ processes on the 128-core host.
 
 | policy | model | dataset | capacity | hit_rate | eff_hit_rate | provenance | commit |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 128 | 0.3067 | 0.3067 | real | 1d210a4+dirty |
 | hotfit | qwen3-30b-a3b | handcrafted8-greedy512/decode | 128 | 0.2083 | 0.2083 | real | 1d210a4+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 256 | 0.4977 | 0.4977 | real | 1d210a4+dirty |
 | hotfit | qwen3-30b-a3b | handcrafted8-greedy512/decode | 256 | 0.3273 | 0.3273 | real | 1d210a4+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 384 | 0.6012 | 0.6012 | real | 1d210a4+dirty |
 | hotfit | qwen3-30b-a3b | handcrafted8-greedy512/decode | 384 | 0.4148 | 0.4148 | real | 1d210a4+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 512 | 0.6722 | 0.6722 | real | 1d210a4+dirty |
 | hotfit | qwen3-30b-a3b | handcrafted8-greedy512/decode | 512 | 0.4829 | 0.4829 | real | 1d210a4+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 768 | 0.7682 | 0.7682 | real | 1d210a4+dirty |
 | hotfit | qwen3-30b-a3b | handcrafted8-greedy512/decode | 768 | 0.5591 | 0.5591 | real | 1d210a4+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.8327 | 0.8327 | real | 1d210a4+dirty |
 | hotfit | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1024 | 0.6547 | 0.6547 | real | 1d210a4+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.9124 | 0.9124 | real | 1d210a4+dirty |
 | hotfit | qwen3-30b-a3b | handcrafted8-greedy512/decode | 1536 | 0.8083 | 0.8083 | real | 1d210a4+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 2048 | 0.9532 | 0.9532 | real | 1d210a4+dirty |
 | hotfit | qwen3-30b-a3b | handcrafted8-greedy512/decode | 2048 | 0.8956 | 0.8956 | real | 1d210a4+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 3072 | 0.9856 | 0.9856 | real | 1d210a4+dirty |
 | hotfit | qwen3-30b-a3b | handcrafted8-greedy512/decode | 3072 | 0.9685 | 0.9685 | real | 1d210a4+dirty |
-| belady | qwen3-30b-a3b | handcrafted8-greedy512/decode | 4096 | 0.9935 | 0.9935 | real | 1d210a4+dirty |
 | hotfit | qwen3-30b-a3b | handcrafted8-greedy512/decode | 4096 | 0.9889 | 0.9889 | real | 1d210a4+dirty |
 
 <!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model qwen3-30b-a3b --dataset handcrafted8-greedy512 --ignore-layers 0 --prefill skip | env: python 3.14.8, numpy 2.5.4, Darwin arm64 | commit: 1d210a4+dirty -->
@@ -3425,25 +3323,15 @@ processes on the 128-core host.
 
 | policy | model | dataset | capacity | hit_rate | eff_hit_rate | provenance | commit |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| belady | qwen3-30b-a3b | belady/decode | 128 | 0.3067 | 0.3067 | real | fc168b7+dirty |
 | costfit | qwen3-30b-a3b | belady/decode | 128 | 0.2083 | 0.2083 | real | fc168b7+dirty |
-| belady | qwen3-30b-a3b | belady/decode | 256 | 0.4977 | 0.4977 | real | fc168b7+dirty |
 | costfit | qwen3-30b-a3b | belady/decode | 256 | 0.3273 | 0.3273 | real | fc168b7+dirty |
-| belady | qwen3-30b-a3b | belady/decode | 384 | 0.6012 | 0.6012 | real | fc168b7+dirty |
 | costfit | qwen3-30b-a3b | belady/decode | 384 | 0.4148 | 0.4148 | real | fc168b7+dirty |
-| belady | qwen3-30b-a3b | belady/decode | 512 | 0.6722 | 0.6722 | real | fc168b7+dirty |
 | costfit | qwen3-30b-a3b | belady/decode | 512 | 0.4853 | 0.4853 | real | fc168b7+dirty |
-| belady | qwen3-30b-a3b | belady/decode | 768 | 0.7682 | 0.7682 | real | fc168b7+dirty |
 | costfit | qwen3-30b-a3b | belady/decode | 768 | 0.5905 | 0.5905 | real | fc168b7+dirty |
-| belady | qwen3-30b-a3b | belady/decode | 1024 | 0.8327 | 0.8327 | real | fc168b7+dirty |
 | costfit | qwen3-30b-a3b | belady/decode | 1024 | 0.6674 | 0.6674 | real | fc168b7+dirty |
-| belady | qwen3-30b-a3b | belady/decode | 1536 | 0.9124 | 0.9124 | real | fc168b7+dirty |
 | costfit | qwen3-30b-a3b | belady/decode | 1536 | 0.8093 | 0.8093 | real | fc168b7+dirty |
-| belady | qwen3-30b-a3b | belady/decode | 2048 | 0.9532 | 0.9532 | real | fc168b7+dirty |
 | costfit | qwen3-30b-a3b | belady/decode | 2048 | 0.8948 | 0.8948 | real | fc168b7+dirty |
-| belady | qwen3-30b-a3b | belady/decode | 3072 | 0.9856 | 0.9856 | real | fc168b7+dirty |
 | costfit | qwen3-30b-a3b | belady/decode | 3072 | 0.9684 | 0.9684 | real | fc168b7+dirty |
-| belady | qwen3-30b-a3b | belady/decode | 4096 | 0.9935 | 0.9935 | real | fc168b7+dirty |
 | costfit | qwen3-30b-a3b | belady/decode | 4096 | 0.9886 | 0.9886 | real | fc168b7+dirty |
 
 <!-- run: python -m benchmarks.cache_simulator.research.run_policies_real --model qwen3-30b-a3b --dataset belady --ignore-layers 0 --prefill skip | env: python 3.14.8, numpy 2.5.4, Darwin arm64 | commit: fc168b7+dirty -->
