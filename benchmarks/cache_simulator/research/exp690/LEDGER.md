@@ -55,3 +55,4 @@
 - STATUS: NEXT
 
 - FREEZE: fd8b92d (pushed)
+- REPAIR (pre-run, disclosed): replication gate reference arm names fixed — exp681 JSON keys the arm "costfit" and exp686a keys it "ringfit3_10"; grid/adjudicator/bars untouched. First launch crashed at the gate (KeyError, exit 1, no verdict); relaunched on fixed code. Freeze for executed code: this commit.

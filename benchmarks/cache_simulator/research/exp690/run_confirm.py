@@ -216,9 +216,11 @@ def replication_check(grid):
     ref6 = {c["d"]: c["caps"] for c in r6["grid"]}
     for cell in grid:
         for cap, c in cell["caps"].items():
-            for ref, arm, code in ((ref1, "center", 4), (ref5, "ring10", 6),
-                                   (ref6, "fit3_10", 7)):
-                a = ref[cell["d"]][cap][arm]
+            for ref, arm, refname, code in (
+                    (ref1, "center", "costfit", 4),
+                    (ref5, "ring10", "ring10", 6),
+                    (ref6, "fit3_10", "ringfit3_10", 7)):
+                a = ref[cell["d"]][cap][refname]
                 for m in ("loop", "burst", "rec"):
                     if c[arm][m] != a[m]:
                         return code, (f"repl d={cell['d']} cap={cap} {arm} "
