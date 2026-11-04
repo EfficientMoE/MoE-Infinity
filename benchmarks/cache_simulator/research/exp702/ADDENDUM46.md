@@ -21,7 +21,7 @@
 ## Why the inversion: real novelty is FRONT-LOADED
 Top-decile novelty windows are 1–23 — the STARTUP RAMP of the
 first session (novelty up to 84 new keys/window). Windows 24–154
-contain **17 first-sights in total**. All 7 later session switches
+contain **17 first-sights in total**. All 6 later session switches
 (windows 51/72/87/98/110/142) carry ZERO novelty — pure warm
 re-access reshuffles, exactly the opposite of the synthetic
 cold-crowd model of session switches. The synthetic frontier
