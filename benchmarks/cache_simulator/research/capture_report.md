@@ -1368,3 +1368,12 @@ the double-miss tax on one-touch reuse is constant. Sharpens exp683: door
 on exp681's flash-crowd streams, where one-touch crowd admissions are the
 proven poison (10.86pp). If it still harms there, admission filtering is
 dead for this family and the fix must live in inner admission.
+## Addendum 29 (exp683 doorcrowd): DOOR-CROWD-HARM — admission filtering closed at wrapper level
+
+Door on exp681's exact crowd streams (anchor exact, det True): burst
+deficit GROWS everywhere (worst 14.8pp vs center 10.9pp at d4096/cap2048),
+H2 safety 11/16 violated — but recovery flips to ADVANTAGE where crowd
+admissions were the poison (d4096/cap512: -1.0pp vs center's +6.98pp).
+Mechanistic synthesis across 681/682/683: the lever is admission SPEED
+with post-admission demotion. exp684: probation subclass (admit first
+sight, evict never-rehit first).
