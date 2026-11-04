@@ -103,7 +103,20 @@ python3 -c '
 import os, pathlib
 p = pathlib.Path("LEDGER.md")
 text = p.read_text()
-target = "- STATUS: NEXT  # (marker INSIDE the fenced example; tail marker below is authoritative)"
+target = "- STATUS: DONE (exit 0; settle re-executed with quoting fix — disclosed)
+- **Result:**
+```
+VERDICT: IN_BURST_KEPT_VISIBLE | det: True | repl: exp681 costfit + exp685 ring10/ring25 exact | bars: h1 False, h2/h3/h4/acc True | elapsed 1471.5s | freeze 2735a8e
+(reconstructed from exp686a-ringfit3.json; original stdout capture lost to the settle-script quoting bug AFTER the run completed — measurement untouched; settle re-executed with the fix, disclosed)
+cell d256/c512: cf bdef +2.73 rdef -0.22 | rf3 bdef +2.73 rdef -0.22 loop_vs_l +0.66 | rf3_10 bdef +2.73 rdef -0.71 loop_vs_l +0.93 adopt burst=ring rec=ring sw=3 | lazy2 rdef +0.51 loop_vs_l +0.34
+cell d256/c2048: cf bdef +0.00 rdef +0.00 | rf3 bdef +0.00 rdef +0.00 loop_vs_l +0.04 | rf3_10 bdef +0.78 rdef -0.17 loop_vs_l +0.14 adopt burst=ring rec=ring sw=1 | lazy2 rdef +0.00 loop_vs_l +0.02
+cell d1024/c512: cf bdef +5.37 rdef -0.07 | rf3 bdef +5.37 rdef -0.07 loop_vs_l +0.66 | rf3_10 bdef +5.18 rdef -1.10 loop_vs_l +0.92 adopt burst=ring rec=ring sw=3 | lazy2 rdef +0.15 loop_vs_l +0.34
+cell d1024/c2048: cf bdef +0.00 rdef +0.00 | rf3 bdef +0.00 rdef +0.00 loop_vs_l +0.04 | rf3_10 bdef +5.57 rdef -1.15 loop_vs_l +0.15 adopt burst=ring rec=ring sw=1 | lazy2 rdef -0.39 loop_vs_l +0.03
+cell d2048/c512: cf bdef +4.05 rdef +1.29 | rf3 bdef +4.05 rdef +1.29 loop_vs_l +0.64 | rf3_10 bdef +5.57 rdef -1.37 loop_vs_l +0.92 adopt burst=ring rec=ring sw=3 | lazy2 rdef -0.02 loop_vs_l +0.33
+cell d2048/c2048: cf bdef +0.00 rdef +0.00 | rf3 bdef +0.00 rdef +0.00 loop_vs_l +0.04 | rf3_10 bdef +7.67 rdef -1.71 loop_vs_l +0.13 adopt burst=ring rec=ring sw=1 | lazy2 rdef -0.56 loop_vs_l +0.03
+cell d4096/c512: cf bdef +1.07 rdef +6.98 | rf3 bdef +1.07 rdef +6.98 loop_vs_l +0.60 | rf3_10 bdef +5.96 rdef -0.73 loop_vs_l +0.89 adopt burst=ring rec=ring sw=3 | lazy2 rdef +0.64 loop_vs_l +0.32
+cell d4096/c2048: cf bdef +0.00 rdef +0.00 | rf3 bdef +0.00 rdef +0.00 loop_vs_l +0.04 | rf3_10 bdef +9.23 rdef +0.00 loop_vs_l +0.08 adopt burst=ring rec=lcnu sw=2 | lazy2 rdef -0.41 loop_vs_l +0.02
+```"
 assert target in text, "no STATUS: NEXT marker"
 rep = f"- STATUS: {os.environ[\"VERDICT\"]}\n- **Result:**\n```\n{os.environ[\"OUT\"][-4000:]}\n```"
 p.write_text(text.replace(target, rep, 1))
