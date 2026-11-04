@@ -114,21 +114,32 @@ def main():
     itl_ms = []
     itl_ms_per_prompt = []
     gen_tokens = []
+    # Wall-clock anchors (#295 cross-validation request): per-prompt start/
+    # end and per-token timestamps let contended windows on a shared host be
+    # localized directly instead of inferred from tail-token clustering.
+    run_start_unix = time.time()
+    run_start_perf = time.perf_counter()
+    prompt_spans_s = []
+    token_times_s_per_prompt = []
     for prompt in PROMPTS[: args.num_prompts]:
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(
             "cuda:0"
         )
         token_times.clear()
+        prompt_start = time.perf_counter() - run_start_perf
         out = model.generate(
             input_ids,
             max_new_tokens=args.max_new_tokens,
             min_new_tokens=args.max_new_tokens,
             do_sample=False,
         )
+        prompt_end = time.perf_counter() - run_start_perf
         ts = list(token_times)
         prompt_itl = [(b - a) * 1e3 for a, b in zip(ts[1:], ts[2:])]
         itl_ms.extend(prompt_itl)
         itl_ms_per_prompt.append(prompt_itl)
+        prompt_spans_s.append([prompt_start, prompt_end])
+        token_times_s_per_prompt.append([t - run_start_perf for t in ts])
         gen_tokens.append(
             [int(t) for t in out[0][-args.max_new_tokens :].tolist()]
         )
@@ -165,6 +176,12 @@ def main():
         # with its measured ITL (itl[i] covers decode forward i+1).
         "itl_ms_per_prompt": itl_ms_per_prompt,
         "min_k": 1,
+        # Wall-clock localization (#295): unix epoch of the run start plus
+        # per-prompt [start, end] spans and per-token sample timestamps,
+        # all in seconds relative to run_start_unix.
+        "run_start_unix": run_start_unix,
+        "prompt_spans_s": prompt_spans_s,
+        "token_times_s_per_prompt": token_times_s_per_prompt,
     }
     with open(args.latency_out, "w") as fh:
         json.dump(latency, fh, indent=2)

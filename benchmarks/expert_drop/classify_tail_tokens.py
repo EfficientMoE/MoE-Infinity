@@ -21,7 +21,16 @@ expert (the fetch-causing set) of every decode token as one of:
 Tokens are then bucketed by their measured ITL percentile band
 ([0,p50) / [p50,p90) / [p90,p99) / [p99,max]) and the per-band fetch
 composition, routing-mass ranks, per-layer fetch depth, and fetch bytes are
-reported. This is the discriminating log requested on issue #234: if the
+reported.
+
+The report also carries a per-prompt decomposition (#295 cross-validation:
+pooled tail bands hide prompt-level structure; the p99 band can be carried
+by a handful of prompts, and the carriers are run-local): per-prompt ITL
+summaries, per-prompt band counts, tail-band concentration (top-3 carrier
+share, effective prompt count 1/sum(s^2)), and, with --compare REPORT,
+paired per-prompt mean-ITL deltas against another report produced by this
+script. Pooled cross-arm tail comparisons at small prompt counts should
+cite the paired deltas and carrier overlap, not the pooled p99 alone. This is the discriminating log requested on issue #234: if the
 tail band fetches predominantly mustkeep_mass experts, re-scoping the gate
 to p50/p90 is mechanism-backed and a tail-targeting policy is the only tail
 lever; if it fetches droppable-but-kept experts, a policy change addresses
@@ -206,6 +215,13 @@ def main():
     )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--output", default="", help="write full JSON report here")
+    ap.add_argument(
+        "--compare",
+        default="",
+        help="report JSON from another arm/run of this script; adds paired "
+        "per-prompt mean-ITL deltas and tail-carrier overlap to the output "
+        "(the compared report must contain a per_prompt section)",
+    )
     args = ap.parse_args()
 
     with open(args.latency) as fh:
@@ -406,6 +422,75 @@ def main():
             "fetch_mb_per_token_mean": bytes_total / len(ts) / 1e6,
         }
 
+    # Per-prompt decomposition (#295): pooled tail bands hide prompt-level
+    # structure, so report per-prompt summaries and tail-band carriers.
+    n_prompts = len(itl_pp)
+    per_prompt = []
+    for p in range(n_prompts):
+        pts = [t for t in tokens if t["prompt"] == p]
+        p_itls = np.array([t["itl_ms"] for t in pts])
+        band_counts = {b: 0 for b in BANDS}
+        for t in pts:
+            band_counts[band_of(t["itl_ms"])] += 1
+        per_prompt.append(
+            {
+                "prompt": p,
+                "tokens": len(pts),
+                "itl_ms_mean": float(p_itls.mean()),
+                "itl_ms_p50": float(np.percentile(p_itls, 50)),
+                "itl_ms_max": float(p_itls.max()),
+                "band_tokens": band_counts,
+            }
+        )
+    tail_total = sum(pp["band_tokens"]["p99_100"] for pp in per_prompt)
+    shares = np.array(
+        [
+            pp["band_tokens"]["p99_100"] / tail_total if tail_total else 0.0
+            for pp in per_prompt
+        ]
+    )
+    carrier_order = np.argsort(-shares, kind="stable")
+    tail_concentration = {
+        "tail_tokens": tail_total,
+        "prompts": n_prompts,
+        "per_prompt_share": [float(s) for s in shares],
+        "top3_prompts": [int(i) for i in carrier_order[:3]],
+        "top3_share": float(shares[carrier_order[:3]].sum()),
+        # 1 / sum(s^2): number of equally-loaded prompts that would produce
+        # the same concentration (uniform spread -> n_prompts).
+        "effective_prompt_count": (
+            float(1.0 / float((shares**2).sum())) if tail_total else None
+        ),
+    }
+    report["per_prompt"] = per_prompt
+    report["tail_concentration"] = tail_concentration
+
+    if args.compare:
+        with open(args.compare) as fh:
+            other = json.load(fh)
+        opp = other.get("per_prompt")
+        if not opp or len(opp) != len(per_prompt):
+            raise SystemExit(
+                "--compare report lacks a matching per_prompt section "
+                f"({len(opp) if opp else 0} vs {len(per_prompt)} prompts); "
+                "regenerate it with this version of the classifier"
+            )
+        mine = np.array([pp["itl_ms_mean"] for pp in per_prompt])
+        theirs = np.array([pp["itl_ms_mean"] for pp in opp])
+        delta_pct = (mine - theirs) / theirs * 100.0
+        my_top = set(tail_concentration["top3_prompts"])
+        their_top = set(other["tail_concentration"]["top3_prompts"])
+        report["paired_compare"] = {
+            "against": args.compare,
+            "per_prompt_mean_itl_delta_pct": [float(d) for d in delta_pct],
+            "median_delta_pct": float(np.median(delta_pct)),
+            "mean_delta_pct": float(np.mean(delta_pct)),
+            "prompts_improved": int((delta_pct < 0).sum()),
+            "tail_top3_this": sorted(my_top),
+            "tail_top3_other": sorted(their_top),
+            "tail_top3_overlap": len(my_top & their_top),
+        }
+
     drop_word = "would-drop" if counterfactual else "dropped"
     print(
         f"\npolicy={lat.get('policy')} mass_budget={mass_budget} "
@@ -443,6 +528,30 @@ def main():
             f"{tail['fetched_share_droppable_kept']:.1%}, max in-layer fetch "
             f"depth {tail['fetch_depth_max_mean']:.2f}, "
             f"{tail['fetch_mb_per_token_mean']:.1f} MB/token"
+        )
+
+    tc = tail_concentration
+    if tc["tail_tokens"]:
+        print(
+            f"\ntail (>=p99) prompt concentration: {tc['tail_tokens']} tokens "
+            f"over {tc['prompts']} prompts; top-3 carriers "
+            f"{tc['top3_prompts']} hold {tc['top3_share']:.1%}, effective "
+            f"prompt count {tc['effective_prompt_count']:.1f} "
+            f"(uniform = {tc['prompts']}). Pooled cross-arm tail deltas are "
+            "confounded when this is small; use --compare for paired deltas."
+        )
+    if args.compare:
+        pc = report["paired_compare"]
+        print(
+            f"\npaired per-prompt mean-ITL delta vs {pc['against']}: "
+            f"median {pc['median_delta_pct']:+.1f}%, mean "
+            f"{pc['mean_delta_pct']:+.1f}%, {pc['prompts_improved']}/"
+            f"{len(per_prompt)} prompts improved"
+        )
+        print(
+            f"tail top-3 carriers: this run {pc['tail_top3_this']}, "
+            f"compared run {pc['tail_top3_other']}, overlap "
+            f"{pc['tail_top3_overlap']}/3"
         )
 
     if args.output:

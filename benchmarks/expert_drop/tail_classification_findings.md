@@ -84,6 +84,37 @@ run, −13% in the issue-thread run), and drops option (2) for this regime.
 A fetch-priority lever (3) remains plausible only as a general throughput
 optimization, not as a tail-specific fix.
 
+## Addendum: per-prompt structure of the tail (external cross-validation)
+
+Independent cross-validation on PR #295 reproduced every committed number
+(pooled percentiles, band counts/means, findings-table cells, drop total)
+from the committed JSONs alone, and then decomposed the same 3,024 ITLs by
+prompt. We adopted that decomposition into the classifier
+(`per_prompt`, `tail_concentration`, `--compare` paired mode) and the
+regenerated reports confirm it bit-for-bit:
+
+- **The p99 band is prompt-concentrated.** 80.6% of the 31 tail tokens
+  come from 3 of 24 prompts in *both* arms (off: prompts 5/4/1; mass20:
+  22/16/10); effective prompt count 3.2–3.3 vs 24 for a uniform spread.
+- **The carriers are run-local, not prompt-intrinsic.** Top-3 tail
+  carriers overlap 0/3 between arms; paired per-prompt mean-ITL deltas:
+  median −3.4%, mean −2.0%, 14/24 prompts improved on the drop arm.
+- **Qualifier on the pooled numbers.** The composition analysis above
+  (within-run bands) is unaffected, but pooled *cross-arm tail* deltas
+  (e.g. the +31% pooled p99 on the fused arm) cannot be attributed to the
+  policy at n=24 prompts: which prompts land in contended windows
+  dominates the band. Cross-arm tail claims must cite the paired
+  per-prompt deltas and carrier overlap (now in `paired_compare` of the
+  mass20 report), or come from repeated runs.
+
+This does not change the verdict — the gate re-scope to p50/p90 was argued
+from fetch-composition flatness, which is per-token and within-run — but it
+strengthens it: the tail is not only compositionally identical to the body,
+its carriers are also non-reproducible across runs on this host.
+`trace_capture.py` now records `run_start_unix`, per-prompt spans, and
+per-token wall-clock timestamps so future runs can localize contended
+windows directly instead of inferring them from clustering.
+
 ## Reproduction
 
 ```bash
@@ -93,9 +124,13 @@ python benchmarks/expert_drop/trace_capture.py \
   --policy on_miss --mass-budget 0.20 --device-memory-ratio 0.05 \
   --trace-out mass20.trace --npz-out mass20.npz --latency-out mass20.json
 
-# classify
+# classify (off arm first, then the drop arm paired against it)
 python benchmarks/expert_drop/classify_tail_tokens.py \
-  --trace mass20.trace --latency mass20.json --output report.json
+  --trace off.trace --latency off.json --mass-budget 0.20 \
+  --output off_report.json
+python benchmarks/expert_drop/classify_tail_tokens.py \
+  --trace mass20.trace --latency mass20.json \
+  --compare off_report.json --output mass20_report.json
 ```
 
 Reports: `results/tailclass_qwen_mass20_report.json`,
