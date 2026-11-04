@@ -27,15 +27,15 @@ _CPP = r"""
 #include <c10/cuda/CUDAStream.h>
 void gdn_recur_launch(const void*, const void*, const void*, const void*,
                       const void*, const float*, void*, float*, int, int, int,
-                      int, int, int, cudaStream_t);
+                      int, int, int, int, cudaStream_t);
 void recur(torch::Tensor qg, torch::Tensor kd, torch::Tensor w, torch::Tensor u,
            torch::Tensor S, torch::Tensor g, torch::Tensor o, torch::Tensor h,
-           int64_t t_base, int64_t nb) {
+           int64_t t_base, int64_t nb, int64_t variant) {
   int B = qg.size(0), TB = qg.size(1), H = qg.size(2), T = o.size(1);
   gdn_recur_launch(qg.data_ptr(), kd.data_ptr(), w.data_ptr(), u.data_ptr(),
                    S.data_ptr(), g.data_ptr<float>(), o.data_ptr(),
                    h.data_ptr<float>(), B, H, T, (int)t_base, TB, (int)nb,
-                   c10::cuda::getCurrentCUDAStream());
+                   (int)variant, c10::cuda::getCurrentCUDAStream());
 }
 // Persisting L2 window on [ptr, ptr + bytes) for the current stream
 // (bytes == 0 clears it).
@@ -120,8 +120,10 @@ def available() -> bool:
         return False
 
 
-def recur(qg, kd, w, u, S, g, o, h, t_base: int, nb: int) -> None:
-    _module().recur(qg, kd, w, u, S, g, o, h, t_base, nb)
+def recur(qg, kd, w, u, S, g, o, h, t_base: int, nb: int, variant: int = 2):
+    """variant 0: 4 MMA warps issue their own cp.async; 2: plus 4 producer
+    warps (warp-specialised)."""
+    _module().recur(qg, kd, w, u, S, g, o, h, t_base, nb, int(variant))
 
 
 def l2_window(buf, nbytes: int) -> None:
