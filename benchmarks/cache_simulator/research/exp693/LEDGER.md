@@ -72,3 +72,4 @@
 ## Run block (filled by adjudicator; sealed after settle)
 - STATUS: NEXT
 - FREEZE: 9c4d4dc (pushed)
+- REPAIR FREEZE: 9fbf133 (pushed; rebuilt clone after parent-repo deletion)
