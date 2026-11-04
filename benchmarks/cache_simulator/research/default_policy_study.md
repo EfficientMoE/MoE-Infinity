@@ -32,7 +32,8 @@ things:
 >    co-activation). Online logistic regression reaches 0.72 / 0.66.
 >    On held-out decode the default cuts stall per token by 15-31%
 >    (Qwen3-30B-A3B) and 9-16% (Qwen3-235B) against LCNU alone; round 2's
->    best pair cut 7-12% and 3-6%.
+>    best pair cut 7-12% and 3-6%. That is 17-82% of a perfect predictor's
+>    gain, depending on the cache size, against 4-47% for round 2's pair.
 > 3. **Eviction still dominates below one token's working set; prefetch
 >    matters as much or more above it.** On Qwen3-30B-A3B, LRU -> LCNU
 >    removes 22-35% of the stall below the working set, where kNN prefetch
@@ -273,9 +274,11 @@ comparison, to LRU).
   stays at or below eviction except at 2,048 slots.
 - **The two compose.** The prefetch gain is nearly the same on LRU and on
   LCNU (round 2's separability), so the default takes the best of each.
-- **Headroom remains.** The oracle bound is still far below the default at
-  large caches (30B 3,072 slots: 0.15 vs 1.94 ms). The remaining misses are
-  experts that no past trajectory predicts.
+- **Share of a perfect predictor's gain.** As in round 2, this is
+  `(LCNU - default) / (LCNU - oracle bound)`: 74-82% below one token's
+  working set, 54-69% at 1.3-2.7x and 17-40% at 5-8x. Round 2's pair reached
+  33-47%, 21-27% and 4-9%. Headroom remains in large caches (30B at 3,072
+  slots: 1.94 ms against the oracle's 0.15).
 
 ## 6. Engine knobs: one default
 
