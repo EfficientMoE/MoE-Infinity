@@ -58,4 +58,4 @@ Both streams load; dims 48x8 decode confirmed; N/distinct/
 per-prompt/window counts verified above; policies accept
 num_layers=48 prior=1/16 (same constructor path as exp702).
 
-- STATUS: NEXT
+- STATUS: DONE — REPLICATED (hi 94.8/lo 93.1); inversion sharper (ring −31pp whole); front-loading SPLIT, session-switch novelty real on qwen; anchors byte-equal; capacity = divergence knob
