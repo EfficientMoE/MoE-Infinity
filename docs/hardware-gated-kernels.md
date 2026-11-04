@@ -38,7 +38,7 @@ Added by the sm_120 kernel-audit fix PRs (tracking issue #297):
 | MXFP4 GEMM and small-M GEMV (E2M1 conversion) | `SM120`, `RTX_PRO_6000` | #327 |
 | CUTLASS expert prefill tiles and grouped prefill | `RTX_PRO_6000` | #325 |
 | GPT-OSS offloaded MXFP4 experts | `RTX_PRO_6000` | #335 |
-| GPT-OSS grouped MXFP4 decode | `RTX_PRO_6000` | #329 |
+| GPT-OSS grouped MXFP4 decode (CUDA grouped kernel, Triton GEMV with `cvt.rn.f16x2.e2m1x2`, launch tables) | `SM120`, `RTX_PRO_6000` | #329 |
 | Linear-attention CUDA recurrence | `RTX_PRO_6000` | #336 |
 | Split-KV paged decode attention | `RTX_PRO_6000` | #326 |
 | GQA attention (sinks, sliding window) | `RTX_PRO_6000` | #334 |
