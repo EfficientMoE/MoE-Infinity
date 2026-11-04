@@ -1,5 +1,13 @@
 # Real expert-cache trace results — Qwen3-30B-A3B (235B-family proxy)
 
+> **Correction.** The tables below were computed on a merged stream that still
+> contained 149 of the 150 prefill passes (4,000,512 of the 7,686,912
+> accesses), because `extract_access_sequence` skipped only the first record.
+> On the decode-only stream (3,686,400 accesses) LRU gets **0** hits up to 376
+> slots and Belady at 256 slots is 0.5013, not 0.7028; the "LRU beats LFU 2x"
+> finding does not hold there. Corrected tables, new policies and LCNU:
+> [`decode_policy_study.md`](./decode_policy_study.md).
+
 Part of #289. Real-trace capture on the **actual Qwen3-MoE routing family**
 (128 experts, top-8) that the 235B target belongs to, while the 235B itself
 stays GPU-blocked. Every number below comes from an actual SGLang 0.5.20

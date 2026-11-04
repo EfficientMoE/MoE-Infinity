@@ -16,8 +16,10 @@ Ported from the Archer / MoE-Infinity prefetch study (`Archer-rel/simulation`).
 | `belady_cache_simulator.py` | Belady optimal hit-rate simulator over `.pt` recorder traces (CLI). Pure-Python core (`extract_access_sequence`, `belady_simulate`) reusable as a library. |
 | `cache_strategy.py` | Belady optimal expert cache over pickled prefill/decode activation traces (CLI). Provides `ExpertIndex`, `ExpertCache` (reference scan) and `HeapExpertCache` (heap, for large traces). |
 | `fetch_engines.py` | Prefetch/replacement policy library: `StreamFetch` (FIFO), `StreamFetchLRU` (LRU), `LFUFetch` (LFU), `LFUKFetch` (windowed LFU). |
-| `policies.py` | `CachePolicy` ABC + baseline shortlist over a flat access sequence: LRU, LFU, LFU-K, model-tracing (BrainStorm), score-based, LHU (HOBBIT), plus trace-oracle prefetch variants (single-layer-ahead, stride, multi-layer, activation-matrix). One shared `simulate()` harness. |
+| `policies.py` | `CachePolicy` ABC + baseline shortlist over a flat access sequence: LRU, LFU, LFU-K, model-tracing (BrainStorm), score-based, LHU (HOBBIT), classic hybrids (ARC, 2Q, LRU-K, LIRS, S3-FIFO, SIEVE, W-TinyLFU), per-layer LRU (Mixtral-Offloading), the layer-cycle-aware LCNU policy, plus trace-oracle prefetch variants (single-layer-ahead, stride, multi-layer, activation-matrix). One shared `simulate()` harness. |
 | `research/run_policies.py` | Benchmark harness: sweeps capacity, runs every policy over synthetic MoE traces, emits a policy x capacity hit-rate table + MRC plots with Belady as "Ideal". |
+| `research/run_policies_real.py` | Same sweep over real SGLang captures, in parallel worker processes; `--prefill skip/union/raw` picks how prefill passes enter the stream (default: decode only). |
+| `research/lcnu_ablation.py` | LCNU hyper-parameter selection on a tuning half of the requests, held-out comparison, ablations, and a routing-oracle bound. |
 
 The cache key throughout is `(layer_idx, expert_id)` and one cache entry holds
 one expert's weights.
@@ -39,6 +41,15 @@ same trace and is bounded above by it on every trace.
 | Model-tracing | `ModelTracingPolicy` | evict globally least-popular (offline profile counts) | BrainStorm (OSDI'23) |
 | Score-based | `ScorePolicy` | evict smallest time-decayed accumulated activation score | ExpertFlow / Specter |
 | LHU | `LHUPolicy` | evict coldest "hot unit" (aged frequency + recency) | HOBBIT (arXiv:2411.01433) |
+| ARC | `ARCPolicy` | adaptive recency/frequency lists with ghost feedback | Megiddo & Modha (FAST'03) |
+| 2Q | `TwoQPolicy` | FIFO probation + ghost list + LRU main | Johnson & Shasha (VLDB'94) |
+| LRU-2 | `LRUKPolicy` | evict largest backward K-distance (K=2) | O'Neil et al. (SIGMOD'93) |
+| LIRS | `LIRSPolicy` | keep low inter-reference-recency keys; loop/scan resistant | Jiang & Zhang (SIGMETRICS'02) |
+| S3-FIFO | `S3FIFOPolicy` | small/main/ghost FIFOs with 2-bit counters | Yang et al. (SOSP'23) |
+| SIEVE | `SIEVEPolicy` | FIFO + visited bit + moving hand | Zhang et al. (NSDI'24) |
+| W-TinyLFU | `WTinyLFUPolicy` | LRU window + SLRU main + frequency admission | Einziger et al. (ACM ToS'17) |
+| Per-layer LRU | `LayerLRUPolicy` | fixed slots per MoE layer, LRU inside each layer | Mixtral-Offloading (arXiv:2312.17238) |
+| LCNU | `LayerCycleNextUsePolicy` | evict the farthest *expected* next use: time until the expert's layer runs again + expected further decode steps until it is routed (online recency + frequency estimate) | this study ([`decode_policy_study.md`](./research/decode_policy_study.md)) |
 | 1-layer-ahead* | `SingleLayerAheadPolicy` | prefetch the next layer's experts | Mixtral-Offloading / Pre-gated MoE |
 | Stride* | `StridePrefetchPolicy` | prefetch the access `stride` steps ahead | ProMoE (arXiv:2410.22134) |
 | Multi-layer* | `MultiLayerAheadPolicy` | prefetch the union over the next `horizon` layers | HOBBIT |
@@ -100,7 +111,10 @@ python -m benchmarks.cache_simulator.belady_cache_simulator \
 
 - `--capacity`: cache size in `(layer, expert)` entries.
 - `--ignore-layers`: skip leading dense (non-MoE) layers.
-- `--include-prefill`: also count the prefill step (default: decode only).
+- `--include-prefill`: also count prefill passes (default: decode only).
+  Records carrying SGLang's `forward_mode` are classified by it, so every
+  per-request prefill of a merged stream is skipped; records without it fall
+  back to "only `records[0]` is prefill".
 
 ### Belady optimal over pickled activation traces
 
@@ -162,13 +176,24 @@ Reusable prompts for driving this work with coding agents:
   [`prompts/`](./prompts/): `01_research_baselines.md` (literature → survey),
   `02_implement_baselines.md` (implement + benchmark vs Belady), and
   `03_accelerate_simulator.md` (parallel / GPU acceleration).
+- [`auto_research_prefetch_eviction.md`](./auto_research_prefetch_eviction.md)
+  — round 2: should prefetch be a separate policy from eviction, and which
+  prefetcher x evictor x admission combinations work on real traces. Prompts
+  `04_research_prefetch_eviction.md` (survey), `05_implement_prefetch_eviction.md`
+  (composable harness + timing model), `06_benchmark_prefetch_eviction.md`
+  (real-trace sweep + engine-knob proposal).
+
+Current recommendations for choosing an eviction policy:
+[`research/recommendations.md`](./research/recommendations.md).
 
 ## Trace formats
 
 **`.pt` recorder trace** (`belady_cache_simulator.py`) — a dict with a
-`records` list. `records[0]` is prefill, `records[1:]` are decode steps. Each
-record has `topk_ids_of_layer`, a tensor of shape
-`[num_layers, seq_len, topk]` holding the activated expert ids (`-1` = none).
+`records` list of forward passes. Each record has `topk_ids_of_layer`, a
+tensor of shape `[num_layers, seq_len, topk]` holding the activated expert ids
+(`-1` = none), and SGLang dumps also carry `forward_mode` (`2` = decode). A
+single-request dump is one prefill followed by decode steps; a merged stream
+(`convert_sglang_traces --merge`) repeats that pattern per request.
 These are produced by the expert-distribution recorder while serving a model;
 they are regenerated per run and are **not** checked in.
 
