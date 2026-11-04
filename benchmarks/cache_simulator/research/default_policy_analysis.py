@@ -74,16 +74,19 @@ def cell_table(
         sub = [r for r in rows if r["capacity"] == cap]
         alone = {r["evictor"]: r[KEY] for r in sub if r["prefetcher"] == "none"}
         default = None
-        for ev in evictors:
-            pick = [
-                r
-                for r in sub
-                if r["evictor"] == ev
-                and r["prefetcher"] in prefetcher
-                and r["admission"] == admission
-            ]
-            if pick:
-                default = pick[0]
+        for spec in prefetcher:  # preference order
+            for ev in evictors:
+                pick = [
+                    r
+                    for r in sub
+                    if r["evictor"] == ev
+                    and r["prefetcher"] == spec
+                    and r["admission"] == admission
+                ]
+                if pick:
+                    default = pick[0]
+                    break
+            if default is not None:
                 break
         online = [
             r for r in sub if r["prefetcher"] != "none" and not r["is_oracle"]
@@ -126,7 +129,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         "--prefetcher",
         nargs="+",
         required=True,
-        help="Default prefetcher spec(s); equivalent spellings may be listed.",
+        help="Default prefetcher spec(s), most preferred first (equivalent "
+        "spellings, e.g. with and without decode_width on decode streams).",
     )
     parser.add_argument("--admission", required=True)
     parser.add_argument("--out", default=None)
