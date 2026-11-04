@@ -1358,3 +1358,13 @@ still loses (sw=1, no help): failure is admission speed of repeating cold
 keys, not arbitration blindness per se. Third failure mode joins alignment
 (exp677) and miss clustering (exp678); all point at the admission lever.
 Det byte-identical; serialization-crash amendment disclosed in prereg.
+## Addendum 28 (exp682 door): DOOR-HARM on stationary — correct null-space result
+
+Doorkeeper admission filter on exp678's exact testbed (replication 24/24
+exact, det True): harm everywhere on stationary streams — H2 16/16 hit
+losses >0.5pp, H3 21 combos slower, H1 only 4/16; lcnu+door also loses
+(policy-independent tax). Protection value is zero without crowd structure;
+the double-miss tax on one-touch reuse is constant. Sharpens exp683: door
+on exp681's flash-crowd streams, where one-touch crowd admissions are the
+proven poison (10.86pp). If it still harms there, admission filtering is
+dead for this family and the fix must live in inner admission.

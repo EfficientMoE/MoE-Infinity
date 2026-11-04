@@ -1,66 +1,59 @@
-# exp681 PREREG — sub-block flash-crowd probe (frozen before launch)
+# exp682 PREREG — anti-clustering candidate: doorkeeper admission (frozen pre-launch)
 
 ## Question
 
-The arbitration barrier acts only at 4096-access boundaries. exp677 localized
-harm to W=4096 alignment; exp680 ruled out cadence. The untested axis: a
-regime change STRICTLY INSIDE the window — a cold-crowd burst shorter than
-the arbitration interval. Does the center policy (CostFit @ exp676 frozen
-center) violate burst or recovery bars under a flash crowd the barrier
-cannot see mid-window? The d=4096 aligned cell is the control where the
-barrier CAN react.
+exp678 (COST-H1) established: the center policy's extra misses vs lcnu
+CLUSTER in time under bursty reload cost; heterogeneity (kappa) is not the
+failure mode. exp680 ruled out arbitration cadence. Does a DOORKEEPER
+admission filter — first-sight missing keys are NOT admitted (evict
+nothing), second sight admits — remove the clustered extra misses while
+holding hit rate? This is the first IMPROVEMENT-shaped candidate of the
+series (prior addenda were characterization).
 
 ## Design (frozen)
 
-- Stationary base: skew 1.1, lam 0.3, B=1024, N=638,976, E=128, L=48.
-  Single regime; no exp676-style transition. Base seed + crowd seed from
-  default_rng(68120261103).spawn(2), drawn FRESH inside run_all (exp680
-  disclosed lesson).
-- Flash crowd: at block-aligned midpoint, replace d accesses with layer
-  uniform + expert uniform over ranks [64, 128) (bottom half by base weight).
-  d ∈ {256, 1024, 2048, 4096}. Crowd draws share one prefix across cells;
-  base stream identical across cells (verified in smoke).
-- Segments: 3 = burst, 4 = recovery (4096 accesses post-burst), 0 = base.
-- Arms: lcnu, s3fifo (standalones), costfit @ frozen center (MARGIN 0.005,
-  GAMMA 0.0025, HALF_LIFE 32768, RESEGMENT 4096 — sealed file untouched).
-- Caps {512, 2048}. 8 cells.
+- Testbed: exp678's frozen stationary streams + time-cost metric
+  (1 + kappa*u_e + phi*trailing-64 miss rate), seeds identical
+  (default_rng(67820261103).spawn per skew; u from SEED+1000+i).
+- Grid: skew {0.9, 1.3} x cap {512, 2048} x kappa {0, 20} x phi {0, 4}
+  = 16 cells (subset of exp678's 24; kappa endpoints only).
+- Arms per cell: lcnu, costfit@frozen-center (replication gate vs exp678
+  published per-cell time/hit, exact), door512, door4096 (center wrapped
+  with doorkeeper K in {512, 4096}, LRU door), lcnu+door4096
+  (generalization probe, lcnu exposes .resident).
+- Wrapper only; sealed policy files untouched. Resident-probe fast path;
+  door membership second-sight admission; LRU-bounded door.
 
 ## Bars (frozen; verdict from pass-1 grid)
 
-- H1: burst-window hit deficit vs best standalone ≤ 1.0pp.
-- H2: recovery-window hit deficit vs best standalone ≤ 0.5pp.
-- H3: barrier switches ≤ 3 per 4096-window.
-- acc: costfit loop == prop (exact).
-- det: pass-2 grid byte-identical to pass-1.
-- Verdict ladder: CROWD-H1 (any H1 violation) > CROWD-H2 > CROWD-SAFE.
+- Replication: center time/hit equal exp678's published values in all
+  overlapping cells (streams identical by construction).
+- H1 efficacy: door time beats center by >= 0.1% absolute in >= half of
+  phi>0 cells (per door arm; door4096 is primary).
+- H2 safety: door hit >= center hit - 0.5pp in every cell.
+- H3: no cell where door time exceeds center by > 0.1%.
+- acc: center double-sim identical (misses == misses2). det: pass-2 grid
+  byte-identical.
+- Verdict ladder: DOOR-WINS > DOOR-NULL > DOOR-HARM.
 
 ## Pre-freeze smoke (disclosed)
 
-- Reduced N=157,696: base deterministic; prefix/tail/revert identity across
-  d verified (short burst region reverts to base); crowd prefix identical
-  across d; seg counts exact; burst hits < loop for all arms (crowd cold);
-  accounting exact; double-eval identical; adjudicate path exercised.
-- One smoke ASSERTION was misdesigned (compared base windows at different
-  absolute offsets); generator was correct. Fixed the check, not the code.
-- Smoke mini-adjudicate (d=4096, cap=512, small N): CROWD-H1 signal — lcnu
-  burst 0.1096 vs costfit 0.0781 (~3.2pp). Not evidence; the full run is.
-- Disk 6 GiB free (> 5 GiB kill threshold); writes < 5 MB total; scoped
-  exception same as exp676-680 series. No model weights, no network.
+- Mock-policy hand stream: door semantics exact (first sight misses without
+  admission, second sight admits, resident hits bypass); LRU bound verified
+  behaviorally (D,E,F with K=2: F evicts D, D re-enters as first sight).
+  One smoke-check bug (closure introspection on the mock) fixed in the
+  CHECK, not the runner.
+- Reduced stream (122,880 acc): center double-sim identical; door arm
+  deterministic; lcnu has .resident (lcnu_door arm valid).
+- Honest smoke signal: at tiny N, door512 hit trails center by ~0.5pp —
+  the known doorkeeper tradeoff (one-touch reuse pays a double miss
+  before working-set protection accrues). Full-length streams decide;
+  DOOR-HARM is an explicit possible outcome.
 
 ## Next (pre-registered branches)
 
-- CROWD-H1/H2 → quantify how deficit scales with d; anti-clustering
-  candidate gets burst-aware margin (shared mechanism with exp678 COST-H1).
-- CROWD-SAFE → blindness confirmed harmless at this scale; close drift axis,
-  pivot to anti-clustering candidate directly.
-
-## Post-freeze amendment (2026-11-03 19:28 EST): serialization crash, rerun
-
-First full run completed BOTH grids (~8 min compute) then crashed at the
-final json.dumps: adjudicate rows carried numpy scalars (np.bool_ acc,
-np.float64 metrics) which Python 3.14 json rejects (exp678/680 runners
-cast; exp681 rows did not). Zero effect on design, streams, or bars —
-fixed by float()/bool()/int() casts in the row build, disclosed here.
-Runner sha superseded e2c3e88b -> (see rerun registration); full rerun
-launched after the fix. Result values are unaffected by the cast (same
-floats, same comparisons).
+- DOOR-WINS -> dose-response K sweep + mechanism check (misses-per-window
+  variance drop), then propose as upstream candidate in the capture report.
+- DOOR-NULL/HARM -> protection does not pay at stationary skew; test door
+  under exp681's flash-crowd streams (where one-touch crowd admissions are
+  the explicit poison) — the crowd testbed is the door's home field.
