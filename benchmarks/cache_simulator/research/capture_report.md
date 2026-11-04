@@ -1418,3 +1418,6 @@ Beyond-pole REAL but NARROW: Grid A cap4096/d4096 6 variants beat ssr (opt eti_4
 
 ## exp700 — phase-boundary sweep (STRUCTURE_UNEXPLAINED; ridge found; ledger #223)
 Spread matrix d{256..4096} x cap{1024,2048,4096}: RIDGE at d~2xcap (max 11.91pp @d4096/cap2048 = the ssr-vs-ring trade band); cap1024 col saturates ~8pp; cap4096 col low with rising tail 2.73pp = beyond-pole. Registered plane-fit bar honest-failed (R2=0.5804<0.8 — wrong model class, not absence of structure). MONOTONE_BOUNDARY passed. det True; anchors==exp694+exp699 exact; ADDENDUM44; freeze d9f52af. exp701: pairwise decomposition + off-grid ridge probes.
+
+## exp701 — ridge decomposition (RIDGE_CREST by 0.012pp; crest off-grid ratio 1.6)
+PAIR_DOMINANT PASS: ring-vs-ssr carries 13/15 cells (87%). RIDGE_CREST pass at tolerance edge (12.402 <= 12.414); DISCLOSED: surface max is OFF-GRID at (d4096,cap2560)=12.40pp -> ridge tracks d/cap ~1.6, NOT the 2.0 read from exp700's grid; cap-profile collapses 12.40/10.01/0.17 at 2560/3072/5120; d3072 row rises through cap2560 (peak drifts right with d); crest cell itself = ring-vs-eti (0.2148 vs 0.0957), not the ssr trade. Run1 d5120 generator crash (BURSTS ceiling 4096) disclosed + rescope v2 freeze d77a4ab; run2 gates all green (REPL==exp700 exact; det True; 1433s); post-JSON cosmetic print KeyError, no data impact, sealed JSON untouched.
