@@ -61,4 +61,5 @@ construction — basis for the window-0 exclusion); policies accept
 granite params; ring10@256 cold window 0.293 vs lcnu 0.444
 (ring's burst cost is VISIBLE in real traffic — motivating H3).
 
-- STATUS: NEXT
+- STATUS: DONE — REAL_CARRYIN (c 99.24%); policy INVERTS (LCNU dominates; ring −20.7pp); novelty front-loaded; H2 degenerate-disclosed; anchor byte-equal
+- FREEZE: 062b413 (prereg pushed; asset = exp650 frozen stream sha e2735ff2-lineage)
