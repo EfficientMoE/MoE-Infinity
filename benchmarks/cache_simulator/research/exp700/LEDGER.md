@@ -29,4 +29,12 @@ Exit 0 settled.
 d512 arms coincide (0.1719), d2048 slight divergence (0.3203 vs
 0.3193) — direction matches model.
 
-- STATUS: NEXT
+- STATUS: DONE (exit 0)
+- **Result:**
+```
+VERDICT: STRUCTURE_UNEXPLAINED (R2=0.5804 < 0.8 bar) — with MONOTONE_BOUNDARY PASS and a clean RIDGE structure | det True | REPL == exp694 (d4096 all caps all arms) and == exp699 (d1024/d256 cap4096) exact | consistency v2 PASS all legs | elapsed 2234s | freeze d9f52af | MATRIX (max-min burst pp): cap1024 col SATURATES ~8pp by d1024 (3.12/5.86/8.11/8.30/8.86); cap2048 col RISES to RIDGE MAX 11.91 @d4096 (1.56/2.54/5.76/7.76/11.91); cap4096 col LOW (0.00/0.20/0.49/0.88/2.73) | beta logd=+1.42 logcap=-2.88 (net -1.46 under proportional scaling) | READING: divergence surface is NOT a log-log plane — it has a RIDGE along d~2xcap (max 11.9pp = the ssr-vs-ring trade band) collapsing to convergence at small d AND washed out by saturation at large cap; cap4096's rising tail (2.73) = the beyond-pole effect (eti_2020 vs ssr) | 0.5pp contour monotone in d all caps | registered bar honest-failed: plane fit cannot capture the ridge | exp701: pairwise decomposition of THIS matrix (JSON has per-arm cells — pure analysis) + off-grid ridge probes (d3072/d5120 x cap1536/2560/2048) to pin ridge location
+```
+
+- FREEZE: d9f52af (prereg + smoke)
+
+- SEAL NOTE: ARTIFACT.sha256 written by follow-up controller 2026-11-04 post-launch (run started 14:32, runner mtime 14:31, unchanged; sha verified == frozen commit d9f52af research/exp700/run_phaseboundary.py)

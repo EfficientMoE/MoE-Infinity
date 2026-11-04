@@ -1415,3 +1415,6 @@ Churn-collapse prediction REFUTED: ETI = strict interior point. d4096 cap1024 +1
 
 ## exp699 — beyond-pole existence test (NEITHER; regime-specific; ledger #221)
 Beyond-pole REAL but NARROW: Grid A cap4096/d4096 6 variants beat ssr (opt eti_4020 0.4292/0.9517, annex plateaus 20%+, ring axis inert past 20%); FAILS Grid B (cap2048 any depth; d256/d1024 all converge). FLAT_GENERALIZES FALSE: eti_0510==ring10 exactly at cap4096 all depths; flat exchange only d4096 caps 1024-2048. MODEL: burst depth x capacity jointly set arbitration dominance; carry-in mechanism needs deep bursts + capacity headroom. Run 1 exit 3 = impossible cross-depth totals gate (disclosed, aborted pre-adjudication, no selection); gate v2 freeze c0c7dfe. det True; anchors==exp694; eti_2020==exp698 exact; ADDENDUM43. exp700: phase-boundary sweep.
+
+## exp700 — phase-boundary sweep (STRUCTURE_UNEXPLAINED; ridge found; ledger #223)
+Spread matrix d{256..4096} x cap{1024,2048,4096}: RIDGE at d~2xcap (max 11.91pp @d4096/cap2048 = the ssr-vs-ring trade band); cap1024 col saturates ~8pp; cap4096 col low with rising tail 2.73pp = beyond-pole. Registered plane-fit bar honest-failed (R2=0.5804<0.8 — wrong model class, not absence of structure). MONOTONE_BOUNDARY passed. det True; anchors==exp694+exp699 exact; ADDENDUM44; freeze d9f52af. exp701: pairwise decomposition + off-grid ridge probes.
