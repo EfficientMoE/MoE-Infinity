@@ -1862,6 +1862,7 @@ summarized here, not logged row by row):
 | predictor accuracy (`--mode predict`) | qwen3-30b-a3b | mmlu150-greedy64/decode/held | recall@8: knn 0.779, logistic 0.722, co-activation naive Bayes 0.655 (`results_prefetch_qwen3_30b_held_predict_r3.csv`) | real | d3ed922 |
 | predictor accuracy (`--mode predict`) | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | recall@8: knn 0.714, logistic 0.661, co-activation naive Bayes 0.602 (`results_prefetch_qwen3_235b_held_predict_r3.csv`) | real | d3ed922 |
 | default-policy regret (`default_policy_analysis.py` over the round-2 and round-3 held-out sweeps) | both | decode and decode+prefill-union, held | 24 cells: mean +0.5%, worst +6.2% vs the per-cell best online configuration (`results_default_policy_analysis.md`) | real | e0bdd04 |
+| kNN bank-size ablation (bank 512 / 1024 / 2048 / 8192, default otherwise) | both | mmlu/decode/held | share of the default's gain over LCNU kept: 84-88% / 94-96% / 99-100% / 100%; bank=8192 reproduces the default rows exactly (`results_prefetch_qwen3_{30b,235b}_held_bank_r3.csv`) | real | 8e2d550 |
 
 Held-out sweeps below: compact rows (per capacity, every evictor alone, the
 best online pair per admission mode, where `probation` includes its issue

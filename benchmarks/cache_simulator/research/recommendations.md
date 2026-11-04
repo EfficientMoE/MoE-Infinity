@@ -63,9 +63,12 @@ reused unchanged.
 
 ## When to deviate
 
-- **Memory-constrained host:** kNN's bank is 1 MB per layer (48 / 94 MB).
-  `coactivation` / `hybrid` (round 2) needs 64 KB per layer, but it cuts
-  stall by only 3-12% against LCNU alone, where kNN cuts 9-31%.
+- **Memory-constrained host:** shrink kNN's bank before switching
+  predictors. The default bank is 1 MB per layer (48 / 94 MB total); 2,048
+  tokens (256 KB per layer) measure within 0.1% of it, and 512 tokens
+  (64 KB per layer, the same footprint as the co-activation table) keep
+  84-88% of its gain. `coactivation` / `hybrid` (round 2) at that footprint
+  cuts stall by only 3-12% against LCNU alone, where kNN cuts 9-31%.
 - **Eviction only, no prefetch:** LCNU (`lcnu_p` with prefill in the stream).
   Without LCNU, round 1's next best are LIRS or W-TinyLFU below the working
   set, LIRS or LRU-2 at 1-2x, and S3-FIFO or LRU above. Above ~2/3 of the

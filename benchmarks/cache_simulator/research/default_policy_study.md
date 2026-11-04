@@ -235,6 +235,12 @@ Robustness of the default (decode, held-out):
 - **FIFO link:** identical stall in every one of the 24 cells. At most 2
   transfers per layer never build a queue that demand fetches would wait
   behind. Without the cap, FIFO gains move by up to 0.9 points.
+- **Bank size** (`results_prefetch_*_held_bank_r3.csv`; the held halves hold
+  4,800 / 3,200 decode tokens, so a 512-token bank wraps 6-9 times and
+  exercises the ring eviction): a 2,048-token bank keeps 99-100% of the
+  default's gain over LCNU, 1,024 keeps 94-96% and 512 (64 KB per layer, the
+  footprint of the round-2 co-activation table) keeps 84-88%. The full
+  8,192-token re-run reproduces the committed default rows exactly.
 - **Roofline compute (least overlap):** gains shrink to 4.6-6.8% (30B) and
   3.7-4.7% (235B), still positive everywhere.
 - **Cost:**
@@ -296,7 +302,8 @@ kNN at runtime, per MoE layer:
 - **Bank:** the last 8192 decode tokens' routing at the preceding 8 layers
   (8 x 128 bits = 128 B per token), 1 MB per layer: 48 MB for
   Qwen3-30B-A3B, 94 MB for Qwen3-235B, in host memory. It also keeps the
-  next layer's 8 routed ids per token (16 B).
+  next layer's 8 routed ids per token (16 B). A 2,048-token bank
+  (256 KB per layer: 12 / 24 MB) measures within 0.1% of it (section 4).
 - **Query:** after the gate, sum the bank's bit-rows for the token's 64
   (layer, expert) features (8192-bit overlap counts), take the top 8 and
   count their votes over 128 experts. That is a few hundred thousand bit
@@ -311,10 +318,11 @@ kNN at runtime, per MoE layer:
   non-preemptive transfers, constant per-layer compute, batch-1 greedy MMLU
   decode.
 - **kNN learns online within a run** of 75 (tuning) or 50 (Qwen3-235B)
-  requests; its bank never fills (8192 tokens per layer). Longer or more
-  diverse workloads may need a larger bank or an eviction rule for it. Its
-  accuracy depends on recurring routing trajectories, which MMLU's shared
-  prompt format may favour.
+  requests. The default 8,192-token bank never fills on these traces, but
+  the bank ablation (section 4) shows the ring eviction degrades
+  gracefully: 8 requests of history keep 84-88% of the gain. Accuracy
+  depends on recurring routing trajectories, which MMLU's shared prompt
+  format may favour; more diverse workloads are untested.
 - **Prefetch is decode-only in the default.** Prefill passes are fetched on
   demand; the oracle bound shows what prefill-time prefetch could add.
 - **Single tuning model.** Parameters were selected on Qwen3-30B-A3B only;
@@ -330,6 +338,7 @@ TD=/mnt/raid0nvme0/leyang/moeinf-traces
 R="python -m benchmarks.cache_simulator.research.run_prefetch_real"
 F30="$TD/belady_qwen3_30b/*.pt"; F235="$TD/belady_qwen3_235b/*.pt"
 KNN="knn:horizon=1,context=8,neighbors=8,power=8,bank=8192"
+KNN2="knn:horizon=1,context=8,neighbors=8,power=8,budget=8"
 L="logistic:horizon=1,lr=0.1"; H="hybrid:horizon=1,alpha=0.4,weights=1/1/16"
 
 # Stage A (tuning half): predictor grid (78 specs; see the CSV for the list).
@@ -374,6 +383,13 @@ $R --files "$F30" --model qwen3-30b-a3b --dataset mmlu150-greedy64 --split held 
    --prefill union --evictors lcnu lcnu_p w_tinylfu lfu \
    --prefetchers none $KNN,budget=8,decode_width=8 --admissions probation:issue=2 \
    --capacities 128 256 512 1024 2048 3072 --tag qwen3_30b_held_union_r3d
+
+# Bank-size ablation (same for Qwen3-235B / its capacities; tag
+# qwen3_235b_held_bank_r3).
+$R --files "$F30" --model qwen3-30b-a3b --dataset mmlu150-greedy64 --split held \
+   --evictors lcnu --prefetchers none $KNN2,bank={512,1024,2048,8192} \
+   --admissions probation:issue=2 --capacities 128 256 512 1024 2048 3072 \
+   --tag qwen3_30b_held_bank_r3
 
 # Held-out predictor accuracy (same for Qwen3-235B).
 $R --files "$F30" --model qwen3-30b-a3b --dataset mmlu150-greedy64 --split held \
