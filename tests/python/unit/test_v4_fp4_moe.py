@@ -41,9 +41,10 @@ def dequant_fp4(packed: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return v * s.repeat_interleave(32, dim=1)
 
 
-def act_quant_ref(x: torch.Tensor) -> torch.Tensor:
-    """Official act_quant(block 128, ue8m0) followed by dequantisation."""
-    xf = x.float().reshape(x.shape[0], -1, 128)
+def act_quant_ref(x: torch.Tensor, block: int = 128) -> torch.Tensor:
+    """Official act_quant(block, ue8m0) followed by dequantisation: block 128
+    for V4-Flash, 32 for V4.1-Flash (its fp8_block_size)."""
+    xf = x.float().reshape(x.shape[0], -1, block)
     amax = xf.abs().amax(-1, keepdim=True).clamp_min(1e-4)
     bits = (amax * (1.0 / 448.0)).view(torch.int32)
     e = ((bits >> 23) & 0xFF) - 127 + ((bits & 0x7FFFFF) != 0).int()
@@ -52,8 +53,8 @@ def act_quant_ref(x: torch.Tensor) -> torch.Tensor:
     return (q * s).reshape(x.shape)
 
 
-def expert_ref(x, w1, w3, w2, limit, weight=None):
-    xq = act_quant_ref(x)
+def expert_ref(x, w1, w3, w2, limit, weight=None, block=128):
+    xq = act_quant_ref(x, block)
     gate = (xq @ w1.T).bfloat16().float()
     up = (xq @ w3.T).bfloat16().float()
     if limit > 0:
@@ -63,7 +64,7 @@ def expert_ref(x, w1, w3, w2, limit, weight=None):
     if weight is not None:
         h = weight * h
     h = h.bfloat16()
-    return (act_quant_ref(h) @ w2.T).bfloat16()
+    return (act_quant_ref(h, block) @ w2.T).bfloat16()
 
 
 def make_expert(H, I, gen):
@@ -90,7 +91,7 @@ def table_of(experts):
     return torch.tensor(rows, dtype=torch.int64, device="cuda")
 
 
-def moe_ref(x, ids, wts, experts, limit):
+def moe_ref(x, ids, wts, experts, limit, block=128):
     y = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
     deq = {}
     for e in sorted(set(ids.flatten().tolist())):
@@ -105,7 +106,7 @@ def moe_ref(x, ids, wts, experts, limit):
             )
         idx, top = torch.where(ids == e)
         y[idx] += expert_ref(
-            x[idx], *deq[e], limit, wts[idx, top, None]
+            x[idx], *deq[e], limit, wts[idx, top, None], block
         ).float()
     return y
 
@@ -140,7 +141,8 @@ def _no_tf32():
         (8192, 6, 16, 256, 2048),  # h = 100 MB: expert-chunked GEMM1/GEMM2
     ],
 )
-def test_moe_matches_official_numerics(T, topk, E, H, I):
+@pytest.mark.parametrize("act_block", [128, 32])
+def test_moe_matches_official_numerics(T, topk, E, H, I, act_block):
     ext = _ext()
     gen = torch.Generator().manual_seed(T * 131 + E)
     experts = [make_expert(H, I, gen) for _ in range(E)]
@@ -149,9 +151,9 @@ def test_moe_matches_official_numerics(T, topk, E, H, I):
     ids = scores.topk(topk, -1).indices.cuda()
     wts = torch.rand(T, topk, generator=gen).cuda() + 0.1
     out = ext.v4_moe_forward_sm120_pro6000(
-        x, ids, wts, table_of(experts), I, 10.0
+        x, ids, wts, table_of(experts), I, 10.0, act_block
     )
-    ref = moe_ref(x, ids, wts, experts, 10.0)
+    ref = moe_ref(x, ids, wts, experts, 10.0, act_block)
     assert out.dtype == torch.float32 and out.shape == (T, H)
     # Differences come only from FP32 accumulation order and the fast SiLU
     # exp, which can flip one BF16 ulp of h / the output.
@@ -188,6 +190,33 @@ def test_moe_int32_ids_skips_invalid_and_empty_experts():
     assert _rel(out, ref) < 2e-2
 
 
+@pytest.mark.parametrize("T", [1, 4, 700])  # batch-1, decode, prefill
+def test_act_block_32_is_the_quantisation_group(T):
+    """V4.1-Flash quantises activations per 32 elements. With a strong
+    per-32 dynamic range inside every 128 block, the act_block=32 result
+    must follow the 32-group reference much more closely than the 128 one."""
+    ext = _ext()
+    gen = torch.Generator().manual_seed(11 + T)
+    E, H, I, k = 8, 512, 256, 6
+    experts = [make_expert(H, I, gen) for _ in range(E)]
+    x = torch.randn(T, H, generator=gen)
+    x = x * torch.tensor(
+        [1.0, 1 / 64, 1 / 16, 1 / 256] * (H // 128)
+    ).repeat_interleave(32)
+    x = x.bfloat16().cuda()
+    ids = torch.rand(T, E, generator=gen).topk(k, -1).indices.cuda()
+    wts = torch.rand(T, k, generator=gen).cuda() + 0.1
+    out = ext.v4_moe_forward_sm120_pro6000(
+        x, ids, wts, table_of(experts), I, 10.0, 32
+    )
+    ref32 = moe_ref(x, ids, wts, experts, 10.0, 32)
+    ref128 = moe_ref(x, ids, wts, experts, 10.0, 128)
+    e32 = (out - ref32).abs().mean().item()
+    e128 = (out - ref128).abs().mean().item()
+    assert e32 < 2e-3 * ref32.abs().mean().item()
+    assert e128 > 4 * e32
+
+
 @pytest.mark.parametrize("H,I", [(4096, 2048), (512, 256)])
 def test_batch1_duplicate_and_invalid_ids(H, I):
     """Batch 1 runs one routed slot per tile: a repeated expert id becomes two
@@ -200,7 +229,7 @@ def test_batch1_duplicate_and_invalid_ids(H, I):
     ids = torch.tensor([[3, 3, -1, 5, 8, 0]], dtype=torch.int64).cuda()
     wts = torch.rand(1, 6, generator=gen).cuda() + 0.1
     out = ext.v4_moe_forward_sm120_pro6000(
-        x, ids, wts, table_of(experts), I, 10.0
+        x, ids, wts, table_of(experts), I, 10.0, 32
     )
     ref = torch.zeros(1, H, dtype=torch.float32, device="cuda")
     for e in sorted(set(ids[0].tolist())):
@@ -212,7 +241,7 @@ def test_batch1_duplicate_and_invalid_ids(H, I):
             for k, s in (("w1", "s1"), ("w3", "s3"), ("w2", "s2"))
         ]
         for j in (ids[0] == e).nonzero().flatten().tolist():
-            ref += expert_ref(x, *w, 10.0, wts[:, j, None]).float()
+            ref += expert_ref(x, *w, 10.0, wts[:, j, None], 32).float()
     assert _rel(out, ref) < 2e-2
 
 

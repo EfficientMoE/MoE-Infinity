@@ -85,7 +85,7 @@ void v4_moe_forward_sm120_pro6000_cuda(
     float swiglu_limit, int bt, uint8_t* xq, uint8_t* xs, int* sorted,
     void* tiles, int* num_tiles, uint8_t* hq, uint8_t* hs, void* ybuf,
     float* out, void* hbuf, int* counters, int n_counters, void* tile_ext,
-    cudaStream_t stream);
+    int act_block, cudaStream_t stream);
 int v4_moe_choose_bt(long long n, int E);
 bool v4_moe_use_decode(int bt, int H, int I);
 int v4_moe_decode_counters(int bound, int H);
@@ -109,7 +109,7 @@ bool v4_moe_supported(int64_t device) {
 std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
     const torch::Tensor& x, const torch::Tensor& topk_ids,
     const torch::Tensor& topk_w, const torch::Tensor& table, int64_t I,
-    double swiglu_limit, bool combine) {
+    double swiglu_limit, bool combine, int64_t act_block) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 &&
                   x.dim() == 2 && x.is_contiguous(),
               "x must be a contiguous CUDA bf16 [T, H] tensor");
@@ -136,6 +136,8 @@ std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
               "v4_moe requires hidden % 256 == 0, inter % 128 == 0, both <= "
               "8192");
   TORCH_CHECK(E >= 1 && E <= 1024 && topk <= 16, "E <= 1024, topk <= 16");
+  TORCH_CHECK(act_block == 32 || act_block == 128,
+              "act_block (activation quantisation group) must be 32 or 128");
   const int64_t n = T * topk;
   int bt = v4_moe_choose_bt(n, (int)E);
   const bool decode = v4_moe_use_decode(bt, (int)H, (int)I);
@@ -152,14 +154,15 @@ std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
     off += (bytes + 255) / 256 * 256;
     return o;
   };
-  const int64_t o_xq = carve(T * H), o_xs = carve(T * (H / 128));
+  // activation scales: one ue8m0 byte per 32 elements
+  const int64_t o_xq = carve(T * H), o_xs = carve(T * (H / 32));
   const int64_t o_sorted = carve(n1 * 4);
   const int64_t o_tiles = carve(((int64_t)bound * 3 + 1) * 4);
   const int64_t o_ctr = carve(decode ? n_counters * 4 : 0);
   const int64_t o_ext = carve(decode ? (int64_t)bound * 96 : 0);
   const int64_t o_hbuf = carve(decode ? n1 * I * 2 : 0);
   const int64_t o_hq = carve(decode ? 0 : n1 * I);
-  const int64_t o_hs = carve(decode ? 0 : n1 * (I / 128));
+  const int64_t o_hs = carve(decode ? 0 : n1 * (I / 32));
   // ybuf is the result of the single-expert call; otherwise scratch too
   const int64_t o_ybuf = carve(combine ? n * H * 2 : 0);
   auto ws = torch::empty({off}, x.options().dtype(torch::kUInt8));
@@ -184,7 +187,7 @@ std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
       base + o_hs, combine ? (void*)(base + o_ybuf) : ybuf.data_ptr(),
       combine ? out.data_ptr<float>() : nullptr,
       decode ? base + o_hbuf : nullptr, reinterpret_cast<int*>(base + o_ctr),
-      (int)n_counters, base + o_ext, stream);
+      (int)n_counters, base + o_ext, (int)act_block, stream);
   return {ybuf, out};
 }
 
@@ -195,13 +198,17 @@ std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
 //   topk_w [T, k] float32 routing weights (applied before w2, as upstream);
 //   table [E, 6] int64 device pointers per expert: w1, s1, w3, s3, w2, s2
 //   (packed e2m1 [N, K/2] and ue8m0 [N, K/32], checkpoint layout).
+//   act_block: elements per FP8 activation scale, the official
+//   fp8_block_size (128 for V4-Flash, 32 for V4.1-Flash).
 // Returns FP32 [T, H] = sum over the token's experts in ascending id order.
 torch::Tensor v4_moe_forward_sm120_pro6000(torch::Tensor x,
                                            torch::Tensor topk_ids,
                                            torch::Tensor topk_w,
                                            torch::Tensor table, int64_t inter,
-                                           double swiglu_limit) {
-  return run_v4_moe(x, topk_ids, topk_w, table, inter, swiglu_limit, true)
+                                           double swiglu_limit,
+                                           int64_t act_block) {
+  return run_v4_moe(x, topk_ids, topk_w, table, inter, swiglu_limit, true,
+                    act_block)
       .second;
 }
 
@@ -209,7 +216,8 @@ torch::Tensor v4_moe_forward_sm120_pro6000(torch::Tensor x,
 // v4_expert_forward, routing weight 1). Returns BF16 [M, H].
 torch::Tensor v4_expert_forward_fp4_sm120_pro6000(
     torch::Tensor x, torch::Tensor w1, torch::Tensor s1, torch::Tensor w2,
-    torch::Tensor s2, torch::Tensor w3, torch::Tensor s3, double swiglu_limit) {
+    torch::Tensor s2, torch::Tensor w3, torch::Tensor s3, double swiglu_limit,
+    int64_t act_block) {
   for (auto* t : {&w1, &s1, &w2, &s2, &w3, &s3})
     TORCH_CHECK(t->is_cuda() && t->is_contiguous(),
                 "expert tensors must be contiguous CUDA tensors");
@@ -226,7 +234,8 @@ torch::Tensor v4_expert_forward_fp4_sm120_pro6000(
   auto table = cpu.to(x.device(), /*non_blocking=*/true);
   auto ids = torch::zeros({M, 1}, x.options().dtype(torch::kInt32));
   auto w = torch::ones({M, 1}, x.options().dtype(torch::kFloat32));
-  return run_v4_moe(x.contiguous(), ids, w, table, I, swiglu_limit, false)
+  return run_v4_moe(x.contiguous(), ids, w, table, I, swiglu_limit, false,
+                    act_block)
       .first;
 }
 
@@ -271,10 +280,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("v4_expert_forward", &v4_expert_forward,
         "V4 FP4 routed-expert SwiGLU forward (BF16 dequant reference)");
   m.def("v4_moe_forward_sm120_pro6000", &v4_moe_forward_sm120_pro6000,
+        py::arg("x"), py::arg("topk_ids"), py::arg("topk_w"), py::arg("table"),
+        py::arg("inter"), py::arg("swiglu_limit"), py::arg("act_block") = 128,
         "V4 grouped routed-expert MoE, native W4A8 block-scaled FP4 MMA "
         "(sm_120a); returns FP32 [T, H]");
   m.def("v4_expert_forward_fp4_sm120_pro6000",
-        &v4_expert_forward_fp4_sm120_pro6000,
+        &v4_expert_forward_fp4_sm120_pro6000, py::arg("x"), py::arg("w1"),
+        py::arg("s1"), py::arg("w2"), py::arg("s2"), py::arg("w3"),
+        py::arg("s3"), py::arg("swiglu_limit"), py::arg("act_block") = 128,
         "V4 single routed expert on the native W4A8 block-scaled FP4 path");
   m.def("v4_moe_supported", &v4_moe_supported, py::arg("device"),
         "True if the *_sm120_pro6000 grouped MoE kernels may run on this "

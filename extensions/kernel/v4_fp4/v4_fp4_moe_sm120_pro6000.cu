@@ -135,7 +135,7 @@ __device__ __forceinline__ void mma_fp4_fp8(float* d, const uint32_t* a,
       "{%10}, {%11,%12}, {%13}, {%14,%15};\n"
       : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
       : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "r"(sfa),
-        "h"((uint16_t)BID), "h"((uint16_t)0), "r"(sfb), "h"((uint16_t)0),
+        "h"((uint16_t)BID), "h"((uint16_t)0), "r"(sfb), "h"((uint16_t)BID),
         "h"((uint16_t)0));
 }
 
@@ -171,11 +171,18 @@ __device__ __forceinline__ int perm32(int e) {
   return i < 4 ? 4 * t + i : 16 + 4 * t + (i - 4);
 }
 
-// One 128-element activation group is quantised by 16 consecutive lanes, 8
-// BF16 values each (elements 8t'..8t'+7 of a 32-block, t' = lane & 3).
-// Writes the permuted FP8 bytes into the 32-byte block at `dst` and returns
-// the unbiased ue8m0 exponent (identical in all 16 lanes).
-__device__ __forceinline__ int quant8_group16(uint4 raw, uint8_t* dst, int t) {
+// Activation scales are stored as one ue8m0 byte per 32 elements: [rows, K/32]
+// bytes, read as one uint32 per (row, 128-element chunk) whose byte j is the
+// MMA scale of k32 block j. With 128-element groups (V4-Flash) the 4 bytes are
+// equal; V4.1-Flash quantises in 32-element groups (official fp8_block_size).
+//
+// One 128-element chunk is quantised by 16 consecutive lanes, 8 BF16 values
+// each (elements 8t'..8t'+7 of a 32-block, t' = lane & 3). Writes the
+// permuted FP8 bytes into the 32-byte block at `dst` and returns the unbiased
+// ue8m0 exponent of the lane's group: the 128-chunk (g32 false, identical in
+// all 16 lanes) or its 32-block (g32, identical in the 4 lanes of the block).
+__device__ __forceinline__ int quant8_group16(uint4 raw, uint8_t* dst, int t,
+                                              bool g32) {
   const __nv_bfloat16* v = reinterpret_cast<const __nv_bfloat16*>(&raw);
   float f[8];
   float amax = 0.f;
@@ -184,9 +191,12 @@ __device__ __forceinline__ int quant8_group16(uint4 raw, uint8_t* dst, int t) {
     f[i] = __bfloat162float(v[i]);
     amax = fmaxf(amax, fabsf(f[i]));
   }
-#pragma unroll
-  for (int o = 1; o < 16; o <<= 1)
-    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+  amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
+  amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
+  if (!g32) {
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 4));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 8));
+  }
   const int e = ue8m0_exponent(amax);
   const float inv = pow2(-e);
   *reinterpret_cast<uint32_t*>(dst + 4 * t) =
@@ -211,7 +221,7 @@ __global__ void __launch_bounds__(kPrepThreads)
                 int* __restrict__ num_tiles, uint8_t* __restrict__ xq,
                 uint8_t* __restrict__ xs, int* __restrict__ zero_buf,
                 int zero_n, const int64_t* __restrict__ table,
-                TileExt* __restrict__ tile_ext) {
+                TileExt* __restrict__ tile_ext, bool act32) {
   const int tid = threadIdx.x;
   // Let a programmatic-dependent successor launch now; it waits for this
   // grid's completion (griddepcontrol.wait) before reading our outputs.
@@ -313,9 +323,9 @@ __global__ void __launch_bounds__(kPrepThreads)
   const int col = (int)(g % (H / kBK)) * kBK + sub * 8;
   const uint4 raw =
       *reinterpret_cast<const uint4*>(x + row * (long long)H + col);
-  const int e =
-      quant8_group16(raw, xq + row * (long long)H + (col & ~31), sub & 3);
-  if (sub == 0) xs[row * (H / kBK) + col / kBK] = (uint8_t)(e + 127);
+  const int e = quant8_group16(raw, xq + row * (long long)H + (col & ~31),
+                               sub & 3, act32);
+  if ((sub & 3) == 0) xs[row * (H / 32) + col / 32] = (uint8_t)(e + 127);
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +348,7 @@ struct Cfg {
   static constexpr int kStage = kA + kB + kSA;
   static constexpr int kSmem = kStage * STAGES;
   static constexpr int kMaxKC = 64;  // K <= 8192
-  static constexpr int kSmemTotal = kSmem + (BT <= 64 ? BT * kMaxKC : 0);
+  static constexpr int kSmemTotal = kSmem + (BT <= 64 ? BT * kMaxKC * 4 : 0);
   // Phase 1 covers ROWS/2 features; a 128-feature activation-scale block
   // spans CLUSTER CTAs that exchange their per-token amax through DSMEM.
   static constexpr int CLUSTER = 128 / (ROWS / 2);
@@ -353,14 +363,15 @@ struct GemmArgs {
   const int* num_tiles;
   const float* topk_w;  // [T*topk]
   int topk;
-  int K;              // reduction dim (H for phase 1, I for phase 2)
-  int N;              // output features (I for phase 1, H for phase 2)
-  const uint8_t* bq;  // activations FP8 (x for phase 1, h for phase 2)
-  const uint8_t* bs;  // activation ue8m0 scales [rows, K/128]
-  uint8_t* hq;        // phase 1 out
+  int K;               // reduction dim (H for phase 1, I for phase 2)
+  int N;               // output features (I for phase 1, H for phase 2)
+  const uint8_t* bq;   // activations FP8 (x for phase 1, h for phase 2)
+  const uint32_t* bs;  // activation scales [rows, K/128] x 4 ue8m0 (per k32)
+  uint8_t* hq;         // phase 1 out
   uint8_t* hs;
   __nv_bfloat16* ybuf;  // phase 2 out [T*topk, H]
   float swiglu_limit;
+  int act32;  // h is quantised in 32-element groups (else 128)
 };
 
 template <int PHASE, int WM, int WN, int MT, int NT, int STAGES>
@@ -477,7 +488,7 @@ __global__ void __launch_bounds__(WM* WN * 32)
     // round trip on the critical path of every short stage); wide tiles
     // prefetch them one stage ahead in registers.
     constexpr bool kSbSmem = BT <= 64;
-    uint8_t* sSB = smem + C::kSmem;
+    uint32_t* sSB = reinterpret_cast<uint32_t*>(smem + C::kSmem);
     uint32_t sb_cur[NT];
     if constexpr (kSbSmem) {
       for (int i = tid; i < BT * KC; i += kThreads) {
@@ -607,59 +618,113 @@ __global__ void __launch_bounds__(WM* WN * 32)
           }
         }
       }
-#pragma unroll
-      for (int ni = 0; ni < NT; ++ni)
-#pragma unroll
-        for (int c = 0; c < 2; ++c) {
-          float m = cmax[ni][c];
-          m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 4));
-          m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 8));
-          m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 16));
-          if (g == 0) red[wm * BT + wn * NT * 8 + ni * 8 + 2 * t4 + c] = m;
-        }
-      __syncthreads();
-      for (int col = tid; col < BT; col += kThreads) {
-        float m = 0.f;
-#pragma unroll
-        for (int w = 0; w < WM; ++w) m = fmaxf(m, red[w * BT + col]);
-        red2[col] = m;
-      }
-      bool write_scale = true;
-      if constexpr (C::CLUSTER == 2) {
-        cg::cluster_group cl = cg::this_cluster();
-        cl.sync();
-        const float* peer = cl.map_shared_rank(red2, cl.block_rank() ^ 1);
-        for (int col = tid; col < BT; col += kThreads)
-          red[col] = fmaxf(red2[col], peer[col]);
-        write_scale = cl.block_rank() == 0;
+      if (args.act32) {
+        // 32-feature groups: every group lies inside this CTA (no cluster
+        // exchange); per-(group, token) amax through shared-memory atomics
+        constexpr int NB = FW / 32;
+        unsigned* r32 =
+            reinterpret_cast<unsigned*>(outq + BT * FW);  // [NB][BT]
         __syncthreads();
-      } else {
+        for (int i = tid; i < NB * BT; i += kThreads) r32[i] = 0u;
         __syncthreads();
-        for (int col = tid; col < BT; col += kThreads) red[col] = red2[col];
-        __syncthreads();
-      }
-      const int fblk = n0 / kBK;  // which 128-block of I
 #pragma unroll
-      for (int ni = 0; ni < NT; ++ni)
+        for (int ni = 0; ni < NT; ++ni)
 #pragma unroll
-        for (int c = 0; c < 2; ++c) {
-          int col = wn * NT * 8 + ni * 8 + 2 * t4 + c;
-          int e = ue8m0_exponent(red[col]);
-          float inv = pow2(-e);
+          for (int c = 0; c < 2; ++c) {
+            const int col = wn * NT * 8 + ni * 8 + 2 * t4 + c;
 #pragma unroll
-          for (int mi = 0; mi < H2; ++mi)
-#pragma unroll
-            for (int hr = 0; hr < 2; ++hr) {
-              int f = wm * H2 * 16 + mi * 16 + g + 8 * hr;  // 0..FW-1
-              float q = acc[mi][ni][2 * hr + c] * inv;
-              __nv_fp8_storage_t b =
-                  __nv_cvt_float_to_fp8(q, __NV_SATFINITE, __NV_E4M3);
-              outq[col * FW + (f & ~31) + perm32(f & 31)] = b;
+            for (int mi = 0; mi < H2; ++mi) {
+              float m = fmaxf(fabsf(acc[mi][ni][c]), fabsf(acc[mi][ni][2 + c]));
+              m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 4));
+              m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 8));
+              m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 16));
+              const int blk = (wm * H2 * 16 + mi * 16) >> 5;
+              if (g == 0) atomicMax(r32 + blk * BT + col, __float_as_uint(m));
             }
-          if (write_scale && wm == 0 && g == 0 && col < tile.nrows)
-            args.hs[(long long)(tile.row_start + col) * (args.N / kBK) + fblk] =
-                (uint8_t)(e + 127);
+          }
+        __syncthreads();
+#pragma unroll
+        for (int ni = 0; ni < NT; ++ni)
+#pragma unroll
+          for (int c = 0; c < 2; ++c) {
+            const int col = wn * NT * 8 + ni * 8 + 2 * t4 + c;
+#pragma unroll
+            for (int mi = 0; mi < H2; ++mi) {
+              const int f0 = wm * H2 * 16 + mi * 16;
+              const float inv = pow2(
+                  -ue8m0_exponent(__uint_as_float(r32[(f0 >> 5) * BT + col])));
+#pragma unroll
+              for (int hr = 0; hr < 2; ++hr) {
+                const int f = f0 + g + 8 * hr;
+                outq[col * FW + (f & ~31) + perm32(f & 31)] =
+                    __nv_cvt_float_to_fp8(acc[mi][ni][2 * hr + c] * inv,
+                                          __NV_SATFINITE, __NV_E4M3);
+              }
+            }
+          }
+        for (int i = tid; i < NB * BT; i += kThreads) {
+          const int blk = i / BT, col = i - blk * BT;
+          if (col < tile.nrows)
+            args.hs[(long long)(tile.row_start + col) * (args.N / 32) +
+                    n0 / 32 + blk] =
+                (uint8_t)(ue8m0_exponent(__uint_as_float(r32[i])) + 127);
         }
+      } else {
+#pragma unroll
+        for (int ni = 0; ni < NT; ++ni)
+#pragma unroll
+          for (int c = 0; c < 2; ++c) {
+            float m = cmax[ni][c];
+            m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 4));
+            m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 8));
+            m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 16));
+            if (g == 0) red[wm * BT + wn * NT * 8 + ni * 8 + 2 * t4 + c] = m;
+          }
+        __syncthreads();
+        for (int col = tid; col < BT; col += kThreads) {
+          float m = 0.f;
+#pragma unroll
+          for (int w = 0; w < WM; ++w) m = fmaxf(m, red[w * BT + col]);
+          red2[col] = m;
+        }
+        bool write_scale = true;
+        if constexpr (C::CLUSTER == 2) {
+          cg::cluster_group cl = cg::this_cluster();
+          cl.sync();
+          const float* peer = cl.map_shared_rank(red2, cl.block_rank() ^ 1);
+          for (int col = tid; col < BT; col += kThreads)
+            red[col] = fmaxf(red2[col], peer[col]);
+          write_scale = cl.block_rank() == 0;
+          __syncthreads();
+        } else {
+          __syncthreads();
+          for (int col = tid; col < BT; col += kThreads) red[col] = red2[col];
+          __syncthreads();
+        }
+        const int fblk = n0 / kBK;  // which 128-block of I
+#pragma unroll
+        for (int ni = 0; ni < NT; ++ni)
+#pragma unroll
+          for (int c = 0; c < 2; ++c) {
+            int col = wn * NT * 8 + ni * 8 + 2 * t4 + c;
+            int e = ue8m0_exponent(red[col]);
+            float inv = pow2(-e);
+#pragma unroll
+            for (int mi = 0; mi < H2; ++mi)
+#pragma unroll
+              for (int hr = 0; hr < 2; ++hr) {
+                int f = wm * H2 * 16 + mi * 16 + g + 8 * hr;  // 0..FW-1
+                float q = acc[mi][ni][2 * hr + c] * inv;
+                __nv_fp8_storage_t b =
+                    __nv_cvt_float_to_fp8(q, __NV_SATFINITE, __NV_E4M3);
+                outq[col * FW + (f & ~31) + perm32(f & 31)] = b;
+              }
+            if (write_scale && wm == 0 && g == 0 && col < tile.nrows)
+              reinterpret_cast<uint32_t*>(
+                  args.hs)[(long long)(tile.row_start + col) * (args.N / kBK) +
+                           fblk] = (uint32_t)(e + 127) * 0x01010101u;
+          }
+      }
       __syncthreads();
       for (int c = tid; c < BT * (FW / 16); c += kThreads) {
         int col = c / (FW / 16), cc = c % (FW / 16);
@@ -779,7 +844,7 @@ constexpr int kDecK = 256;
 constexpr int kDecMaxI = 2560;
 // in-flight work units: the producer runs up to STAGES - 1 stages (so up
 // to that many units of >= 1 stage) ahead of the consumer
-constexpr int kDecRing = 16;
+constexpr int kDecRing = 8;
 constexpr long long kDecL2Budget = 64ll << 20;  // w2 L2 prefetch limit
 constexpr int kDecSmemLimit = 101376;  // 99 KiB per block (RTX PRO 6000)
 
@@ -794,7 +859,8 @@ struct DecCfg {
   static constexpr int kStageA = ROWS * kDecK / 2;
   static constexpr int kStageSA = ROWS * kDecK / 32;
   static constexpr int kStageB = BROWS * kDecK;  // token rows of the stage
-  static constexpr int kSB = BROWS * 64;  // ue8m0 activation scales per unit
+  // activation scales per unit: [BROWS][64] uint32 (4 x ue8m0 per 128 of K)
+  static constexpr int kSB = BROWS * 64 * 4;
   static constexpr int kStage = kStageA + kStageSA + kStageB;
   static constexpr int kBres = BROWS * (kDecMaxI + 16);  // stride I + 16
   static constexpr int kRed = (kKSplit - 1) * kRowWarps * 32 * 8 * 4;
@@ -824,6 +890,7 @@ struct DecodeArgs {
   int* rb_done;         // [H / 64]
   float swiglu_limit;
   int static_sched;  // CTA c owns units c, c + grid, ... (cooperative)
+  int act32;         // h is quantised in 32-element groups (else 128)
 };
 
 // Decoded work unit.
@@ -932,12 +999,12 @@ __global__ void __launch_bounds__(kDecThreads, 1)
     if (pf_slot < 0) return;
     pf_slot = tid < 16 * BROWS ? pf_slot : -1;
     if (pf_slot < 0) return;
-    uint8_t* d = sSB0 + pf_slot * C::kSB;
+    uint32_t* d = reinterpret_cast<uint32_t*>(sSB0 + pf_slot * C::kSB);
     const int r = tid >> 4;
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
       int c = (tid & 15) + 16 * j;
-      if (c < KCx) d[r * 64 + c] = (uint8_t)pf_sb[j];
+      if (c < KCx) d[r * 64 + c] = pf_sb[j];
     }
     pf_slot = -1;
   };
@@ -980,7 +1047,9 @@ __global__ void __launch_bounds__(kDecThreads, 1)
 #pragma unroll
       for (int j = 0; j < 4; ++j) {
         int c = (tid & 15) + 16 * j;
-        pf_sb[j] = c < KCx ? a.xs[tok * KCx + c] : 0;
+        pf_sb[j] = c < KCx
+                       ? reinterpret_cast<const uint32_t*>(a.xs)[tok * KCx + c]
+                       : 0u;
       }
       pf_slot = slot;
     }
@@ -1097,9 +1166,11 @@ __global__ void __launch_bounds__(kDecThreads, 1)
           if (gi < groups) {  // uniform across the 16 lanes of a group
             int r = gi / nkb, kb = gi - r * nkb;
             int sub = tid & 15;
-            int e = quant8_group16(
-                raw[j], sBres + r * ldb + kb * kBK + (sub >> 2) * 32, sub & 3);
-            if (sub == 0) sSB[r * 64 + kb] = (uint8_t)(e + 127);
+            int e = quant8_group16(raw[j],
+                                   sBres + r * ldb + kb * kBK + (sub >> 2) * 32,
+                                   sub & 3, a.act32);
+            if ((sub & 3) == 0)
+              sSB[(r * 64 + kb) * 4 + (sub >> 2)] = (uint8_t)(e + 127);
           }
         }
       }
@@ -1128,7 +1199,8 @@ __global__ void __launch_bounds__(kDecThreads, 1)
         const int Q = kq * kQ + qi;  // k64 quarter of the stage
         const int kh = Q >> 1, jp = Q & 1;
         const int kc = ks * 2 + kh;
-        const uint32_t sfb = sSB[(BROWS == 1 ? 0 : g) * 64 + kc];
+        const uint32_t sfb = reinterpret_cast<const uint32_t*>(
+            sSB)[(BROWS == 1 ? 0 : g) * 64 + kc];
         uint32_t sfa[2];
 #pragma unroll
         for (int mi = 0; mi < 2; ++mi)
@@ -1368,8 +1440,9 @@ void v4_moe_forward_sm120_pro6000_cuda(
     float swiglu_limit, int bt, uint8_t* xq, uint8_t* xs, int* sorted,
     void* tiles, int* num_tiles, uint8_t* hq, uint8_t* hs, void* ybuf,
     float* out, void* hbuf, int* counters, int n_counters, void* tile_ext,
-    cudaStream_t stream) {
+    int act_block, cudaStream_t stream) {
   using namespace v4moe;
+  const bool act32 = act_block == 32;
   const bool decode = hbuf != nullptr;
   const long long groups = (long long)T * (H / kBK);
   const long long qblocks =
@@ -1380,13 +1453,13 @@ void v4_moe_forward_sm120_pro6000_cuda(
         xb, reinterpret_cast<const int64_t*>(topk_ids), T, H, topk, E, bt,
         sorted, reinterpret_cast<Tile*>(tiles), num_tiles, xq, xs, counters,
         decode ? n_counters : 0, table,
-        decode ? reinterpret_cast<TileExt*>(tile_ext) : nullptr);
+        decode ? reinterpret_cast<TileExt*>(tile_ext) : nullptr, act32);
   else
     prep_kernel<int32_t><<<1 + qblocks, kPrepThreads, 0, stream>>>(
         xb, reinterpret_cast<const int32_t*>(topk_ids), T, H, topk, E, bt,
         sorted, reinterpret_cast<Tile*>(tiles), num_tiles, xq, xs, counters,
         decode ? n_counters : 0, table,
-        decode ? reinterpret_cast<TileExt*>(tile_ext) : nullptr);
+        decode ? reinterpret_cast<TileExt*>(tile_ext) : nullptr, act32);
 
   if (decode) {
     DecodeArgs d{};
@@ -1410,6 +1483,7 @@ void v4_moe_forward_sm120_pro6000_cuda(
     d.rb_done = counters + 1 + (n_counters - 1 - H / kDecRows);
     d.swiglu_limit = swiglu_limit;
     d.static_sched = (long long)T * topk <= 8;
+    d.act32 = act32;
     // bt == 1: the batch-1 path, one routed slot per tile
     if (ids_int64)
       launch_decode_any<int64_t>(d, bt == 1, stream);
@@ -1428,15 +1502,16 @@ void v4_moe_forward_sm120_pro6000_cuda(
   a1.K = H;
   a1.N = I;
   a1.bq = xq;
-  a1.bs = xs;
+  a1.bs = reinterpret_cast<const uint32_t*>(xs);
   a1.hq = hq;
   a1.hs = hs;
   a1.swiglu_limit = swiglu_limit;
+  a1.act32 = act32;
   GemmArgs a2 = a1;
   a2.K = I;
   a2.N = H;
   a2.bq = hq;
-  a2.bs = hs;
+  a2.bs = reinterpret_cast<const uint32_t*>(hs);
   a2.ybuf = reinterpret_cast<__nv_bfloat16*>(ybuf);
 
   switch (bt) {
