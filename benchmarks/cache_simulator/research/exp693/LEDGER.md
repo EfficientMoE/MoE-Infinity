@@ -70,6 +70,11 @@
 - HARM -> annex family dead; exp694: different axis entirely.
 
 ## Run block (filled by adjudicator; sealed after settle)
-- STATUS: NEXT
+- STATUS: DONE (exit 0)
+- **Result:**
+```
+VERDICT: BOTH_PASS | winners: ssr_05+ssr_10+ssr_15 (ALL bars green) | det: True | repl: exp681+exp685 exact | elapsed 3780s | freeze 9c4d4dc + repair 9fbf133 (batch annex exclusion, equivalence-proven) | FIRST BOTH_PASS in the composite program (686a/687/689/690/691 were REC_ONLY or worse) | burst_def = 0.000 EXACTLY at every cap512 cell (annex never touches burst: ssr burst 0.0884 == lcnu) | cap2048: burst_def NEGATIVE up to -0.78pp (ssr BEATS lcnu — fencing revisit keys purges victim competition) | rec_def ~0 (+/-0.05pp): null capture — no recovery gain | REGISTERED INTERPRETATION: capacity frontier CONFIRMED end-to-end; closure published; exp694 -> different axis (capacity scaling / layer-aware annex)
+```
+
 - FREEZE: 9c4d4dc (pushed)
 - REPAIR FREEZE: 9fbf133 (pushed; rebuilt clone after parent-repo deletion)
