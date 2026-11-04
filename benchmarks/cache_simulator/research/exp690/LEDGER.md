@@ -53,3 +53,5 @@
 
 ## Run block (filled by adjudicator; sealed after settle)
 - STATUS: NEXT
+
+- FREEZE: fd8b92d (pushed)
