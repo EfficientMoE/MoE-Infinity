@@ -36,6 +36,9 @@ L2_PERSIST = True
 PREP_WARPS_PRO6000 = 2
 AUX_WARPS_PRO6000 = 8
 PREP_NEUMANN = True
+# CUDA recurrence variant: 0 = 4 MMA warps, 2 = + 4 cp.async producer warps
+# (round 7: 9K recurrence 345 -> 293 us, 12K 436 -> 389, 50K neutral)
+RECUR_VARIANT_PRO6000 = 2
 BLOCK_TOKENS = 2048  # 72 MB of block buffers, under the 80 MB window
 
 
@@ -134,7 +137,9 @@ def _recur(
     if use_cuda:
         from moe_infinity.kernel import gdn_recur_cuda
 
-        gdn_recur_cuda.recur(qg, kd, w, u, S, g, o, h, t_base, nb)
+        gdn_recur_cuda.recur(
+            qg, kd, w, u, S, g, o, h, t_base, nb, variant=RECUR_VARIANT_PRO6000
+        )
         return
     blocked_recur_pro6000_kernel[(B * HV * (V // BV),)](
         qg,
