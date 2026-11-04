@@ -40,4 +40,10 @@ N=8192 d=1024 caps {64,512}: arms distinct, ring leads burst+rec,
 ssr tracks lcnu, determinism micro True. Placeholder-loop bug fixed
 pre-freeze (cell_eval nested dict).
 
-- STATUS: NEXT
+- STATUS: DONE (exit 0)
+- **Result:**
+```
+VERDICT: DUAL_STABLE | det True | repl exp681+exp685 exact (center/ring10 all depths @512,2048) | ssr_safety True | elapsed 822s | freeze f3b4795 | TABLE d4096: cap512 burst_adv +5.96pp rec_adv +0.73pp DUAL | cap1024 +8.86pp +2.34pp DUAL (rec edge TRIPLES) | cap2048 +9.23pp +1.44pp DUAL | cap4096 +0.88pp +0.20pp catch | cap8192 0.00 0.00 TOTAL CONVERGENCE (working set fits: all arms 0.9985-1.0) | lcnu burst ABSOLUTE penalty GROWS with capacity (0.0884@512 -> 0.4099@4096) | center(CostFit) == lcnu byte-equal at cap>=1024 (arbitration no-op beyond cap512) | ssr never beats lcnu at burst (confirms exp693) | SCIENCE: burst/recovery frontier is a MID-CAP phenomenon, worst 1024-2048 (=1.5-4x home working set), dissolves at saturation; ring's probation delivers max combined value exactly where KV budgets sit | exp695 registered: why does lcnu pay burst at ALL caps — victim-ranking pathology under flood
+```
+
+- FREEZE: f3b4795 (prereg + smoke)
