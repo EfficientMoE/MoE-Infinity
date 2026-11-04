@@ -33,4 +33,10 @@ lcnu .1104/.6035; ring10 .0537/.6536; ssr_10 .1143/.6038;
 sring_10 .0498/.6361; c-hits sring 26 > ring 20 (annex refund visible
 at mini); classes policy-independent; det micro True; 4 arms distinct.
 
-- STATUS: NEXT
+- STATUS: DONE (exit 0)
+- **Result:**
+```
+VERDICT: TRADE_UNCHANGED (primary False, secondary False, HARM gate OK) | det True | repl lcnu/ring10/ssr_10/center == exp694 exact both depths all caps | consistency PASS | elapsed 1269s+det | freeze 0c2e7fb | KEY FINDING: sring_10 == ssr_10 to 4dp at EVERY cap (burst/rec) — the composite collapsed onto ssr exactly. The routing choice for REVISIT-misses (annex-protection here vs ring-quarantine in pure ring) fully determines behavior: ring reduced to first-sight-only quarantine contributes ZERO rec gain (0.7666==lcnu at cap1024 vs ring 0.7898) and zero burst change. Therefore ring's ENTIRE +2.34pp rec win comes from quarantining re-entry REVISITS — the same population ssr protects for burst (exp695: burst 99.9% revisits; recovery re-entries are revisits by definition). CONFLICT PINNED: protect-revisits-early (ssr/burst) vs make-revisits-earn (ring/rec) is ONE binary decision on ONE population — composition at population level impossible; the Pareto frontier IS the revisit routing rule. Middle point untested: earn-then-immune (quarantine on re-entry until first re-hit, then scorer-immune annex) = exp697.
+```
+
+- FREEZE: 0c2e7fb (prereg + smoke)
