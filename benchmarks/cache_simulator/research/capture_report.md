@@ -1347,3 +1347,14 @@ gate). Alignment exposure flows through inner-policy transition response,
 not switch timing. det=False incident disclosed: module-level seed spawn
 advanced between passes; fixed, rerun det=True, numbers reproduced; no
 publication on det=False. Pivot: sub-block flash-crowd probe.
+## Addendum 26 (exp681 crowd): CROWD-H1 — third failure mode, admission lag
+
+Cold-crowd bursts (d 256-4096, ranks [64,128) uniform) at midpoint of
+stationary streams: H1 violated 8/8 cells, worst 10.86pp (d4096/cap2048);
+costfit burst hit collapses to 0.016-0.188 while best standalone adapts.
+Cap-dependent split: cap 2048 harm in-burst; cap 512 harm moves to recovery
+(worst 6.98pp — crowd admissions evicted the hot set). Aligned control
+still loses (sw=1, no help): failure is admission speed of repeating cold
+keys, not arbitration blindness per se. Third failure mode joins alignment
+(exp677) and miss clustering (exp678); all point at the admission lever.
+Det byte-identical; serialization-crash amendment disclosed in prereg.
