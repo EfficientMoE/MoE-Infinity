@@ -48,4 +48,4 @@ excluded). Per cell: whole + burst hit over full stateful pass.
 ## Budget
 36 granite + 72 qwen + 3 det passes ≈ 80-85 min single process.
 
-- STATUS: NEXT
+- STATUS: DONE — CAPACITY_MAP (B1 3/3, anchors 13/13 @CSV precision, B3 strict-fail on saturation ties only, CROSS1 768/1792/NOT_REACHED)
