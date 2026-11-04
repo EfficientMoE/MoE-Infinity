@@ -1,0 +1,244 @@
+{
+ "exp": "exp695-flooddecomp",
+ "cells": [
+  {
+   "d": 4096,
+   "n_burst_runs": 1,
+   "caps": {
+    "512": {
+     "lcnu": {
+      "a_cnt": 6,
+      "a_hits": 0,
+      "b_cnt": 4,
+      "b_hits": 3,
+      "c_cnt": 4086,
+      "c_hits": 359,
+      "tot_cnt": 4096,
+      "tot_hits": 362
+     },
+     "ring10": {
+      "a_cnt": 6,
+      "a_hits": 0,
+      "b_cnt": 4,
+      "b_hits": 0,
+      "c_cnt": 4086,
+      "c_hits": 118,
+      "tot_cnt": 4096,
+      "tot_hits": 118
+     }
+    },
+    "1024": {
+     "lcnu": {
+      "a_cnt": 6,
+      "a_hits": 0,
+      "b_cnt": 4,
+      "b_hits": 4,
+      "c_cnt": 4086,
+      "c_hits": 559,
+      "tot_cnt": 4096,
+      "tot_hits": 563
+     },
+     "ring10": {
+      "a_cnt": 6,
+      "a_hits": 0,
+      "b_cnt": 4,
+      "b_hits": 1,
+      "c_cnt": 4086,
+      "c_hits": 199,
+      "tot_cnt": 4096,
+      "tot_hits": 200
+     }
+    },
+    "2048": {
+     "lcnu": {
+      "a_cnt": 6,
+      "a_hits": 0,
+      "b_cnt": 4,
+      "b_hits": 4,
+      "c_cnt": 4086,
+      "c_hits": 766,
+      "tot_cnt": 4096,
+      "tot_hits": 770
+     },
+     "ring10": {
+      "a_cnt": 6,
+      "a_hits": 0,
+      "b_cnt": 4,
+      "b_hits": 1,
+      "c_cnt": 4086,
+      "c_hits": 391,
+      "tot_cnt": 4096,
+      "tot_hits": 392
+     }
+    },
+    "4096": {
+     "lcnu": {
+      "a_cnt": 6,
+      "a_hits": 0,
+      "b_cnt": 4,
+      "b_hits": 4,
+      "c_cnt": 4086,
+      "c_hits": 1675,
+      "tot_cnt": 4096,
+      "tot_hits": 1679
+     },
+     "ring10": {
+      "a_cnt": 6,
+      "a_hits": 0,
+      "b_cnt": 4,
+      "b_hits": 2,
+      "c_cnt": 4086,
+      "c_hits": 1641,
+      "tot_cnt": 4096,
+      "tot_hits": 1643
+     }
+    },
+    "8192": {
+     "lcnu": {
+      "a_cnt": 6,
+      "a_hits": 0,
+      "b_cnt": 4,
+      "b_hits": 4,
+      "c_cnt": 4086,
+      "c_hits": 4086,
+      "tot_cnt": 4096,
+      "tot_hits": 4090
+     },
+     "ring10": {
+      "a_cnt": 6,
+      "a_hits": 0,
+      "b_cnt": 4,
+      "b_hits": 4,
+      "c_cnt": 4086,
+      "c_hits": 4086,
+      "tot_cnt": 4096,
+      "tot_hits": 4090
+     }
+    }
+   }
+  },
+  {
+   "d": 1024,
+   "n_burst_runs": 1,
+   "caps": {
+    "512": {
+     "lcnu": {
+      "a_cnt": 2,
+      "a_hits": 0,
+      "b_cnt": 0,
+      "b_hits": 0,
+      "c_cnt": 1022,
+      "c_hits": 84,
+      "tot_cnt": 1024,
+      "tot_hits": 84
+     },
+     "ring10": {
+      "a_cnt": 2,
+      "a_hits": 0,
+      "b_cnt": 0,
+      "b_hits": 0,
+      "c_cnt": 1022,
+      "c_hits": 31,
+      "tot_cnt": 1024,
+      "tot_hits": 31
+     }
+    },
+    "1024": {
+     "lcnu": {
+      "a_cnt": 2,
+      "a_hits": 0,
+      "b_cnt": 0,
+      "b_hits": 0,
+      "c_cnt": 1022,
+      "c_hits": 127,
+      "tot_cnt": 1024,
+      "tot_hits": 127
+     },
+     "ring10": {
+      "a_cnt": 2,
+      "a_hits": 0,
+      "b_cnt": 0,
+      "b_hits": 0,
+      "c_cnt": 1022,
+      "c_hits": 44,
+      "tot_cnt": 1024,
+      "tot_hits": 44
+     }
+    },
+    "2048": {
+     "lcnu": {
+      "a_cnt": 2,
+      "a_hits": 0,
+      "b_cnt": 0,
+      "b_hits": 0,
+      "c_cnt": 1022,
+      "c_hits": 146,
+      "tot_cnt": 1024,
+      "tot_hits": 146
+     },
+     "ring10": {
+      "a_cnt": 2,
+      "a_hits": 0,
+      "b_cnt": 0,
+      "b_hits": 0,
+      "c_cnt": 1022,
+      "c_hits": 89,
+      "tot_cnt": 1024,
+      "tot_hits": 89
+     }
+    },
+    "4096": {
+     "lcnu": {
+      "a_cnt": 2,
+      "a_hits": 0,
+      "b_cnt": 0,
+      "b_hits": 0,
+      "c_cnt": 1022,
+      "c_hits": 407,
+      "tot_cnt": 1024,
+      "tot_hits": 407
+     },
+     "ring10": {
+      "a_cnt": 2,
+      "a_hits": 0,
+      "b_cnt": 0,
+      "b_hits": 0,
+      "c_cnt": 1022,
+      "c_hits": 404,
+      "tot_cnt": 1024,
+      "tot_hits": 404
+     }
+    },
+    "8192": {
+     "lcnu": {
+      "a_cnt": 2,
+      "a_hits": 0,
+      "b_cnt": 0,
+      "b_hits": 0,
+      "c_cnt": 1022,
+      "c_hits": 1022,
+      "tot_cnt": 1024,
+      "tot_hits": 1022
+     },
+     "ring10": {
+      "a_cnt": 2,
+      "a_hits": 0,
+      "b_cnt": 0,
+      "b_hits": 0,
+      "c_cnt": 1022,
+      "c_hits": 1022,
+      "tot_cnt": 1024,
+      "tot_hits": 1022
+     }
+    }
+   }
+  }
+ ],
+ "verdict": "REFUTED",
+ "h1": false,
+ "h2": false,
+ "b_share_of_growth": 0.0008,
+ "det": true,
+ "repl": "exp694 exact (burst, d4096 all caps)",
+ "elapsed_s": 151.9
+}

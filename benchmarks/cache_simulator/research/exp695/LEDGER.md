@@ -37,4 +37,10 @@ N=8192 d=1024 cap512: classes policy-independent (a=794 b=135 c=95);
 ring b-hits 35 vs lcnu 103 (sacrifice in b); ring c-hits 20 vs 10
 (carry-in protection visible at mini). det micro True.
 
-- STATUS: NEXT
+- STATUS: DONE (exit 0)
+- **Result:**
+```
+VERDICT: REFUTED (H1 False: b_share 0.0008; H2 False: ring c-hit < lcnu c-hit @1024/2048 — direction inverted) | det True | repl exp694 exact (burst d4096 all caps) | consistency PASS (class counts policy-independent) | elapsed 141s | freeze ad3b362 | TRUE DECOMPOSITION (d4096): burst window = 4096 accesses: a=6 first-sights, b=4 same-burst, c=4086 CARRY-INS (99.9%) — bursts RE-ACCESS the pre-seeded crowd region, not novel keys | lcnu c-hits by cap: 359/559/766/1675/4086 (= its entire burst hit; growth = more crowd keys still resident when burst lands) | ring c-hits: 118/199/391/1641/4086 (probation holds HOME keys -> crowd carry-ins miss; converges at saturation) | ring b-hits 1-2/4 vs lcnu 4/4 (sacrifice located in carry-ins too) | MECHANISM REWRITTEN: burst-vs-recovery = slot competition between two re-access populations (crowd carry-ins vs home revisits); the actionable decision point is the CALM SEEDING PHASE (crowd admission), not burst-time arbitration — new axis for exp696: admission-time population throttling
+```
+
+- FREEZE: ad3b362 (prereg + smoke)
