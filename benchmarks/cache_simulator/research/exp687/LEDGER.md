@@ -83,14 +83,55 @@ visible — disclosed in full):
 
 ## FREEZE
 
-- Runner: run_windowed.py (this directory; sha256 below).
-- Freeze commit: <FILLED AT COMMIT> (path-scoped under
-  benchmarks/cache_simulator/research/exp687/ on exp651/qwen30b-results).
+- Runner: run_windowed.py sha256
+  c80780b5aa9087fd4ab1458453e98fd18f72bb78ffad187ed6549b321ee52f51
+- Freeze commit: 0084bdd on exp651/qwen30b-results
+  (benchmarks/cache_simulator/research/exp687/, path-scoped; untracked
+  data/ out of scope, untouched).
 
 ## RUN
 
-- STATUS: NEXT (full grid + double-run determinism; ~30 min).
+- STATUS: DONE. Full 8-cell grid + double-run determinism. Exit 0.
+  Elapsed 1428.2s. det: byte-identical double grid (True).
+  REPL1+REPL2+REPL3 anchors EXACT on all cells (gated exit codes 0).
 
 ## SETTLE
 
-- <FILLED AFTER RUN>
+- VERDICT: **HARM/THRASH** (bars: h1=True, h2=False, h3=True,
+  h4=False, acc=True).
+- Home cell (d=4096/cap=512): windowfit3_10 rec_def **−0.732pp**
+  (H1 PASSES — ring-served recovery, first H1 pass in series) but
+  burst_def **+5.957pp** vs center +1.074pp (H2 fails — rf3_10
+  tradeoff reproduced). incumbent_at_mid = **ring** (adopted 77823,
+  held through burst AND recovery; 0 switches inside burst window
+  [319488,323584) — mid-burst escape measured impossible).
+- Pre-registered branch that fired: "pre-burst ring re-adoption via
+  window noise (→ H2 fails instead, rf3_10 tradeoff)" — the windowed
+  challenger does NOT wait for burst evidence; stationary-window noise
+  (σ≈0.0073 > sealed MARGIN 0.005) re-adopts ring BEFORE the burst, so
+  the windowed scoreboard inherits the decayed-scoreboard failure mode
+  instead of fixing it.
+- NEW measured mechanism (beyond exp686a): asymmetric evidence
+  (single-window challenger vs decayed incumbent) is UNSTABLE at the
+  sealed margin — 8–14 switches across all cells (bar ≤6; exp686a
+  rf3_10 had 4), with post-recovery oscillation ring→lcnu→ring→lcnu→
+  s3fifo (tl tail at home cell: 327679 lcnu, 331775 ring, 335871 lcnu,
+  339967 s3fifo). H2 fails on 6/8 cells (all cap2048 + d≥2048 at
+  cap512); H3 holds everywhere (cap512 loop +0.90–1.02pp over lcnu).
+- Structural fact confirmed measured: mid=319488 ≡ 0 mod 4096;
+  recovery [323584,327680) contains no arbitration boundary that
+  could adopt a challenger on recovery evidence before recovery ends.
+- CONCLUSION: the naive single-window challenger scoreboard is CLOSED
+  as an arbitration-evidence fix. Windowed evidence is not wrong — it
+  is UNSTABLE at this margin and arrives one window late under
+  window-aligned bursts.
+- Registered follow-ups (queue, not this exp):
+  (a) smoothed-window challenger (2-window mean σ≈0.0052 still >margin;
+  4-window σ≈0.0037 <margin — the smoothing-vs-margin design rule is
+  now quantified by measured σ);
+  (b) unaligned burst streams (mid+2048 offset): separates
+  alignment-limited adoption from evidence-limited adoption.
+- Artifacts: exp687-windowed.json (this dir + repo research/exp687/),
+  RUN-LOG.txt. Candidate evidence UID: exp687-moei-windowed (Tier:
+  sim/trace — CPU trace-replay on frozen exp681 streams; proves the
+  arbitration control-law boundary only, no CUDA/serving claim).
