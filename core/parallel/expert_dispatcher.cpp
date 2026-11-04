@@ -1799,6 +1799,8 @@ bool ExpertDispatcher::GroupedEligible(const ExpertNodePtr& expert_node,
     return false;
   }
   const int64_t tokens = h.size(0);
+  // Prefill-sized batches never qualify; skip the tensor lookups below.
+  if (tokens > kGroupedMoePro6000MaxTokens) return false;
   const int64_t hidden = h.size(1);
   const auto& out = final_hidden_states_;
   if (!out.defined() || out.device() != h.device() || out.stride(1) != 1) {
