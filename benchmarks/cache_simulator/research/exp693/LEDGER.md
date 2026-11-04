@@ -33,6 +33,16 @@
   3's precondition corrected (LCNU scoring protects residents through
   moderate floods — confirmed evicted keys needed for FIFO test).
 
+## REPAIR (disclosed, pre-publication; run killed before first d-cell completed)
+- The frozen sequential fence re-asked base _victim() once per annex
+  member; annex members systematically hold top scores, so every miss
+  cost O(annex) full candidate recomputes (~25x slowdown; 15 min
+  without finishing d=256). Replaced by batch exclusion: remove all
+  annex members from _by_layer, one base pick, restore. Proven
+  equivalent on 6 workloads x 20k accesses (identical hit sequences,
+  resident sets, annex states) + smoke units + mini reproduce
+  (burst 0.1243 / rec 0.6187 identical pre/post). Bars untouched.
+
 ## Bars (pre-committed; exit codes)
 - REPL1 center == exp681 per-cell EXACT            (exit 4)
 - REPL3 ring10 == exp685 per-cell EXACT            (exit 6)

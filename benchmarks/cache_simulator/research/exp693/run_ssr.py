@@ -95,28 +95,27 @@ class SecondSightLCNU(LayerCycleNextUsePolicy):
         if len(self.resident) - len(self._annex) <= 0:
             k = next(iter(self._annex))  # everything protected: drain oldest
             return k[0], k
-        # Ask base scoring for its pick; if it wants an annex member,
-        # fence that member out of scoring (discard from _by_layer +
-        # mark layer stale so the candidate cache rebuilds) and ask
-        # again. _layer_candidate reads _by_layer, so fencing is
-        # respected; the loop fences at most len(annex) members before
-        # base must return an unprotected pick (or None, handled).
-        # Deterministic: base tie-breaks by key.
-        fenced = []
-        while True:
-            layer, k = super()._victim()
-            if k is None or k not in self._annex:
-                for fk in fenced:
-                    self._by_layer[fk[0]].add(fk)
-                    self._stale.add(fk[0])
-                if k is None:
-                    # scoring found no candidate: drain oldest annex
-                    k = next(iter(self._annex))
-                    layer = k[0]
-                return layer, k
+        # Batch exclusion (REPAIR of the frozen sequential fence — same
+        # victim, O(1) recomputes): temporarily remove ALL annex members
+        # from _by_layer + mark their layers stale, take ONE base pick
+        # (the max-score unprotected key, deterministic tie-break), then
+        # restore. Equivalent to fencing members one-by-one and
+        # re-asking, which converges to the same pick but costs
+        # O(annex) candidate recomputes per miss.
+        saved = []
+        for k in list(self._annex):
             self._by_layer[k[0]].discard(k)
             self._stale.add(k[0])
-            fenced.append(k)
+            saved.append(k)
+        layer, k = super()._victim()
+        for fk in saved:
+            self._by_layer[fk[0]].add(fk)
+            self._stale.add(fk[0])
+        if k is None:
+            # scoring found no candidate: drain oldest annex
+            k = next(iter(self._annex))
+            layer = k[0]
+        return layer, k
 
 
 def mk_arm(name, cap):
