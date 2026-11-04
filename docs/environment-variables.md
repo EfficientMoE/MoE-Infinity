@@ -20,6 +20,7 @@ Exact string comparisons matter. Several toggles only react to `"1"` or
 | --- | --- | --- | --- | --- |
 | `MOE_DISABLE_FUSED_KERNELS` | `"0"` | `moe_infinity/kernel/__init__.py` import time | If `"1"`, QKV and FFN use eager/PyTorch fallback, while decode attention bypasses the fused decode wrapper and routes through `paged_attention_fwd`, which uses the CUDA paged-attention kernel when available and otherwise falls back to torch SDPA. | Read at import time, so set it before importing `moe_infinity.kernel`. |
 | `MOE_DISABLE_CUDA_GRAPHS` | unset, treated as off | `moe_infinity/serving/cuda_graph.py` init | If `"1"`, disable CUDA graph warmup, capture, and replay. | Read when `CudaGraphRunner` is constructed. |
+| `MOE_INFINITY_UNVALIDATED_HW` | unset | `moe_infinity/utils/hw_profile.py` (each `supports` call), `extensions/kernel/hw_profile.h` (first use) | If `"1"`, kernels tuned for the RTX PRO 6000 Blackwell also run on other GPUs. | For re-tuning on a new card. Never enables sm_120-only kernels on other architectures. See [hardware-gated kernels](./hardware-gated-kernels.md). |
 
 ## Profiling and tracing
 
