@@ -77,7 +77,7 @@ python3 -c '
 import os, pathlib
 p = pathlib.Path("LEDGER.md")
 text = p.read_text()
-target = "- STATUS: NEXT"
+target = "- STATUS: NEXT  # (marker INSIDE the fenced example; tail marker below is authoritative)"
 assert target in text, "no STATUS: NEXT marker"
 rep = f"- STATUS: {os.environ[\"VERDICT\"]}\n- **Result:**\n```\n{os.environ[\"OUT\"][-4000:]}\n```"
 p.write_text(text.replace(target, rep, 1))
@@ -89,4 +89,8 @@ git add -- "$RELP" || true
 bash benchmarks/cache_simulator/research/scripts/leak_scan.sh --staged || { git reset -- "$RELP"; exit 4; }
 git commit -q -m "auto: settle exp685 (ring nursery, safe-settle v2)" || true
 ```
-- STATUS: NEXT
+- STATUS: DONE (exit 0)
+- **Result:**
+```
+VERDICT: IN_BURST_FIXED_ONLY | det: True | repl: exp681+exp683 exact (24 cells) | in-burst deficit <= center ALL cells (0.0 at cap2048; worst 5.37pp) | ring25 rec >= lcnu-0.5 ALL | composite rec_def +6.982pp == center at d4096/cap512 (inner invisible) | standalone ring10 = Pareto point between door and lcnu | elapsed 974s | freeze 63d4e09
+```

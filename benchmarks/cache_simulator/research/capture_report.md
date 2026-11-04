@@ -1377,3 +1377,9 @@ admissions were the poison (d4096/cap512: -1.0pp vs center's +6.98pp).
 Mechanistic synthesis across 681/682/683: the lever is admission SPEED
 with post-admission demotion. exp684: probation subclass (admit first
 sight, evict never-rehit first).
+
+## exp684 — ring-less probation (PROB-HARM, ledger #208)
+ProbationLCNU (admit first sight, evict oldest never-rehit first, no partition) on exp681 exact crowd streams: burst deficit -3.6..-8.7pp in ALL 8 cells, loop -2.2pp at cap2048, center_prob rec -2.2..-5.4pp cap2048; h3 4/8; det+repl exact. Unbounded probation = the door failure moved inside the cache; capacity partition required -> exp685. ADDENDUM30 (0b54a645), freeze fe1d97f.
+
+## exp685 — bounded nursery ring (IN_BURST_FIXED_ONLY, ledger #209)
+RingProbationLCNU (FIFO nursery drains ONLY when full; citizens by LCNU scoring; rehit promotes) on exp681 exact streams, dual-anchored replication (center==exp681, door4096==exp683, 24 cells byte-exact): in-burst deficit <= center ALL cells (0.0 at cap2048 — the door 12.7-14.8pp catastrophe erased); ring25 rec >= lcnu-0.5 ALL; single failed gate = composite rec_def +6.982pp == center at d4096/cap512, byte-equal to center => ring inner INVISIBLE to arbitration at cap512 (not overflow). Standalone ring10 = new Pareto point (b0.0288/r0.6853 vs door b0.0205/r0.6934 vs lcnu b0.0884/r0.6780); at cap2048 ring = pure churn-waste. exp686a: lazy promotion + arbitration visibility + stride-adaptive sizing. ADDENDUM31 (3bc4e1a1), freeze 63d4e09.
