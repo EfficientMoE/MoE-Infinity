@@ -1989,7 +1989,7 @@ void ExpertDispatcher::FailDispatch(
     if (context.overload_owned && context.gpu_id >= 0) {
       gpu_overload_[context.gpu_id].store(false, std::memory_order_release);
     }
-    if (context.gpu_id >= 0) cache_cv_[context.gpu_id].notify_all();
+    if (context.gpu_id >= 0) NotifyCacheWaiters(context.gpu_id);
   }
   route_failures_.fetch_add(1, std::memory_order_relaxed);
   last_active_experts_count_.store(0, std::memory_order_relaxed);
@@ -2006,6 +2006,13 @@ void ExpertDispatcher::NotifyPendingWaiters() noexcept {
   // notification cannot land between that check and the wait (lost wakeup).
   { std::lock_guard<std::mutex> lock(pending_mutex_); }
   pending_cv_.notify_all();
+}
+
+void ExpertDispatcher::NotifyCacheWaiters(int gpu_id) noexcept {
+  // Same ordering for the legacy cache-full wait in GPUFetchFunc: the node
+  // state its FindExpertEvict predicate reads changes outside cache_mutex_.
+  { std::lock_guard<std::mutex> lock(cache_mutex_[gpu_id]); }
+  cache_cv_[gpu_id].notify_all();
 }
 
 void ExpertDispatcher::CompleteOne(std::uint64_t generation) noexcept {
@@ -2547,7 +2554,7 @@ void ExpertDispatcher::RetirementFunc() {
       if (args.residency_lease != 0 && kExpertResidencyManager) {
         kExpertResidencyManager->ReleaseLease(args.residency_lease);
       }
-      cache_cv_[args.gpu_id].notify_all();
+      NotifyCacheWaiters(args.gpu_id);
     } catch (...) {
       FailDispatch(args.generation, std::current_exception(),
                    {FailureContext{args.expert_node, args.gpu_id, false, false,

@@ -10,6 +10,7 @@ All notable changes to MoE-Infinity will be documented in this file.
 - Phase-specific expert policy: admission modes now reach the native `configure_phase_policy` binding as `AdmissionMode` values instead of names, which the binding rejected.
 - Managed expert residency: a demand fetch whose reserved victim was dispatched or leased before it could be evicted now releases the reservation and picks again, instead of failing the forward pass with `failed to evict reserved expert victim`.
 - Expert dispatcher: two decode hangs. `wait_expert` now releases the GIL while it blocks, because an exec worker that drops the last C++ reference to a Python-owned tensor needs the GIL to finish the layer. Completion and routing notifications now take the pending mutex before notifying, so a completion can no longer arrive between the waiter's check and its wait and be lost.
+- Offloaded weight reads: an intermittent hang while loading the model. `ArcherPrioAioHandle` published a finished read and queued a new request without holding the mutex its waiters check under, so the wakeup could be lost and `Read()` (or the I/O scheduler) waited forever. Both now take the waiter's mutex before notifying, as do the AIO thread's shutdown and the legacy expert cache's "all cached experts locked" wait.
 
 ### Changed
 - The non-MLA paged KV cache now allocates one plane per decoder layer

@@ -217,7 +217,7 @@ class ExpertDispatcher : public base::noncopyable {
     completion_retirement_queue_.Close();
     retirement_queue_.Close();
     for (int i = 0; i < static_cast<int>(cache_cv_.size()); ++i) {
-      cache_cv_[i].notify_all();
+      NotifyCacheWaiters(i);
     }
     pending_cv_.notify_all();
     for (auto& t : threads_) {
@@ -381,6 +381,7 @@ class ExpertDispatcher : public base::noncopyable {
                     const std::vector<FailureContext>& contexts = {}) noexcept;
   void CompleteOne(std::uint64_t generation) noexcept;
   void NotifyPendingWaiters() noexcept;
+  void NotifyCacheWaiters(int gpu_id) noexcept;
 
   static void CUDART_CB CompletionWaitsConsumedCallback(void* opaque);
   void CompletionRetirementFunc();
