@@ -52,5 +52,10 @@
   capacity coexistence policy (lcnu main + ring annex, no arbiter).
 
 ## Run block (filled by adjudicator; sealed after settle)
-- STATUS: NEXT
+- STATUS: DONE (exit 0)
+- **Result:**
+```
+VERDICT: REC_ONLY | det: True | repl: exp681+exp685+exp690 exact (incl twoway_lr control) | storm detector fires exactly ONCE per stream and only AT/AFTER the burst (storm_w=1 at d>=2048; 0 at d=256: bursts shorter than the 4096-access window are invisible — registered risk confirmed) | revert-to-lcnu too late for burst (0.0288 == ring) AND sealed barrier (~0.75pp after switch inflation) blocks ring re-adoption in recovery (+0.73pp advantage < barrier) -> rec collapses to lcnu 0.6780 | freeze arms == twoway_lr byte-identical (adoption happens pre-burst; freezing during storms is a no-op) | all 5 T-arms recov+safety PASS, burst_def FAIL (5.96 home / 9.23 worst) | elapsed 2052s | freeze a1df70b
+```
+
 - FREEZE: a1df70b (pushed)
