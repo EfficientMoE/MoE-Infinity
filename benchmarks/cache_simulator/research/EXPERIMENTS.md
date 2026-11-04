@@ -1803,3 +1803,263 @@ best online pair per admission mode, the best oracle pair); full rows in
 | lfu | oracle:horizon=4 | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9147 | 0.0853 | 12.79 | real | db1ef24 |
 
 <!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-235b-a22b-fp8 --split held --prefill union --tag qwen3_235b_held_union | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: db1ef24 -->
+
+## Round 3 — more predictors and one default policy (#289)
+
+Same traces, protocol, streams and timing model as round 2. Study:
+`default_policy_study.md`; default-policy regret:
+`results_default_policy_analysis.md`.
+
+Setup runs (commands in the study's Reproduce section; tuning-half runs are
+summarized here, not logged row by row):
+
+| run | model | dataset | result | provenance | commit |
+| --- | --- | --- | --- | --- | --- |
+| predictor stage A (`--mode predict`, 78 specs) | qwen3-30b-a3b | mmlu150-greedy64/decode/tune | mean recall@8 over distances 1-4: knn context 8, 8 neighbours, power 8 0.7717 (selected; context 12: 0.7727), logistic lr 0.1 0.6939, co-activation naive Bayes 0.6272, multi-visit co-activation 0.5834 (`results_prefetch_qwen3_30b_tune_predict_r3.csv`) | real | d3ed922 |
+| eviction, no prefetch (8 evictors x 6 capacities) | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/tune | mean stall vs LCNU: lcnu_p 0.923; prefill weight 0.1 / 0.25 / 0.5: 0.936 / 0.958 / 0.980; lcnu_b 0.922; LFU 1.036; W-TinyLFU 1.063 (`results_prefetch_qwen3_30b_tune_union_evict.md`) | real | d3ed922 |
+| bypass on prefill misses (2 evictors x 6 capacities) | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/tune | mean stall vs LCNU: `lcnu:bypass=prefill` 1.000, `lcnu_p:bypass=prefill` 0.923 (`results_prefetch_qwen3_30b_tune_union_evict_bypass.md`) | real | e0bdd04 |
+| stage B (LCNU x 70 prefetch configurations x 6 capacities, 426 runs) | qwen3-30b-a3b | mmlu150-greedy64/decode/tune | knn budget 8 on `probation:issue=2`: mean stall 0.773 of LCNU alone, worst regret +4.6% vs the per-cell best (`results_prefetch_qwen3_30b_tune_r3_default.md`) | real | d3ed922 |
+| predictor accuracy (`--mode predict`) | qwen3-30b-a3b | mmlu150-greedy64/decode/held | recall@8: knn 0.779, logistic 0.722, co-activation naive Bayes 0.655 (`results_prefetch_qwen3_30b_held_predict_r3.csv`) | real | d3ed922 |
+| predictor accuracy (`--mode predict`) | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | recall@8: knn 0.714, logistic 0.661, co-activation naive Bayes 0.602 (`results_prefetch_qwen3_235b_held_predict_r3.csv`) | real | d3ed922 |
+| default-policy regret (`default_policy_analysis.py` over the round-2 and round-3 held-out sweeps) | both | decode and decode+prefill-union, held | 24 cells: mean +0.5%, worst +6.2% vs the per-cell best online configuration (`results_default_policy_analysis.md`) | real | e0bdd04 |
+
+Held-out sweeps below: compact rows (per capacity, every evictor alone, the
+best online pair per admission mode, where `probation` includes its issue
+caps, and the best oracle pair); full rows in `results_prefetch_<tag>.csv`.
+The `*_held_union_r3` sweeps run kNN without `decode_width`; the
+`*_held_union_r3d` sweeps rerun the prefill-union stream with the default's
+decode-only kNN.
+
+| evictor | prefetcher | admission | model | dataset | capacity | hit_rate | covered | stall_ms_tok | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2179 | 0.0000 | 49.64 | real | d3ed922 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.0000 | 0.0000 | 63.47 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.1303 | 0.0000 | 55.20 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2163 | 0.2223 | 42.42 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2124 | 0.4297 | 42.67 | real | d3ed922 |
+| lcnu | oracle:horizon=1 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 128 | 0.2166 | 0.2500 | 40.64 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3461 | 0.0000 | 41.50 | real | d3ed922 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.0000 | 0.0000 | 63.47 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.2251 | 0.0000 | 49.18 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3458 | 0.2106 | 34.83 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3446 | 0.3548 | 34.88 | real | d3ed922 |
+| lcnu | oracle:horizon=1 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 256 | 0.3463 | 0.2482 | 32.44 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4976 | 0.0000 | 31.89 | real | d3ed922 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4398 | 0.0000 | 35.56 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.3577 | 0.0000 | 40.76 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4992 | 0.1882 | 25.90 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4993 | 0.2677 | 25.87 | real | d3ed922 |
+| lcnu | oracle:horizon=1 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 512 | 0.4996 | 0.2377 | 22.90 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6697 | 0.0000 | 20.96 | real | d3ed922 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6432 | 0.0000 | 22.65 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.5488 | 0.0000 | 28.64 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6725 | 0.2205 | 16.01 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6721 | 0.1781 | 16.11 | real | d3ed922 |
+| lcnu | oracle:horizon=4 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 1024 | 0.6705 | 0.3295 | 11.98 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8662 | 0.0000 | 8.49 | real | d3ed922 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8490 | 0.0000 | 9.58 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8025 | 0.0000 | 12.53 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8667 | 0.0730 | 5.87 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8666 | 0.0613 | 6.04 | real | d3ed922 |
+| lcnu | oracle:horizon=4 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 2048 | 0.8664 | 0.1336 | 1.92 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9558 | 0.0000 | 2.80 | real | d3ed922 |
+| lru | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9506 | 0.0000 | 3.14 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9314 | 0.0000 | 4.36 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=32,min_score=0.25 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9559 | 0.0204 | 1.85 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=32,min_score=0.25 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9559 | 0.0172 | 1.95 | real | d3ed922 |
+| lcnu | oracle:horizon=4 | do_no_harm | qwen3-30b-a3b | mmlu150-greedy64/decode/held | 3072 | 0.9558 | 0.0442 | 0.16 | real | d3ed922 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-30b-a3b --split held --prefill skip --tag qwen3_30b_held_r3 | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: d3ed922 -->
+
+| evictor | prefetcher | admission | model | dataset | capacity | hit_rate | covered | stall_ms_tok | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2064 | 0.0000 | 197.26 | real | d3ed922 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.0000 | 0.0000 | 248.57 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.1586 | 0.0000 | 209.15 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=32,min_score=0.25 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2057 | 0.2105 | 180.39 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2044 | 0.3533 | 180.89 | real | d3ed922 |
+| lcnu | oracle:horizon=1 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 256 | 0.2059 | 0.2500 | 176.58 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3295 | 0.0000 | 166.67 | real | d3ed922 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.0000 | 0.0000 | 248.57 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.2579 | 0.0000 | 184.46 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=32,min_score=0.25 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3296 | 0.1992 | 150.63 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3292 | 0.2940 | 151.05 | real | d3ed922 |
+| lcnu | oracle:horizon=1 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 512 | 0.3299 | 0.2494 | 145.76 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4842 | 0.0000 | 128.21 | real | d3ed922 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.3884 | 0.0000 | 152.02 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.3971 | 0.0000 | 149.87 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4863 | 0.3213 | 113.58 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4862 | 0.2197 | 114.26 | real | d3ed922 |
+| lcnu | oracle:horizon=1 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 1024 | 0.4863 | 0.2419 | 107.04 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6643 | 0.0000 | 83.45 | real | d3ed922 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6206 | 0.0000 | 94.32 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.5848 | 0.0000 | 103.21 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6671 | 0.1960 | 71.76 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6666 | 0.1455 | 72.62 | real | d3ed922 |
+| lcnu | oracle:horizon=4 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 2048 | 0.6662 | 0.3338 | 62.22 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8637 | 0.0000 | 33.87 | real | d3ed922 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8378 | 0.0000 | 40.33 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8190 | 0.0000 | 44.99 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8643 | 0.0628 | 28.59 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8642 | 0.0518 | 29.01 | real | d3ed922 |
+| lcnu | oracle:horizon=4 | probation | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 4096 | 0.8643 | 0.1357 | 15.69 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9527 | 0.0000 | 11.75 | real | d3ed922 |
+| lru | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9377 | 0.0000 | 15.48 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9352 | 0.0000 | 16.10 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=32,min_score=0.25 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9528 | 0.0179 | 10.02 | real | d3ed922 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=32,min_score=0.25 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9528 | 0.0151 | 10.23 | real | d3ed922 |
+| lcnu | oracle:horizon=4 | do_no_harm | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode/held | 6016 | 0.9528 | 0.0472 | 2.47 | real | d3ed922 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-235b-a22b-fp8 --split held --prefill skip --tag qwen3_235b_held_r3 | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: d3ed922 -->
+
+| evictor | prefetcher | admission | model | dataset | capacity | hit_rate | covered | stall_ms_tok | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1973 | 0.0000 | 57.67 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1973 | 0.0000 | 57.67 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1556 | 0.0000 | 60.66 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1189 | 0.0000 | 63.30 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1961 | 0.0771 | 59.11 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1962 | 0.0000 | 64.64 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3144 | 0.0000 | 49.26 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3147 | 0.0000 | 49.23 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.2537 | 0.0000 | 53.62 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.2062 | 0.0000 | 57.03 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3149 | 0.0698 | 51.07 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3151 | 0.0004 | 55.97 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4530 | 0.0000 | 39.30 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4565 | 0.0000 | 39.05 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.3715 | 0.0000 | 45.16 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.3301 | 0.0000 | 48.13 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4584 | 0.0609 | 41.14 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4585 | 0.0087 | 44.43 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6121 | 0.0000 | 27.87 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6230 | 0.0000 | 27.09 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.5467 | 0.0000 | 32.57 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.5141 | 0.0000 | 34.91 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6251 | 0.0487 | 29.01 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6252 | 0.0462 | 27.71 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8087 | 0.0000 | 13.74 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8262 | 0.0000 | 12.49 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.7977 | 0.0000 | 14.53 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.7688 | 0.0000 | 16.61 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8265 | 0.0227 | 13.19 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8267 | 0.0746 | 8.01 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9174 | 0.0000 | 5.93 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9313 | 0.0000 | 4.94 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9353 | 0.0000 | 4.65 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9094 | 0.0000 | 6.51 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9313 | 0.0077 | 4.88 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9313 | 0.0347 | 2.61 | real | d3ed922 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-30b-a3b --split held --prefill union --tag qwen3_30b_held_union_r3 | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: d3ed922 -->
+
+| evictor | prefetcher | admission | model | dataset | capacity | hit_rate | covered | stall_ms_tok | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1873 | 0.0000 | 228.86 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1873 | 0.0000 | 228.87 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1533 | 0.0000 | 238.42 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1444 | 0.0000 | 240.94 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1868 | 0.0496 | 232.06 | real | d3ed922 |
+| lcnu | oracle:horizon=4 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1868 | 0.0000 | 239.41 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2997 | 0.0000 | 197.20 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2999 | 0.0000 | 197.14 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2530 | 0.0000 | 210.36 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2362 | 0.0000 | 215.09 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.3004 | 0.0410 | 201.44 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.3004 | 0.0000 | 207.40 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4408 | 0.0000 | 157.48 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4442 | 0.0000 | 156.51 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.3704 | 0.0000 | 177.30 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.3671 | 0.0000 | 178.22 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4463 | 0.0332 | 161.50 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4464 | 0.0050 | 164.89 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6052 | 0.0000 | 111.17 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6175 | 0.0000 | 107.72 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.5373 | 0.0000 | 130.29 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.5488 | 0.0000 | 127.05 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6198 | 0.0250 | 113.55 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6199 | 0.0423 | 106.04 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7988 | 0.0000 | 56.66 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.8237 | 0.0000 | 49.63 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7705 | 0.0000 | 64.62 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7872 | 0.0000 | 59.91 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.8242 | 0.0115 | 54.80 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.8244 | 0.0755 | 34.87 | real | d3ed922 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9047 | 0.0000 | 26.83 | real | d3ed922 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9277 | 0.0000 | 20.36 | real | d3ed922 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9083 | 0.0000 | 25.82 | real | d3ed922 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9149 | 0.0000 | 23.96 | real | d3ed922 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9277 | 0.0041 | 22.35 | real | d3ed922 |
+| lcnu_p | oracle:horizon=4 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9278 | 0.0351 | 11.79 | real | d3ed922 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-235b-a22b-fp8 --split held --prefill union --tag qwen3_235b_held_union_r3 | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: d3ed922 -->
+
+| evictor | prefetcher | admission | model | dataset | capacity | hit_rate | covered | stall_ms_tok | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1973 | 0.0000 | 57.67 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1973 | 0.0000 | 57.67 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1556 | 0.0000 | 60.66 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1189 | 0.0000 | 63.30 | real | 2f8d8a4 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 128 | 0.1959 | 0.1966 | 50.43 | real | 2f8d8a4 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3144 | 0.0000 | 49.26 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3147 | 0.0000 | 49.23 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.2537 | 0.0000 | 53.62 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.2062 | 0.0000 | 57.03 | real | 2f8d8a4 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 256 | 0.3147 | 0.1861 | 42.54 | real | 2f8d8a4 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4530 | 0.0000 | 39.30 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4565 | 0.0000 | 39.05 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.3715 | 0.0000 | 45.16 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.3301 | 0.0000 | 48.13 | real | 2f8d8a4 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 512 | 0.4583 | 0.1661 | 33.04 | real | 2f8d8a4 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6121 | 0.0000 | 27.87 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6230 | 0.0000 | 27.09 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.5467 | 0.0000 | 32.57 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.5141 | 0.0000 | 34.91 | real | 2f8d8a4 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 1024 | 0.6250 | 0.1280 | 22.17 | real | 2f8d8a4 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8087 | 0.0000 | 13.74 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8262 | 0.0000 | 12.49 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.7977 | 0.0000 | 14.53 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.7688 | 0.0000 | 16.61 | real | 2f8d8a4 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 2048 | 0.8266 | 0.0552 | 9.90 | real | 2f8d8a4 |
+| lcnu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9174 | 0.0000 | 5.93 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9313 | 0.0000 | 4.94 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9353 | 0.0000 | 4.65 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9094 | 0.0000 | 6.51 | real | 2f8d8a4 |
+| w_tinylfu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-30b-a3b | mmlu150-greedy64/decode+prefill-union/held | 3072 | 0.9351 | 0.0143 | 3.85 | real | 2f8d8a4 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-30b-a3b --split held --prefill union --tag qwen3_30b_held_union_r3d | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: 2f8d8a4 -->
+
+| evictor | prefetcher | admission | model | dataset | capacity | hit_rate | covered | stall_ms_tok | provenance | commit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1873 | 0.0000 | 228.86 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1873 | 0.0000 | 228.87 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1533 | 0.0000 | 238.42 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1444 | 0.0000 | 240.94 | real | 2f8d8a4 |
+| lcnu | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 256 | 0.1867 | 0.1858 | 211.99 | real | 2f8d8a4 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2997 | 0.0000 | 197.20 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2999 | 0.0000 | 197.14 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2530 | 0.0000 | 210.36 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.2362 | 0.0000 | 215.09 | real | 2f8d8a4 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 512 | 0.3001 | 0.1755 | 181.07 | real | 2f8d8a4 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4408 | 0.0000 | 157.48 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4442 | 0.0000 | 156.51 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.3704 | 0.0000 | 177.30 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.3671 | 0.0000 | 178.22 | real | 2f8d8a4 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 1024 | 0.4461 | 0.1546 | 141.91 | real | 2f8d8a4 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6052 | 0.0000 | 111.17 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6175 | 0.0000 | 107.72 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.5373 | 0.0000 | 130.29 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.5488 | 0.0000 | 127.05 | real | 2f8d8a4 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 2048 | 0.6195 | 0.1169 | 96.16 | real | 2f8d8a4 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7988 | 0.0000 | 56.66 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.8237 | 0.0000 | 49.63 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7705 | 0.0000 | 64.62 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.7872 | 0.0000 | 59.91 | real | 2f8d8a4 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 4096 | 0.8242 | 0.0476 | 44.43 | real | 2f8d8a4 |
+| lcnu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9047 | 0.0000 | 26.83 | real | 2f8d8a4 |
+| lcnu_p | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9277 | 0.0000 | 20.36 | real | 2f8d8a4 |
+| w_tinylfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9083 | 0.0000 | 25.82 | real | 2f8d8a4 |
+| lfu | none | same_queue | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9149 | 0.0000 | 23.96 | real | 2f8d8a4 |
+| lcnu_p | knn:horizon=1,context=8,neighbors=8,power=8,bank=8192,budget=8,decode_width=8 | probation:issue=2 | qwen3-235b-a22b-fp8 | mmlu100-greedy64/decode+prefill-union/held | 6016 | 0.9278 | 0.0120 | 18.80 | real | 2f8d8a4 |
+
+<!-- run: python -m benchmarks.cache_simulator.research.run_prefetch_real --model qwen3-235b-a22b-fp8 --split held --prefill union --tag qwen3_235b_held_union_r3d | env: python 3.12.3, numpy 2.4.4, Linux x86_64 | commit: 2f8d8a4 -->

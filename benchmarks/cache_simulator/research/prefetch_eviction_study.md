@@ -11,6 +11,12 @@ transfer-timing model ([`timing_model.py`](./timing_model.py)) on the
 held-out halves of the real Qwen3 captures. The prefetcher literature and
 caching theory behind it are in [`prefetch_survey.md`](./prefetch_survey.md).
 
+> **Superseded in part by round 3**
+> ([`default_policy_study.md`](./default_policy_study.md)): a kNN
+> routing-trajectory predictor replaces co-activation, and one default policy
+> replaces the per-regime recommendation of item 5 and section 9. The
+> separability and admission findings below still hold.
+
 > **Summary**
 >
 > 1. **Yes, keep prefetch and eviction as two policies, connected by an

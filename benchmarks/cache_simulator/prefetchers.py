@@ -13,8 +13,9 @@ When prefetches are issued
     per token. A layer's routing is known once its gate has run, so the
     prefetcher is consulted **once per layer visit**, after the visit's
     routing is known, and proposes up to ``budget`` experts for each of the
-    next ``horizon`` visits. At most ``budget`` prefetches are issued per
-    target visit over all the visits that propose it.
+    next ``horizon`` visits. At most ``budget`` prefetches (or the wrapper's
+    ``issue_budget``, if set) are issued per target visit over all the
+    visits that propose it.
 
 Online predictors (CAUSAL: they see only completed layer visits, i.e. the past
 plus the current token's routing up to the current layer; unit-tested by
@@ -44,7 +45,9 @@ changing the future of a trace):
   at the next layer (``moe_infinity/memory/expert_prefetcher.py``).
 
 Every predictor accepts ``min_score``: candidates scoring below it are not
-proposed (an adaptive budget; scores are routing-probability-like).
+proposed (an adaptive budget; scores are routing-probability-like). With
+``decode_width`` a visit routing more experts than that is a prefill pass:
+the predictor neither learns from it nor predicts after it.
 
 Oracle bound (``uses_oracle = True``, an UPPER BOUND, not a policy):
 
@@ -1529,6 +1532,8 @@ __all__ = [
     "CoActivationPrefetcher",
     "FrequencyPrefetcher",
     "HybridPrefetcher",
+    "KNNPrefetcher",
+    "LogisticPrefetcher",
     "OraclePrefetcher",
     "PrefetchCachePolicy",
     "PrefetchPolicy",
