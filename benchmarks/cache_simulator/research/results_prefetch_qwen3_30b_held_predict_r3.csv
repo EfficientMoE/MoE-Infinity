@@ -1,0 +1,10 @@
+model,dataset,provenance,commit,prefetcher,precision_d1,recall_d1,precision_d2,recall_d2,precision_d3,recall_d3,precision_d4,recall_d4
+qwen3-30b-a3b,mmlu150-greedy64/decode/held,real,d3ed922,"knn:horizon=4,context=8,neighbors=8,power=8,bank=8192,budget=8",0.779375,0.77921,0.773509,0.773344,0.768196,0.768033,0.764014,0.763852
+qwen3-30b-a3b,mmlu150-greedy64/decode/held,real,d3ed922,"logistic:horizon=4,lr=0.1,budget=8",0.722417,0.722417,0.710471,0.710471,0.7019,0.7019,0.689821,0.689821
+qwen3-30b-a3b,mmlu150-greedy64/decode/held,real,d3ed922,"knn:horizon=4,context=8,neighbors=8,power=8,bank=8192,budget=2",0.942956,0.235689,0.937836,0.234409,0.933791,0.233398,0.929626,0.232357
+qwen3-30b-a3b,mmlu150-greedy64/decode/held,real,d3ed922,"logistic:horizon=4,lr=0.1,budget=2",0.935937,0.233984,0.925195,0.231299,0.915893,0.228973,0.907001,0.22675
+qwen3-30b-a3b,mmlu150-greedy64/decode/held,real,d3ed922,"knn:horizon=4,context=8,neighbors=8,power=8,bank=8192,budget=16",0.505946,0.912359,0.501604,0.907777,0.497906,0.903889,0.494815,0.900468
+qwen3-30b-a3b,mmlu150-greedy64/decode/held,real,d3ed922,"logistic:horizon=4,lr=0.1,budget=16",0.447066,0.894133,0.442745,0.88549,0.43902,0.878039,0.43451,0.86902
+qwen3-30b-a3b,mmlu150-greedy64/decode/held,real,d3ed922,"knn:horizon=4,context=8,neighbors=8,power=8,bank=8192,budget=32",0.43459,0.93747,0.427618,0.934899,0.421655,0.932847,0.416822,0.931005
+qwen3-30b-a3b,mmlu150-greedy64/decode/held,real,d3ed922,"logistic:horizon=4,lr=0.1,budget=32",0.241194,0.964775,0.24019,0.960761,0.239171,0.956683,0.238216,0.952863
+qwen3-30b-a3b,mmlu150-greedy64/decode/held,real,d3ed922,"coactivation:horizon=4,scoring=bayes,smoothing=0.25,depth=3,decay=0.5",0.655441,0.655304,0.641876,0.641742,0.629303,0.629172,0.618926,0.618797

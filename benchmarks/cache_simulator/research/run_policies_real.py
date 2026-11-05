@@ -58,6 +58,7 @@ from benchmarks.cache_simulator.belady_cache_simulator import (
 )
 from benchmarks.cache_simulator.policies import (
     GEOMETRY_POLICIES,
+    LCNU_POLICIES,
     ORACLE_POLICIES,
     build_policy,
     simulate,
@@ -218,8 +219,10 @@ def geometry_kwargs(name: str, stats: Dict[str, int]) -> Dict[str, float]:
         return {}
     kwargs: Dict[str, float] = {"num_layers": stats["num_layers"]}
     num_experts = stats["max_expert_id"] + 1
-    if name == "lcnu" and stats["top_k"] > 0 and num_experts > 0:
+    if name in LCNU_POLICIES and stats["top_k"] > 0 and num_experts > 0:
         kwargs["prior"] = min(1.0, stats["top_k"] / num_experts)
+        if name != "lcnu":  # prefill-aware variants detect prefill visits
+            kwargs["decode_width"] = stats["top_k"]
     return kwargs
 
 
