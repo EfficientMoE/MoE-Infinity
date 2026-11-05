@@ -9,6 +9,7 @@
 #include "model/model_topology.h"
 #include "store/tensor_store.h"
 #include "prefetch/expert_residency.h"
+#include "kernel/v4_fp4/gptoss_expert.h"
 
 // Expert type enum
 enum class ExpertType {
@@ -205,7 +206,9 @@ struct MoEMLP : public torch::nn::Module {
   // Binds expert parameters directly (SetTensorsFromIds resolves ids from the
   // tensor store and forwards here).
   void SetTensors(const std::vector<torch::Tensor>& tensors);
-  void DequantMxfp4Params(cudaStream_t stream);
+  // allow_pro6000: the dispatcher's RTX_PRO_6000 setting; combined with the
+  // device check once, on the first call.
+  void DequantMxfp4Params(cudaStream_t stream, bool allow_pro6000);
   void SetFp8Scales(const std::vector<torch::Tensor>& scales);
   void DequantFp8Params(cudaStream_t stream);
   void SetRepresentation(const ExpertExecutionDescriptor& descriptor);
@@ -222,6 +225,9 @@ struct MoEMLP : public torch::nn::Module {
   std::vector<int64_t> staging_cols_;
   std::vector<torch::Tensor> param_;
   std::vector<torch::Tensor> gpt_oss_param_;
+  GptOssExpertScratch gpt_oss_scratch_;
+  bool gpt_oss_mxfp4_pro6000_ = false;  // RTX PRO 6000 MXFP4 kernels
+  bool gpt_oss_gate_set_ = false;
 
   at::cuda::CUDAGraph graph_;
   int warmup_count_ = 5;

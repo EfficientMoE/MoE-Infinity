@@ -7,10 +7,8 @@
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
 #include "kernel/fused_moe_mlp.h"
-
-void mxfp4_dequant_cuda(const void* packed, const void* scales, void* output,
-                        int rows, int packed_cols, int scale_cols,
-                        int block_size, cudaStream_t stream);
+#include "kernel/hw_profile.h"
+#include "kernel/v4_fp4/mxfp4_gptoss_moe.h"
 extern void fp8_dequant_blockwise_cuda(const void* weight, const void* scale,
                                        void* out, int N, int K,
                                        cudaStream_t stream);
@@ -134,7 +132,10 @@ void MoEMLP::SetTensors(const std::vector<torch::Tensor>& tensors) {
       hdim = shape[1];
       idim = shape[0];
     }
-    AllocateStaging(hdim, idim, tensors.size());
+    // GPT-OSS keeps its intermediate in its own scratch (GptOssExpertScratch).
+    const std::size_t num_inter =
+        expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE ? 0 : tensors.size();
+    AllocateStaging(hdim, idim, num_inter);
     param_init_ = true;
   }
 
@@ -181,31 +182,40 @@ void MoEMLP::ResizeStaging(int64_t rows) {
   }
 }
 
-void MoEMLP::DequantMxfp4Params(cudaStream_t stream) {
+// Binds the stored MXFP4 tensors (gate_up blocks/scales/bias, down
+// blocks/scales/bias). ForwardHelper consumes them directly; the BF16
+// de-quantisation only runs on the fallback path.
+void MoEMLP::DequantMxfp4Params(cudaStream_t stream, bool allow_pro6000) {
   if (expert_type_ != GPT_OSS_MOE_DENSE_ACT_DENSE) return;
   int device = at::cuda::current_device();
-  gpt_oss_param_.clear();
-  for (auto pair : {std::pair<int, int>{0, 1}, {3, 4}}) {
-    auto packed = param_[pair.first].to(CUDA_DEVICE(device)).contiguous();
-    auto scales = param_[pair.second].to(CUDA_DEVICE(device)).contiguous();
-    DLOG_FATAL_IF(packed.scalar_type() != torch::kUInt8 ||
-                      scales.scalar_type() != torch::kUInt8,
-                  "GPT-OSS MXFP4 blocks/scales must be uint8");
-    int rows = packed.size(0);
-    int packed_cols = packed.size(1);
-    int scale_cols = scales.size(1);
-    int block_size = packed_cols * 2 / scale_cols;
-    auto output =
-        torch::empty({rows, packed_cols * 2}, torch::TensorOptions()
-                                                  .dtype(torch::kBFloat16)
-                                                  .device(CUDA_DEVICE(device)));
-    mxfp4_dequant_cuda(packed.data_ptr(), scales.data_ptr(), output.data_ptr(),
-                       rows, packed_cols, scale_cols, block_size, stream);
-    gpt_oss_param_.push_back(output);
+  if (!gpt_oss_gate_set_) {
+    gpt_oss_mxfp4_pro6000_ =
+        allow_pro6000 &&
+        moe_infinity::hw::Supports(moe_infinity::hw::Gate::kRtxPro6000, device);
+    gpt_oss_gate_set_ = true;
   }
-  gpt_oss_param_.insert(gpt_oss_param_.begin() + 1,
-                        param_[2].to(CUDA_DEVICE(device)));
-  gpt_oss_param_.push_back(param_[5].to(CUDA_DEVICE(device)));
+  gpt_oss_param_.clear();
+  for (int i = 0; i < 6; ++i) {
+    gpt_oss_param_.push_back(param_[i].to(CUDA_DEVICE(device)));
+  }
+  DLOG_FATAL_IF(gpt_oss_param_[0].scalar_type() != torch::kUInt8 ||
+                    gpt_oss_param_[1].scalar_type() != torch::kUInt8 ||
+                    gpt_oss_param_[3].scalar_type() != torch::kUInt8 ||
+                    gpt_oss_param_[4].scalar_type() != torch::kUInt8,
+                "GPT-OSS MXFP4 blocks/scales must be uint8");
+}
+
+static torch::Tensor DequantMxfp4(const torch::Tensor& blocks,
+                                  const torch::Tensor& scales,
+                                  cudaStream_t stream) {
+  auto packed = blocks.contiguous();
+  auto sc = scales.contiguous();
+  auto output = torch::empty({packed.size(0), packed.size(1) * 2},
+                             packed.options().dtype(torch::kBFloat16));
+  mxfp4_dequant_cuda(packed.data_ptr(), sc.data_ptr(), output.data_ptr(),
+                     packed.size(0), packed.size(1), sc.size(1),
+                     packed.size(1) * 2 / sc.size(1), stream);
+  return output;
 }
 
 torch::Tensor MoEMLP::forward(torch::Tensor hidden_states, cudaStream_t stream,
@@ -289,12 +299,19 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
   auto& output = buffer_[1];
 
   if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
-    auto& gate_up_weight = gpt_oss_param_[0];
-    auto& gate_up_bias = gpt_oss_param_[1];
-    auto& down_weight = gpt_oss_param_[2];
-    auto& down_bias = gpt_oss_param_[3];
+    const auto& p = gpt_oss_param_;
+    // RTX PRO 6000: MXFP4 tensor-core kernels on the stored blocks/scales
+    // (bias, interleaved gate/up split and clamped SwiGLU-OAI fused).
+    if (gpt_oss_mxfp4_pro6000_ && gptoss_mxfp4_expert_forward_pro6000(
+                                      input, p[0], p[1], p[2], p[3], p[4], p[5],
+                                      output, gpt_oss_scratch_, stream)) {
+      return;
+    }
+    // Previous path (other devices, or layouts the kernels do not cover):
+    // de-quantise to BF16 + matmul.
     auto gate_up =
-        torch::matmul(input, gate_up_weight.transpose(0, 1)) + gate_up_bias;
+        torch::matmul(input, DequantMxfp4(p[0], p[1], stream).transpose(0, 1)) +
+        p[2];
     auto gate =
         gate_up.index({torch::indexing::Slice(),
                        torch::indexing::Slice(0, torch::indexing::None, 2)});
@@ -304,8 +321,10 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
     gate = torch::clamp_max(gate, 7.0);
     up = torch::clamp(up, -7.0, 7.0);
     auto activated = (up + 1.0) * (gate * torch::sigmoid(gate * 1.702));
-    output.copy_(torch::matmul(activated, down_weight.transpose(0, 1)) +
-                 down_bias);
+    output.copy_(
+        torch::matmul(activated,
+                      DequantMxfp4(p[3], p[4], stream).transpose(0, 1)) +
+        p[5]);
     return;
   }
 

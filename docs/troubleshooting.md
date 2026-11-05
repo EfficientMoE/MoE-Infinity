@@ -71,6 +71,20 @@ Use the entries below as symptom-first checks. Each one lists the likely cause, 
 - **Resolution:** keep the fallback if correctness matters more than backend selection, or install the matching optional package and model-family path if you are validating that specific branch.
 - **Related guide:** [Serving](serving.md)
 
+## Slow Qwen3.5 / GLM-5.3-Flash prefill (linear-attention torch fallback)
+
+- **Symptom:** the loader logs `... runs the transformers torch fallback for chunk/recurrent ...`, or `transformers` warns `The fast path is not available ...`. Qwen3.5 or GLM-5.3-Flash prefill is much slower than models of the same size, and the GPU sits idle between thousands of tiny kernels.
+- **Likely cause:** `flash-linear-attention` (`fla`) is not installed, so the Gated DeltaNet / KDA layers run the pure-torch reference, a Python loop over 64-token chunks. Measured on sm_120 for one Qwen3.5-35B layer at 9K tokens: 19.3 ms with the fallback, 1.1 ms with fla.
+- **How to confirm:**
+
+  ```bash
+  python -c 'from transformers.utils.import_utils import is_flash_linear_attention_available as f; print(f())'
+  ```
+
+  For a loaded model, `moe_infinity.kernel.linear_attention.linear_attention_kernels(model)` returns the bound backend (`fla` or `torch`) per linear-attention layer class.
+- **Resolution:** `pip install 'flash-linear-attention>=0.6.0'` (or the `linear_attn` extra). It is pure Python + Triton. `transformers` must be imported after the install, so restart the process. `causal-conv1d` is optional. Without it, the short convolution uses a cuDNN depthwise conv.
+- **Related guide:** [README: Enable linear-attention kernels](../README.md#enable-linear-attention-kernels-optional-recommended-for-qwen35--glm-53-flash)
+
 ## Startup or decode timeout
 
 - **Symptom:** `/health` returns 503 with `starting` or `unhealthy`, or the logs mention a startup or decode watchdog timeout.

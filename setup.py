@@ -251,9 +251,13 @@ _STORE_SOURCES = [
     # CUDA kernels for store
     "core/model/fused_mlp.cu",
     "extensions/kernel/fused_moe_mlp.cu",
+    "extensions/kernel/fused_moe_mlp_generic.cu",
+    "extensions/kernel/grouped_moe_prefill.cu",
     "extensions/kernel/activation_kernels.cu",
     "extensions/kernel/topk_softmax_kernels.cu",
     "extensions/kernel/v4_fp4/mxfp4_dequant.cu",
+    "extensions/kernel/v4_fp4/mxfp4_gptoss_moe.cu",
+    "extensions/kernel/v4_fp4/gptoss_expert.cpp",
     "extensions/kernel/v4_fp4/fp8_dequant.cu",
     # Python binding
     "core/python/py_archer_prefetch.cpp",
@@ -449,12 +453,33 @@ if cuda_available:
                     "extensions/kernel/v4_fp4/v4_fp4_binding.cpp",
                     "extensions/kernel/v4_fp4/v4_fp4_dequant.cu",
                     "extensions/kernel/v4_fp4/mxfp4_dequant.cu",
+                    "extensions/kernel/v4_fp4/mxfp4_gptoss_moe.cu",
+                    "extensions/kernel/v4_fp4/gptoss_expert.cpp",
                     "extensions/kernel/v4_fp4/fp8_dequant.cu",
                 ],
                 extra_compile_args={
                     "cxx": ["-O3", "-std=c++20", "-fPIC"],
                     "nvcc": ["-O3", "--use_fast_math", "-std=c++20"]
                     + _v4fp4_arch_flags,
+                },
+            )
+        )
+
+    if os.environ.get("MOE_ENABLE_SM120", "0") == "1":
+        # GPT-OSS grouped MXFP4 decode MoE (bf16 mma.sync, sm_80+ code paths;
+        # PDL on sm_90+), built with the sm_120 kernels it was tuned for.
+        ext_modules.append(
+            cpp_extension.CUDAExtension(
+                name="moe_infinity._gptoss_moe",
+                include_dirs=[get_path("extensions")],
+                sources=[
+                    "extensions/kernel/gptoss_moe/gptoss_moe_binding.cpp",
+                    "extensions/kernel/gptoss_moe/gptoss_grouped_mxfp4.cu",
+                ],
+                extra_compile_args={
+                    "cxx": ["-O3", "-std=c++20", "-fPIC"],
+                    "nvcc": ["-O3", "--use_fast_math", "-std=c++20"]
+                    + _cuda_arch_flags,
                 },
             )
         )
@@ -489,6 +514,8 @@ setup(
         "flashinfer": ["flashinfer-python"],
         "flash_attn": ["flash-attn>=2.5.2"],
         "contextpilot": ["contextpilot>=0.5.0,<0.6"],
+        # chunked Triton GDN / KDA kernels for Qwen3.5 and GLM-5.3-Flash
+        "linear_attn": ["flash-linear-attention>=0.6.0"],
     },
     author="EfficientMoE Team",
     long_description=read_readme(),
