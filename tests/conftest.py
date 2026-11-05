@@ -1,6 +1,7 @@
 """Root conftest: stub CUDA-only deps so CPU-only CI can collect all tests."""
 
 import importlib.machinery
+import importlib.util
 import sys
 from unittest.mock import MagicMock
 
@@ -38,6 +39,20 @@ def _stub_if_missing(name: str) -> None:
 
 for _mod in _OPTIONAL_CUDA_MODULES:
     _stub_if_missing(_mod)
+
+
+# With flash-linear-attention installed on a CUDA host, transformers binds its
+# Triton kernels even for the tiny CPU Qwen3.5 / GLM-5.3-Flash test models;
+# route CPU tensors back to the torch references (#304).
+if importlib.util.find_spec("fla") is not None:
+    try:
+        from moe_infinity.kernel.linear_attention import (
+            make_linear_attention_device_safe,
+        )
+
+        make_linear_attention_device_safe()
+    except Exception:  # noqa: BLE001 - never block collection
+        pass
 
 
 def pytest_collection_modifyitems(config, items):

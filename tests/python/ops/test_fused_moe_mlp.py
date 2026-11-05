@@ -162,7 +162,6 @@ def _call_single_expert_fused(binding_name: str, x, gate_w, up_w, down_w):
             gate_buf,
             fused_buf,
             output,
-            None,
         )
         return output
 
@@ -208,16 +207,12 @@ def test_fused_moe_mlp_single_expert_matches_reference(
     ).contiguous()
 
     fused_out = _call_single_expert_fused(binding_name, x, gate_w, up_w, down_w)
-    reference_out = _reference_moe_mlp(x, gate_w, up_w, down_w)
-
-    # Unit-variance weights give outputs of magnitude ~1e4, where elementwise
-    # bf16 tolerances are meaningless; compare the relative L2 error instead
-    # (the bf16 reference itself is ~3.5e-3 away from fp32).
-    rel = (fused_out.float() - reference_out.float()).norm() / (
-        reference_out.float().norm()
-    )
+    # Unscaled randn weights give outputs in the thousands; compare against an
+    # fp32 reference with a tolerance relative to the output scale (a bf16
+    # reference rounds the [M, I] intermediates and is itself off by ~1 %).
+    reference_out = _reference_fp32(x, gate_w, up_w, down_w)
     assert torch.isfinite(fused_out).all()
-    assert rel.item() < 1e-2
+    _assert_close_to_reference(fused_out, reference_out)
 
 
 @requires_cuda
@@ -275,3 +270,151 @@ def test_fused_moe_mlp_batched_matches_reference(seed_everything):
         rtol=BF16_RTOL,
         atol=BF16_ATOL,
     )
+
+
+# ---------------------------------------------------------------------------
+# Every tile config / split-K factor of the CUTLASS expert FFN
+# (extensions/kernel/fused_moe_mlp.cu) against an fp32 reference.
+# ---------------------------------------------------------------------------
+
+
+def _requires_tuned_binding():
+    if _STORE is None or not hasattr(_STORE, "fused_moe_ffn_pro6000"):
+        pytest.skip("moe_infinity._store has no fused_moe_ffn_pro6000 binding")
+
+
+def _expert_weights(tokens, hidden_dim, intermediate_dim):
+    def rnd(*shape, scale):
+        return (torch.randn(*shape, device="cuda") * scale).to(torch.bfloat16)
+
+    x = rnd(tokens, hidden_dim, scale=1.0)
+    gate_w = rnd(intermediate_dim, hidden_dim, scale=hidden_dim**-0.5)
+    up_w = rnd(intermediate_dim, hidden_dim, scale=hidden_dim**-0.5)
+    down_w = rnd(hidden_dim, intermediate_dim, scale=intermediate_dim**-0.5)
+    return x, gate_w, up_w, down_w
+
+
+def _reference_fp32(x, gate_w, up_w, down_w):
+    xf = x.float()
+    act = F.silu(xf @ gate_w.float().t()) * (xf @ up_w.float().t())
+    return act @ down_w.float().t()
+
+
+def _run_tuned(
+    x, gate_w, up_w, down_w, dual_cfg, dual_splits, down_cfg, down_splits
+):
+    fused_buf = torch.empty(
+        x.size(0), gate_w.size(0), dtype=x.dtype, device=x.device
+    )
+    out = torch.full_like(x, float("nan"))
+    _STORE.fused_moe_ffn_pro6000(
+        x,
+        gate_w,
+        up_w,
+        down_w,
+        fused_buf,
+        out,
+        dual_cfg,
+        dual_splits,
+        down_cfg,
+        down_splits,
+    )
+    return out
+
+
+def _assert_close_to_reference(out, ref):
+    scale = ref.abs().max().item()
+    torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2 * scale)
+
+
+# (tokens, hidden, intermediate): decode, ragged prefill, non-tile-multiple dims
+_TUNED_SHAPES = [
+    (1, 256, 128),
+    (7, 512, 256),
+    (37, 264, 520),
+    (130, 1024, 384),
+    (301, 512, 1024),
+]
+
+
+@requires_cuda
+@pytest.mark.parametrize("tokens,hidden_dim,intermediate_dim", _TUNED_SHAPES)
+def test_fused_moe_ffn_every_config_matches_reference(
+    seed_everything, tokens, hidden_dim, intermediate_dim
+):
+    _requires_tuned_binding()
+    num_dual, num_down = _STORE.fused_moe_ffn_num_configs()
+    x, gate_w, up_w, down_w = _expert_weights(
+        tokens, hidden_dim, intermediate_dim
+    )
+    ref = _reference_fp32(x, gate_w, up_w, down_w)
+
+    _assert_close_to_reference(
+        _run_tuned(x, gate_w, up_w, down_w, -1, 0, -1, 0), ref
+    )
+    # 0 = stream-K remainder (only the last partial wave is split)
+    for splits in (0, 1, 3, 8):
+        for cfg in range(num_dual):
+            out = _run_tuned(x, gate_w, up_w, down_w, cfg, splits, -1, 0)
+            _assert_close_to_reference(out, ref)
+        for cfg in range(num_down):
+            out = _run_tuned(x, gate_w, up_w, down_w, -1, 0, cfg, splits)
+            _assert_close_to_reference(out, ref)
+
+
+@requires_cuda
+def test_fused_moe_ffn_split_k_is_deterministic_and_reusable(seed_everything):
+    _requires_tuned_binding()
+    num_dual, num_down = _STORE.fused_moe_ffn_num_configs()
+    x, gate_w, up_w, down_w = _expert_weights(5, 1024, 512)
+    ref = _reference_fp32(x, gate_w, up_w, down_w)
+    # Smallest tiles (last configs) support split-K; repeated launches reuse
+    # the self-resetting workspace and must give bit-identical results.
+    first = _run_tuned(
+        x, gate_w, up_w, down_w, num_dual - 1, 8, num_down - 1, 8
+    )
+    _assert_close_to_reference(first, ref)
+    for _ in range(3):
+        again = _run_tuned(
+            x, gate_w, up_w, down_w, num_dual - 1, 8, num_down - 1, 8
+        )
+        assert torch.equal(first, again)
+
+
+@requires_cuda
+def test_fused_moe_ffn_concurrent_streams(seed_everything):
+    _requires_tuned_binding()
+    num_dual, num_down = _STORE.fused_moe_ffn_num_configs()
+    problems = [_expert_weights(3, 512, 256) for _ in range(4)]
+    refs = [_reference_fp32(*p) for p in problems]
+    streams = [torch.cuda.Stream() for _ in problems]
+    outs = [None] * len(problems)
+    for _ in range(5):
+        for i, (p, s) in enumerate(zip(problems, streams)):
+            with torch.cuda.stream(s):
+                outs[i] = _run_tuned(*p, num_dual - 1, 4, num_down - 1, 4)
+        torch.cuda.synchronize()
+        for out, ref in zip(outs, refs):
+            _assert_close_to_reference(out, ref)
+
+
+@requires_cuda
+@pytest.mark.parametrize("tokens,hidden_dim,intermediate_dim", _TUNED_SHAPES)
+def test_fused_moe_ffn_generic_fallback_matches_reference(
+    seed_everything, tokens, hidden_dim, intermediate_dim
+):
+    """The path fused_moe_ffn_into runs on GPUs other than the RTX PRO 6000."""
+    if _STORE is None or not hasattr(_STORE, "fused_moe_ffn_into_generic"):
+        pytest.skip("moe_infinity._store has no fused_moe_ffn_into_generic")
+    x, gate_w, up_w, down_w = _expert_weights(
+        tokens, hidden_dim, intermediate_dim
+    )
+    gate_buf = torch.empty(
+        tokens, intermediate_dim, dtype=x.dtype, device=x.device
+    )
+    fused_buf = torch.empty_like(gate_buf)
+    out = torch.full_like(x, float("nan"))
+    _STORE.fused_moe_ffn_into_generic(
+        x, gate_w, up_w, down_w, gate_buf, fused_buf, out
+    )
+    _assert_close_to_reference(out, _reference_fp32(x, gate_w, up_w, down_w))
