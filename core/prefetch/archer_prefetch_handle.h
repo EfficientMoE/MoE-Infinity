@@ -112,6 +112,13 @@ class ArcherPrefetchHandle {
   void ConfigureExpertPolicy(bool enabled, int prefill_admission,
                              int decode_admission, double prefill_weight,
                              double decode_weight, int starvation_limit);
+  // Selects the GPU expert-cache eviction policy ("legacy" or a name from
+  // EvictionPolicyNames()); see
+  // ExpertResidencyManager::ConfigureEvictionPolicy.
+  bool ConfigureEvictionPolicy(const std::string& name, int num_layers,
+                               double lcnu_alpha, double lcnu_beta,
+                               double lcnu_prior);
+  std::string GetEvictionPolicy() const;
   ExpertPolicyStats GetExpertPolicyStats() const;
 
   // void SetNodeCachePriority(const std::uint64_t corr_id, const float

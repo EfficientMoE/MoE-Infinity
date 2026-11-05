@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from moe_infinity.utils.config import ArcherConfig
+from moe_infinity.utils.config import EXPERT_EVICTION_POLICIES, ArcherConfig
 
 
 def test_adaptive_resident_mode_defaults_to_legacy(monkeypatch):
@@ -163,6 +163,58 @@ def test_phase_policy_rejects_invalid_values(
     kwargs = {"offload_path": "/tmp", "use_native_engine": False, field: value}
     with pytest.raises(ValueError, match=message):
         ArcherConfig(**kwargs)
+
+
+def test_expert_eviction_policy_defaults_to_legacy(monkeypatch):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    config = ArcherConfig(offload_path="/tmp", use_native_engine=False)
+    assert config.expert_eviction_policy == "legacy"
+    assert config.expert_eviction_lcnu_alpha == pytest.approx(0.3)
+    assert config.expert_eviction_lcnu_beta == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("policy", EXPERT_EVICTION_POLICIES)
+def test_expert_eviction_policy_accepts_every_native_policy(
+    monkeypatch, policy
+):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    config = ArcherConfig.load_from_json(
+        {
+            "offload_path": "/tmp",
+            "use_native_engine": False,
+            "expert_eviction_policy": policy,
+        }
+    )
+    assert config.expert_eviction_policy == policy
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"expert_eviction_policy": "mru"}, "must be one of"),
+        ({"expert_eviction_lcnu_alpha": 0.0}, "must be in \\(0, 1\\)"),
+        ({"expert_eviction_lcnu_alpha": 1.0}, "must be in \\(0, 1\\)"),
+        ({"expert_eviction_lcnu_beta": 1.5}, "must be in \\[0, 1\\]"),
+        (
+            {"expert_eviction_policy": "lcnu", "adaptive_memory_enabled": True},
+            "cannot be combined with adaptive_memory_enabled",
+        ),
+        (
+            {
+                "expert_eviction_policy": "lru",
+                "adaptive_expert_precision": True,
+                "adaptive_hbm_budget_bytes": 1024,
+            },
+            "cannot be combined with adaptive_expert_precision",
+        ),
+    ],
+)
+def test_expert_eviction_policy_rejects_invalid_values(
+    monkeypatch, kwargs, message
+):
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+    with pytest.raises(ValueError, match=message):
+        ArcherConfig(offload_path="/tmp", use_native_engine=False, **kwargs)
 
 
 def test_overlap_prefetch_defaults_are_safe(monkeypatch):

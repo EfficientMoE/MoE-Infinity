@@ -686,6 +686,29 @@ def _has_fp8_blockwise(config: object) -> bool:
     return "fp8" in method
 
 
+_NATIVE_ADMISSION_MODES = {"cache": 0, "transient_on_pressure": 1}
+
+
+def _expert_routing_prior(config: object, num_experts: int) -> Optional[float]:
+    """``top_k / num_experts``: the per-layer routing probability of an expert."""
+    if not num_experts or num_experts <= 0:
+        return None
+    sources = [moe_text_config(config), config]
+    sources += [getattr(source, "ffn_config", None) for source in list(sources)]
+    for source in sources:
+        if source is None:
+            continue
+        for name in ("num_experts_per_tok", "moe_top_k", "experts_per_token"):
+            value = (
+                source.get(name)
+                if isinstance(source, dict)
+                else getattr(source, name, None)
+            )
+            if isinstance(value, int) and 0 < value <= num_experts:
+                return value / num_experts
+    return None
+
+
 def _compute_config_fingerprint(config: object) -> str:
     fields = [
         "model_type",
@@ -866,13 +889,48 @@ class OffloadEngine(object):
             return
         configure = getattr(self.archer_engine, "configure_phase_policy", None)
         if callable(configure):
+            # The native binding takes AdmissionMode values, not names.
             configure(
                 phase_policy.enabled,
-                phase_policy.prefill_admission,
-                phase_policy.decode_admission,
+                _NATIVE_ADMISSION_MODES[phase_policy.prefill_admission],
+                _NATIVE_ADMISSION_MODES[phase_policy.decode_admission],
                 phase_policy.prefill_eviction_weight,
                 phase_policy.decode_eviction_weight,
                 phase_policy.starvation_limit,
+            )
+
+    def _configure_native_eviction_policy(self) -> None:
+        name = getattr(self.archer_config, "expert_eviction_policy", "legacy")
+        if name == "legacy":
+            return
+        if is_gptq_quantized(self.config):
+            # GPTQ experts are fetched by hooks, not the expert dispatcher.
+            warnings.warn(
+                f"expert_eviction_policy={name!r} is ignored for GPTQ "
+                "checkpoints; the built-in eviction stays in use",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+        configure = getattr(
+            self.archer_engine, "configure_eviction_policy", None
+        )
+        if not callable(configure):
+            raise RuntimeError(
+                f"expert_eviction_policy={name!r} needs a native engine with "
+                "configure_eviction_policy; rebuild moe_infinity._store"
+            )
+        kwargs = {
+            "num_layers": 0,  # native side: number of registered MoE layers
+            "lcnu_alpha": float(self.archer_config.expert_eviction_lcnu_alpha),
+            "lcnu_beta": float(self.archer_config.expert_eviction_lcnu_beta),
+        }
+        prior = _expert_routing_prior(self.config, self.num_experts)
+        if prior is not None:
+            kwargs["lcnu_prior"] = prior
+        if not configure(name, **kwargs):
+            raise RuntimeError(
+                f"native engine rejected expert_eviction_policy={name!r}"
             )
 
     @property
@@ -1538,6 +1596,7 @@ class OffloadEngine(object):
                     )
 
                 self._configure_native_phase_policy()
+                self._configure_native_eviction_policy()
 
                 self.expert_executor.set_expert_dispatcher(
                     self.expert_dispatcher

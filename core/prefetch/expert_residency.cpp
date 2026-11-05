@@ -138,19 +138,169 @@ std::uint32_t ExpertResidencyManager::NodeLeaseCount(
   return count;
 }
 
+bool ExpertResidencyManager::IsEvictable(const ResidencyEntry& entry,
+                                         std::int64_t needed_bytes) const {
+  if (!entry.node || entry.state != ResidencyState::ACTIVE) return false;
+  if (entry.lease_count > 0 || NodeLeaseCount(entry.node->id) > 0) {
+    return false;
+  }
+  if (protected_ids_.count(entry.node->id) > 0) return false;
+  if (std::find(protected_variants_.begin(), protected_variants_.end(),
+                entry.key) != protected_variants_.end()) {
+    return false;
+  }
+  return entry.bytes >= needed_bytes;
+}
+
 NodePtr ExpertResidencyManager::SelectVictim(const GpuState& state,
                                              std::int64_t needed_bytes) const {
   NodePtr victim;
   std::size_t best_last_access = static_cast<std::size_t>(-1);
   for (const auto& entry : state.entries) {
-    if (!entry.node || entry.state != ResidencyState::ACTIVE) continue;
-    if (entry.lease_count > 0 || NodeLeaseCount(entry.node->id) > 0) continue;
-    if (protected_ids_.count(entry.node->id) > 0) continue;
-    if (std::find(protected_variants_.begin(), protected_variants_.end(),
-                  entry.key) != protected_variants_.end()) {
+    if (!IsEvictable(entry, needed_bytes)) continue;
+    if (!victim || entry.node->last_access_time < best_last_access) {
+      victim = entry.node;
+      best_last_access = entry.node->last_access_time;
+    }
+  }
+  return victim;
+}
+
+std::optional<ExpertCacheKey> ExpertResidencyManager::KeyOf(
+    const NodePtr& node) const {
+  if (!node) return std::nullopt;
+  auto it = node_keys_.find(node->id);
+  if (it == node_keys_.end()) return std::nullopt;
+  return it->second;
+}
+
+int ExpertResidencyManager::RegisteredLayerCount() const {
+  std::unordered_set<int> layers;
+  for (const auto& node_key : node_keys_) {
+    layers.insert(ExpertCacheKeyLayer(node_key.second));
+  }
+  return static_cast<int>(layers.size());
+}
+
+std::optional<std::size_t> ExpertResidencyManager::DenseSlot(
+    ExpertCacheKey key) const {
+  const auto layer = static_cast<std::int64_t>(key >> 32);
+  const auto expert = static_cast<std::int64_t>(key & 0xffffffffu);
+  if (layer > max_registered_layer_ || expert > max_registered_expert_) {
+    return std::nullopt;
+  }
+  return static_cast<std::size_t>(layer * (max_registered_expert_ + 1) +
+                                  expert);
+}
+
+EvictionPolicy* ExpertResidencyManager::PolicyFor(GpuState& state,
+                                                  std::int64_t expert_bytes) {
+  if (!eviction_policy_active_.load(std::memory_order_relaxed)) return nullptr;
+  if (state.policy) return state.policy.get();
+  if (expert_bytes <= 0) return nullptr;
+  EvictionPolicyOptions options = eviction_options_;
+  if (options.num_layers <= 0) options.num_layers = RegisteredLayerCount();
+  state.policy = CreateEvictionPolicy(eviction_policy_name_, options);
+  if (!state.policy) return nullptr;
+  // Experts of one model share a size: capacity in experts = bytes / size.
+  state.policy_expert_bytes = expert_bytes;
+  state.policy->SetCapacity(static_cast<std::size_t>(
+      std::max<std::int64_t>(1, state.capacity_bytes / expert_bytes)));
+  // Experts already resident enter as cold admissions.
+  state.policy_key_entries.clear();
+  state.pending_demand.clear();
+  for (auto& entry : state.entries) {
+    if (!entry.policy_key) entry.policy_key = KeyOf(entry.node);
+    if (entry.policy_key &&
+        ++state.policy_key_entries[*entry.policy_key] == 1) {
+      state.policy->OnAdmit(*entry.policy_key, true);
+    }
+  }
+  return state.policy.get();
+}
+
+void ExpertResidencyManager::TrackEntryAdded(
+    GpuState& state, const std::optional<ExpertCacheKey>& key,
+    AdmissionSource source) {
+  if (!state.policy || !key) return;
+  const bool demanded = state.pending_demand.erase(*key) > 0;
+  if (++state.policy_key_entries[*key] == 1) {
+    state.policy->OnAdmit(*key,
+                          source == AdmissionSource::PREFETCH && !demanded);
+  }
+}
+
+void ExpertResidencyManager::TrackEntryRemoved(
+    GpuState& state, const std::optional<ExpertCacheKey>& key) {
+  if (!state.policy || !key) return;
+  auto it = state.policy_key_entries.find(*key);
+  if (it == state.policy_key_entries.end()) return;
+  if (--it->second == 0) {
+    state.policy_key_entries.erase(it);
+    state.policy->OnEvict(*key);
+  }
+}
+
+NodePtr ExpertResidencyManager::SelectPolicyVictim(GpuState& state,
+                                                   ExpertCacheKey incoming,
+                                                   bool need_room,
+                                                   std::int64_t needed_bytes) {
+  // Index the evictable entries by dense (layer, expert) slot so the policy's
+  // eligibility checks are O(1) without per-call hashing.
+  auto& slots = state.evictable_slots;
+  auto& used = state.evictable_used;
+  const auto dense_size =
+      static_cast<std::size_t>(std::max(max_registered_layer_ + 1, 0)) *
+      static_cast<std::size_t>(std::max(max_registered_expert_ + 1, 0));
+  if (slots.size() < dense_size) slots.assign(dense_size, nullptr);
+  used.clear();
+  for (const auto& entry : state.entries) {
+    if (!entry.policy_key || !IsEvictable(entry, needed_bytes) ||
+        !NodeIdle(entry.node)) {
       continue;
     }
-    if (entry.bytes < needed_bytes) continue;
+    if (auto slot = DenseSlot(*entry.policy_key)) {
+      slots[*slot] = &entry;
+      used.push_back(*slot);
+    }
+  }
+  // Nothing evictable (e.g. every resident is in flight): skip the policy so
+  // a retried admission does not advance its state (clock hands, promotions).
+  if (used.empty()) {
+    return need_room ? SelectIdleVictim(state, needed_bytes) : nullptr;
+  }
+  const auto chosen = state.policy->SelectVictim(
+      incoming, need_room, [this, &slots](ExpertCacheKey key) {
+        const auto slot = DenseSlot(key);
+        return slot && slots[*slot] != nullptr;
+      });
+  NodePtr victim = chosen ? slots[*DenseSlot(*chosen)]->node : nullptr;
+  for (std::size_t slot : used) slots[slot] = nullptr;
+  if (victim) {
+    counters_["policy_victims"] += 1;
+    if (!need_room) counters_["policy_requested_evictions"] += 1;
+    return victim;
+  }
+  if (!need_room) return nullptr;
+  // Residents the policy does not know: fall back to the built-in choice
+  // rather than stall the admission.
+  NodePtr fallback = SelectIdleVictim(state, needed_bytes);
+  if (fallback) counters_["policy_fallback_victims"] += 1;
+  return fallback;
+}
+
+bool ExpertResidencyManager::NodeIdle(const NodePtr& node) {
+  return node->exec_state.load(std::memory_order_acquire) ==
+             NodeExecState::IDLE &&
+         node->pending_dispatches.load(std::memory_order_acquire) == 0;
+}
+
+NodePtr ExpertResidencyManager::SelectIdleVictim(
+    const GpuState& state, std::int64_t needed_bytes) const {
+  NodePtr victim;
+  std::size_t best_last_access = static_cast<std::size_t>(-1);
+  for (const auto& entry : state.entries) {
+    if (!IsEvictable(entry, needed_bytes) || !NodeIdle(entry.node)) continue;
     if (!victim || entry.node->last_access_time < best_last_access) {
       victim = entry.node;
       best_last_access = entry.node->last_access_time;
@@ -172,6 +322,10 @@ bool ExpertResidencyManager::ConfigureCapacity(int gpu_id,
   if (capacity_bytes < charged) return false;
   state.configured = true;
   state.capacity_bytes = capacity_bytes;
+  if (state.policy && state.policy_expert_bytes > 0) {
+    state.policy->SetCapacity(static_cast<std::size_t>(
+        std::max<std::int64_t>(1, capacity_bytes / state.policy_expert_bytes)));
+  }
   return true;
 }
 
@@ -258,9 +412,22 @@ ResidencyTicket ExpertResidencyManager::BeginAdmission(
                        state.workspace_bytes;
   const auto free_bytes = state.capacity_bytes - charged;
   ticket.id = next_ticket_id_++;
-  if (requested > free_bytes) {
-    NodePtr victim = SelectVictim(state, requested - free_bytes);
-    if (!victim) {
+  // Only registered experts are policy keys; other nodes (dense weights
+  // prefetched through the same manager) keep the built-in victim choice and
+  // must not size the policy.
+  std::optional<ExpertCacheKey> incoming_key;
+  EvictionPolicy* policy = nullptr;
+  if (eviction_policy_active_.load(std::memory_order_relaxed)) {
+    incoming_key = KeyOf(incoming.node);
+    if (incoming_key) policy = PolicyFor(state, incoming.aligned_bytes);
+  }
+  const bool need_room = requested > free_bytes;
+  if (need_room || (policy && policy->WantsVictim(*incoming_key))) {
+    const std::int64_t needed = need_room ? requested - free_bytes : 0;
+    NodePtr victim =
+        policy ? SelectPolicyVictim(state, *incoming_key, need_room, needed)
+               : SelectVictim(state, needed);
+    if (!victim && need_room) {
       if (mode == AdmissionMode::TRANSIENT_ON_PRESSURE) {
         ticket.outcome = AdmissionOutcome::TRANSIENT;
         ticket.transient = true;
@@ -269,10 +436,12 @@ ResidencyTicket ExpertResidencyManager::BeginAdmission(
       }
       return ticket;
     }
-    ticket.reserved_victim = victim;
-    if (auto* victim_entry = FindEntry(state, victim->id)) {
-      ticket.reserved_victim_key = victim_entry->key;
-      ++victim_entry->lease_count;
+    if (victim) {
+      ticket.reserved_victim = victim;
+      if (auto* victim_entry = FindEntry(state, victim->id)) {
+        ticket.reserved_victim_key = victim_entry->key;
+        ++victim_entry->lease_count;
+      }
     }
   }
 
@@ -348,14 +517,22 @@ bool ExpertResidencyManager::EvictReserved(const ResidencyTicket& ticket) {
   GpuState& state = StateFor(pending.gpu_id);
   ResidencyEntry* victim = FindEntry(state, *pending.reserved_victim_key);
   if (victim == nullptr || victim->lease_count != 1) return false;
+  // Under an eviction policy the victim must still be idle: it may have been
+  // dispatched since BeginAdmission picked it.
+  if (state.policy && victim->policy_key && !NodeIdle(victim->node)) {
+    counters_["policy_victims_dispatched"] += 1;
+    return false;
+  }
   if (transfer_ops_ && !transfer_ops_->MoveToHost(victim->node)) return false;
   state.resident_bytes -= victim->bytes;
   const auto key = victim->key;
+  const auto victim_policy_key = victim->policy_key;
   state.entries.erase(std::remove_if(state.entries.begin(), state.entries.end(),
                                      [&key](const ResidencyEntry& entry) {
                                        return entry.key == key;
                                      }),
                       state.entries.end());
+  TrackEntryRemoved(state, victim_policy_key);
   pending.reserved_victim = nullptr;
   pending.reserved_victim_key.reset();
   state.transition_reserved_bytes += pending.reserved_aligned_bytes;
@@ -379,6 +556,9 @@ bool ExpertResidencyManager::CommitTransaction(
     return false;
   }
   if (pending.transient) {
+    if (auto key = KeyOf(pending.incoming_variant.node)) {
+      state.pending_demand.erase(*key);
+    }
     pending_tickets_.erase(pending_it);
     return true;
   }
@@ -402,9 +582,11 @@ bool ExpertResidencyManager::CommitTransaction(
   entry.key = pending.incoming_variant.key;
   entry.payload_bytes = pending.incoming_variant.payload_bytes;
   entry.state = ResidencyState::ACTIVE;
+  entry.policy_key = KeyOf(entry.node);
   state.entries.push_back(entry);
   state.resident_bytes += entry.bytes;
   state.transition_reserved_bytes -= pending.reserved_aligned_bytes;
+  TrackEntryAdded(state, entry.policy_key, pending.source);
   if (pending.reserved_workspace_bytes > 0) {
     workspace_records_[pending.id] = WorkspaceRecord{
         pending.id, pending.incoming_variant.key, pending.gpu_id,
@@ -543,7 +725,9 @@ std::size_t ExpertResidencyManager::ReapRetired(int gpu_id) {
         EventComplete(it->last_use_event) &&
         (!transfer_ops_ || transfer_ops_->MoveToHost(it->node))) {
       state.resident_bytes -= it->bytes;
+      const auto policy_key = it->policy_key;
       it = state.entries.erase(it);
+      TrackEntryRemoved(state, policy_key);
       ++reaped;
     } else {
       ++it;
@@ -598,11 +782,67 @@ void ExpertResidencyManager::ConfigurePolicy(const PhasePolicyConfig& config) {
   std::lock_guard<std::mutex> lock(mutex_);
   config_ = config;
   counters_["enabled"] = config.enabled ? 1 : 0;
+  managed_residency_.store(config_.enabled || eviction_policy_name_ != "legacy",
+                           std::memory_order_release);
 }
 
 bool ExpertResidencyManager::PolicyEnabled() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return config_.enabled;
+}
+
+bool ExpertResidencyManager::ConfigureEvictionPolicy(
+    const std::string& name, const EvictionPolicyOptions& options) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!pending_tickets_.empty()) return false;
+  const bool active = name != "legacy";
+  if (active && !CreateEvictionPolicy(name, options)) return false;
+  eviction_policy_name_ = name;
+  eviction_options_ = options;
+  for (auto& gpu : gpu_states_) {
+    gpu.second.policy.reset();
+    gpu.second.policy_expert_bytes = 0;
+    gpu.second.policy_key_entries.clear();
+    gpu.second.pending_demand.clear();
+  }
+  counters_["eviction_policy_active"] = active ? 1 : 0;
+  eviction_policy_active_.store(active, std::memory_order_release);
+  managed_residency_.store(config_.enabled || active,
+                           std::memory_order_release);
+  return true;
+}
+
+std::string ExpertResidencyManager::EvictionPolicyName() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return eviction_policy_name_;
+}
+
+bool ExpertResidencyManager::ManagedResidency() const {
+  return managed_residency_.load(std::memory_order_acquire);
+}
+
+void ExpertResidencyManager::RegisterExpertKey(std::size_t node_id, int layer,
+                                               int expert) {
+  if (layer < 0 || expert < 0) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  node_keys_[node_id] = MakeExpertCacheKey(layer, expert);
+  max_registered_layer_ = std::max(max_registered_layer_, layer);
+  max_registered_expert_ = std::max(max_registered_expert_, expert);
+}
+
+void ExpertResidencyManager::RecordRouted(const NodePtr& node, int gpu_id) {
+  if (!eviction_policy_active_.load(std::memory_order_acquire)) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!node || gpu_id < 0) return;
+  const auto key = KeyOf(node);
+  if (!key) return;
+  GpuState& state = StateFor(gpu_id);
+  EvictionPolicy* policy = PolicyFor(state, node->byte_size);
+  if (policy == nullptr) return;
+  const bool resident = state.policy_key_entries.count(*key) > 0;
+  if (!resident) state.pending_demand.insert(*key);
+  policy->OnAccess(*key, resident);
+  counters_[resident ? "policy_routed_hits" : "policy_routed_misses"] += 1;
 }
 
 AdmissionMode ExpertResidencyManager::AdmissionFor(ExpertPhase phase) const {
@@ -641,7 +881,14 @@ void ExpertResidencyManager::RecordAccess(const NodePtr& node,
 
 ExpertPolicyStats ExpertResidencyManager::Snapshot() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  ExpertPolicyStats stats;
+  ExpertPolicyStats stats = counters_;
+  std::int64_t policy_slots = 0;
+  for (const auto& gpu : gpu_states_) {
+    if (gpu.second.policy) {
+      policy_slots += static_cast<std::int64_t>(gpu.second.policy->Capacity());
+    }
+  }
+  stats["eviction_policy_slots"] = policy_slots;
   std::int64_t resident_bytes = 0;
   std::int64_t resident_payload_bytes = 0;
   std::int64_t capacity_bytes = 0;
