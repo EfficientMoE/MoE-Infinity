@@ -34,6 +34,7 @@ def load():
         name="kaudit_ext",
         sources=[str(_HERE / "audit_ext.cpp")],
         extra_cflags=["-O2", "-std=c++17"],
+        extra_include_paths=[str(_REPO / "extensions")],
         extra_ldflags=[
             f"-L{_PKG}",
             f"-l:{store.name}",

@@ -9,6 +9,7 @@
 #include "model/model_topology.h"
 #include "store/tensor_store.h"
 #include "prefetch/expert_residency.h"
+#include "kernel/moe_activation.h"
 #include "kernel/v4_fp4/gptoss_expert.h"
 
 // Expert type enum
@@ -213,6 +214,8 @@ struct MoEMLP : public torch::nn::Module {
   void DequantFp8Params(cudaStream_t stream);
   void SetRepresentation(const ExpertExecutionDescriptor& descriptor);
   void PrepareRepresentation(cudaStream_t stream);
+  // Gated activation of the gate/up experts (types 4 and 5).
+  void SetActivation(const MoEActivation& activation);
 
  private:
   void ForwardHelper(cudaStream_t stream);
@@ -241,6 +244,7 @@ struct MoEMLP : public torch::nn::Module {
   std::vector<torch::Tensor> fp8_scales_;
   bool has_fp8_scales_ = false;
   std::uint8_t representation_execution_kind_ = 0;
+  MoEActivation activation_;
 };
 
 struct ExpertNode {
