@@ -1,1 +1,3 @@
 autoawq>=0.2.0
+# chunked Triton kernels for linear-attention layers (Qwen3.5 GDN, GLM-5.3-Flash KDA)
+flash-linear-attention>=0.6.0
