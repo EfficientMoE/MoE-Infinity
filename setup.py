@@ -251,9 +251,13 @@ _STORE_SOURCES = [
     # CUDA kernels for store
     "core/model/fused_mlp.cu",
     "extensions/kernel/fused_moe_mlp.cu",
+    "extensions/kernel/fused_moe_mlp_generic.cu",
+    "extensions/kernel/grouped_moe_prefill.cu",
     "extensions/kernel/activation_kernels.cu",
     "extensions/kernel/topk_softmax_kernels.cu",
     "extensions/kernel/v4_fp4/mxfp4_dequant.cu",
+    "extensions/kernel/v4_fp4/mxfp4_gptoss_moe.cu",
+    "extensions/kernel/v4_fp4/gptoss_expert.cpp",
     "extensions/kernel/v4_fp4/fp8_dequant.cu",
     # Python binding
     "core/python/py_archer_prefetch.cpp",
@@ -450,6 +454,8 @@ if cuda_available:
                     "extensions/kernel/v4_fp4/v4_fp4_dequant.cu",
                     "extensions/kernel/v4_fp4/v4_fp4_moe_sm120_pro6000.cu",
                     "extensions/kernel/v4_fp4/mxfp4_dequant.cu",
+                    "extensions/kernel/v4_fp4/mxfp4_gptoss_moe.cu",
+                    "extensions/kernel/v4_fp4/gptoss_expert.cpp",
                     "extensions/kernel/v4_fp4/fp8_dequant.cu",
                 ],
                 extra_compile_args={
@@ -509,6 +515,8 @@ setup(
         "flashinfer": ["flashinfer-python"],
         "flash_attn": ["flash-attn>=2.5.2"],
         "contextpilot": ["contextpilot>=0.5.0,<0.6"],
+        # chunked Triton GDN / KDA kernels for Qwen3.5 and GLM-5.3-Flash
+        "linear_attn": ["flash-linear-attention>=0.6.0"],
     },
     author="EfficientMoE Team",
     long_description=read_readme(),
