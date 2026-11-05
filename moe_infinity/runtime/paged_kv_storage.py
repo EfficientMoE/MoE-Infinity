@@ -192,24 +192,24 @@ class PagedKVStorage:
         if slot_mapping.ndim != 1 or slot_mapping.shape[0] != num_tokens:
             raise ValueError("slot_mapping must have shape [num_tokens]")
 
-        x = self._X
-        block_size = self.spec.block_size
-        k_src = key.to(device=self.spec.device, dtype=self.spec.dtype)
-        v_src = value.to(device=self.spec.device, dtype=self.spec.dtype)
-        slots = slot_mapping.to(device=self.spec.device, dtype=torch.long)
+        from moe_infinity.kernel.paged_kv_write import paged_kv_scatter_
 
-        for i in range(num_tokens):
-            slot = int(slots[i].item())
-            if slot < 0:
-                raise ValueError("slot_mapping contains negative slot index")
-            block_id = slot // block_size
-            token_offset = slot % block_size
-            if block_id >= self.spec.num_blocks:
-                raise ValueError("slot_mapping points past allocated blocks")
-            self.key_cache[layer_idx, block_id, :, :, token_offset, :] = k_src[
-                i
-            ].reshape(self.spec.num_kv_heads, self.spec.head_dim // x, x)
-            self.value_cache[layer_idx, block_id, :, :, token_offset] = v_src[i]
+        device, dtype = self.spec.device, self.spec.dtype
+        if slot_mapping.dtype not in (torch.int32, torch.int64):
+            slot_mapping = slot_mapping.to(dtype=torch.long)
+        if slot_mapping.device != device:
+            slot_mapping = slot_mapping.to(device=device)
+        if key.device != device or key.dtype is not dtype:
+            key = key.to(device=device, dtype=dtype)
+        if value.device != device or value.dtype is not dtype:
+            value = value.to(device=device, dtype=dtype)
+        paged_kv_scatter_(
+            self.key_cache[layer_idx],
+            self.value_cache[layer_idx],
+            key,
+            value,
+            slot_mapping,
+        )
 
 
 __all__ = ["PagedKVStorage", "PagedKVStorageSpec", "canonical_device"]
