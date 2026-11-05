@@ -73,7 +73,7 @@ import heapq
 import math
 from abc import ABC, abstractmethod
 from collections import OrderedDict, defaultdict, deque
-from typing import Deque, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple
 
 Key = Tuple[int, int]
 
@@ -133,6 +133,36 @@ class CachePolicy(ABC):
     @abstractmethod
     def _select_victim(self, protect: Sequence[Key]) -> Optional[Key]:
         """Pick one resident key to evict, never one of ``protect``."""
+
+    # -- prefetch-composition hooks ------------------------------------------ #
+    # Used only by ``prefetchers.PrefetchCachePolicy``. Nothing on the demand
+    # paths above calls them, so existing policy behaviour is unchanged.
+    def victim_hint(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        """The resident key this policy would evict next (no state change).
+
+        Self-managed policies override this with a best-effort peek of their
+        own eviction rule; ``protect`` is honoured only where the underlying
+        rule supports it.
+        """
+        if not self.resident:
+            return None
+        return self._select_victim(protect)
+
+    def pop_victim(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        """Evict one key chosen by this policy's own rule and return it."""
+        victim = self._select_victim(protect) if self.resident else None
+        if victim is None:
+            return None
+        del self.resident[victim]
+        self._speculative.discard(victim)
+        return victim
+
+    def _prepare_speculative(self, key: Key) -> None:
+        """Initialise per-key state a speculative (prefetch) insert needs."""
+
+    def admits(self, key: Key) -> bool:
+        """Whether a demand miss on ``key`` is cached (default: always)."""
+        return True
 
     # -- core --------------------------------------------------------------- #
     def _admit(self, key: Key, protect: Sequence[Key]) -> None:
@@ -627,6 +657,10 @@ class _SelfManagedPolicy(CachePolicy):
     the resident set so the shared harness can check the capacity invariant.
     """
 
+    #: Eviction observer (set by ``prefetchers.PrefetchCachePolicy``); called
+    #: with each evicted key. ``None`` keeps the original behaviour.
+    _evict_callback: Optional[Callable[[Key], None]] = None
+
     def _select_victim(self, protect: Sequence[Key]) -> Optional[Key]:
         raise NotImplementedError(
             "self-managed policies pick their own victims"
@@ -637,6 +671,8 @@ class _SelfManagedPolicy(CachePolicy):
 
     def _evict(self, key: Key) -> None:
         del self.resident[key]
+        if self._evict_callback is not None:
+            self._evict_callback(key)
 
     def _on_hit(self, key: Key) -> None:
         """Update queues on a demand hit (default: nothing)."""
@@ -691,6 +727,31 @@ class ARCPolicy(_SelfManagedPolicy):
             old, _ = self.t2.popitem(last=False)
             self.b2[old] = None
         self._evict(old)
+
+    def _replace_choice(self) -> bool:
+        """Whether ``_replace(False)`` would take its victim from ``T1``."""
+        from_t1 = bool(self.t1) and len(self.t1) > self.p
+        if not self.t2:
+            from_t1 = True
+        return from_t1
+
+    def victim_hint(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        if not self.resident:
+            return None
+        source = self.t1 if self._replace_choice() else self.t2
+        return next(iter(source), None)
+
+    def pop_victim(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        if not self.resident:
+            return None
+        if self._replace_choice():
+            old, _ = self.t1.popitem(last=False)
+            self.b1[old] = None
+        else:
+            old, _ = self.t2.popitem(last=False)
+            self.b2[old] = None
+        self._evict(old)
+        return old
 
     def _on_hit(self, key: Key) -> None:
         if key in self.t1:
@@ -748,6 +809,24 @@ class TwoQPolicy(_SelfManagedPolicy):
         self.a1in: "OrderedDict[Key, None]" = OrderedDict()
         self.a1out: "OrderedDict[Key, None]" = OrderedDict()
         self.am: "OrderedDict[Key, None]" = OrderedDict()
+
+    def victim_hint(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        if len(self.a1in) > self.kin or not self.am:
+            return next(iter(self.a1in), None)
+        return next(iter(self.am), None)
+
+    def pop_victim(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        if not self.resident:
+            return None
+        if len(self.a1in) > self.kin or not self.am:
+            old, _ = self.a1in.popitem(last=False)
+            self.a1out[old] = None
+            if len(self.a1out) > self.kout:
+                self.a1out.popitem(last=False)
+        else:
+            old, _ = self.am.popitem(last=False)
+        self._evict(old)
+        return old
 
     def _on_hit(self, key: Key) -> None:
         if key in self.am:
@@ -810,6 +889,29 @@ class LRUKPolicy(_SelfManagedPolicy):
             heap[:] = [e for e in heap if live.get(e[2]) == e[1]]
             heapq.heapify(heap)
 
+    def victim_hint(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        heap, stamp = self._heap, self._stamp
+        while heap:
+            _, when, key = heap[0]
+            if key in self.resident and stamp.get(key) == when:
+                return key
+            heapq.heappop(heap)  # drop a stale entry (no behaviour change)
+        return None
+
+    def pop_victim(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        old = self.victim_hint()
+        if old is None:
+            return None
+        heapq.heappop(self._heap)
+        del self._stamp[old]
+        self._evict(old)
+        return old
+
+    def _prepare_speculative(self, key: Key) -> None:
+        # ``_on_miss`` needs a reference history; count the prefetch as one.
+        if not self._hist.get(key):
+            self._record_access(key)
+
     def _on_hit(self, key: Key) -> None:
         self._push(key)
 
@@ -861,6 +963,16 @@ class LIRSPolicy(_SelfManagedPolicy):
         del self.stack[bottom]
         self.queue[bottom] = None
         self._prune()
+
+    def victim_hint(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        return next(iter(self.queue), None)
+
+    def pop_victim(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        if not self.queue:  # every resident is LIR: nothing evictable
+            return None
+        old, _ = self.queue.popitem(last=False)
+        self._evict(old)
+        return old
 
     def _on_hit(self, key: Key) -> None:
         stack = self.stack
@@ -955,6 +1067,39 @@ class S3FIFOPolicy(_SelfManagedPolicy):
                     self.ghost.popitem(last=False)
                 return
 
+    def victim_hint(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        """Best-effort peek: lazy promotion may make ``pop_victim`` differ."""
+        if len(self.small) >= self.s_cap or not self.main:
+            for key in self.small:
+                if self.freq.get(key, 0) <= 1:
+                    return key
+        for key in self.main:
+            if self.freq.get(key, 0) == 0:
+                return key
+        return next(iter(self.main), None) or next(iter(self.small), None)
+
+    def pop_victim(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        if not self.resident:
+            return None
+        evicted: List[Key] = []
+        outer = self._evict_callback
+
+        def spy(key: Key, _outer=outer) -> None:
+            evicted.append(key)
+            if _outer is not None:
+                _outer(key)
+
+        self._evict_callback = spy
+        try:
+            while not evicted and self.resident:
+                if len(self.small) >= self.s_cap or not self.main:
+                    self._evict_small()
+                else:
+                    self._evict_main()
+        finally:
+            self._evict_callback = outer
+        return evicted[0] if evicted else None
+
     def _on_miss(self, key: Key) -> None:
         while len(self.resident) >= self.capacity:
             if len(self.small) >= self.s_cap or not self.main:
@@ -1000,6 +1145,34 @@ class SIEVEPolicy(_SelfManagedPolicy):
             self._newer[older] = newer
         else:
             self._tail = newer
+
+    def victim_hint(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        if not self.resident:
+            return None
+        obj = self._hand if self._hand is not None else self._tail
+        start = obj
+        for _ in range(len(self.resident)):
+            if not self.visited[obj]:
+                return obj
+            obj = self._newer[obj]
+            if obj is None:
+                obj = self._tail
+        return start  # all visited: the sweep would come back to its start
+
+    def pop_victim(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        if not self.resident:
+            return None
+        obj = self._hand if self._hand is not None else self._tail
+        while self.visited[obj]:
+            self.visited[obj] = False
+            obj = self._newer[obj]
+            if obj is None:
+                obj = self._tail
+        self._hand = self._newer[obj]
+        self._unlink(obj)
+        del self.visited[obj]
+        self._evict(obj)
+        return obj
 
     def _on_miss(self, key: Key) -> None:
         if len(self.resident) >= self.capacity:
@@ -1066,6 +1239,20 @@ class WTinyLFUPolicy(_SelfManagedPolicy):
                 else:
                     del self.freq[k]
 
+    def victim_hint(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        for segment in (self.probation, self.protected, self.window):
+            for key in segment:
+                return key
+        return None
+
+    def pop_victim(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        for segment in (self.probation, self.protected, self.window):
+            if segment:
+                old, _ = segment.popitem(last=False)
+                self._evict(old)
+                return old
+        return None
+
     def _on_hit(self, key: Key) -> None:
         if key in self.window:
             self.window.move_to_end(key)
@@ -1128,6 +1315,32 @@ class LayerLRUPolicy(_SelfManagedPolicy):
         if key[0] > self._max_layer:
             self._max_layer = key[0]
 
+    def _over_quota_layer(self) -> Optional[int]:
+        candidates = [lay for lay, od in self._layers.items() if od]
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda lay: len(self._layers[lay]) - self._quota(lay),
+        )
+
+    def victim_hint(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        layer = self._over_quota_layer()
+        if layer is None:
+            return None
+        return next(iter(self._layers[layer]))
+
+    def pop_victim(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        layer = self._over_quota_layer()
+        if layer is None:
+            return None
+        old, _ = self._layers[layer].popitem(last=False)
+        self._evict(old)
+        return old
+
+    def _prepare_speculative(self, key: Key) -> None:
+        self._record_access(key)  # track the layer for the per-layer quota
+
     def _on_hit(self, key: Key) -> None:
         self._layers[key[0]].move_to_end(key)
 
@@ -1148,6 +1361,12 @@ class LayerLRUPolicy(_SelfManagedPolicy):
             self._evict(old)
         layer[key] = None
         self._insert(key)
+
+
+#: LCNU admission control: never bypass (original), bypass prefill misses
+#: only, or bypass any miss whose expected next use is no sooner than the
+#: victim's.
+LCNU_BYPASS = ("never", "prefill", "always")
 
 
 class LayerCycleNextUsePolicy(_SelfManagedPolicy):
@@ -1192,6 +1411,9 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
         prior: float = 1.0 / 16,
         num_layers: Optional[int] = None,
         cycle_aware: bool = True,
+        bypass: str = "never",
+        prefill_weight: float = 1.0,
+        decode_width: Optional[int] = None,
     ):
         super().__init__(capacity)
         if not 0.0 < alpha < 1.0:
@@ -1202,11 +1424,23 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
             raise ValueError("prior must be in (0, 1]")
         if num_layers is not None and num_layers < 1:
             raise ValueError("num_layers must be >= 1")
+        if bypass not in LCNU_BYPASS:
+            raise ValueError(f"bypass must be one of {LCNU_BYPASS}")
+        if not 0.0 <= prefill_weight <= 1.0:
+            raise ValueError("prefill_weight must be in [0, 1]")
+        if decode_width is not None and decode_width < 1:
+            raise ValueError("decode_width must be >= 1")
         self.alpha = alpha
         self.beta = beta
         self.prior = prior
         self.num_layers = num_layers
         self.cycle_aware = cycle_aware
+        # Admission control and prefill handling (defaults: original LCNU).
+        self.bypass = bypass
+        self.prefill_weight = prefill_weight
+        self.decode_width = decode_width
+        self._prefill_starts: Set[int] = set()
+        self._in_prefill = False
         self._log_keep = math.log1p(-alpha)
         self._last: Dict[Key, int] = {}  # layer-visit index of last routing
         self._ema: Dict[Key, float] = {}
@@ -1247,6 +1481,16 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
             out.append(p if p > 1e-12 else 1e-12)
         return out
 
+    def bind_trace(self, accesses: Sequence[Key]) -> None:
+        super().bind_trace(accesses)
+        self._prefill_starts = set()
+        if self.decode_width is not None:
+            # A visit routing more distinct experts than one token can is a
+            # prefill pass (the engine knows the forward mode at the gate).
+            for _, start, end in layer_segments(accesses):
+                if end - start > self.decode_width:
+                    self._prefill_starts.add(start)
+
     def _record_access(self, key: Key) -> None:
         layer = key[0]
         if layer > self._max_layer:
@@ -1255,12 +1499,29 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
                 self._cand.clear()
         if layer != self._cur:
             self._cur = layer
+            self._in_prefill = self._index in self._prefill_starts
             self._visits[layer] += 1
             self._stale.add(layer)
             self._used_now = set()
         visit = self._visits[layer]
         last = self._last.get(key)
-        if last is None:
+        if self._in_prefill and self.prefill_weight != 1.0:
+            # Prefill evidence counts ``prefill_weight`` of a routing event.
+            w = self.prefill_weight
+            if last is None:
+                self._ema[key] = (
+                    1.0 - self.alpha
+                ) * self.prior + self.alpha * w
+                self._count[key] = w
+                self._first[key] = visit - 1
+            elif visit > last:
+                gap = visit - last
+                self._ema[key] = (
+                    self._ema[key] * math.exp(self._log_keep * gap)
+                    + self.alpha * w
+                )
+                self._count[key] += w
+        elif last is None:
             self._ema[key] = (1.0 - self.alpha) * self.prior + self.alpha
             self._count[key] = 1
             self._first[key] = visit - 1
@@ -1272,6 +1533,29 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
             self._count[key] += 1
         self._last[key] = visit
         self._used_now.add(key)
+
+    def _bypassing(self) -> bool:
+        return self.bypass == "always" or (
+            self.bypass == "prefill" and self._in_prefill
+        )
+
+    def _score(self, layer: int, key: Key) -> float:
+        """LCNU's expected next use of ``key`` (layer-steps)."""
+        return self._distance(layer, key) + self.cycle * (
+            1.0 / self.routing_probability(key) - 1.0
+        )
+
+    def admits(self, key: Key) -> bool:
+        """Whether a miss on ``key`` should be cached (admission control).
+
+        With ``bypass`` active a missed expert whose expected next use is no
+        sooner than the victim's is used without being cached (an engine's
+        transient expert slot), the online analogue of Belady with bypass.
+        """
+        if not self._bypassing() or not self.resident:
+            return True
+        layer, victim = self._victim()
+        return self._score(key[0], key) < self._score(layer, victim)
 
     def _layer_candidate(self, layer: int, cycle: int) -> Tuple[float, Key]:
         """Max of ``cycle * (1/p - 1)`` over the layer's residents."""
@@ -1315,9 +1599,49 @@ class LayerCycleNextUsePolicy(_SelfManagedPolicy):
                 best_s, best_k, best_layer = s, key, cur
         return best_layer, best_k
 
+    def victim_hint(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        if not self.resident:
+            return None
+        return self._victim()[1]
+
+    def pop_victim(self, protect: Sequence[Key] = ()) -> Optional[Key]:
+        if not self.resident:
+            return None
+        layer, old = self._victim()
+        self._by_layer[layer].discard(old)
+        if layer != self._cur:
+            self._stale.add(layer)
+        self._evict(old)
+        return old
+
+    def _prepare_speculative(self, key: Key) -> None:
+        """Give a prefetched key neutral stats without a routing event.
+
+        The key is scored with ``p = prior`` (an average expert) until its
+        first demand use; a routing event is *not* recorded, so prefetching
+        does not inflate the expert's estimated routing probability, and the
+        layer-visit clock is untouched.
+        """
+        layer = key[0]
+        if layer > self._max_layer:
+            self._max_layer = layer
+            if self.num_layers is None:  # inferred cycle grew
+                self._cand.clear()
+        if key not in self._last:
+            visit = self._visits[layer]
+            self._ema[key] = self.prior
+            self._count[key] = 0
+            self._first[key] = visit
+            self._last[key] = visit
+        self._stale.add(layer)
+
     def _on_miss(self, key: Key) -> None:
         if len(self.resident) >= self.capacity:
             layer, old = self._victim()
+            if self._bypassing() and self._score(key[0], key) >= self._score(
+                layer, old
+            ):
+                return  # served from a transient slot, not cached
             self._by_layer[layer].discard(old)
             if layer != self._cur:
                 self._stale.add(layer)
@@ -1369,11 +1693,28 @@ POLICY_FACTORIES = {
     "w_tinylfu": lambda cap, **kw: WTinyLFUPolicy(cap, **kw),
     "layer_lru": lambda cap, **kw: LayerLRUPolicy(cap, **kw),
     "lcnu": lambda cap, **kw: LayerCycleNextUsePolicy(cap, **kw),
+    # LCNU with decode-only routing statistics: prefill passes (visits wider
+    # than ``decode_width``) give no routing evidence.
+    "lcnu_p": lambda cap, **kw: LayerCycleNextUsePolicy(
+        cap, **{"prefill_weight": 0.0, **kw}
+    ),
+    # ... plus admission control: a miss whose expected next use is no
+    # sooner than the victim's is not cached.
+    "lcnu_b": lambda cap, **kw: LayerCycleNextUsePolicy(
+        cap, **{"bypass": "always", "prefill_weight": 0.0, **kw}
+    ),
 }
 
 #: Policies that accept the model geometry (``num_layers``; ``lcnu`` also
 #: ``prior = top_k / num_experts``) as keyword arguments.
-GEOMETRY_POLICIES = {"layer_lru", "lcnu"}
+GEOMETRY_POLICIES = {"layer_lru", "lcnu", "lcnu_p", "lcnu_b"}
+
+#: LCNU variants (take ``prior`` and ``decode_width`` too).
+LCNU_POLICIES = {"lcnu", "lcnu_p", "lcnu_b"}
+
+#: Policies that may serve a miss without caching it (compare with
+#: ``belady_simulate(..., bypass=True)``).
+BYPASS_POLICIES = {"lcnu_b"}
 
 
 # Keep a module-level INF for callers that compare against Belady.

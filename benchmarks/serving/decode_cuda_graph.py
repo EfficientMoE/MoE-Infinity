@@ -4,6 +4,7 @@ import argparse
 import json
 import statistics
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -19,8 +20,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Paired decode CUDA graph benchmark"
     )
     parser.add_argument(
-        "--mode", choices=("fixture", "model"), default="fixture"
+        "--mode", choices=("fixture", "resident", "model"), default="fixture"
     )
+    parser.add_argument(
+        "--resident-config",
+        choices=("tiny", "qwen3-30b-a3b"),
+        default="tiny",
+        help="resident mode: random-weight Qwen3-MoE shape",
+    )
+    parser.add_argument(
+        "--experts-impl",
+        choices=("batched_mm", "grouped_mm", "grouped_decode"),
+        default="batched_mm",
+        help=(
+            "resident mode: experts implementation. batched_mm (HF) and "
+            "grouped_decode (moe_infinity._store grouped decode kernel over a "
+            "device pointer table) are capture-safe; HF grouped_mm "
+            "(transformers 5.12) is not"
+        ),
+    )
+    parser.add_argument("--num-layers", type=int, default=None)
+    parser.add_argument("--rtol", type=float, default=1e-4)
+    parser.add_argument("--atol", type=float, default=1e-4)
     parser.add_argument("--model")
     parser.add_argument("--offload-dir")
     parser.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 2, 4])
@@ -72,6 +93,7 @@ def build_result(
     graph_stats: dict[str, object],
     environment: dict[str, object],
     correctness: dict[str, object] | None = None,
+    host: dict[str, object] | None = None,
 ) -> dict[str, object]:
     measurements: dict[str, object] = {
         "eager_us": eager_us,
@@ -81,6 +103,8 @@ def build_result(
         measurements["eager_summary_us"] = _summary(eager_us)
     if replay_us:
         measurements["replay_summary_us"] = _summary(replay_us)
+    if host:
+        measurements.update(host)
     if eager_us and replay_us:
         replay_p50 = statistics.median(replay_us)
         measurements["observed_ratio"] = (
@@ -97,19 +121,40 @@ def build_result(
 
 
 def _time_cuda(
-    operation: Callable[[], torch.Tensor],
-) -> tuple[float, torch.Tensor]:
+    operation: Callable[[], torch.Tensor | None],
+) -> tuple[float, float, torch.Tensor | None]:
+    """Return (GPU microseconds, host microseconds, output) for one call.
+
+    The host time is the wall time of the call itself, measured before the
+    stream is synchronised: the CPU cost of issuing the step.
+    """
     start = torch.cuda.Event(enable_timing=True)
     stop = torch.cuda.Event(enable_timing=True)
     start.record()
+    host_start = time.perf_counter()
     output = operation()
+    host_us = (time.perf_counter() - host_start) * 1e6
     stop.record()
     stop.synchronize()
-    return float(start.elapsed_time(stop) * 1000.0), output
+    return float(start.elapsed_time(stop) * 1000.0), host_us, output
+
+
+_LAUNCH_APIS = (
+    "cudaLaunchKernel",
+    "cudaLaunchKernelExC",
+    "cuLaunchKernel",
+    "cuLaunchKernelEx",
+    "cudaGraphLaunch",
+    "cudaMemcpyAsync",
+    "cudaMemsetAsync",
+)
+
+
+_ATTENTION_KERNELS = ("paged_attention", "split_kv", "merge_splits")
 
 
 def _profile_cuda_operation(
-    operation: Callable[[], torch.Tensor],
+    operation: Callable[[], torch.Tensor | None],
 ) -> dict[str, float | int]:
     with torch.profiler.profile(
         activities=[
@@ -119,13 +164,28 @@ def _profile_cuda_operation(
     ) as profile:
         _ = operation()
         torch.cuda.synchronize()
-    events = profile.key_averages()
-    cuda_events = [event for event in events if event.device_time_total > 0]
+    host_launches = 0
+    graph_launches = 0
+    device_activities = 0
+    device_time_us = 0.0
+    attention_time_us = 0.0
+    for event in profile.events():
+        if event.device_type == torch.autograd.DeviceType.CUDA:
+            device_activities += 1
+            device_time_us += float(event.device_time)
+            if any(tag in event.name for tag in _ATTENTION_KERNELS):
+                attention_time_us += float(event.device_time)
+        elif event.name in _LAUNCH_APIS:
+            host_launches += 1
+            graph_launches += int(event.name == "cudaGraphLaunch")
     return {
-        "cuda_operator_count": sum(event.count for event in cuda_events),
-        "cuda_time_us": float(
-            sum(event.device_time_total for event in cuda_events)
-        ),
+        "host_launch_calls": host_launches,
+        "graph_launches": graph_launches,
+        "device_activities": device_activities,
+        "device_time_us": device_time_us,
+        # Decode-attention kernels, so the host / GPU ratio can also be read
+        # against the rest of the step (independent of the attention kernel).
+        "attention_device_time_us": attention_time_us,
     }
 
 
@@ -137,58 +197,72 @@ def _environment() -> dict[str, object]:
     }
 
 
-def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
-    from benchmarks.serving.decode_cuda_graph_fixture import build_fixture
+def _build_fixture(args: argparse.Namespace, batch_sizes, context_sizes):
+    from benchmarks.serving.decode_cuda_graph_fixture import (
+        build_fixture,
+        build_resident_fixture,
+    )
 
-    batch_sizes = tuple(sorted(set(args.batch_sizes)))
-    context_sizes = tuple(sorted(set(args.context_sizes)))
-    fixture = build_fixture(
+    if args.mode == "resident":
+        return build_resident_fixture(
+            batch_sizes=batch_sizes,
+            context_sizes=context_sizes,
+            warmup_iters=args.warmup_iters,
+            config_name=args.resident_config,
+            experts_impl=args.experts_impl,
+            num_layers=args.num_layers,
+            max_graph_memory_bytes=args.max_graph_memory_bytes,
+        )
+    return build_fixture(
         batch_sizes=batch_sizes,
         context_sizes=context_sizes,
         warmup_iters=args.warmup_iters,
         max_graph_memory_bytes=args.max_graph_memory_bytes,
     )
+
+
+def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
+    batch_sizes = tuple(sorted(set(args.batch_sizes)))
+    context_sizes = tuple(sorted(set(args.context_sizes)))
+    fixture = _build_fixture(args, batch_sizes, context_sizes)
+    runner = fixture.model_runner
     points: list[dict[str, object]] = []
+    profiled: list[tuple[dict[str, object], Callable, Callable]] = []
     try:
         for batch_size in batch_sizes:
             for context_size in context_sizes:
                 batch = fixture.make_batch(batch_size, context_size)
-                prepared = fixture.model_runner.allocate_decode_buffers(
-                    batch_bucket=batch_size,
-                    context_bucket=context_size,
-                )
-                fixture.model_runner.copy_decode_batch(batch, prepared, [])
+
+                def eager_step(batch=batch) -> torch.Tensor:
+                    return runner.execute(batch)
+
+                def graph_step(batch=batch) -> torch.Tensor | None:
+                    return fixture.graph_runner.try_execute(batch)
 
                 for _ in range(args.warmup_iters):
-                    _ = fixture.model_runner.forward_prepared_decode(prepared)
-                graph_output = fixture.graph_runner.try_execute(batch)
+                    _ = eager_step()
+                graph_output = graph_step()
                 if graph_output is None:
                     raise RuntimeError(
                         f"fixture graph fallback: {fixture.graph_runner.stats()}"
                     )
+                for _ in range(args.warmup_iters):
+                    _ = graph_step()
                 torch.cuda.synchronize()
 
                 eager_us: list[float] = []
                 replay_us: list[float] = []
-                eager_output = fixture.model_runner.forward_prepared_decode(
-                    prepared
-                )
+                eager_output = eager_step()
                 for iteration in range(args.measure_iters):
                     operations = ("eager", "graph")
                     if iteration % 2:
                         operations = tuple(reversed(operations))
                     for operation in operations:
                         if operation == "eager":
-                            elapsed, eager_output = _time_cuda(
-                                lambda: fixture.model_runner.forward_prepared_decode(
-                                    prepared
-                                )
-                            )
+                            elapsed, _, eager_output = _time_cuda(eager_step)
                             eager_us.append(elapsed)
                         else:
-                            elapsed, replayed = _time_cuda(
-                                lambda: fixture.graph_runner.try_execute(batch)
-                            )
+                            elapsed, _, replayed = _time_cuda(graph_step)
                             if replayed is None:
                                 raise RuntimeError(
                                     "fixture graph unexpectedly fell back"
@@ -196,14 +270,31 @@ def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
                             graph_output = replayed
                             replay_us.append(elapsed)
 
+                # Host cost per step, measured in runs of the same step so
+                # the eager path's large temporaries do not make the caching
+                # allocator release memory inside a timed replay.
+                eager_host_us = [
+                    _time_cuda(eager_step)[1] for _ in range(args.measure_iters)
+                ]
+                replay_host_us = [
+                    _time_cuda(graph_step)[1] for _ in range(args.measure_iters)
+                ]
+
+                assert graph_output is not None and eager_output is not None
                 torch.testing.assert_close(
-                    graph_output,
-                    eager_output[:batch_size],
-                    rtol=1e-4,
-                    atol=1e-4,
+                    graph_output.float(),
+                    eager_output[:batch_size].float(),
+                    rtol=args.rtol,
+                    atol=args.atol,
+                )
+                argmax_equal = bool(
+                    torch.equal(
+                        graph_output.argmax(-1),
+                        eager_output[:batch_size].argmax(-1),
+                    )
                 )
                 checksums = [
-                    float(fixture.storage.value_cache[layer].sum().item())
+                    float(fixture.storage.value_cache[layer].float().sum())
                     for layer in range(fixture.storage.spec.num_layers)
                 ]
                 stats = fixture.graph_runner.stats()
@@ -218,13 +309,14 @@ def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
                         (), dtype=fixture.storage.spec.dtype
                     ).element_size()
                 )
+                registered = len(runner.paged_attention_registry.bindings)
                 stats.update(
                     {
                         "capability_reason": "eligible",
-                        "registered_paged_layers": 2,
-                        "proved_write_layers": 2,
+                        "registered_paged_layers": registered,
+                        "proved_write_layers": registered,
                         "kv_storage_owner_id": fixture.storage.owner_id,
-                        "per_layer_kv_checksums": checksums,
+                        "per_layer_kv_checksums": checksums[:4],
                         "native_attention_kernel": True,
                         "scratch_kv_bytes": scratch_kv_bytes,
                         "replay_coverage": 1.0,
@@ -232,20 +324,26 @@ def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
                 )
                 launch_profile: dict[str, object] = {}
                 if args.profile_launches:
-                    launch_profile = {
-                        "eager": _profile_cuda_operation(
-                            lambda: fixture.model_runner.forward_prepared_decode(
-                                prepared
-                            )
-                        ),
-                        "replay": _profile_cuda_operation(
-                            lambda: fixture.graph_runner.try_execute(batch)
-                        ),
-                    }
+                    # Profiled after every timing: CUPTI stays attached once
+                    # the profiler ran and slows later host launches.
+                    profiled.append((launch_profile, eager_step, graph_step))
+                replay_gpu_p50 = statistics.median(replay_us)
+                replay_host_p50 = statistics.median(replay_host_us)
                 points.append(
                     build_result(
                         config={
-                            "mode": "fixture",
+                            "mode": args.mode,
+                            "resident_config": (
+                                args.resident_config
+                                if args.mode == "resident"
+                                else None
+                            ),
+                            "experts_impl": (
+                                args.experts_impl
+                                if args.mode == "resident"
+                                else None
+                            ),
+                            "num_layers": fixture.storage.spec.num_layers,
                             "batch_size": batch_size,
                             "context_size": context_size,
                             "batch_buckets": batch_sizes,
@@ -257,14 +355,27 @@ def _run_fixture(args: argparse.Namespace) -> dict[str, object]:
                         graph_stats=stats,
                         environment=_environment(),
                         correctness={
-                            "eager_replay_equal": True,
+                            "eager_replay_close": True,
+                            "eager_replay_argmax_equal": argmax_equal,
                             "launch_profile": launch_profile,
+                        },
+                        host={
+                            "eager_host_us": _summary(eager_host_us),
+                            "replay_host_us": _summary(replay_host_us),
+                            "replay_host_over_gpu": (
+                                replay_host_p50 / replay_gpu_p50
+                                if replay_gpu_p50
+                                else None
+                            ),
                         },
                     )
                 )
+        for launch_profile, eager_step, graph_step in profiled:
+            launch_profile["eager"] = _profile_cuda_operation(eager_step)
+            launch_profile["replay"] = _profile_cuda_operation(graph_step)
     finally:
         fixture.close()
-    return {"schema_version": 1, "mode": "fixture", "results": points}
+    return {"schema_version": 1, "mode": args.mode, "results": points}
 
 
 def _run_model(args: argparse.Namespace) -> dict[str, object]:
@@ -335,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_args(args)
     if not torch.cuda.is_available():
         raise RuntimeError("decode CUDA graph benchmark requires CUDA")
-    result = _run_fixture(args) if args.mode == "fixture" else _run_model(args)
+    result = _run_model(args) if args.mode == "model" else _run_fixture(args)
     args.output_json.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
     return 0

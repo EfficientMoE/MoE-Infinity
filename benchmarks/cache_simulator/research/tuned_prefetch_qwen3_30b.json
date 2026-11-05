@@ -1,0 +1,1273 @@
+{
+  "model": "qwen3-30b-a3b",
+  "dataset": "mmlu150-greedy64/decode/tune",
+  "keyspace": 6144,
+  "evictors": [
+    "lru",
+    "lcnu"
+  ],
+  "objective": "mean stall_ms_nominal / evictor-alone stall",
+  "commit": "1a64e8c",
+  "best": [
+    {
+      "prefetcher": "coactivation",
+      "admission": "buffer",
+      "capacity": 128,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.916746
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "buffer",
+      "capacity": 256,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.916522
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "buffer",
+      "capacity": 512,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.92312
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "buffer",
+      "capacity": 1024,
+      "spec": "coactivation:budget=8,horizon=1",
+      "mean_relative_stall": 0.919287
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "buffer",
+      "capacity": 2048,
+      "spec": "coactivation:budget=8,horizon=1",
+      "mean_relative_stall": 0.911566
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "buffer",
+      "capacity": 3072,
+      "spec": "coactivation:budget=16,horizon=1",
+      "mean_relative_stall": 0.928866
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "do_no_harm",
+      "capacity": 128,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.91634
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "do_no_harm",
+      "capacity": 256,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.916437
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "do_no_harm",
+      "capacity": 512,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.925957
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "do_no_harm",
+      "capacity": 1024,
+      "spec": "coactivation:budget=8,horizon=1",
+      "mean_relative_stall": 0.919828
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "do_no_harm",
+      "capacity": 2048,
+      "spec": "coactivation:budget=8,horizon=1",
+      "mean_relative_stall": 0.910716
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "do_no_harm",
+      "capacity": 3072,
+      "spec": "coactivation:budget=16,horizon=1",
+      "mean_relative_stall": 0.927049
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "pin",
+      "capacity": 128,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.915508
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "pin",
+      "capacity": 256,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.914625
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "pin",
+      "capacity": 512,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.920287
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "pin",
+      "capacity": 1024,
+      "spec": "coactivation:budget=8,horizon=1",
+      "mean_relative_stall": 0.911243
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "pin",
+      "capacity": 2048,
+      "spec": "coactivation:budget=8,horizon=1",
+      "mean_relative_stall": 0.904654
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "pin",
+      "capacity": 3072,
+      "spec": "coactivation:budget=16,horizon=2",
+      "mean_relative_stall": 0.909309
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "probation",
+      "capacity": 128,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.915508
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "probation",
+      "capacity": 256,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.914625
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "probation",
+      "capacity": 512,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.920287
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "probation",
+      "capacity": 1024,
+      "spec": "coactivation:budget=8,horizon=1",
+      "mean_relative_stall": 0.911243
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "probation",
+      "capacity": 2048,
+      "spec": "coactivation:budget=8,horizon=1",
+      "mean_relative_stall": 0.904654
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "probation",
+      "capacity": 3072,
+      "spec": "coactivation:budget=16,horizon=1",
+      "mean_relative_stall": 0.911774
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "same_queue",
+      "capacity": 128,
+      "spec": "coactivation:budget=2,horizon=1",
+      "mean_relative_stall": 0.938896
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "same_queue",
+      "capacity": 256,
+      "spec": "coactivation:budget=2,horizon=1",
+      "mean_relative_stall": 0.9421
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "same_queue",
+      "capacity": 512,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.940295
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "same_queue",
+      "capacity": 1024,
+      "spec": "coactivation:budget=4,horizon=1",
+      "mean_relative_stall": 0.93792
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "same_queue",
+      "capacity": 2048,
+      "spec": "coactivation:budget=8,horizon=1",
+      "mean_relative_stall": 0.910253
+    },
+    {
+      "prefetcher": "coactivation",
+      "admission": "same_queue",
+      "capacity": 3072,
+      "spec": "coactivation:budget=16,horizon=4",
+      "mean_relative_stall": 0.876892
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "buffer",
+      "capacity": 128,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.911286
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "buffer",
+      "capacity": 256,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.91282
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "buffer",
+      "capacity": 512,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.926261
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "buffer",
+      "capacity": 1024,
+      "spec": "hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.91062
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "buffer",
+      "capacity": 2048,
+      "spec": "hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.920244
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "buffer",
+      "capacity": 3072,
+      "spec": "hybrid:alpha=0.4,budget=16,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.933011
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "do_no_harm",
+      "capacity": 128,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.911069
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "do_no_harm",
+      "capacity": 256,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.912987
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "do_no_harm",
+      "capacity": 512,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.928678
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "do_no_harm",
+      "capacity": 1024,
+      "spec": "hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.914102
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "do_no_harm",
+      "capacity": 2048,
+      "spec": "hybrid:alpha=0.4,budget=8,horizon=2,weights=1/1/16",
+      "mean_relative_stall": 0.918469
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "do_no_harm",
+      "capacity": 3072,
+      "spec": "hybrid:alpha=0.4,budget=16,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.930536
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "pin",
+      "capacity": 128,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.909925
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "pin",
+      "capacity": 256,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.910933
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "pin",
+      "capacity": 512,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.923692
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "pin",
+      "capacity": 1024,
+      "spec": "hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.903203
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "pin",
+      "capacity": 2048,
+      "spec": "hybrid:alpha=0.4,budget=8,horizon=2,weights=1/1/16",
+      "mean_relative_stall": 0.909217
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "pin",
+      "capacity": 3072,
+      "spec": "hybrid:alpha=0.4,budget=16,horizon=2,weights=1/1/16",
+      "mean_relative_stall": 0.90903
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "probation",
+      "capacity": 128,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.909925
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "probation",
+      "capacity": 256,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.910933
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "probation",
+      "capacity": 512,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.923692
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "probation",
+      "capacity": 1024,
+      "spec": "hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.903203
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "probation",
+      "capacity": 2048,
+      "spec": "hybrid:alpha=0.4,budget=8,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.913431
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "probation",
+      "capacity": 3072,
+      "spec": "hybrid:alpha=0.4,budget=16,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.915793
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "same_queue",
+      "capacity": 128,
+      "spec": "hybrid:alpha=0.4,budget=2,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.936212
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "same_queue",
+      "capacity": 256,
+      "spec": "hybrid:alpha=0.4,budget=2,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.940735
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "same_queue",
+      "capacity": 512,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.941161
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "same_queue",
+      "capacity": 1024,
+      "spec": "hybrid:alpha=0.4,budget=4,horizon=1,weights=1/1/16",
+      "mean_relative_stall": 0.94777
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "same_queue",
+      "capacity": 2048,
+      "spec": "hybrid:alpha=0.4,budget=8,horizon=2,weights=1/1/16",
+      "mean_relative_stall": 0.915807
+    },
+    {
+      "prefetcher": "hybrid",
+      "admission": "same_queue",
+      "capacity": 3072,
+      "spec": "hybrid:alpha=0.4,budget=16,horizon=4,weights=1/1/16",
+      "mean_relative_stall": 0.878452
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "buffer",
+      "capacity": 128,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.850742
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "buffer",
+      "capacity": 256,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.830294
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "buffer",
+      "capacity": 512,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.74852
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "buffer",
+      "capacity": 1024,
+      "spec": "oracle:horizon=2",
+      "mean_relative_stall": 0.63176
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "buffer",
+      "capacity": 2048,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.324416
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "buffer",
+      "capacity": 3072,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.084403
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "do_no_harm",
+      "capacity": 128,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.842699
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "do_no_harm",
+      "capacity": 256,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.82288
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "do_no_harm",
+      "capacity": 512,
+      "spec": "oracle:horizon=2",
+      "mean_relative_stall": 0.73869
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "do_no_harm",
+      "capacity": 1024,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.602608
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "do_no_harm",
+      "capacity": 2048,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.286323
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "do_no_harm",
+      "capacity": 3072,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.071036
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "pin",
+      "capacity": 128,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.842699
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "pin",
+      "capacity": 256,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.82288
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "pin",
+      "capacity": 512,
+      "spec": "oracle:horizon=2",
+      "mean_relative_stall": 0.73869
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "pin",
+      "capacity": 1024,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.602608
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "pin",
+      "capacity": 2048,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.286323
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "pin",
+      "capacity": 3072,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.071036
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "probation",
+      "capacity": 128,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.842699
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "probation",
+      "capacity": 256,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.82288
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "probation",
+      "capacity": 512,
+      "spec": "oracle:horizon=2",
+      "mean_relative_stall": 0.738698
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "probation",
+      "capacity": 1024,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.602543
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "probation",
+      "capacity": 2048,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.286373
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "probation",
+      "capacity": 3072,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.071147
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "same_queue",
+      "capacity": 128,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.899342
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "same_queue",
+      "capacity": 256,
+      "spec": "oracle:horizon=1",
+      "mean_relative_stall": 0.907422
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "same_queue",
+      "capacity": 512,
+      "spec": "oracle:horizon=2",
+      "mean_relative_stall": 0.849713
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "same_queue",
+      "capacity": 1024,
+      "spec": "oracle:horizon=2",
+      "mean_relative_stall": 0.753687
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "same_queue",
+      "capacity": 2048,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.46552
+    },
+    {
+      "prefetcher": "oracle",
+      "admission": "same_queue",
+      "capacity": 3072,
+      "spec": "oracle:horizon=4",
+      "mean_relative_stall": 0.189501
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "buffer",
+      "capacity": 128,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.983715
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "buffer",
+      "capacity": 256,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.984185
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "buffer",
+      "capacity": 512,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.995851
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "buffer",
+      "capacity": 1024,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.001298
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "buffer",
+      "capacity": 2048,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.001759
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "buffer",
+      "capacity": 3072,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.002392
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "do_no_harm",
+      "capacity": 128,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.964767
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "do_no_harm",
+      "capacity": 256,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.972044
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "do_no_harm",
+      "capacity": 512,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.994427
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "do_no_harm",
+      "capacity": 1024,
+      "spec": "prev_token:budget=8,horizon=4",
+      "mean_relative_stall": 0.999998
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "do_no_harm",
+      "capacity": 2048,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "do_no_harm",
+      "capacity": 3072,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "pin",
+      "capacity": 128,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.982765
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "pin",
+      "capacity": 256,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.98303
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "pin",
+      "capacity": 512,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.994427
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "pin",
+      "capacity": 1024,
+      "spec": "prev_token:budget=8,horizon=4",
+      "mean_relative_stall": 0.999998
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "pin",
+      "capacity": 2048,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "pin",
+      "capacity": 3072,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "probation",
+      "capacity": 128,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.982765
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "probation",
+      "capacity": 256,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.98303
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "probation",
+      "capacity": 512,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.994427
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "probation",
+      "capacity": 1024,
+      "spec": "prev_token:budget=8,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "probation",
+      "capacity": 2048,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "probation",
+      "capacity": 3072,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "same_queue",
+      "capacity": 128,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.983339
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "same_queue",
+      "capacity": 256,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.985895
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "same_queue",
+      "capacity": 512,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 0.998735
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "same_queue",
+      "capacity": 1024,
+      "spec": "prev_token:budget=8,horizon=4",
+      "mean_relative_stall": 0.999999
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "same_queue",
+      "capacity": 2048,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "prev_token",
+      "admission": "same_queue",
+      "capacity": 3072,
+      "spec": "prev_token:budget=2,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "buffer",
+      "capacity": 128,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.106084
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "buffer",
+      "capacity": 256,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.115251
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "buffer",
+      "capacity": 512,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.15662
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "buffer",
+      "capacity": 1024,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.189899
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "buffer",
+      "capacity": 2048,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.214749
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "buffer",
+      "capacity": 3072,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.190997
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "do_no_harm",
+      "capacity": 128,
+      "spec": "same_id:budget=8,horizon=1",
+      "mean_relative_stall": 0.987976
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "do_no_harm",
+      "capacity": 256,
+      "spec": "same_id:budget=8,horizon=1",
+      "mean_relative_stall": 0.990716
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "do_no_harm",
+      "capacity": 512,
+      "spec": "same_id:budget=8,horizon=1",
+      "mean_relative_stall": 0.994456
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "do_no_harm",
+      "capacity": 1024,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 0.999402
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "do_no_harm",
+      "capacity": 2048,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.027169
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "do_no_harm",
+      "capacity": 3072,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.056861
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "pin",
+      "capacity": 128,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.10523
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "pin",
+      "capacity": 256,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.114084
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "pin",
+      "capacity": 512,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.153826
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "pin",
+      "capacity": 1024,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.185683
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "pin",
+      "capacity": 2048,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.211829
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "pin",
+      "capacity": 3072,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.189496
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "probation",
+      "capacity": 128,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.10523
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "probation",
+      "capacity": 256,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.114084
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "probation",
+      "capacity": 512,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.153826
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "probation",
+      "capacity": 1024,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.185683
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "probation",
+      "capacity": 2048,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.211829
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "probation",
+      "capacity": 3072,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.189496
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "same_queue",
+      "capacity": 128,
+      "spec": "same_id:budget=2,horizon=4",
+      "mean_relative_stall": 1.046298
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "same_queue",
+      "capacity": 256,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.046786
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "same_queue",
+      "capacity": 512,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.044829
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "same_queue",
+      "capacity": 1024,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.103918
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "same_queue",
+      "capacity": 2048,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.171573
+    },
+    {
+      "prefetcher": "same_id",
+      "admission": "same_queue",
+      "capacity": 3072,
+      "spec": "same_id:budget=2,horizon=1",
+      "mean_relative_stall": 1.268203
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "buffer",
+      "capacity": 128,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=1",
+      "mean_relative_stall": 0.9679
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "buffer",
+      "capacity": 256,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=1",
+      "mean_relative_stall": 0.974424
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "buffer",
+      "capacity": 512,
+      "spec": "topk_ema:alpha=0.4,budget=4,horizon=1",
+      "mean_relative_stall": 0.998865
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "buffer",
+      "capacity": 1024,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=1",
+      "mean_relative_stall": 1.001298
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "buffer",
+      "capacity": 2048,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=1",
+      "mean_relative_stall": 1.001759
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "buffer",
+      "capacity": 3072,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=1",
+      "mean_relative_stall": 1.002392
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "do_no_harm",
+      "capacity": 128,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=1",
+      "mean_relative_stall": 0.964975
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "do_no_harm",
+      "capacity": 256,
+      "spec": "topk_ema:alpha=0.4,budget=4,horizon=1",
+      "mean_relative_stall": 0.969482
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "do_no_harm",
+      "capacity": 512,
+      "spec": "topk_ema:alpha=0.4,budget=4,horizon=1",
+      "mean_relative_stall": 0.996596
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "do_no_harm",
+      "capacity": 1024,
+      "spec": "topk_ema:alpha=0.4,budget=8,horizon=4",
+      "mean_relative_stall": 0.999998
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "do_no_harm",
+      "capacity": 2048,
+      "spec": "topk_ema:alpha=0.4,budget=16,horizon=1",
+      "mean_relative_stall": 0.999946
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "do_no_harm",
+      "capacity": 3072,
+      "spec": "topk_ema:alpha=0.4,budget=32,horizon=1",
+      "mean_relative_stall": 0.999742
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "pin",
+      "capacity": 128,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=1",
+      "mean_relative_stall": 0.966713
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "pin",
+      "capacity": 256,
+      "spec": "topk_ema:alpha=0.4,budget=4,horizon=1",
+      "mean_relative_stall": 0.972898
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "pin",
+      "capacity": 512,
+      "spec": "topk_ema:alpha=0.4,budget=4,horizon=1",
+      "mean_relative_stall": 0.996737
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "pin",
+      "capacity": 1024,
+      "spec": "topk_ema:alpha=0.4,budget=8,horizon=4",
+      "mean_relative_stall": 0.999998
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "pin",
+      "capacity": 2048,
+      "spec": "topk_ema:alpha=0.4,budget=16,horizon=1",
+      "mean_relative_stall": 0.999992
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "pin",
+      "capacity": 3072,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "probation",
+      "capacity": 128,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=1",
+      "mean_relative_stall": 0.966713
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "probation",
+      "capacity": 256,
+      "spec": "topk_ema:alpha=0.4,budget=4,horizon=1",
+      "mean_relative_stall": 0.972898
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "probation",
+      "capacity": 512,
+      "spec": "topk_ema:alpha=0.4,budget=4,horizon=1",
+      "mean_relative_stall": 0.996737
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "probation",
+      "capacity": 1024,
+      "spec": "topk_ema:alpha=0.4,budget=8,horizon=4",
+      "mean_relative_stall": 0.999998
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "probation",
+      "capacity": 2048,
+      "spec": "topk_ema:alpha=0.4,budget=16,horizon=1",
+      "mean_relative_stall": 0.999992
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "probation",
+      "capacity": 3072,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=1",
+      "mean_relative_stall": 1.0
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "same_queue",
+      "capacity": 128,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=2",
+      "mean_relative_stall": 0.970549
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "same_queue",
+      "capacity": 256,
+      "spec": "topk_ema:alpha=0.4,budget=2,horizon=2",
+      "mean_relative_stall": 0.974158
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "same_queue",
+      "capacity": 512,
+      "spec": "topk_ema:alpha=0.4,budget=4,horizon=4",
+      "mean_relative_stall": 0.994828
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "same_queue",
+      "capacity": 1024,
+      "spec": "topk_ema:alpha=0.4,budget=8,horizon=4",
+      "mean_relative_stall": 0.999998
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "same_queue",
+      "capacity": 2048,
+      "spec": "topk_ema:alpha=0.4,budget=16,horizon=1",
+      "mean_relative_stall": 0.999941
+    },
+    {
+      "prefetcher": "topk_ema",
+      "admission": "same_queue",
+      "capacity": 3072,
+      "spec": "topk_ema:alpha=0.4,budget=32,horizon=1",
+      "mean_relative_stall": 0.998961
+    }
+  ]
+}

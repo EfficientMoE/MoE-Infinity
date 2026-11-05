@@ -183,8 +183,10 @@ Reusable prompts for driving this work with coding agents:
   (composable harness + timing model), `06_benchmark_prefetch_eviction.md`
   (real-trace sweep + engine-knob proposal).
 
-Current recommendations for choosing an eviction policy:
-[`research/recommendations.md`](./research/recommendations.md).
+Current recommendation, one default expert-cache policy (evictor, prefetcher
+and admission rule):
+[`research/recommendations.md`](./research/recommendations.md); round-3 study
+behind it: [`research/default_policy_study.md`](./research/default_policy_study.md).
 
 ## Trace formats
 
