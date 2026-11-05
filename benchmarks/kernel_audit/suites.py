@@ -5,7 +5,7 @@ issues the same kernels MoE-Infinity issues for that op on sm_120
 (torch 2.11 / cu130, no flash_attn / flashinfer / fla installed).
 
 Impl names:
-  production paths   cutlass_fused, grouped_prefill, fp8_native, fp8_prod,
+  production paths   cutlass_fused, cutlass_fused_act, grouped_prefill, fp8_native, fp8_prod,
                      gptoss_resident, gptoss_offload, triton_mxfp4,
                      v4_fp4_prod, v4_fp4_native, sdpa_shim, hf_eager, paged_fwd,
                      paged_fwd_int8, hf_eager_decode, router_*, gdn_torch,
@@ -95,6 +95,36 @@ def _cutlass_builder(M: int, H: int, I: int):
         return lambda: ext.fused_moe_ffn_into(x, g, u, d, gb, fb, out)
 
     return build
+
+
+# Routed-expert gated activation of the checkpoint (moe_infinity.runtime.
+# expert_activation kinds: 1 = clamped_silu, 2 = swiglu_oai); absent = silu.
+_EXPERT_ACT = {
+    "glm-5.3-flash": (1, 1.0, 10.0),
+    "minimax-m3": (2, 1.702, 7.0),
+}
+
+
+def _cutlass_act_builder(act: tuple[int, float, float]):
+    """CUTLASS path with the checkpoint's activation in the epilogue."""
+
+    def builder(M: int, H: int, I: int):
+        def build():
+            from benchmarks.kernel_audit.ext import load
+
+            ext = load()
+            x = _rand(M, H, scale=1.0)
+            g, u, d = _rand(I, H), _rand(I, H), _rand(H, I)
+            gb = torch.empty(M, I, device="cuda", dtype=torch.bfloat16)
+            fb = torch.empty_like(gb)
+            out = torch.empty(M, H, device="cuda", dtype=torch.bfloat16)
+            return lambda: ext.fused_moe_ffn_act_into(
+                x, g, u, d, gb, fb, out, *act
+            )
+
+        return build
+
+    return builder
 
 
 _MOE_MLP_MODULES: dict = {}
@@ -442,6 +472,7 @@ def _v4_fp4_native_layer_builder(T: int, n_exp: int, H: int, I: int, k: int):
 # weight bytes per element of one expert in each storage format
 _W_BYTES = {
     "cutlass_fused": BF16,
+    "cutlass_fused_act": BF16,
     "moemlp_native": BF16,
     "cublas_ref": BF16,
     "gptoss_bf16cached": BF16,
@@ -476,8 +507,12 @@ def _expert_impls(m: MoEModel):
     if m.expert_dtype.startswith("fp4"):
         impls.append(("v4_fp4_prod", _v4_fp4_builder))
         impls.append(("v4_fp4_native", _v4_fp4_native_builder))
+    impls.append(("cutlass_fused", _cutlass_builder))
+    if m.key in _EXPERT_ACT:
+        impls.append(
+            ("cutlass_fused_act", _cutlass_act_builder(_EXPERT_ACT[m.key]))
+        )
     impls += [
-        ("cutlass_fused", _cutlass_builder),
         ("moemlp_native", _moemlp_native_builder),
         ("cublas_ref", _cublas_ref_builder),
     ]

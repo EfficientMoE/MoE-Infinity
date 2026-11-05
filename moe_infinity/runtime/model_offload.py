@@ -87,6 +87,10 @@ from moe_infinity.runtime.adaptive_precision_allowlist import (
     RELEASED_ADAPTIVE_ENTRIES,
     ReleasedAdaptiveEntry,
 )
+from moe_infinity.runtime.expert_activation import (
+    apply_expert_activation,
+    resolve_expert_activation,
+)
 from moe_infinity.runtime.expert_precision import (
     PROTECTED_MODEL_PATHS,
     ModelPrecisionCapabilities,
@@ -1537,6 +1541,12 @@ class OffloadEngine(object):
                     self.dtype,
                     parse_expert_type(self.config),
                     self.archer_config.num_threads,
+                )
+                self.expert_activation = resolve_expert_activation(
+                    self.config, parse_expert_type(self.config)
+                )
+                apply_expert_activation(
+                    self.expert_dispatcher, self.expert_activation
                 )
                 self.expert_prefetcher.expert_dispatcher = (
                     self.expert_dispatcher

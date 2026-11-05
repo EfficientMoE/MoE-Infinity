@@ -62,6 +62,11 @@ MoEMLP::MoEMLP(int dtype, int expert_type) {
   }
 }
 
+void MoEMLP::SetActivation(const MoEActivation& activation) {
+  check_moe_activation(activation);
+  activation_ = activation;
+}
+
 void MoEMLP::SetRepresentation(const ExpertExecutionDescriptor& descriptor) {
   const std::size_t expected_roles =
       descriptor.execution_kind == 1 || descriptor.execution_kind == 2 ? 6 : 3;
@@ -386,7 +391,7 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
     auto& fused_out = buffer_[3];
 
     fused_moe_ffn_into(input, gate_proj, up_proj, down_proj, gate_out,
-                       fused_out, output, stream);
+                       fused_out, output, activation_, stream);
     return;
   }
   DLOG_FATAL("MoEMLP::forward: expert_type not supported", expert_type_);

@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 
+#include "kernel/moe_activation.h"
 #include "../../../extensions/kernel/v4_fp4/gptoss_expert.h"
 #include "../../../extensions/kernel/v4_fp4/mxfp4_gptoss_moe.h"
 
@@ -13,6 +14,11 @@ void fused_moe_ffn_into(at::Tensor& hidden, at::Tensor& gate_proj,
                         at::Tensor& up_proj, at::Tensor& down_proj,
                         at::Tensor& gate_buf, at::Tensor& fused_buf,
                         at::Tensor& output, cudaStream_t stream);
+void fused_moe_ffn_into(at::Tensor& hidden, at::Tensor& gate_proj,
+                        at::Tensor& up_proj, at::Tensor& down_proj,
+                        at::Tensor& gate_buf, at::Tensor& fused_buf,
+                        at::Tensor& output, const MoEActivation& activation,
+                        cudaStream_t stream);
 void mxfp4_dequant_cuda(const void* packed, const void* scales, void* output,
                         int rows, int packed_cols, int scale_cols,
                         int block_size, cudaStream_t stream);
@@ -32,6 +38,17 @@ static void py_fused_moe_ffn_into(at::Tensor hidden, at::Tensor gate_proj,
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   fused_moe_ffn_into(hidden, gate_proj, up_proj, down_proj, gate_buf, fused_buf,
                      output, stream);
+}
+
+static void py_fused_moe_ffn_act_into(at::Tensor hidden, at::Tensor gate_proj,
+                                      at::Tensor up_proj, at::Tensor down_proj,
+                                      at::Tensor gate_buf, at::Tensor fused_buf,
+                                      at::Tensor output, int kind, float alpha,
+                                      float limit) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  MoEActivation act{static_cast<MoEActivationKind>(kind), alpha, limit};
+  fused_moe_ffn_into(hidden, gate_proj, up_proj, down_proj, gate_buf, fused_buf,
+                     output, act, stream);
 }
 
 static void py_mxfp4_dequant(at::Tensor packed, at::Tensor scales,
@@ -78,6 +95,7 @@ static void py_gptoss_mxfp4_expert_pro6000(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_moe_ffn_into", &py_fused_moe_ffn_into);
+  m.def("fused_moe_ffn_act_into", &py_fused_moe_ffn_act_into);
   m.def("mxfp4_dequant", &py_mxfp4_dequant);
   m.def("fp8_dequant_blockwise", &py_fp8_dequant_blockwise);
   m.def("fused_fp8_moe_ffn_sm120_pro6000_into",

@@ -211,6 +211,7 @@ def test_fused_moe_mlp_single_expert_matches_reference(
     # fp32 reference with a tolerance relative to the output scale (a bf16
     # reference rounds the [M, I] intermediates and is itself off by ~1 %).
     reference_out = _reference_fp32(x, gate_w, up_w, down_w)
+    assert torch.isfinite(fused_out).all()
     _assert_close_to_reference(fused_out, reference_out)
 
 

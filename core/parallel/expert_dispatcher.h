@@ -309,6 +309,9 @@ class ExpertDispatcher : public base::noncopyable {
   // module (decided once at setup by moe_infinity/kernel/fp8_experts.py; the
   // modules still check the hardware gate themselves).
   void SetFp8Sm120Pro6000Experts(bool allowed);
+  // Gated activation of the routed experts (kind = MoEActivationKind). Must be
+  // called before the first dispatch; exec workers read it without locking.
+  void SetExpertActivation(int kind, float alpha, float limit);
   bool RegisterExpertVariant(
       int layer_idx, int expert_idx, const std::string& format,
       std::uint64_t generation, const std::string& execution,
