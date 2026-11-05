@@ -68,6 +68,7 @@ Stable options from `api_server_v2.py`:
 | `--enable-contextpilot` | off | Enable ContextPilot middleware |
 | `--contextpilot-debug` | off | Enable ContextPilot fault-injection/admin hooks |
 | `--phase-specific-expert-policy` / `--no-phase-specific-expert-policy` | off | Enable or explicitly disable phase-specific admission, prefetch, eviction, and mixed-batch ordering over the shared expert cache |
+| `--expert-eviction-policy` | `legacy` | GPU expert-cache eviction policy: `legacy`, `lru`, `lfu`, `lfu_k`, `lhu`, `lru_k`, `arc`, `2q`, `lirs`, `s3fifo`, `sieve`, `w_tinylfu`, `layer_lru`, `lcnu`. See [Configuration](configuration.md#expert-eviction-policy-fields) |
 
 Internal / deprecated:
 

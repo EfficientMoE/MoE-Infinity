@@ -248,6 +248,9 @@ print(output_text)
 ```
 
 For the source-derived config reference, see [docs/configuration.md](docs/configuration.md).
+To change how the GPU expert cache evicts experts (for example
+`"expert_eviction_policy": "lcnu"` for decode-heavy workloads), see
+[Expert eviction policy fields](docs/configuration.md#expert-eviction-policy-fields).
 Runtime and build env vars are listed in [docs/environment-variables.md](docs/environment-variables.md).
 
 ### Running Inference

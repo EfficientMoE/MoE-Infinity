@@ -43,6 +43,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Initialize the MoE layer with the specified parameters.");
   m.def("topk_softmax", TopKSoftmax,
         "Perform top-k softmax operation on the MoE layer.");
+  m.def("eviction_policy_names", &EvictionPolicyNames,
+        "Expert-cache eviction policies accepted besides \"legacy\".");
 
   py::class_<PrefetchAdmission>(m, "prefetch_admission")
       .def_readonly("accepted_tensor_ids",
@@ -173,6 +175,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("prefill_admission"), py::arg("decode_admission"),
            py::arg("prefill_weight"), py::arg("decode_weight"),
            py::arg("starvation_limit"))
+      .def("configure_eviction_policy",
+           &ArcherPrefetchHandle::ConfigureEvictionPolicy, py::arg("name"),
+           py::arg("num_layers") = 0, py::arg("lcnu_alpha") = 0.3,
+           py::arg("lcnu_beta") = 0.5, py::arg("lcnu_prior") = 1.0 / 16)
+      .def("get_eviction_policy", &ArcherPrefetchHandle::GetEvictionPolicy)
       .def("get_expert_policy_stats",
            &ArcherPrefetchHandle::GetExpertPolicyStats)
       .def("reset_cache", &ArcherPrefetchHandle::ResetCache);
@@ -310,7 +317,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            &ExpertDispatcher::SetOverlapComputeTimingEnabled)
       .def("drain_compute_samples", &ExpertDispatcher::DrainComputeSamples)
       .def("set_expected_queue", &ExpertDispatcher::SetExpectedQueue)
-      .def("wait_expert", &ExpertDispatcher::WaitHiddenStates)
+      // Release the GIL while blocked: a worker that drops the last C++
+      // reference to a Python-owned tensor needs it to finish the layer.
+      .def("wait_expert", &ExpertDispatcher::WaitHiddenStates,
+           py::call_guard<py::gil_scoped_release>())
       .def("dispatch_experts", &ExpertDispatcher::DispatchExperts)
       .def("take_last_active_experts", &ExpertDispatcher::TakeLastActiveExperts)
       .def("get_routing_stats", &ExpertDispatcher::GetRoutingStats)
