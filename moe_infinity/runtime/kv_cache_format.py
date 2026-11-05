@@ -163,8 +163,12 @@ def resolve_kv_cache_format(
 
 def quantize_tokenwise_symmetric(
     x: torch.Tensor,
+    *,
+    check: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if not torch.all(torch.isfinite(x)):
+    """``check=False`` skips the finiteness checks, which read a flag back to
+    the host (a sync on CUDA)."""
+    if check and not torch.all(torch.isfinite(x)):
         raise ValueError("KV cache input must contain only finite values")
     amax = x.float().abs().amax(dim=-1)
     raw_scale = amax / 127.0
@@ -178,7 +182,7 @@ def quantize_tokenwise_symmetric(
         torch.nextafter(candidate, inf),
         candidate,
     )
-    if not torch.all(torch.isfinite(scale)):
+    if check and not torch.all(torch.isfinite(scale)):
         raise ValueError("KV values require an unrepresentable FP16 scale")
     q = torch.clamp(
         torch.round(x.float() / scale.float().unsqueeze(-1)), -127, 127
@@ -232,30 +236,49 @@ class FormatLayeredKVStore:
             raise ValueError(f"K/V chunk must have shape {expected}")
         if not 0 <= layer_idx < self.num_layers:
             raise ValueError("layer_idx outside FormatLayeredKVStore")
-        slots = slot_mapping.to(self.payload.device, dtype=torch.long)
-        pages, offsets = slots // self.block_size, slots % self.block_size
-        if bool(torch.any(slots < 0)) or bool(
-            torch.any(pages >= self.num_pages)
+        from moe_infinity.kernel.paged_kv_write import (
+            flashinfer_kv_scatter_,
+            strict_checks,
+        )
+
+        device = self.payload.device
+        if slot_mapping.dtype not in (torch.int32, torch.int64):
+            slot_mapping = slot_mapping.to(dtype=torch.long)
+        slots = slot_mapping.to(device)
+        # Range / finiteness checks read back to the host; on CUDA they only
+        # run with MOE_INFINITY_KV_WRITE_CHECK=1 (the scatter drops slots
+        # outside the allocated pages on device).
+        strict = strict_checks(slots)
+        if (
+            strict
+            and slots.numel()
+            and (
+                bool(torch.any(slots < 0))
+                or bool(torch.any(slots >= self.num_pages * self.block_size))
+            )
         ):
             raise ValueError("slot_mapping points outside allocated KV pages")
-        key_chunk = key_chunk.to(
-            self.payload.device, dtype=self.execution_dtype
-        )
-        value_chunk = value_chunk.to(
-            self.payload.device, dtype=self.execution_dtype
-        )
+        key_chunk = key_chunk.to(device, dtype=self.execution_dtype)
+        value_chunk = value_chunk.to(device, dtype=self.execution_dtype)
         if self.format.name is KVCacheFormatName.NATIVE:
-            self.payload[layer_idx, pages, 0, offsets] = key_chunk
-            self.payload[layer_idx, pages, 1, offsets] = value_chunk
+            flashinfer_kv_scatter_(
+                self.payload[layer_idx], key_chunk, value_chunk, slots
+            )
             return
         if self.scales is None:
             raise RuntimeError("int8_sym storage requires K/V scales")
-        key_q, key_scale = quantize_tokenwise_symmetric(key_chunk)
-        value_q, value_scale = quantize_tokenwise_symmetric(value_chunk)
-        self.payload[layer_idx, pages, 0, offsets] = key_q
-        self.payload[layer_idx, pages, 1, offsets] = value_q
-        self.scales[layer_idx, pages, 0, offsets] = key_scale
-        self.scales[layer_idx, pages, 1, offsets] = value_scale
+        key_q, key_scale = quantize_tokenwise_symmetric(key_chunk, check=strict)
+        value_q, value_scale = quantize_tokenwise_symmetric(
+            value_chunk, check=strict
+        )
+        # payload [pages, 2, block, H, D]; scales [pages, 2, block, H] as D = 1
+        flashinfer_kv_scatter_(self.payload[layer_idx], key_q, value_q, slots)
+        flashinfer_kv_scatter_(
+            self.scales[layer_idx].unsqueeze(-1),
+            key_scale.unsqueeze(-1),
+            value_scale.unsqueeze(-1),
+            slots,
+        )
 
     def read_prefix(
         self,

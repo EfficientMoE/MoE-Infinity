@@ -62,6 +62,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompts", type=int, default=3)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--warmup-tokens", type=int, default=8)
+    parser.add_argument(
+        "--num-threads",
+        type=int,
+        default=None,
+        help="Override ArcherConfig.num_threads (GPUExecFunc workers/GPU).",
+    )
+    parser.add_argument(
+        "--gpu-only-expert-routing",
+        action="store_true",
+        help="Enable native CUDA expert routing (skips eager .cpu() dispatch).",
+    )
+    parser.add_argument(
+        "--speculative-prefetch",
+        action="store_true",
+        help="Wire the expert prefetcher (next-layer speculative prefetch).",
+    )
+    parser.add_argument(
+        "--speculative-prefetch-overlap",
+        action="store_true",
+        help="Fire speculative prefetch before the layer barrier.",
+    )
+    parser.add_argument(
+        "--cuda-profiler-range",
+        action="store_true",
+        help=(
+            "Call torch.cuda.profiler.start() after warmup and stop() at the"
+            " end so `nsys profile -c cudaProfilerApi` skips the load phase."
+        ),
+    )
     parser.add_argument("--out", default="results.json")
     return parser.parse_args()
 
@@ -136,6 +165,10 @@ def main() -> int:
         "kv_cache_memory_ratio": args.kv_cache_memory_ratio,
         "max_new_tokens": args.max_new_tokens,
         "warmup_tokens": args.warmup_tokens,
+        "num_threads": args.num_threads,
+        "gpu_only_expert_routing": args.gpu_only_expert_routing,
+        "speculative_prefetch": args.speculative_prefetch,
+        "speculative_prefetch_overlap": args.speculative_prefetch_overlap,
     }
     print(json.dumps(env, indent=2))
 
@@ -147,6 +180,14 @@ def main() -> int:
     }
     if args.kv_cache_memory_ratio is not None:
         moe_config["kv_cache_memory_ratio"] = args.kv_cache_memory_ratio
+    if args.num_threads is not None:
+        moe_config["num_threads"] = args.num_threads
+    if args.gpu_only_expert_routing:
+        moe_config["gpu_only_expert_routing"] = True
+    if args.speculative_prefetch:
+        moe_config["speculative_prefetch"] = True
+    if args.speculative_prefetch_overlap:
+        moe_config["speculative_prefetch_overlap"] = True
     model = MoE(args.ckpt, moe_config)
     load_s = time.perf_counter() - load_start
     print(f"model load (incl. store build if cold): {load_s:.1f} s")
@@ -160,6 +201,9 @@ def main() -> int:
     warm_ids = tokenizer(PROMPTS[0], return_tensors="pt").input_ids.to("cuda:0")
     warm_s, _ = _timed_generate(model, warm_ids, args.warmup_tokens)
     print(f"warmup generate ({args.warmup_tokens} tokens): {warm_s:.1f} s")
+
+    if args.cuda_profiler_range:
+        torch.cuda.profiler.start()
 
     n = args.max_new_tokens
     per_prompt: list[dict[str, Any]] = []
@@ -213,6 +257,9 @@ def main() -> int:
             f"ttft={ttft:.2f}s e2e={e2e:.2f}s "
             f"decode={decode_tok_s:.3f} tok/s hit_rate={hit_rate}"
         )
+
+    if args.cuda_profiler_range:
+        torch.cuda.profiler.stop()
 
     summary = {
         "ttft_p50_s": _p50([r["ttft_s"] for r in per_prompt]),

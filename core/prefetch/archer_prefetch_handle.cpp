@@ -122,6 +122,25 @@ void ArcherPrefetchHandle::ConfigureExpertPolicy(
   }
 }
 
+bool ArcherPrefetchHandle::ConfigureEvictionPolicy(const std::string& name,
+                                                   int num_layers,
+                                                   double lcnu_alpha,
+                                                   double lcnu_beta,
+                                                   double lcnu_prior) {
+  if (!kExpertResidencyManager) return false;
+  EvictionPolicyOptions options;
+  options.num_layers = num_layers;
+  options.lcnu_alpha = lcnu_alpha;
+  options.lcnu_beta = lcnu_beta;
+  options.lcnu_prior = lcnu_prior;
+  return kExpertResidencyManager->ConfigureEvictionPolicy(name, options);
+}
+
+std::string ArcherPrefetchHandle::GetEvictionPolicy() const {
+  return kExpertResidencyManager ? kExpertResidencyManager->EvictionPolicyName()
+                                 : "legacy";
+}
+
 ExpertPolicyStats ArcherPrefetchHandle::GetExpertPolicyStats() const {
   if (!kExpertResidencyManager) return ExpertPolicyStats{};
   return kExpertResidencyManager->Snapshot();
@@ -310,7 +329,7 @@ void ArcherPrefetchHandle::ReplaceCacheCandidates(
     candidates.push_back(node);
   }
 
-  if (kExpertResidencyManager && kExpertResidencyManager->PolicyEnabled()) {
+  if (kExpertResidencyManager && kExpertResidencyManager->ManagedResidency()) {
     kExpertResidencyManager->ReplaceProtectedCandidates(candidates);
   } else {
     kTaskPool->ReplaceCacheCandidates(candidates);

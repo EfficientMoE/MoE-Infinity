@@ -29,7 +29,11 @@ void ArcherAioThread::Stop() {
     return;
   }
 
-  is_running_.store(false);
+  {
+    // Under mutex_ for the same reason as the decrement in Run().
+    std::lock_guard<std::mutex> lock(mutex_);
+    is_running_.store(false);
+  }
   cv_.notify_one();
   thread_.join();
 }

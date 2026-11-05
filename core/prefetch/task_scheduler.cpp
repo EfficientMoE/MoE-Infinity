@@ -472,17 +472,20 @@ void ArcherTaskPool::GPUThreadFunc(int gpu_id, int thread_id) {
 
     std::uint32_t max_priority = 1000;
     std::unique_lock<std::mutex> lock(unified_mutex_);
-    const bool managed =
+    const bool phase_policy =
         kExpertResidencyManager && kExpertResidencyManager->PolicyEnabled();
+    const bool managed =
+        kExpertResidencyManager && kExpertResidencyManager->ManagedResidency();
     TaskPtr task = nullptr;
     std::uint32_t selected_class = 1000;
     for (std::uint32_t i = 0; i < NUM_PRIORITY; ++i) {
       for (const auto& queued : unified_queue_[i]) {
         if (queued->dst_device.index() != gpu_id) continue;
         const std::uint32_t service_class =
-            managed ? ServiceClass(queued->priority, queued->bypasses,
-                                   kExpertResidencyManager->StarvationLimit())
-                    : queued->priority;
+            phase_policy
+                ? ServiceClass(queued->priority, queued->bypasses,
+                               kExpertResidencyManager->StarvationLimit())
+                : queued->priority;
         if (task == nullptr || service_class < selected_class ||
             (service_class == selected_class && i < max_priority)) {
           task = queued;
@@ -497,7 +500,7 @@ void ArcherTaskPool::GPUThreadFunc(int gpu_id, int thread_id) {
       SKIP_TO_NEXT_ITERATION
     }
 
-    if (managed) {
+    if (phase_policy) {
       const auto limit = kExpertResidencyManager->StarvationLimit();
       if (task->priority > kRouteAheadPriority && task->bypasses >= limit) {
         kExpertResidencyManager->RecordStarvationPromotion();
