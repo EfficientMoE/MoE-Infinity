@@ -192,10 +192,14 @@ def belady_simulate(
     *,
     show_progress: bool = False,
     progress_desc: str = "Simulating",
+    bypass: bool = False,
 ) -> Tuple[int, int, float]:
     """Run Belady optimal simulation.
 
-    Returns a tuple of ``(hits, misses, hit_rate)``.
+    Returns a tuple of ``(hits, misses, hit_rate)``. With ``bypass`` a missed
+    key whose next use is no sooner than every resident's is served without
+    being cached (optimal when admission is optional, e.g. an engine's
+    transient expert slot); otherwise every miss is cached (classic MIN).
     """
 
     total = len(accesses)
@@ -233,14 +237,21 @@ def belady_simulate(
         misses += 1
         if len(cache_next) >= capacity:
             # Evict farthest in the future (or never used again).
-            evicted = False
+            evicted = skipped = False
             while heap:
                 candidate_neg, candidate_key = heapq.heappop(heap)
                 candidate_next = -candidate_neg
                 if cache_next.get(candidate_key) == candidate_next:
+                    if bypass and next_use >= candidate_next:
+                        # The missed key is needed no sooner: do not cache it.
+                        heapq.heappush(heap, (candidate_neg, candidate_key))
+                        skipped = True
+                        break
                     cache_next.pop(candidate_key, None)
                     evicted = True
                     break
+            if skipped:
+                continue
             if not evicted and cache_next:
                 # Fallback if all heap entries were stale: drop any key.
                 cache_next.pop(next(iter(cache_next)))

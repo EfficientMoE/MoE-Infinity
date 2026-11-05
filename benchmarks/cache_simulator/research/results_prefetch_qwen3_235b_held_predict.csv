@@ -1,0 +1,17 @@
+model,dataset,provenance,commit,prefetcher,precision_d1,recall_d1,precision_d2,recall_d2,precision_d3,recall_d3,precision_d4,recall_d4
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"prev_token:horizon=4,budget=8",0.387551,0.387431,0.387551,0.387432,0.387551,0.387434,0.387551,0.387435
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"topk_ema:horizon=4,budget=8,alpha=0.4",0.401413,0.401289,0.401413,0.40129,0.401413,0.401291,0.401413,0.401293
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"coactivation:horizon=4,budget=8",0.551158,0.550977,0.542803,0.542625,0.535527,0.535351,0.52854,0.528366
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"hybrid:horizon=4,budget=8,alpha=0.4,weights=1/1/16",0.563104,0.56293,0.554841,0.554671,0.548027,0.547861,0.541052,0.54089
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"same_id:horizon=4,budget=8",0.0587024,0.0587024,0.0605826,0.0605826,0.0647713,0.0647713,0.0605161,0.0605161
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"prev_token:horizon=4,budget=2",0.494099,0.123487,0.494099,0.123487,0.494099,0.123487,0.494099,0.123488
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"topk_ema:horizon=4,budget=2,alpha=0.4",0.600035,0.149962,0.600035,0.149963,0.600035,0.149963,0.600035,0.149964
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"coactivation:horizon=4,budget=2",0.750057,0.187452,0.740491,0.185062,0.729671,0.182358,0.721504,0.180317
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"hybrid:horizon=4,budget=2,alpha=0.4,weights=1/1/16",0.770648,0.192602,0.762053,0.190455,0.751538,0.187828,0.744077,0.185964
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"same_id:horizon=4,budget=2",0.0568901,0.0142225,0.0579309,0.0144827,0.0654278,0.016357,0.0624011,0.0156003
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"topk_ema:horizon=4,budget=16,alpha=0.4",0.284079,0.567829,0.284079,0.567831,0.284079,0.567833,0.284079,0.567835
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"coactivation:horizon=4,budget=16",0.3815,0.762525,0.37692,0.753368,0.373447,0.746428,0.369696,0.738931
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"hybrid:horizon=4,budget=16,alpha=0.4,weights=1/1/16",0.388309,0.776167,0.384155,0.767867,0.380793,0.761149,0.377468,0.754505
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"topk_ema:horizon=4,budget=32,alpha=0.4",0.188706,0.75367,0.188706,0.753672,0.188706,0.753675,0.188706,0.753677
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"coactivation:horizon=4,budget=32",0.228278,0.911514,0.226834,0.905743,0.225804,0.901623,0.224725,0.897319
+qwen3-235b-a22b-fp8,mmlu100-greedy64/decode/held,real,db1ef24,"hybrid:horizon=4,budget=32,alpha=0.4,weights=1/1/16",0.230316,0.919858,0.228998,0.914595,0.228106,0.911038,0.22717,0.907299

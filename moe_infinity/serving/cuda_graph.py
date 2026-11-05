@@ -152,6 +152,8 @@ class CudaGraphRunner:
         self._closed = False
         self._lock = threading.RLock()
         self._cuda_ops: object = _DefaultCudaOps()
+        self._proof_check: tuple[object, object, int, bool] | None = None
+        self._fallback_details: dict[str, str] = {}
 
     def check_eligibility(self, batch: BatchMetadata) -> GraphDecision:
         if self._closed or not self.enabled:
@@ -197,14 +199,16 @@ class CudaGraphRunner:
 
     def _check_capability(self, key: GraphKey) -> str:
         capability = self.model_runner.decode_graph_capability()
-
-        if self.storage is None:
-            if not capability.safe:
-                return capability.reason
-            return "native_paged_required"
-
         if not capability.safe:
+            detail = getattr(capability, "detail", "")
+            if detail:
+                self._fallback_details[capability.reason] = detail
             return capability.reason
+        if self.storage is None:
+            self._fallback_details["native_paged_required"] = (
+                "serving KV cache has no PagedKVStorage"
+            )
+            return "native_paged_required"
         if capability.storage_owner_id != self.storage.owner_id:
             return "kv_storage_mismatch"
 
@@ -218,14 +222,25 @@ class CudaGraphRunner:
         if not bindings:
             return "paged_class_unregistered"
 
-        proof_set = {
-            (proof.class_fqn, proof.layer_idx)
-            for proof in capability.layer_write_proofs
-        }
-        binding_set = {
-            (binding.class_fqn, binding.layer_idx) for binding in bindings
-        }
-        if proof_set != binding_set:
+        proofs = capability.layer_write_proofs
+        cached = self._proof_check
+        if not (
+            cached is not None
+            and cached[0] is proofs
+            and cached[1] is registry
+            and cached[2] == len(bindings)
+        ):
+            proof_set = {(proof.class_fqn, proof.layer_idx) for proof in proofs}
+            binding_set = {
+                (binding.class_fqn, binding.layer_idx) for binding in bindings
+            }
+            self._proof_check = (
+                proofs,
+                registry,
+                len(bindings),
+                proof_set == binding_set,
+            )
+        if not self._proof_check[3]:
             return "layer_write_unproven"
 
         if not _devices_match(
@@ -298,12 +313,11 @@ class CudaGraphRunner:
 
         device = self.storage.spec.device
         stream = torch.cuda.Stream(device=device)
+        stream.wait_stream(torch.cuda.current_stream(device))
         warmup_logits: torch.Tensor | None = None
         with torch.cuda.stream(stream):
             for _ in range(self.warmup_iters):
-                warmup_logits = self.model_runner.forward_prepared_decode(
-                    buffers
-                )
+                warmup_logits = self._prepared_step(buffers)
         stream.synchronize()
 
         before = self._cuda_ops.memory_allocated(device)
@@ -325,7 +339,7 @@ class CudaGraphRunner:
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            captured_logits = self.model_runner.forward_prepared_decode(buffers)
+            captured_logits = self._prepared_step(buffers)
             static_output_logits.copy_(captured_logits)
 
         after = self._cuda_ops.memory_allocated(device)
@@ -352,25 +366,17 @@ class CudaGraphRunner:
             self._stats.graph_pool_bytes += pool
         return state
 
+    def _prepared_step(self, buffers: PreparedDecodeBuffers) -> torch.Tensor:
+        # The step metadata is uploaded into ``buffers.staging`` before each
+        # replay; unpacking it is part of the graph.
+        buffers.unpack_staging()
+        return self.model_runner.forward_prepared_decode(buffers)
+
     def _fill_scratch_metadata(self, buffers: PreparedDecodeBuffers) -> None:
-        assert self.storage is not None
         assert self._scratch_block_ids is not None
-        block_size = self.storage.spec.block_size
-        metadata = buffers.attention_metadata
-
-        buffers.input_ids.zero_()
-        buffers.position_ids.zero_()
-        buffers.attention_mask.fill_(1)
-        buffers.active_rows.zero_()
-        metadata.block_tables.zero_()
-        metadata.seq_lens.fill_(1)
-        metadata.slot_mapping.zero_()
-
-        for row in range(buffers.batch_bucket):
-            scratch_id = self._scratch_block_ids[row]
-            metadata.block_tables[row, 0] = scratch_id
-            metadata.slot_mapping[row] = scratch_id * block_size
-        buffers.real_batch_size = 0
+        self.model_runner.stage_scratch_decode(
+            buffers, self._scratch_block_ids[: buffers.batch_bucket]
+        )
 
     def try_execute(self, batch: BatchMetadata) -> torch.Tensor | None:
         decision = self.check_eligibility(batch)
@@ -387,6 +393,12 @@ class CudaGraphRunner:
                     return None
                 except (RuntimeError, ValueError) as exc:
                     self._quarantined[decision.key] = type(exc).__name__
+                    first_line = str(exc).strip().splitlines()[:1]
+                    self._fallback_details["capture_failed"] = (
+                        f"b{decision.key.batch_size}@{decision.key.context_size}"
+                        f": {type(exc).__name__}: "
+                        f"{first_line[0][:200] if first_line else ''}"
+                    )
                     self._stats.capture_failures += 1
                     self._record_fallback("capture_failed")
                     return None
@@ -402,7 +414,7 @@ class CudaGraphRunner:
                 context_size=decision.key.context_size,
             )
             self.model_runner.copy_decode_batch(
-                batch, state.buffers, scratch_rows
+                batch, state.buffers, scratch_rows, unpack=False
             )
             self.model_runner.prepare_batch_side_effects(batch)
             try:
@@ -445,6 +457,7 @@ class CudaGraphRunner:
                 "capture_failures": self._stats.capture_failures,
                 "graph_pool_bytes": self._stats.graph_pool_bytes,
                 "fallback_reasons": dict(self._stats.fallback_reasons),
+                "fallback_details": dict(self._fallback_details),
                 "graphs": len(self._graphs),
             }
 
