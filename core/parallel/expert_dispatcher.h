@@ -217,7 +217,7 @@ class ExpertDispatcher : public base::noncopyable {
     completion_retirement_queue_.Close();
     retirement_queue_.Close();
     for (int i = 0; i < static_cast<int>(cache_cv_.size()); ++i) {
-      cache_cv_[i].notify_all();
+      NotifyCacheWaiters(i);
     }
     pending_cv_.notify_all();
     for (auto& t : threads_) {
@@ -335,6 +335,10 @@ class ExpertDispatcher : public base::noncopyable {
   void DispatchExperts(int layer_idx);
   std::vector<int> TakeLastActiveExperts();
   std::vector<int> TakeLastRoutedExperts();
+  // GPT-OSS offloaded experts: allow the RTX PRO 6000 MXFP4 kernels (set by
+  // Python from hw_profile.supports(RTX_PRO_6000); each module re-checks its
+  // device). Off: the previous de-quantise + matmul path.
+  void SetGptOssMxfp4Pro6000(bool enabled) { gptoss_mxfp4_pro6000_ = enabled; }
   void SetExpertDropPolicy(bool enabled, int min_k, double mass_budget,
                            double flatness_floor, double head_budget = 0.0,
                            double adaptive_slope = 0.0, int adaptive_miss0 = 0);
@@ -380,6 +384,8 @@ class ExpertDispatcher : public base::noncopyable {
                     std::exception_ptr error,
                     const std::vector<FailureContext>& contexts = {}) noexcept;
   void CompleteOne(std::uint64_t generation) noexcept;
+  void NotifyPendingWaiters() noexcept;
+  void NotifyCacheWaiters(int gpu_id) noexcept;
 
   static void CUDART_CB CompletionWaitsConsumedCallback(void* opaque);
   void CompletionRetirementFunc();
@@ -485,6 +491,7 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<MoEMLP*> modules_;
 
   bool fp8_in_store_ = false;
+  bool gptoss_mxfp4_pro6000_ = false;
   std::vector<std::vector<std::vector<torch::Tensor>>> fp8_scales_;
   // FP32 copies of fp8_scales_ cached on every CUDA device at SetScales time
   // (~70-90 MB per GPU for a 290 GB FP8 model) so exec workers never pay a

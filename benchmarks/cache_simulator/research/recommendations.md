@@ -79,6 +79,17 @@ reused unchanged.
 - **Batched decode** (several tokens per layer visit) weakens the cyclic-scan
   effect; no study has measured it.
 
+## In the engine
+
+Every policy above is selectable at runtime with
+`"expert_eviction_policy": "lcnu"` in the `MoE(...)` config or
+`--expert-eviction-policy lcnu` on the OpenAI server; `legacy` (default)
+keeps the built-in victim choice. The engine sets `prior` from the model
+config and counts the MoE layers itself; `expert_eviction_lcnu_alpha` and
+`expert_eviction_lcnu_beta` default to the values above. The native policies
+reproduce the simulator's hit counts on the same access stream. See
+[`docs/configuration.md`](../../../docs/configuration.md#expert-eviction-policy-fields).
+
 ## In the simulator
 
 ```python

@@ -16,11 +16,39 @@ logger = logging.getLogger(__name__)
 _registered = False
 
 
+def gptoss_grouped_pro6000_enabled(device=None) -> bool:
+    """Gate of the GPT-OSS grouped MXFP4 MoE op (kernel/mxfp4_moe.py).
+
+    Its launch configs (Triton GEMV / MMA tables, CUDA grouped decode kernel)
+    were tuned on the RTX PRO 6000 Blackwell (188 SMs, 128 MiB L2, 300 W) and
+    the b1 GEMV uses the sm_120a ``cvt.rn.f16x2.e2m1x2``; other GPUs keep the
+    previous resident expert loop.
+    """
+    from moe_infinity.utils.hw_profile import RTX_PRO_6000, SM120, supports
+
+    return supports(SM120, device) and supports(RTX_PRO_6000, device)
+
+
+def v4_moe_sm120_pro6000_supported(device=None) -> bool:
+    """Whether the grouped DeepSeek-V4 FP4 MoE (``v4_moe_forward_sm120_pro6000``)
+    may run on ``device``.
+
+    Its kernels use sm_120a block-scaled MMA and were tuned on the RTX PRO
+    6000 (99 KiB shared memory, 188-SM persistent grid, 128 MiB L2), so both
+    gates must pass. Other devices keep Path B (``v4_expert_forward`` per
+    expert: BF16 dequant + cuBLAS).
+    """
+    from moe_infinity.utils.hw_profile import RTX_PRO_6000, SM120, supports
+
+    return supports(SM120, device) and supports(RTX_PRO_6000, device)
+
+
 def register_engine_ops() -> None:
     global _registered
     if _registered:
         return
 
+    from moe_store.hooks import ops as _ops
     from moe_store.hooks import register_engine_ops as _register
 
     from moe_infinity.kernel import topk_softmax
@@ -39,6 +67,14 @@ def register_engine_ops() -> None:
         route_ahead_ctx=_route_ahead_ctx,
     )
 
+    if hasattr(_ops, "fused_moe_mxfp4") and gptoss_grouped_pro6000_enabled():
+        # Older moe-store releases lack this op, and devices other than the
+        # RTX PRO 6000 it was tuned on leave it unregistered: either way the
+        # moe-store wrapper keeps its per-expert loop.
+        from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
+
+        _register(fused_moe_mxfp4=fused_moe_mxfp4)
+
     try:
         from moe_infinity import _v4_fp4
     except ImportError as error:
@@ -49,5 +85,12 @@ def register_engine_ops() -> None:
         )
     else:
         _register(v4_fp4_ext=_v4_fp4)
+        from moe_store.hooks import ops as _ops
+
+        # older moe-store releases have no such hook: the grouped path stays off
+        if hasattr(_ops, "v4_moe_sm120_pro6000_supported"):
+            _register(
+                v4_moe_sm120_pro6000_supported=v4_moe_sm120_pro6000_supported
+            )
 
     _registered = True

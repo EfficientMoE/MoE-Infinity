@@ -1,5 +1,26 @@
+"""Single-launch paged KV-cache writes.
+
+Every writer scatters ``[num_tokens, num_kv_heads, head_dim]`` K/V into a paged
+cache with one Triton launch: ``block_id`` / ``offset`` are computed on device
+from ``slot_mapping`` and nothing is read back to the host.
+
+Supported destination layouts (per-layer views, unchanged from the callers):
+
+* native K ``[blocks, H, D // 8, block, 8]`` and native V ``[blocks, H, D, block]``
+  (consumed by ``paged_attention_v1`` and the Triton decode kernels);
+* FlashInfer NHD ``[blocks, 2, block, H, D]``.
+
+Slot validation: a slot is written only if ``0 <= slot < blocks * block``; any
+other slot is dropped on device, so a bad slot can never write out of bounds.
+Slots are produced on the host by the block allocator and only reference
+allocated blocks, so the strict ``ValueError`` check (which needs a device to
+host read of every slot) runs only where it is free (CPU tensors) or when
+``MOE_INFINITY_KV_WRITE_CHECK=1`` is set for debugging.
+"""
+
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -7,6 +28,8 @@ import torch
 try:
     import triton
     import triton.language as tl
+    from triton import knobs
+    from triton.runtime import driver as _driver
 
     _HAS_TRITON = True
 except ImportError:
@@ -17,7 +40,14 @@ except ImportError:
 if TYPE_CHECKING:
     from moe_infinity.runtime.paged_kv_storage import PagedKVStorage
 
-_X = 8
+_STRICT_ENV = "MOE_INFINITY_KV_WRITE_CHECK"
+# Elements (BLOCK_T * BLOCK_D) per program and tensor below _FULL_BLOCK_TOKENS:
+# small tiles keep many programs in flight for decode-sized batches.
+_TILE_ELEMS = 512
+# From this many tokens on, a program writes one whole cache block.
+_FULL_BLOCK_TOKENS = 1024
+# Largest whole-block tile (block * H * D elements) when heads are merged.
+_MAX_MERGED_TILE = 16384
 
 
 def _validate(
@@ -52,85 +82,435 @@ def _validate(
         raise ValueError("key/value dtype must match the storage dtype")
 
 
+def check_slots(slot_mapping: torch.Tensor, num_blocks: int, block_size: int):
+    """Raise ``ValueError`` for a slot outside the allocated blocks.
+
+    Free on CPU tensors; on CUDA it synchronises, so writers only call it when
+    ``MOE_INFINITY_KV_WRITE_CHECK=1``.
+    """
+    if slot_mapping.numel() == 0:
+        return
+    if bool((slot_mapping < 0).any()):
+        raise ValueError("slot_mapping contains negative slot index")
+    if bool((slot_mapping >= num_blocks * block_size).any()):
+        raise ValueError("slot_mapping points past allocated blocks")
+
+
+def strict_checks(t: torch.Tensor) -> bool:
+    """Whether writers run their host-side (syncing) input checks for ``t``:
+    always on CPU, on CUDA only with ``MOE_INFINITY_KV_WRITE_CHECK=1``."""
+    return not t.is_cuda or os.environ.get(_STRICT_ENV, "") not in ("", "0")
+
+
 if _HAS_TRITON:
 
     @triton.jit
-    def _paged_kv_write_kernel(
+    def _load_tile(
+        src_ptr,
+        tok0,
+        head,
+        valid,
+        S_T: tl.constexpr,
+        S_H: tl.constexpr,
+        HEAD_DIM: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        BLOCK_T: tl.constexpr,
+    ):
+        # src = tok*S_T + head*S_H + d; int64 scalar base, int32 tile offsets.
+        t = tl.arange(0, BLOCK_T)
+        d = tl.arange(0, BLOCK_D)
+        mask = valid[:, None] & (d < HEAD_DIM)[None, :]
+        return tl.load(
+            src_ptr + tok0 * S_T + head * S_H + t[:, None] * S_T + d[None, :],
+            mask=mask,
+            eviction_policy="evict_first",
+        )
+
+    @triton.jit
+    def _store_tile(
+        x,
+        dst_ptr,
+        head,
+        slot,
+        valid,
+        blk0,
+        off0,
+        is_run,
+        is_full,
+        S_B: tl.constexpr,
+        S_HD: tl.constexpr,
+        S_DO: tl.constexpr,
+        S_DI: tl.constexpr,
+        S_O: tl.constexpr,
+        X: tl.constexpr,
+        HEAD_DIM: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        BLOCK_T: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        # dst = blk*S_B + head*S_HD + (d // X)*S_DO + (d % X)*S_DI + off*S_O
+        t = tl.arange(0, BLOCK_T)
+        d = tl.arange(0, BLOCK_D)
+        mask = valid[:, None] & (d < HEAD_DIM)[None, :]
+        x = x.to(dst_ptr.dtype.element_ty)
+        d_off = (d // X)[None, :] * S_DO + (d % X)[None, :] * S_DI
+        base = dst_ptr + blk0 * S_B + head * S_HD
+        if is_full:
+            # Whole-block tile of a canonical native page: the page of this
+            # (block, head) is one contiguous BLOCK_SIZE * HEAD_DIM run.
+            # Transpose in registers so the stores are contiguous, vectorised
+            # and run along tokens across lanes.
+            if X == 1:
+                # V [D, block]
+                tl.store(
+                    base + d[:, None] * BLOCK_SIZE + t[None, :], tl.trans(x)
+                )
+            else:
+                # K [D // X, block, X] as a [t, g, i] tile
+                g = tl.arange(0, BLOCK_D // X)
+                i = tl.arange(0, X)
+                tl.store(
+                    base
+                    + t[:, None, None] * X
+                    + g[None, :, None] * (BLOCK_SIZE * X)
+                    + i[None, None, :],
+                    tl.reshape(x, (BLOCK_T, BLOCK_D // X, X)),
+                )
+        elif is_run:
+            # One run of consecutive slots inside a single block (prefill):
+            # scalar + arange offsets coalesce the stores along tokens.
+            off = (off0 + t)[:, None]
+            tl.store(base + off * S_O + d_off, x, mask=mask)
+        else:
+            slot = tl.where(valid, slot, 0)
+            blk = (slot // BLOCK_SIZE)[:, None]
+            off = (slot % BLOCK_SIZE).to(tl.int32)[:, None]
+            tl.store(
+                dst_ptr + blk * S_B + head * S_HD + off * S_O + d_off,
+                x,
+                mask=mask,
+            )
+
+    @triton.jit
+    def _kv_scatter_kernel(
         key_ptr,
         value_ptr,
-        key_cache_ptr,
-        value_cache_ptr,
-        slot_mapping_ptr,
-        layer_idx,
-        num_kv_heads: tl.constexpr,
-        head_dim: tl.constexpr,
-        x: tl.constexpr,
-        block_size: tl.constexpr,
-        num_blocks: tl.constexpr,
+        slot_ptr,
+        k_dst_ptr,
+        v_dst_ptr,
+        num_tokens,
+        num_slots,
+        S_KT: tl.constexpr,
+        S_KH: tl.constexpr,
+        S_VT: tl.constexpr,
+        S_VH: tl.constexpr,
+        K_SB: tl.constexpr,
+        K_SH: tl.constexpr,
+        K_SDO: tl.constexpr,
+        K_SDI: tl.constexpr,
+        K_SO: tl.constexpr,
+        KX: tl.constexpr,
+        V_SB: tl.constexpr,
+        V_SH: tl.constexpr,
+        V_SDO: tl.constexpr,
+        V_SDI: tl.constexpr,
+        V_SO: tl.constexpr,
+        VX: tl.constexpr,
+        HEAD_DIM: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        BLOCK_T: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+        CANONICAL: tl.constexpr,
     ):
-        token = tl.program_id(0)
         head = tl.program_id(1)
+        t = tl.arange(0, BLOCK_T)
+        tok = tl.program_id(0) * BLOCK_T + t
+        tok_mask = tok < num_tokens
+        slot = tl.load(slot_ptr + tok, mask=tok_mask, other=-1).to(tl.int64)
+        valid = tok_mask & (slot >= 0) & (slot < num_slots)
+        tok0 = tl.program_id(0).to(tl.int64) * BLOCK_T
 
-        slot = tl.load(slot_mapping_ptr + token)
-        block_id = slot // block_size
-        token_offset = slot % block_size
-
-        dim = tl.arange(0, head_dim)
-        src_offset = token * (num_kv_heads * head_dim) + head * head_dim + dim
-        key_vals = tl.load(key_ptr + src_offset)
-        value_vals = tl.load(value_ptr + src_offset)
-
-        layer_block_stride = num_kv_heads * (head_dim // x) * block_size * x
-        block_stride = (head_dim // x) * block_size * x
-        head_stride = block_size * x
-        outer = dim // x
-        inner = dim % x
-        key_dst = (
-            layer_idx * (num_blocks * layer_block_stride)
-            + block_id * layer_block_stride
-            + head * block_stride
-            + outer * head_stride
-            + token_offset * x
-            + inner
+        slot0 = tl.load(slot_ptr + tl.program_id(0) * BLOCK_T).to(tl.int64)
+        blk0 = slot0 // BLOCK_SIZE
+        off0 = (slot0 - blk0 * BLOCK_SIZE).to(tl.int32)
+        n_gap = tl.sum(((slot != slot0 + t) & tok_mask).to(tl.int32), axis=0)
+        is_run = (
+            (n_gap == 0)
+            & (slot0 >= 0)
+            & (off0 + BLOCK_T <= BLOCK_SIZE)
+            & (slot0 + BLOCK_T <= num_slots)
         )
-        tl.store(key_cache_ptr + key_dst, key_vals)
+        if CANONICAL and BLOCK_T == BLOCK_SIZE and HEAD_DIM == BLOCK_D:
+            n_tok = tl.sum(tok_mask.to(tl.int32), axis=0)
+            is_full = is_run & (n_tok == BLOCK_T)
+        else:
+            is_full = False
 
-        v_layer_block_stride = num_kv_heads * head_dim * block_size
-        v_block_stride = head_dim * block_size
-        v_head_stride = head_dim * block_size
-        value_dst = (
-            layer_idx * (num_blocks * v_layer_block_stride)
-            + block_id * v_layer_block_stride
-            + head * v_head_stride
-            + dim * block_size
-            + token_offset
+        # Both loads before both stores: twice the bytes in flight.
+        xk = _load_tile(
+            key_ptr, tok0, head, valid, S_KT, S_KH, HEAD_DIM, BLOCK_D, BLOCK_T
         )
-        tl.store(value_cache_ptr + value_dst, value_vals)
+        xv = _load_tile(
+            value_ptr, tok0, head, valid, S_VT, S_VH, HEAD_DIM, BLOCK_D, BLOCK_T
+        )
+        _store_tile(
+            xk, k_dst_ptr, head, slot, valid, blk0, off0, is_run, is_full,
+            K_SB, K_SH, K_SDO, K_SDI, K_SO, KX,
+            HEAD_DIM, BLOCK_D, BLOCK_T, BLOCK_SIZE,
+        )  # fmt: skip
+        _store_tile(
+            xv, v_dst_ptr, head, slot, valid, blk0, off0, is_run, is_full,
+            V_SB, V_SH, V_SDO, V_SDI, V_SO, VX,
+            HEAD_DIM, BLOCK_D, BLOCK_T, BLOCK_SIZE,
+        )  # fmt: skip
 
 
-def _write_cpu(
-    storage: "PagedKVStorage",
-    layer_idx: int,
+def _x_layout_geometry(cache: torch.Tensor):
+    """``[blocks, H, D // x, block, x]`` -> (s_b, s_h, s_do, s_di, s_o, x)."""
+    s = cache.stride()
+    return s[0], s[1], s[2], s[4], s[3], cache.shape[-1]
+
+
+def _hd_block_geometry(cache: torch.Tensor):
+    """``[blocks, H, D, block]`` -> (s_b, s_h, s_do, 0, s_o, 1)."""
+    s = cache.stride()
+    return s[0], s[1], s[2], 0, s[3], 1
+
+
+def _nhd_geometry(cache: torch.Tensor):
+    """``[blocks, block, H, D]`` -> (s_b, s_h, s_do, 0, s_o, 1)."""
+    s = cache.stride()
+    return s[0], s[2], s[3], 0, s[1], 1
+
+
+def _canonical_native(k_geo, v_geo, block_size: int) -> bool:
+    """Each (block, head) page is dense: K ``[D // x, block, x]``, V
+    ``[D, block]`` (true for per-layer views of the contiguous caches)."""
+    _, _, k_do, k_di, k_o, x = k_geo
+    _, _, v_do, _, v_o, _ = v_geo
+    return (
+        k_di == 1
+        and k_o == x
+        and k_do == block_size * x
+        and v_o == 1
+        and v_do == block_size
+    )
+
+
+def _src(t: torch.Tensor) -> torch.Tensor:
+    return t if t.stride(-1) == 1 else t.contiguous()
+
+
+# Compiled kernels keyed by everything Triton specialises on, so steady-state
+# launches skip the JIT dispatcher (~10 us of host time per call).
+_COMPILED: dict = {}
+_FAST_LAUNCH = True
+
+
+def _get_stream(device_index: int):
+    return _driver.active.get_current_stream(device_index)
+
+
+def _launch_hooks_active() -> bool:
+    # Launch hooks (e.g. proton) need launch metadata: take the JIT path.
+    hook = knobs.runtime.launch_enter_hook
+    return hook is not None and bool(getattr(hook, "calls", True))
+
+
+def _align16(t: torch.Tensor) -> bool:
+    return t.data_ptr() % 16 == 0
+
+
+def _is_pow2(n: int) -> bool:
+    return n & (n - 1) == 0
+
+
+def _mergeable(key, value, k_geo, v_geo, bs: int) -> bool:
+    """Heads can be folded into the head dim when every token's heads are
+    adjacent in the source and every block's heads are adjacent in the cache,
+    i.e. head stride == head_dim (source) and == the page size (cache)."""
+    _, num_kv_heads, head_dim = key.shape
+    if key.stride(1) != head_dim or value.stride(1) != head_dim:
+        return False
+    if _is_pow2(head_dim) and not _is_pow2(num_kv_heads * head_dim):
+        return False  # would lose the whole-block path (needs a pow2 dim)
+    if bs * num_kv_heads * head_dim > _MAX_MERGED_TILE:
+        return False
+    for _, s_h, s_do, _, _, x in (k_geo, v_geo):
+        if head_dim % x or s_h != (head_dim // x) * s_do:
+            return False
+    return True
+
+
+def _launch(key, value, slots, k_dst, v_dst, k_geo, v_geo, num_blocks, bs):
+    global _FAST_LAUNCH
+    num_tokens, num_kv_heads, head_dim = key.shape
+    if num_tokens == 0:
+        return
+    key = _src(key)
+    value = _src(value)
+    if num_kv_heads > 1 and _mergeable(key, value, k_geo, v_geo, bs):
+        # All heads of a token / block form one run in source and cache: write
+        # them as a single head of size H * D (bigger tiles, one slot decode
+        # per token instead of per head).
+        k_geo = (k_geo[0], 0, *k_geo[2:])
+        v_geo = (v_geo[0], 0, *v_geo[2:])
+        head_dim *= num_kv_heads
+        num_kv_heads = 1
+    # Plain-Python helpers: triton.next_power_of_2 / cdiv are slow to call.
+    block_d = 1 << (head_dim - 1).bit_length()
+    # Tokens per program: at most one cache block, so a prefill tile can be a
+    # single consecutive slot run (see the kernel's run / whole-block paths).
+    block_cap = 1 << (bs.bit_length() - 1)
+    if num_tokens >= _FULL_BLOCK_TOKENS:
+        block_t = block_cap
+    else:
+        block_t = min(
+            1 << (num_tokens - 1).bit_length(),
+            max(1, _TILE_ELEMS // block_d),
+            block_cap,
+        )
+    elems = block_t * block_d
+    # 4 warps up to 8K-element tiles (measured best for whole-block prefill
+    # tiles), fewer for small decode tiles.
+    num_warps = min(8, max(4, elems // 2048)) if elems >= 2048 else elems // 512
+    num_warps = max(1, num_warps)
+    grid = (-(-num_tokens // block_t), num_kv_heads, 1)
+    num_slots = num_blocks * bs
+    args = (key, value, slots, k_dst, v_dst, num_tokens, num_slots)
+    s_k = key.stride()
+    s_v = value.stride()
+    constexprs = (
+        s_k[0],
+        s_k[1],
+        s_v[0],
+        s_v[1],
+        *k_geo,
+        *v_geo,
+        head_dim,
+        block_d,
+        block_t,
+        bs,
+        _canonical_native(k_geo, v_geo, bs),
+    )
+    spec = (
+        constexprs,
+        num_warps,
+        key.dtype,
+        value.dtype,
+        slots.dtype,
+        k_dst.dtype,
+        v_dst.dtype,
+        key.device.index,
+        num_tokens == 1,
+        num_tokens % 16 == 0,
+        num_slots,
+        _align16(key),
+        _align16(value),
+        _align16(slots),
+        _align16(k_dst),
+        _align16(v_dst),
+    )
+    kernel = _COMPILED.get(spec) if _FAST_LAUNCH else None
+    if kernel is not None and not _launch_hooks_active():
+        try:
+            kernel.run(
+                grid[0],
+                grid[1],
+                1,
+                _get_stream(key.device.index),
+                kernel.function,
+                kernel.packed_metadata,
+                None,
+                None,
+                None,
+                *args,
+                *constexprs,
+            )
+            return
+        except Exception:  # Triton launcher ABI changed: use the JIT path
+            _FAST_LAUNCH = False
+    kernel = _kv_scatter_kernel[grid](*args, *constexprs, num_warps=num_warps)
+    if _FAST_LAUNCH and len(_COMPILED) < 256:
+        _COMPILED[spec] = kernel
+
+
+def _use_triton(t: torch.Tensor) -> bool:
+    return _HAS_TRITON and t.is_cuda
+
+
+def _block_offsets(slots: torch.Tensor, block_size: int):
+    slots = slots.to(dtype=torch.long)
+    block_ids = torch.div(slots, block_size, rounding_mode="floor")
+    return block_ids, slots - block_ids * block_size
+
+
+def paged_kv_scatter_(
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    block_size = storage.spec.block_size
-    x = _X
-    key_cache = storage.key_cache
-    value_cache = storage.value_cache
-    num_tokens = key.shape[0]
-    key_view = key.view(
-        num_tokens, storage.spec.num_kv_heads, storage.spec.head_dim // x, x
-    )
-    slots = slot_mapping.to(dtype=torch.long)
-    block_ids = torch.div(slots, block_size, rounding_mode="floor")
-    offsets = slots - block_ids * block_size
-    for i in range(num_tokens):
-        block_id = block_ids[i]
-        offset = offsets[i]
-        key_cache[layer_idx, block_id, :, :, offset, :] = key_view[i]
-        value_cache[layer_idx, block_id, :, :, offset] = value[i]
+    """Write K/V into one layer of the native paged cache in one launch.
+
+    ``k_cache``: ``[blocks, H, D // x, block, x]``; ``v_cache``:
+    ``[blocks, H, D, block]``; ``key`` / ``value``: ``[T, H, D]`` on the cache
+    device (any dtype; cast on store); ``slot_mapping``: ``[T]`` int32/int64.
+    """
+    num_blocks, _, _, block_size, x = k_cache.shape
+    if strict_checks(slot_mapping):
+        check_slots(slot_mapping, num_blocks, block_size)
+    if _use_triton(k_cache):
+        _launch(
+            key,
+            value,
+            slot_mapping,
+            k_cache,
+            v_cache,
+            _x_layout_geometry(k_cache),
+            _hd_block_geometry(v_cache),
+            num_blocks,
+            block_size,
+        )
+        return
+    num_tokens, num_kv_heads, head_dim = key.shape
+    block_ids, offsets = _block_offsets(slot_mapping, block_size)
+    k_cache[block_ids, :, :, offsets, :] = key.reshape(
+        num_tokens, num_kv_heads, head_dim // x, x
+    ).to(k_cache.dtype)
+    v_cache[block_ids, :, :, offsets] = value.to(v_cache.dtype)
+
+
+def flashinfer_kv_scatter_(
+    kv_cache: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Write K/V into one layer of a FlashInfer NHD cache
+    ``[blocks, 2, block, H, D]`` in one launch."""
+    num_blocks, _, block_size = kv_cache.shape[:3]
+    if strict_checks(slot_mapping):
+        check_slots(slot_mapping, num_blocks, block_size)
+    k_cache = kv_cache[:, 0]
+    v_cache = kv_cache[:, 1]
+    if _use_triton(kv_cache):
+        _launch(
+            key,
+            value,
+            slot_mapping,
+            k_cache,
+            v_cache,
+            _nhd_geometry(k_cache),
+            _nhd_geometry(v_cache),
+            num_blocks,
+            block_size,
+        )
+        return
+    block_ids, offsets = _block_offsets(slot_mapping, block_size)
+    k_cache[block_ids, offsets] = key.to(kv_cache.dtype)
+    v_cache[block_ids, offsets] = value.to(kv_cache.dtype)
 
 
 def paged_kv_write_(
@@ -145,30 +525,23 @@ def paged_kv_write_(
     capture: validation precedes all writes and no new tensor/list/workspace is
     allocated on the write path.
 
-    On CUDA the write is a Triton kernel launch whose grid is fixed by the
-    captured ``[num_tokens, num_kv_heads]`` dimensions. On CPU (or when Triton
-    is unavailable) the equivalent allocation-free indexed write is used."""
+    On CUDA the write is a single Triton kernel launch whose grid is fixed by
+    the captured ``[num_tokens, num_kv_heads]`` dimensions. On CPU (or when
+    Triton is unavailable) the equivalent vectorised indexed write is used."""
     _validate(storage, layer_idx, key, value, slot_mapping)
-
-    if not (_HAS_TRITON and key.is_cuda):
-        _write_cpu(storage, layer_idx, key, value, slot_mapping)
-        return
-
-    num_tokens, num_kv_heads, head_dim = key.shape
-    grid = (num_tokens, num_kv_heads)
-    _paged_kv_write_kernel[grid](
+    paged_kv_scatter_(
+        storage.key_cache[layer_idx],
+        storage.value_cache[layer_idx],
         key,
         value,
-        storage.key_cache,
-        storage.value_cache,
         slot_mapping,
-        layer_idx,
-        num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
-        x=_X,
-        block_size=storage.spec.block_size,
-        num_blocks=storage.spec.num_blocks,
     )
 
 
-__all__ = ["paged_kv_write_"]
+__all__ = [
+    "check_slots",
+    "strict_checks",
+    "flashinfer_kv_scatter_",
+    "paged_kv_scatter_",
+    "paged_kv_write_",
+]
