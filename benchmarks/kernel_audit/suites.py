@@ -5,10 +5,13 @@ issues the same kernels MoE-Infinity issues for that op on sm_120
 (torch 2.11 / cu130, no flash_attn / flashinfer / fla installed).
 
 Impl names:
-  production paths   cutlass_fused, fp8_prod, gptoss_resident, gptoss_offload,
+  production paths   cutlass_fused, grouped_prefill, fp8_prod, gptoss_resident,
+                     gptoss_offload,
                      v4_fp4_prod, sdpa_shim, hf_eager, paged_v1,
                      sdpa_fallback, hf_eager_decode, router_*, gdn_torch,
-                     kv_write_loop
+                     kv_write_loop, moe_gqa, moe_gqa_swa, moe_gqa_masked,
+                     moe_gqa_decode, moe_gqa_masked_decode (HF models
+                     without a paged shim, runtime/hf_attention.py)
   references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode
 """
 
@@ -491,11 +494,82 @@ def expert_layer_graph_cases(model_keys: list[str] | None = None) -> list[Case]:
     return out
 
 
+def _grouped_prefill_builder(
+    n: int, M: int, T: int, E: int, H: int, I: int, ext=None
+):
+    """Grouped prefill path (#307): every expert of the layer in 3 launches.
+
+    n experts with their own weight tensors (as in the expert cache), each
+    routed exactly M of the T tokens, through moe_infinity._store
+    .grouped_moe_prefill (same descriptor interface as grouped_moe_decode,
+    #306) with the zero-init of the fp32 output folded in.
+    """
+
+    def build():
+        import moe_infinity._store as store
+
+        experts = [(_rand(I, H), _rand(I, H), _rand(H, I)) for _ in range(n)]
+        mask = torch.zeros(T, E, dtype=torch.bool, device="cuda")
+        for j in range(n):
+            toks = (torch.arange(M, device="cuda") + j * M) % T
+            mask[toks, j] = True
+        weights = torch.rand(T, E, device="cuda") * mask
+        kcap = int(mask.sum(1).max())
+        table = torch.tensor(
+            [[t.data_ptr() for t in w] + [j] for j, w in enumerate(experts)],
+            dtype=torch.int64,
+            device="cuda",
+        )
+        x = _rand(T, H, scale=1.0)
+        out = torch.empty(T, H, device="cuda")
+
+        def run():
+            store.grouped_moe_prefill(
+                x, mask, weights, table, I, kcap, out, zero_out=True
+            )
+
+        run.keep = experts  # weights must outlive the pointer table
+        return run
+
+    return build
+
+
+def _grouped_prefill_cases(c: Case, n_exec: int) -> list[Case]:
+    if c.phase != "prefill" or c.impl != "cutlass_fused":
+        return []
+    m = MODELS[c.model]
+    H, I, M, T = c.meta["H"], c.meta["I"], c.meta["M"], c.meta["tokens"]
+    mem = n_exec * 3 * H * I * BF16 + T * max(m.experts, n_exec)
+    return [
+        Case(
+            cid=c.cid.replace("|", "|layer|", 1).replace(
+                "|cutlass_fused", "|grouped_prefill"
+            ),
+            suite="expert_layer",
+            model=c.model,
+            phase=c.phase,
+            size=c.size,
+            impl="grouped_prefill",
+            flops=c.flops * n_exec,
+            bytes_min=c.bytes_min * n_exec,
+            build=_grouped_prefill_builder(
+                n_exec, M, T, max(m.experts, n_exec), H, I
+            ),
+            per_layer=1.0,
+            layers=c.layers,
+            meta={**c.meta, "n_exec": n_exec, "streams": 1},
+            skip=f"needs {mem / 1e9:.0f} GB" if mem > 60e9 else None,
+            iters=5,
+        )
+    ]
+
+
 def expert_layer_cases(model_keys: list[str] | None = None) -> list[Case]:
     out = []
     for c in expert_cases(model_keys):
         if c.impl == "gptoss_bf16cached":
             continue
+        out += _grouped_prefill_cases(c, max(1, round(c.per_layer)))
         n_exec = max(1, round(c.per_layer))
         H, I = c.meta["H"], c.meta["I"]
         eb = 3 * H * I * _W_BYTES[c.impl]
@@ -618,6 +692,38 @@ def _hf_eager_prefill_builder(T, H, KVH, dqk, dv, sinks):
     return build
 
 
+def _moe_gqa_call(q, k, v, mask, scale, sinks, window=None):
+    """Production non-paged HF attention (runtime/hf_attention.py)."""
+    from moe_infinity.runtime.hf_attention import moe_gqa_attention_forward
+
+    mod = torch.nn.Module()
+    return lambda: moe_gqa_attention_forward(
+        mod, q, k, v, mask, scaling=scale, sliding_window=window, s_aux=sinks
+    )
+
+
+def _moe_gqa_prefill_builder(T, H, KVH, dqk, dv, sinks, window, masked):
+    def build():
+        q = torch.randn(1, H, T, dqk, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(1, KVH, T, dqk, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(1, KVH, T, dv, device="cuda", dtype=torch.bfloat16)
+        snk = (
+            torch.randn(H, device="cuda", dtype=torch.bfloat16)
+            if sinks
+            else None
+        )
+        mask = (
+            torch.ones(T, T, device="cuda", dtype=torch.bool).tril_()[
+                None, None
+            ]
+            if masked
+            else None
+        )
+        return _moe_gqa_call(q, k, v, mask, dqk**-0.5, snk, window)
+
+    return build
+
+
 def _attn_dims(m: MoEModel):
     a = m.attn
     if a.kind == "mla_dsa":  # HF eager MLA: per-head K/V after kv_b_proj
@@ -680,6 +786,46 @@ def attn_prefill_cases(model_keys: list[str] | None = None) -> list[Case]:
                 if need > 0.85 * 96e9:
                     c.skip = f"OOM: eager scores need ~{need / 1e9:.0f} GB"
                 out.append(c)
+                if dqk == dv and dqk <= 256:
+                    out.append(
+                        Case(
+                            f"{key}|{lbl}|moe_gqa",
+                            impl="moe_gqa",
+                            build=_moe_gqa_prefill_builder(
+                                T, H, KVH, dqk, dv, m.attn.sinks, None, False
+                            ),
+                            **common,
+                        )
+                    )
+                if m.attn.window and dqk == dv:
+                    W = m.attn.window
+                    swa = dict(common)
+                    swa["flops"] = 2.0 * H * (dqk + dv) * (T * W - W * W / 2)
+                    swa["layers"] = m.attn.swa_layers
+                    out.append(
+                        Case(
+                            f"{key}|{lbl}|moe_gqa_swa",
+                            impl="moe_gqa_swa",
+                            build=_moe_gqa_prefill_builder(
+                                T, H, KVH, dqk, dv, m.attn.sinks, W, False
+                            ),
+                            **swa,
+                        )
+                    )
+                if m.attn.kind in ("mla_dsa", "minimax_sparse") and dqk == dv:
+                    # Sparse layers: dense SDPA under the [1, 1, T, T] index
+                    # mask HF builds (sparse kernels: #269 / out of scope).
+                    c = Case(
+                        f"{key}|{lbl}|moe_gqa_masked",
+                        impl="moe_gqa_masked",
+                        build=_moe_gqa_prefill_builder(
+                            T, H, KVH, dqk, dv, False, None, True
+                        ),
+                        **common,
+                    )
+                    if T > 51200:
+                        c.skip = "dense [T, T] index mask (> 40 GB)"
+                    out.append(c)
             if dqk == dv and dqk <= 256:
                 out.append(
                     Case(
@@ -784,6 +930,29 @@ def _hf_eager_decode_builder(B, L, H, KVH, dqk, dv, sinks):
     return build
 
 
+def _moe_gqa_decode_builder(B, L, H, KVH, dqk, dv, sinks, masked):
+    """runtime/hf_attention.py over a DynamicCache (contiguous [B, KVH, L, D])."""
+
+    def build():
+        q = torch.randn(B, H, 1, dqk, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(B, KVH, L, dqk, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(B, KVH, L, dv, device="cuda", dtype=torch.bfloat16)
+        snk = (
+            torch.randn(H, device="cuda", dtype=torch.bfloat16)
+            if sinks
+            else None
+        )
+        # All-visible mask: prices the mask path itself (no skipped keys).
+        mask = (
+            torch.ones(B, 1, 1, L, device="cuda", dtype=torch.bool)
+            if masked
+            else None
+        )
+        return _moe_gqa_call(q, k, v, mask, dqk**-0.5, snk)
+
+    return build
+
+
 # Production paged decode is extremely slow; sample a few points only.
 _PAGED_POINTS = {(1, "1K"), (1, "2K"), (16, "1K"), (1, "9K")}
 _FALLBACK_POINTS = {
@@ -853,6 +1022,28 @@ def attn_decode_cases(model_keys: list[str] | None = None) -> list[Case]:
                             **common,
                         )
                     )
+                    out.append(
+                        Case(
+                            f"{key}|b{B}@{lbl}|moe_gqa_decode",
+                            impl="moe_gqa_decode",
+                            build=_moe_gqa_decode_builder(
+                                B, L, H, KVH, dqk, dv, m.attn.sinks, False
+                            ),
+                            **common,
+                        )
+                    )
+                    if m.attn.kind in ("mla_dsa", "minimax_sparse"):
+                        # Sparse layers pass an explicit [B, 1, 1, L] mask.
+                        out.append(
+                            Case(
+                                f"{key}|b{B}@{lbl}|moe_gqa_masked_decode",
+                                impl="moe_gqa_masked_decode",
+                                build=_moe_gqa_decode_builder(
+                                    B, L, H, KVH, dqk, dv, False, True
+                                ),
+                                **common,
+                            )
+                        )
                 if dqk == dv and dqk in (64, 128):
                     out.append(
                         Case(
@@ -1404,8 +1595,89 @@ def _gptoss_moe_loop_builder(T: int, H: int, I: int, E: int, k: int):
     return build
 
 
+def _gptoss_moe_grouped_builder(
+    T: int,
+    H: int,
+    I: int,
+    E: int,
+    k: int,
+    graph: bool = False,
+    router: bool = True,
+):
+    """Same router, then device-side dispatch (#313): moe_align + grouped
+    MXFP4 GEMM1 (+SwiGLU) + GEMM2 (weighted scatter-add), no host sync.
+    `graph=True` replays the layer as one CUDA graph; `router=False` times
+    the expert block alone (top-k ids/weights computed once outside)."""
+
+    def build():
+        from moe_infinity.kernel.mxfp4_moe import fused_moe_mxfp4
+
+        # Fixed routing: the active-expert count (and so the bytes actually
+        # read) would otherwise change from run to run.
+        torch.manual_seed(0)
+        x = _rand(T, H, scale=1.0)
+        wr, br = _rand(E, H), _rand(E)
+        gu_p = torch.randint(
+            0, 255, (E, 2 * I, H // 2), device="cuda", dtype=torch.uint8
+        )
+        gu_s = torch.randint(
+            118, 124, (E, 2 * I, H // 32), device="cuda", dtype=torch.uint8
+        )
+        d_p = torch.randint(
+            0, 255, (E, H, I // 2), device="cuda", dtype=torch.uint8
+        )
+        d_s = torch.randint(
+            118, 124, (E, H, I // 32), device="cuda", dtype=torch.uint8
+        )
+        gu_b, d_b = _rand(E, 2 * I), _rand(E, H)
+        F = torch.nn.functional
+
+        def route():
+            logits = F.linear(x, wr, br)
+            p = F.softmax(logits, dim=-1, dtype=torch.float32)
+            w, sel = torch.topk(p, k, dim=-1)
+            return sel, (w / w.sum(-1, keepdim=True)).to(x.dtype)
+
+        fixed = None if router else route()
+
+        def run():
+            sel, w = fixed or route()
+            return fused_moe_mxfp4(x, sel, w, gu_p, gu_s, gu_b, d_p, d_s, d_b)
+
+        if not graph:
+            return run
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                run()
+        torch.cuda.current_stream().wait_stream(s)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            run()
+        return g.replay
+
+    return build
+
+
 def gptoss_loop_cases(model_keys: list[str] | None = None) -> list[Case]:
     out = []
+    impls = (
+        ("gptoss_moe_loop", _gptoss_moe_loop_builder, {}, 5),
+        ("gptoss_moe_grouped", _gptoss_moe_grouped_builder, {}, None),
+        (
+            "gptoss_moe_grouped_graph",
+            _gptoss_moe_grouped_builder,
+            {"graph": True},
+            None,
+        ),
+        (
+            "gptoss_moe_experts_graph",
+            _gptoss_moe_grouped_builder,
+            {"graph": True, "router": False},
+            None,
+        ),
+    )
     for key in ("gpt-oss-20b", "gpt-oss-120b"):
         if model_keys and key not in model_keys:
             continue
@@ -1413,31 +1685,35 @@ def gptoss_loop_cases(model_keys: list[str] | None = None) -> list[Case]:
         for phase, lbl, T in (
             ("decode", "b1", 1),
             ("decode", "b16", 16),
+            ("decode", "b64", 64),
             ("prefill", "1K", 1024),
         ):
             M, A = expert_tokens(m, T)
-            out.append(
-                Case(
-                    f"{key}|{lbl}|gptoss_moe_loop",
-                    suite="gptoss_loop",
-                    model=key,
-                    phase=phase,
-                    size=lbl,
-                    impl="gptoss_moe_loop",
-                    flops=2.0 * T * m.top_k * 3 * m.hidden * m.inter,
-                    bytes_min=round(A)
-                    * 3
-                    * m.hidden
-                    * m.inter
-                    * _W_BYTES["gptoss_resident"],
-                    build=_gptoss_moe_loop_builder(
-                        T, m.hidden, m.inter, m.experts, m.top_k
-                    ),
-                    layers=m.moe_layers,
-                    meta={"T": T, "active": A},
-                    iters=5,
+            for impl, builder, kw, iters in impls:
+                if impl == "gptoss_moe_loop" and lbl == "b64":
+                    continue
+                out.append(
+                    Case(
+                        f"{key}|{lbl}|{impl}",
+                        suite="gptoss_loop",
+                        model=key,
+                        phase=phase,
+                        size=lbl,
+                        impl=impl,
+                        flops=2.0 * T * m.top_k * 3 * m.hidden * m.inter,
+                        bytes_min=round(A)
+                        * 3
+                        * m.hidden
+                        * m.inter
+                        * _W_BYTES["gptoss_resident"],
+                        build=builder(
+                            T, m.hidden, m.inter, m.experts, m.top_k, **kw
+                        ),
+                        layers=m.moe_layers,
+                        meta={"T": T, "active": A},
+                        iters=iters,
+                    )
                 )
-            )
     return out
 
 
