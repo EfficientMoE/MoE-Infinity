@@ -58,6 +58,7 @@ from benchmarks.cache_simulator.belady_cache_simulator import (
 )
 from benchmarks.cache_simulator.policies import (
     GEOMETRY_POLICIES,
+    LCNU_POLICIES,
     ORACLE_POLICIES,
     build_policy,
     simulate,
@@ -236,8 +237,8 @@ def geometry_kwargs(name: str, stats: Dict[str, int]) -> Dict[str, float]:
     num_experts = stats["max_expert_id"] + 1
     if (
         name
-        in (
-            "lcnu",
+        in LCNU_POLICIES
+        | {
             "rothead",
             "hotfit",
             "shadowfit",
@@ -246,11 +247,14 @@ def geometry_kwargs(name: str, stats: Dict[str, int]) -> Dict[str, float]:
             "costfit3",
             "shared_costfit",
             "shared_costfit3",
-        )
+        }
         and stats["top_k"] > 0
         and num_experts > 0
     ):
         kwargs["prior"] = min(1.0, stats["top_k"] / num_experts)
+        if name in LCNU_POLICIES and name != "lcnu":
+            # prefill-aware LCNU variants detect prefill visits
+            kwargs["decode_width"] = stats["top_k"]
     return kwargs
 
 

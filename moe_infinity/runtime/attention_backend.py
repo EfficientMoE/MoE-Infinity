@@ -782,6 +782,26 @@ class PagedAttentionBackend:
 
         k_store = self._k_store(layer_idx)
         v_store = self._v_store(layer_idx)
+        # Storage-bound CUDA writes go through the capture-safe writer. Every
+        # other write uses the vectorised scatter already on main.
+        if self.storage is not None and key.is_cuda:
+            k_src = _on(key, self.device, k_store.dtype)
+            v_src = _on(value, self.device, v_store.dtype)
+            slots = _slots_on(slot_mapping, self.device)
+            if k_src.is_cuda and k_src.device == self.storage.spec.device:
+                # Storage-bound backends serve the CUDA-graph decode path: one
+                # launch per layer, no host sync, so the write can be captured.
+                from moe_infinity.kernel.paged_kv_write import paged_kv_write_
+
+                paged_kv_write_(
+                    self.storage,
+                    layer_idx=layer_idx,
+                    key=k_src.contiguous(),
+                    value=v_src.contiguous(),
+                    slot_mapping=slots,
+                )
+                return
+
         paged_kv_scatter_(
             k_store,
             v_store,

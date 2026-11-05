@@ -42,6 +42,8 @@ class DecodeGraphCapability:
     reason: str
     storage_owner_id: str | None = None
     layer_write_proofs: tuple[PagedLayerWriteProof, ...] = ()
+    # Human-readable blocker behind ``reason`` (which hook, which component).
+    detail: str = field(default="", compare=False)
 
 
 @runtime_checkable

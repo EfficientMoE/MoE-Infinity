@@ -82,8 +82,9 @@ def build_fixture(
             hidden = self.embed(input_ids)
             seq_len = input_ids.shape[1]
             head_dim = self.config.head_dim
-            cos = torch.ones(1, seq_len, head_dim, device=input_ids.device)
-            sin = torch.zeros(1, seq_len, head_dim, device=input_ids.device)
+            cos = torch.ones(1, seq_len, head_dim, device=hidden.device)
+            sin = torch.zeros_like(cos)
+            cos, sin = cos.to(hidden.dtype), sin.to(hidden.dtype)
             for layer in self.layers:
                 attention, _ = layer(
                     hidden_states=hidden,
@@ -104,24 +105,26 @@ def build_fixture(
     max_batch = max(batch_sizes)
     max_blocks_per_row = math.ceil(max(context_sizes) / block_size)
     request_block_count = max_batch * max_blocks_per_row
+    # head_dim 64 is the smallest size the native paged-attention kernel
+    # takes; smaller sizes use the host-synchronising SDPA fallback.
     storage = PagedKVStorage(
         PagedKVStorageSpec(
             num_layers=2,
             num_blocks=request_block_count + max_batch + 16,
             block_size=block_size,
             num_kv_heads=2,
-            head_dim=8,
-            dtype=torch.float32,
+            head_dim=64,
+            dtype=torch.bfloat16,
             device=target,
         )
     )
     request_blocks = storage.block_allocator.allocate(request_block_count)
     backend = PagedAttentionBackend(storage=storage, use_flashinfer=False)
     config = Qwen3MoeConfig(
-        hidden_size=32,
+        hidden_size=256,
         num_attention_heads=4,
         num_key_value_heads=2,
-        head_dim=8,
+        head_dim=64,
         num_hidden_layers=2,
         intermediate_size=32,
         moe_intermediate_size=16,
@@ -130,7 +133,7 @@ def build_fixture(
         vocab_size=64,
     )
     torch.manual_seed(0)
-    model = TwoLayerQwen3(config).to(target).eval()
+    model = TwoLayerQwen3(config).to(target, torch.bfloat16).eval()
     registry = PagedAttentionLayerRegistry.register(model, backend, storage)
     engine = SimpleNamespace(
         request_id=0,
@@ -181,4 +184,192 @@ def build_fixture(
     )
 
 
-__all__ = ["BenchmarkFixture", "build_fixture"]
+RESIDENT_CONFIGS: dict[str, dict[str, int]] = {
+    "tiny": {
+        "hidden_size": 256,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 128,
+        "num_hidden_layers": 2,
+        "intermediate_size": 256,
+        "moe_intermediate_size": 128,
+        "num_experts": 8,
+        "num_experts_per_tok": 2,
+        "vocab_size": 512,
+    },
+    "qwen3-30b-a3b": {
+        "hidden_size": 2048,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 4,
+        "head_dim": 128,
+        "num_hidden_layers": 48,
+        "intermediate_size": 6144,
+        "moe_intermediate_size": 768,
+        "num_experts": 128,
+        "num_experts_per_tok": 8,
+        "vocab_size": 151936,
+    },
+}
+
+
+def build_resident_model(
+    name: str,
+    *,
+    experts_impl: str = "batched_mm",
+    num_layers: int | None = None,
+    dtype: torch.dtype = torch.bfloat16,
+    device: torch.device | None = None,
+    seed: int = 0,
+) -> torch.nn.Module:
+    """Random-weight Qwen3-MoE with every expert resident on the device and
+    the paged ``Qwen3PagedAttention`` shim in each decoder layer."""
+    import transformers.models.qwen3_moe.modeling_qwen3_moe as hf_qwen3
+    from moe_store.wrappers.qwen3_paged_attention import Qwen3PagedAttention
+
+    values = dict(RESIDENT_CONFIGS[name])
+    if num_layers is not None:
+        values["num_hidden_layers"] = num_layers
+    config = hf_qwen3.Qwen3MoeConfig(max_position_embeddings=8192, **values)
+    grouped = experts_impl == "grouped_decode"
+    config._experts_implementation = "batched_mm" if grouped else experts_impl
+    target = device or torch.device("cuda", 0)
+    original = hf_qwen3.Qwen3MoeAttention
+    previous_dtype = torch.get_default_dtype()
+    hf_qwen3.Qwen3MoeAttention = Qwen3PagedAttention
+    torch.manual_seed(seed)
+    try:
+        torch.set_default_dtype(dtype)
+        with target:
+            model = hf_qwen3.Qwen3MoeForCausalLM(config)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+        hf_qwen3.Qwen3MoeAttention = original
+    model = model.to(device=target, dtype=dtype).eval()
+    if grouped:
+        from moe_infinity.serving.resident_experts import (
+            install_grouped_resident_experts,
+        )
+
+        if not install_grouped_resident_experts(model):
+            raise RuntimeError(
+                "grouped_decode needs moe_infinity._store.grouped_moe_decode"
+            )
+    return model
+
+
+def build_resident_fixture(
+    *,
+    batch_sizes: tuple[int, ...],
+    context_sizes: tuple[int, ...],
+    warmup_iters: int,
+    config_name: str = "tiny",
+    experts_impl: str = "batched_mm",
+    num_layers: int | None = None,
+    max_graph_memory_bytes: int = 0,
+    device: torch.device | None = None,
+) -> BenchmarkFixture:
+    """Resident-expert Qwen3-MoE behind a storage-bound paged backend."""
+    importlib.import_module("moe_infinity.serving")
+    from moe_store.wrappers.paged_attention_registry import (
+        PagedAttentionLayerRegistry,
+    )
+
+    from moe_infinity.runtime.attention_backend import PagedAttentionBackend
+    from moe_infinity.runtime.attention_types import DecodeGraphCapability
+    from moe_infinity.runtime.paged_kv_storage import (
+        PagedKVStorage,
+        PagedKVStorageSpec,
+    )
+    from moe_infinity.serving.batch import BatchMetadata
+    from moe_infinity.serving.cuda_graph import CudaGraphRunner
+    from moe_infinity.serving.model_runner import ModelRunner
+    from moe_infinity.serving.sequence import SamplingParams
+
+    class ResidentExperts:
+        def decode_graph_capability(self) -> DecodeGraphCapability:
+            return DecodeGraphCapability(True, "eligible")
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("resident mode requires CUDA")
+    target = device or torch.device("cuda", 0)
+    model = build_resident_model(
+        config_name,
+        experts_impl=experts_impl,
+        num_layers=num_layers,
+        device=target,
+    )
+    config = model.config
+    block_size = 16
+    max_batch = max(batch_sizes)
+    max_blocks_per_row = math.ceil(max(context_sizes) / block_size)
+    request_block_count = max_batch * max_blocks_per_row
+    storage = PagedKVStorage(
+        PagedKVStorageSpec(
+            num_layers=config.num_hidden_layers,
+            num_blocks=request_block_count + max_batch + 16,
+            block_size=block_size,
+            num_kv_heads=config.num_key_value_heads,
+            head_dim=config.head_dim,
+            dtype=model.dtype,
+            device=target,
+        )
+    )
+    request_blocks = storage.block_allocator.allocate(request_block_count)
+    backend = PagedAttentionBackend(storage=storage, use_flashinfer=False)
+    registry = PagedAttentionLayerRegistry.register(model, backend, storage)
+    engine = SimpleNamespace(
+        request_id=0,
+        kv_cache=SimpleNamespace(storage=storage, block_size=block_size),
+        get_attention_backend=lambda: backend,
+    )
+    model_runner = ModelRunner(
+        model,
+        engine,
+        device=target,
+        paged_kv_storage=storage,
+        paged_attention_registry=registry,
+        decode_graph_capability_provider=ResidentExperts(),
+    )
+    graph_runner = CudaGraphRunner(
+        model_runner,
+        storage,
+        enabled=True,
+        batch_buckets=batch_sizes,
+        context_buckets=context_sizes,
+        warmup_iters=warmup_iters,
+        max_graph_memory_bytes=max_graph_memory_bytes,
+    )
+
+    def make_batch(batch_size: int, context_size: int) -> BatchMetadata:
+        blocks_needed = math.ceil(context_size / block_size)
+        block_tables = []
+        for row in range(batch_size):
+            start = row * max_blocks_per_row
+            block_tables.append(request_blocks[start : start + blocks_needed])
+        return BatchMetadata(
+            seq_ids=list(range(batch_size)),
+            input_token_ids=[20 + row for row in range(batch_size)],
+            seq_lengths=[1] * batch_size,
+            context_lengths=[context_size - 1] * batch_size,
+            is_prefill=[False] * batch_size,
+            block_tables=block_tables,
+            token_offsets=list(range(batch_size + 1)),
+            sampling_params=[SamplingParams() for _ in range(batch_size)],
+        )
+
+    return BenchmarkFixture(
+        model_runner,
+        graph_runner,
+        storage,
+        make_batch,
+        request_blocks,
+    )
+
+
+__all__ = [
+    "RESIDENT_CONFIGS",
+    "BenchmarkFixture",
+    "build_fixture",
+    "build_resident_fixture",
+    "build_resident_model",
+]
