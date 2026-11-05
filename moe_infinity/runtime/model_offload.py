@@ -97,6 +97,8 @@ from moe_infinity.runtime.expert_variant_manifest import (
     ExpertVariantManifest,
     load_derivative_overlay,
 )
+from moe_infinity.runtime.gptoss_offload import gptoss_mxfp4_pro6000_enabled
+from moe_infinity.runtime.hf_attention import select_attn_implementation
 from moe_infinity.runtime.hooks import *
 from moe_infinity.runtime.resident_precision import (
     load_time_fp8_plan,
@@ -1424,18 +1426,15 @@ class OffloadEngine(object):
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
                 )
-                _model_type = getattr(self.config, "model_type", "")
-                _force_eager = _model_type in ("glm_moe_dsa", "glm5_next")
+                attn_implementation = select_attn_implementation(
+                    cls, self.config, is_flash_attn_available
+                )
                 model = cls._from_config(
                     self.config,
                     torch_dtype=self.dtype_cls
                     if self.config.model_type != "deepseek_v3"
                     else torch.bfloat16,
-                    attn_implementation=(
-                        "eager"
-                        if _force_eager or not is_flash_attn_available
-                        else "flash_attention_2"
-                    ),
+                    attn_implementation=attn_implementation,
                 )
 
                 if self.config.model_type == "deepseek_v3":
@@ -1459,6 +1458,14 @@ class OffloadEngine(object):
                 self.expert_prefetcher.expert_dispatcher = (
                     self.expert_dispatcher
                 )
+                if parse_expert_type(self.config) == 6 and hasattr(
+                    self.expert_dispatcher, "set_gptoss_mxfp4_pro6000"
+                ):
+                    # RTX PRO 6000-tuned MXFP4 expert kernels; other devices
+                    # keep the de-quantise + matmul path.
+                    self.expert_dispatcher.set_gptoss_mxfp4_pro6000(
+                        gptoss_mxfp4_pro6000_enabled()
+                    )
 
                 for name, param in model.named_parameters(recurse=True):
                     # remove base_model_prefix from self.name_id_map

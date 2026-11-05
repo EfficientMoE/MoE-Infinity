@@ -1,0 +1,640 @@
+// Copyright (c) EfficientMoE.
+// SPDX-License-Identifier: Apache-2.0
+
+// Grouped (all experts of one MoE layer per launch) prefill GEMMs.
+//
+// RTX PRO 6000 only: launched by grouped_moe_prefill behind the RTX_PRO_6000
+// gate (its configs, persistent grids and combine passes were tuned on that
+// card); other GPUs never instantiate a launch of these kernels.
+//
+//   GroupedExpertGemm<..., Dual=true>   act[r] = act(x[tok[r]]·Wgᵀ,
+//   x[tok[r]]·Wuᵀ) GroupedExpertGemm<..., Dual=false>  out[tok[r]] += w[r] ·
+//   bf16(act[r]·Wdᵀ)
+//
+// Rows r are the routed (token, expert) pairs in the sorted layout produced by
+// the routing kernel: expert e owns rows [offsets[e], offsets[e+1]). The
+// gate/up launch gathers its X rows through the token list (CUTLASS GatherA
+// iterator) and writes the activations contiguously; the down launch reads them
+// back contiguously and fuses the routing-weight multiply and the scatter-add
+// into its epilogue (fp32 vector reductions straight from the accumulators).
+//
+// Both launches are persistent: SMs × occupancy CTAs walk one tile space that
+// concatenates the tiles of every expert, so a layer with many small experts
+// still fills the GPU. Within an expert, consecutive tiles share a weight
+// panel (M tiles of one N panel), which keeps that panel in L2.
+
+#pragma once
+
+#include "kernel/moe_expert_gemm.h"
+
+#include <cstdint>
+#include <type_traits>
+
+namespace moe_gemm {
+
+struct GroupedExpert {
+  void const* gate;  // [I, H]
+  void const* up;    // [I, H]
+  void const* down;  // [H, I]
+  int64_t expert_id;
+};
+static_assert(sizeof(GroupedExpert) == 32, "expert table row is int64[4]");
+
+struct GroupedRouting {
+  int const* offsets;     // [n + 1] first sorted row of every expert
+  int const* tokens;      // [rows] token of every sorted row
+  float const* weights;   // [rows] routing weight of every sorted row
+  int const* tile_start;  // [n + 1] first tile of every expert (this GEMM)
+};
+
+// Stand-in epilogue of the direct-store (remainder) tiles.
+struct NoEpilogue {
+  struct SharedStorage {};
+  struct OutputTileIterator {
+    struct Params {
+      Params() = default;
+      template <typename Layout>
+      explicit Params(Layout) {}
+    };
+  };
+};
+
+template <bool Direct, typename TB, typename WarpMma, int PartitionsK,
+          typename OutputOp, int Alignment>
+struct EpilogueOf {
+  using type = typename cutlass::epilogue::threadblock::DefaultEpilogueTensorOp<
+      TB, WarpMma, PartitionsK, OutputOp, Alignment>::Epilogue;
+};
+template <typename TB, typename WarpMma, int PartitionsK, typename OutputOp,
+          int Alignment>
+struct EpilogueOf<true, TB, WarpMma, PartitionsK, OutputOp, Alignment> {
+  using type = NoEpilogue;
+};
+
+template <typename Element_, typename ThreadblockShape_, typename WarpShape_,
+          int Stages, bool Dual, typename Act = SiluAndMul>
+struct GroupedExpertGemm {
+  using Element = Element_;
+  using ElementAccumulator = float;
+  using ThreadblockShape = ThreadblockShape_;
+  using WarpShape = WarpShape_;
+  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
+  using LayoutA = cutlass::layout::RowMajor;
+  using LayoutB = cutlass::layout::ColumnMajor;
+  using LayoutC = cutlass::layout::RowMajor;
+  static constexpr int kAlignment = 128 / cutlass::sizeof_bits<Element>::value;
+  static constexpr bool kDual = Dual;
+
+  // gate/up gathers its A rows (tokens); down reads them contiguously.
+  using DefaultMma = typename cutlass::gemm::threadblock::DefaultMma<
+      Element, LayoutA, kAlignment, Element, LayoutB, kAlignment,
+      ElementAccumulator, LayoutC, cutlass::arch::OpClassTensorOp,
+      cutlass::arch::Sm80, ThreadblockShape, WarpShape, InstructionShape,
+      Stages, cutlass::arch::OpMultiplyAdd, false,
+      cutlass::gemm::SharedMemoryClearOption::kNone,
+      /*GatherA=*/Dual>::ThreadblockMma;
+  using MmaSingle = DefaultMma;
+  static constexpr auto kCacheOpB = DefaultMma::kCacheOpB;
+
+  using MmaDual = cutlass::gemm::threadblock::DualMmaMultistage<
+      typename MmaSingle::Shape, typename MmaSingle::IteratorA,
+      typename MmaSingle::SmemIteratorA, DefaultMma::kCacheOpA,
+      typename MmaSingle::IteratorB, typename MmaSingle::SmemIteratorB,
+      kCacheOpB, typename MmaSingle::IteratorB,
+      typename MmaSingle::SmemIteratorB, ElementAccumulator, LayoutC,
+      typename MmaSingle::Policy, typename MmaSingle::Policy, Stages,
+      cutlass::gemm::SharedMemoryClearOption::kNone>;
+
+  using Mma = std::conditional_t<Dual, MmaDual, MmaSingle>;
+  using IteratorA = typename MmaSingle::IteratorA;
+  using IteratorB = typename MmaSingle::IteratorB;
+  using FragmentC = typename MmaSingle::FragmentC;
+  using WarpMma = typename MmaSingle::Operator;
+  using MmaIterations = typename WarpMma::MmaIterations;
+  using WarpCount = typename MmaSingle::WarpCount;
+
+  static constexpr int kPartitionsK = ThreadblockShape::kK / WarpShape::kK;
+  static_assert(kPartitionsK == 1, "no intra-CTA split-K");
+  using OutputOp = cutlass::epilogue::thread::LinearCombination<
+      Element, kAlignment, ElementAccumulator, ElementAccumulator,
+      cutlass::epilogue::thread::ScaleType::OnlyAlphaScaling>;
+  // Tiles under 32 rows (remainder tiles of an expert) have no CUTLASS
+  // threadblock epilogue: they store straight from the mma fragments.
+  static constexpr bool kDirectStore = ThreadblockShape::kM < 32;
+  using Epilogue =
+      typename EpilogueOf<kDirectStore, ThreadblockShape, WarpMma, kPartitionsK,
+                          OutputOp, kAlignment>::type;
+  using OutputIterator = typename Epilogue::OutputTileIterator;
+
+  static constexpr int kThreads = 32 * WarpCount::kCount;
+
+  union SharedStorage {
+    typename Mma::SharedStorage main_loop;
+    typename Epilogue::SharedStorage epilogue;
+  };
+  struct KernelStorage {
+    SharedStorage tiles;
+  };
+  static constexpr int kSmemBytes = int(sizeof(KernelStorage));
+
+  struct Params {
+    int n;     // experts
+    int N, K;  // per-expert GEMM: [rows_e, K] x [K, N]
+    int tiles_n;
+    int panels;  // N panels per pass: all experts sweep `panels` N panels
+                 // before the next pass, bounding the output working set
+    GroupedExpert const* experts;
+    GroupedRouting routing;
+    typename IteratorA::Params params_A;
+    Element const* A;  // gate/up: hidden [T, K]; down: act [rows, K]
+    typename IteratorB::Params params_B;
+    typename OutputIterator::Params params_D;
+    Element* act;  // gate/up output [rows, N]
+    float* out;    // down output [T, N], accumulated
+    Element* y;    // down output per sorted row [rows, N] (combine mode)
+    int64_t ldo;
+    typename Act::Params act_params;
+  };
+
+  static Params make_params(int n, int N, int K, int ldA,
+                            GroupedExpert const* experts,
+                            GroupedRouting routing, Element const* A,
+                            Element* act, float* out, int64_t ldo,
+                            typename Act::Params act_params = {}) {
+    Params p;
+    p.n = n;
+    p.N = N;
+    p.K = K;
+    p.tiles_n = (N + ThreadblockShape::kN - 1) / ThreadblockShape::kN;
+    p.panels = p.tiles_n;
+    p.experts = experts;
+    p.routing = routing;
+    p.params_A = typename IteratorA::Params(LayoutA(ldA));
+    p.A = A;
+    p.params_B = typename IteratorB::Params(LayoutB(K));
+    p.params_D = typename OutputIterator::Params(LayoutC(N));
+    p.act = act;
+    p.out = out;
+    p.y = nullptr;
+    p.ldo = ldo;
+    p.act_params = act_params;
+    return p;
+  }
+
+  CUTLASS_DEVICE
+  static void red_add4(float* addr, float4 v) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};" ::"l"(addr),
+                 "f"(v.x), "f"(v.y), "f"(v.z), "f"(v.w)
+                 : "memory");
+#else
+    atomicAdd(addr, v.x);
+    atomicAdd(addr + 1, v.y);
+    atomicAdd(addr + 2, v.z);
+    atomicAdd(addr + 3, v.w);
+#endif
+  }
+
+  // out[tok[r]] += w[r] * bf16(acc) straight from the mma.m16n8 fragments.
+  // Chunk c covers mma (c % kRow, c / kRow) of the warp tile; lane (g, q)
+  // holds rows g and g+8 at columns 2q, 2q+1. Lane pairs (q, q^1) swap one
+  // row each so every lane owns 4 consecutive columns of one row and issues
+  // one 16-byte fp32 vector reduction.
+  CUTLASS_DEVICE
+  static void scatter_epilogue(Params const& p, FragmentC const& acc, int row0,
+                               int rows, int tile_m, int tile_n, int warp_idx,
+                               int lane_idx) {
+    int const warp_mn = warp_idx % (WarpCount::kM * WarpCount::kN);
+    int const warp_m = warp_mn % WarpCount::kM;
+    int const warp_n = warp_mn / WarpCount::kM;
+    int const g = lane_idx / 4;
+    int const q = lane_idx % 4;
+    bool const odd = q & 1;
+    int const base_r = tile_m * ThreadblockShape::kM + warp_m * WarpShape::kM +
+                       g + (odd ? 8 : 0);
+    int const base_c =
+        tile_n * ThreadblockShape::kN + warp_n * WarpShape::kN + 2 * (q & ~1);
+    float const* v = reinterpret_cast<float const*>(&acc);
+    CUTLASS_PRAGMA_UNROLL
+    for (int mi = 0; mi < MmaIterations::kRow; ++mi) {
+      int const r = base_r + mi * 16;
+      bool const live = r < rows;
+      int tok = 0;
+      float w = 0.f;
+      if (live) {
+        tok = p.routing.tokens[row0 + r];
+        w = p.routing.weights[row0 + r];
+      }
+      float* orow = p.out + int64_t(tok) * p.ldo;
+      CUTLASS_PRAGMA_UNROLL
+      for (int ni = 0; ni < MmaIterations::kColumn; ++ni) {
+        int const chunk = mi + ni * MmaIterations::kRow;
+        float const x0 = float(Element(v[chunk * 4 + 0]));
+        float const x1 = float(Element(v[chunk * 4 + 1]));
+        float const x2 = float(Element(v[chunk * 4 + 2]));
+        float const x3 = float(Element(v[chunk * 4 + 3]));
+        // even lanes keep row g and send row g+8; odd lanes the opposite.
+        float const s0 = odd ? x0 : x2;
+        float const s1 = odd ? x1 : x3;
+        float const r0 = __shfl_xor_sync(0xffffffff, s0, 1);
+        float const r1 = __shfl_xor_sync(0xffffffff, s1, 1);
+        int const c = base_c + ni * 8;
+        if (!live || c >= p.N) continue;
+        float4 out =
+            odd ? make_float4(r0, r1, x2, x3) : make_float4(x0, x1, r0, r1);
+        out.x *= w;
+        out.y *= w;
+        out.z *= w;
+        out.w *= w;
+        red_add4(orow + c, out);
+      }
+    }
+  }
+
+  // dst[r, c] = bf16(acc) for the tile's live rows, straight from the
+  // mma.m16n8 fragments (lane (g, q): rows g and g+8, columns 2q and 2q+1).
+  CUTLASS_DEVICE
+  static void direct_store(Element* dst, int ld, int rows, int ncols,
+                           FragmentC const& acc, int tile_m, int tile_n,
+                           int warp_idx, int lane_idx) {
+    int const warp_mn = warp_idx % (WarpCount::kM * WarpCount::kN);
+    int const warp_m = warp_mn % WarpCount::kM;
+    int const warp_n = warp_mn / WarpCount::kM;
+    int const g = lane_idx / 4;
+    int const q = lane_idx % 4;
+    int const base_r =
+        tile_m * ThreadblockShape::kM + warp_m * WarpShape::kM + g;
+    int const base_c =
+        tile_n * ThreadblockShape::kN + warp_n * WarpShape::kN + 2 * q;
+    float const* v = reinterpret_cast<float const*>(&acc);
+    CUTLASS_PRAGMA_UNROLL
+    for (int mi = 0; mi < MmaIterations::kRow; ++mi) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int ni = 0; ni < MmaIterations::kColumn; ++ni) {
+        int const chunk = mi + ni * MmaIterations::kRow;
+        int const c = base_c + ni * 8;
+        CUTLASS_PRAGMA_UNROLL
+        for (int h = 0; h < 2; ++h) {
+          int const r = base_r + mi * 16 + 8 * h;
+          if (r >= rows || c >= ncols) continue;
+          cutlass::Array<Element, 2> pair;
+          pair[0] = Element(v[chunk * 4 + 2 * h]);
+          pair[1] = Element(v[chunk * 4 + 2 * h + 1]);
+          *reinterpret_cast<cutlass::Array<Element, 2>*>(dst + int64_t(r) * ld +
+                                                         c) = pair;
+        }
+      }
+    }
+  }
+
+  CUTLASS_DEVICE
+  static void run_tile(Params const& p, SharedStorage& smem, int e, int tile_m,
+                       int tile_n) {
+    int const row0 = p.routing.offsets[e];
+    int const rows = p.routing.offsets[e + 1] - row0;
+    GroupedExpert const ex = p.experts[e];
+
+    int const thread_idx = threadIdx.x;
+    int const warp_idx = __shfl_sync(0xffffffff, threadIdx.x / 32, 0);
+    int const lane_idx = threadIdx.x % 32;
+    int const k_iterations =
+        (p.K + ThreadblockShape::kK - 1) / ThreadblockShape::kK;
+
+    cutlass::MatrixCoord offset_A{tile_m * ThreadblockShape::kM, 0};
+    cutlass::MatrixCoord offset_B{0, tile_n * ThreadblockShape::kN};
+
+    FragmentC acc[Dual ? 2 : 1];
+    CUTLASS_PRAGMA_UNROLL
+    for (int a = 0; a < (Dual ? 2 : 1); ++a) acc[a].clear();
+
+    Mma mma(smem.main_loop, thread_idx, warp_idx, lane_idx);
+    if constexpr (Dual) {
+      IteratorA iterator_A(p.params_A, const_cast<Element*>(p.A), {rows, p.K},
+                           thread_idx, offset_A, p.routing.tokens + row0);
+      IteratorB iterator_B0(p.params_B,
+                            static_cast<Element*>(const_cast<void*>(ex.gate)),
+                            {p.K, p.N}, thread_idx, offset_B);
+      IteratorB iterator_B1(p.params_B,
+                            static_cast<Element*>(const_cast<void*>(ex.up)),
+                            {p.K, p.N}, thread_idx, offset_B);
+      mma(k_iterations, acc[0], acc[1], iterator_A, iterator_B0, iterator_B1,
+          acc[0], acc[1]);
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < FragmentC::kElements; ++i)
+        acc[0][i] = Act::apply(acc[0][i], acc[1][i], p.act_params);
+
+      cutlass::arch::cp_async_wait<0>();
+      if constexpr (kDirectStore) {
+        direct_store(p.act + int64_t(row0) * p.N, p.N, rows, p.N, acc[0],
+                     tile_m, tile_n, warp_idx, lane_idx);
+      } else {
+        __syncthreads();
+        OutputIterator iterator_D(
+            p.params_D, p.act + int64_t(row0) * p.N, {rows, p.N}, thread_idx,
+            {tile_m * ThreadblockShape::kM, tile_n * ThreadblockShape::kN});
+        Epilogue epilogue(smem.epilogue, thread_idx, warp_idx, lane_idx);
+        epilogue(OutputOp(typename OutputOp::Params(1.0f)), iterator_D, acc[0]);
+      }
+    } else {
+      IteratorA iterator_A(p.params_A,
+                           const_cast<Element*>(p.A) + int64_t(row0) * p.K,
+                           {rows, p.K}, thread_idx, offset_A);
+      IteratorB iterator_B(p.params_B,
+                           static_cast<Element*>(const_cast<void*>(ex.down)),
+                           {p.K, p.N}, thread_idx, offset_B);
+      mma(k_iterations, acc[0], iterator_A, iterator_B, acc[0]);
+      cutlass::arch::cp_async_wait<0>();
+      if (p.y) {
+        // Combine mode: bf16 rows in sorted order, summed per token later.
+        if constexpr (kDirectStore) {
+          direct_store(p.y + int64_t(row0) * p.N, p.N, rows, p.N, acc[0],
+                       tile_m, tile_n, warp_idx, lane_idx);
+        } else {
+          __syncthreads();
+          OutputIterator iterator_D(
+              p.params_D, p.y + int64_t(row0) * p.N, {rows, p.N}, thread_idx,
+              {tile_m * ThreadblockShape::kM, tile_n * ThreadblockShape::kN});
+          Epilogue epilogue(smem.epilogue, thread_idx, warp_idx, lane_idx);
+          epilogue(OutputOp(typename OutputOp::Params(1.0f)), iterator_D,
+                   acc[0]);
+        }
+      } else {
+        scatter_epilogue(p, acc[0], row0, rows, tile_m, tile_n, warp_idx,
+                         lane_idx);
+      }
+    }
+    __syncthreads();  // the next tile's prologue reuses shared memory
+  }
+};
+
+// Rows of one expert split into `nbig` tiles of big_m rows followed by
+// `nsmall` tiles of small_m rows: the small tiles cover the remainder when at
+// most max_small of them are cheaper than one more big tile. A single-height
+// config has small_m = big_m and max_small = 0.
+struct TileSplit {
+  int big_m, small_m, max_small;
+  CUTLASS_HOST_DEVICE void split(int rows, int& nbig, int& nsmall) const {
+    nbig = rows / big_m;
+    int const rem = rows - nbig * big_m;
+    nsmall = 0;
+    if (rem > 0) {
+      nsmall = (rem + small_m - 1) / small_m;
+      if (nsmall > max_small) {
+        ++nbig;
+        nsmall = 0;
+      }
+    }
+  }
+  CUTLASS_HOST_DEVICE int tiles(int rows) const {
+    int a, b;
+    split(rows, a, b);
+    return a + b;
+  }
+};
+
+// Combine mode of the down launch: once every down tile of an N pass has
+// stored its bf16 rows y[r] (expert-sorted), CTAs sum each token's rows over
+// that pass's columns, in ascending row order:
+//   out[t, c] (+)= sum_r w[r] * y[r, c]
+// The combine items of pass p are interleaved with the down tiles of pass
+// p + 1, so the memory-bound sum overlaps the compute-bound GEMM; only the
+// last pass's items run at the end.
+template <typename Element>
+struct GroupedCombine {
+  Element const* y;  // [rows, H], written by this launch
+  float const* weights;
+  int const* tcount;  // [T] rows of every token
+  int const* rowmap;  // [T, kcap] its rows, ascending
+  float* out;
+  int64_t ldo;
+  int T, H, kcap, zero_out;
+  int* done;  // [passes] down tiles finished per pass, zeroed by routing
+  int tokens_per_item;
+};
+
+template <typename Element>
+CUTLASS_DEVICE void combine_item(GroupedCombine<Element> const& p, int t0,
+                                 int t1, int c0, int c1) {
+  // One CTA of a GEMM launch per SM does this, so every thread keeps
+  // kItems x kRows 16-byte loads in flight.
+  constexpr int kItems = 2, kRows = 8;
+  int const vec = (c1 - c0) / 8;
+  int const count = (t1 - t0) * vec;
+  for (int i0 = threadIdx.x; i0 < count; i0 += kItems * blockDim.x) {
+    int t[kItems], n[kItems];
+    int const* r[kItems];
+    float* o[kItems];
+    CUTLASS_PRAGMA_UNROLL
+    for (int q = 0; q < kItems; ++q) {
+      int const i = i0 + q * blockDim.x;
+      t[q] = i < count ? t0 + i / vec : -1;
+      n[q] = t[q] >= 0 ? min(__ldg(p.tcount + t[q]), p.kcap) : 0;
+      r[q] = p.rowmap + int64_t(max(t[q], 0)) * p.kcap;
+      o[q] = p.out + int64_t(max(t[q], 0)) * p.ldo + c0 + (i % vec) * 8;
+    }
+    float acc[kItems][8];
+    CUTLASS_PRAGMA_UNROLL
+    for (int q = 0; q < kItems; ++q) {
+      if (p.zero_out || t[q] < 0) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int k = 0; k < 8; ++k) acc[q][k] = 0.f;
+      } else {
+        float4 const a = *reinterpret_cast<float4 const*>(o[q]);
+        float4 const b = *reinterpret_cast<float4 const*>(o[q] + 4);
+        acc[q][0] = a.x, acc[q][1] = a.y, acc[q][2] = a.z, acc[q][3] = a.w;
+        acc[q][4] = b.x, acc[q][5] = b.y, acc[q][6] = b.z, acc[q][7] = b.w;
+      }
+    }
+    int const nmax = max(n[0], n[1]);
+    for (int j0 = 0; j0 < nmax; j0 += kRows) {
+      uint4 v[kItems][kRows];
+      float w[kItems][kRows];
+      CUTLASS_PRAGMA_UNROLL
+      for (int q = 0; q < kItems; ++q) {
+        int64_t const col = o[q] - (p.out + int64_t(max(t[q], 0)) * p.ldo);
+        CUTLASS_PRAGMA_UNROLL
+        for (int j = 0; j < kRows; ++j) {
+          w[q][j] = 0.f;
+          v[q][j] = make_uint4(0, 0, 0, 0);
+          if (j0 + j < n[q]) {
+            int const row = __ldg(r[q] + j0 + j);
+            w[q][j] = __ldg(p.weights + row);
+            v[q][j] = __ldcg(
+                reinterpret_cast<uint4 const*>(p.y + int64_t(row) * p.H + col));
+          }
+        }
+      }
+      CUTLASS_PRAGMA_UNROLL
+      for (int q = 0; q < kItems; ++q) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int j = 0; j < kRows; ++j) {
+          if (j0 + j >= n[q]) break;
+          Element const* h = reinterpret_cast<Element const*>(&v[q][j]);
+          CUTLASS_PRAGMA_UNROLL
+          for (int k = 0; k < 8; ++k) acc[q][k] += w[q][j] * float(h[k]);
+        }
+      }
+    }
+    CUTLASS_PRAGMA_UNROLL
+    for (int q = 0; q < kItems; ++q) {
+      if (t[q] < 0) continue;
+      *reinterpret_cast<float4*>(o[q]) =
+          make_float4(acc[q][0], acc[q][1], acc[q][2], acc[q][3]);
+      *reinterpret_cast<float4*>(o[q] + 4) =
+          make_float4(acc[q][4], acc[q][5], acc[q][6], acc[q][7]);
+    }
+  }
+}
+
+// One persistent launch over the tiles of every expert, with two tile heights
+// (Big for full tiles, Small for the remainder of each expert; Small = Big for
+// a single-height config). Both share the CTA size and the N tile.
+template <typename Big_, typename Small_ = Big_>
+struct GroupedTiledGemm {
+  using Big = Big_;
+  using Small = Small_;
+  static constexpr bool kMixed = !std::is_same_v<Big, Small>;
+  static_assert(Big::kThreads == Small::kThreads, "one CTA size");
+  static_assert(Big::ThreadblockShape::kN == Small::ThreadblockShape::kN,
+                "one N tile");
+  static_assert(Big::ThreadblockShape::kM % Small::ThreadblockShape::kM == 0,
+                "small tiles start on big tile boundaries");
+  static_assert(Big::kDual == Small::kDual, "same GEMM");
+  using ThreadblockShape = typename Big::ThreadblockShape;
+  static constexpr int kBigM = Big::ThreadblockShape::kM;
+  static constexpr int kSmallM = Small::ThreadblockShape::kM;
+  static constexpr int kThreads = Big::kThreads;
+
+  union KernelStorage {
+    typename Big::SharedStorage big;
+    typename Small::SharedStorage small;
+  };
+  static constexpr int kSmemBytes = int(sizeof(KernelStorage));
+
+  struct Params {
+    typename Big::Params big;
+    typename Small::Params small;
+    TileSplit split;
+    int* next_tile;  // zeroed before the launch: CTAs claim tiles in order
+    GroupedCombine<typename Big::Element> combine;  // down only; y = null: off
+  };
+
+  template <typename... Args>
+  static Params make_params(int max_small, Args&&... args) {
+    Params p;
+    p.big = Big::make_params(args...);
+    p.small = Small::make_params(args...);
+    p.split = {kBigM, kMixed ? kSmallM : kBigM, kMixed ? max_small : 0};
+    p.next_tile = nullptr;
+    p.combine = {};
+    return p;
+  }
+  CUTLASS_DEVICE
+  static void run(Params const& p, KernelStorage& storage) {
+    // Tiles are numbered pass-major (groups of `panels` N panels), then
+    // expert, then N panel, then M tile (big tiles first); the routing kernel
+    // published the first tile of every expert within one pass.
+    auto const& pb = p.big;
+    auto const& cw = p.combine;
+    int const* start = pb.routing.tile_start;
+    int const per_pass = start[pb.n];
+    int const passes = pb.tiles_n / pb.panels;
+    bool const fuse = !Big::kDual && cw.y != nullptr;
+    // Combine mode: after the down tiles of pass p come the combine items of
+    // pass p - 1; the items of the last pass close the launch.
+    int const items =
+        fuse ? (cw.T + cw.tokens_per_item - 1) / cw.tokens_per_item : 0;
+    int const seg = per_pass + items;
+    // Down tiles of pass p that precede its first combine item of pass p - 1,
+    // so the last tiles of pass p - 1 have finished by then.
+    int const lead = min(per_pass, 2 * int(gridDim.x));
+    int const total = per_pass * passes + items * passes;
+    // Tiles of different heights take different times, so CTAs claim the
+    // next tile from a counter instead of a fixed stride. Claiming the first
+    // tile too means every claimed tile belongs to a running CTA, so a
+    // combine item never waits on a tile whose CTA is not resident.
+    __shared__ int claimed;
+    if (threadIdx.x == 0)
+      claimed = p.next_tile ? atomicAdd(p.next_tile, 1) : int(blockIdx.x);
+    __syncthreads();
+    for (int t = claimed; t < total;) {
+      int pass = t / per_pass, tl = t - pass * per_pass, item = -1;
+      if (fuse && t >= per_pass) {
+        int const u = t - per_pass;
+        pass = 1 + u / seg;
+        int const r = u % seg;
+        if (pass >= passes) {
+          item = r;
+          pass -= 1;
+        } else if (r < lead) {
+          tl = r;
+        } else {
+          // Spread the items of pass - 1 evenly over the rest of the segment.
+          int64_t const q = r - lead, len = seg - lead;
+          int const upto = int((q + 1) * items / len);
+          if (upto != int(q * items / len)) {
+            item = upto - 1;
+            pass -= 1;
+          } else {
+            tl = r - upto;
+          }
+        }
+      }
+      if (item >= 0) {
+        if (threadIdx.x == 0) {
+          while (*reinterpret_cast<int volatile*>(cw.done + pass) < per_pass)
+            __nanosleep(256);
+          __threadfence();
+        }
+        __syncthreads();
+        int const t0 = item * cw.tokens_per_item;
+        int const c0 = pass * pb.panels * ThreadblockShape::kN;
+        combine_item(cw, t0, min(cw.T, t0 + cw.tokens_per_item), c0,
+                     min(cw.H, c0 + pb.panels * ThreadblockShape::kN));
+        __syncthreads();
+      } else {
+        int lo = 0, hi = pb.n;  // largest e with start[e] <= tl
+        while (hi - lo > 1) {
+          int mid = (lo + hi) / 2;
+          if (__ldg(start + mid) <= tl)
+            lo = mid;
+          else
+            hi = mid;
+        }
+        int const e = lo;
+        int const rows = pb.routing.offsets[e + 1] - pb.routing.offsets[e];
+        int nbig, nsmall;
+        p.split.split(rows, nbig, nsmall);
+        int const tiles_m = nbig + nsmall;
+        int const local = tl - start[e];
+        int const m = local % tiles_m;
+        int const n = pass * pb.panels + local / tiles_m;
+        if (kMixed && m >= nbig)
+          Small::run_tile(p.small, storage.small, e,
+                          nbig * (kBigM / kSmallM) + (m - nbig), n);
+        else
+          Big::run_tile(pb, storage.big, e, m, n);
+        if (fuse) {
+          // Publish this tile's rows of y before counting it done.
+          __threadfence();
+          __syncthreads();
+          if (threadIdx.x == 0) atomicAdd(cw.done + pass, 1);
+        }
+      }
+      // Every thread has read `claimed` (barrier above).
+      if (threadIdx.x == 0)
+        claimed = p.next_tile ? atomicAdd(p.next_tile, 1) : t + int(gridDim.x);
+      __syncthreads();
+      t = claimed;
+    }
+  }
+};
+
+template <typename Gemm>
+__global__ void __launch_bounds__(Gemm::kThreads)
+    grouped_expert_gemm_pro6000_kernel(typename Gemm::Params params) {
+  extern __shared__ __align__(128) char smem[];
+  Gemm::run(params, *reinterpret_cast<typename Gemm::KernelStorage*>(smem));
+}
+
+}  // namespace moe_gemm
