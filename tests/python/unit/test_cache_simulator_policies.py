@@ -18,6 +18,7 @@ import pytest
 
 from benchmarks.cache_simulator.belady_cache_simulator import belady_simulate
 from benchmarks.cache_simulator.policies import (
+    BYPASS_POLICIES,
     GEOMETRY_POLICIES,
     ORACLE_POLICIES,
     POLICY_FACTORIES,
@@ -301,10 +302,14 @@ def test_hit_rate_never_exceeds_belady_fuzz():
         length = rng.randrange(1, 60)
         accesses = random_trace(rng, length)
         for cap in (1, 2, 4, 8):
-            _, _, belady_rate = belady_simulate(accesses, cap)
+            _, _, no_bypass = belady_simulate(accesses, cap)
+            _, _, with_bypass = belady_simulate(accesses, cap, bypass=True)
             for name in POLICY_FACTORIES:
                 policy = build_policy(name, cap)
                 hits, misses, rate = simulate(policy, accesses)
+                belady_rate = (
+                    with_bypass if name in BYPASS_POLICIES else no_bypass
+                )
                 assert hits + misses == length, (name, cap)
                 assert len(policy.resident) <= cap, (name, cap)
                 assert rate <= belady_rate + 1e-9, (
@@ -320,11 +325,13 @@ def test_hit_rate_never_exceeds_belady_layered_traces():
     for _ in range(20):
         accesses = layered_trace(rng, steps=rng.randrange(2, 8))
         for cap in (2, 4, 8, 16):
-            _, _, belady_rate = belady_simulate(accesses, cap)
+            _, _, no_bypass = belady_simulate(accesses, cap)
+            _, _, with_bypass = belady_simulate(accesses, cap, bypass=True)
             for name in POLICY_FACTORIES:
                 policy = build_policy(name, cap)
                 _, _, rate = simulate(policy, accesses)
-                assert rate <= belady_rate + 1e-9, (name, cap)
+                bound = with_bypass if name in BYPASS_POLICIES else no_bypass
+                assert rate <= bound + 1e-9, (name, cap)
 
 
 def test_oracle_registry_matches_uses_oracle_flag():

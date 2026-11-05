@@ -9,8 +9,23 @@ pytest.importorskip(
     reason="paged_attention_ops required",
 )
 
-from moe_infinity.kernel.paged_attention_ops import paged_attention_fwd
-from moe_infinity.runtime.kv_cache_format import quantize_tokenwise_symmetric
+from moe_infinity.kernel import paged_attention_ops
+from moe_infinity.kernel.paged_attention_ops import (
+    paged_attention_fwd,
+    paged_attention_reference,
+)
+from moe_infinity.runtime.kv_cache_format import (
+    allocate_layered_paged_kv_store,
+    quantize_tokenwise_symmetric,
+)
+
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="no GPU"
+)
+
+HEAD_DIMS = [64, 80, 96, 112, 128, 256]
+# GQA ratios 1, 2, 4, 8, 16.
+HEAD_CONFIGS = [(8, 8), (16, 8), (16, 4), (32, 4), (64, 4)]
 
 
 def make_paged_kv(
@@ -29,62 +44,241 @@ def make_paged_kv(
     return k_cache, v_cache, block_tables, seq_lens
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="no GPU")
+def make_vllm_cache(
+    seq_lens: list[int],
+    num_kv_heads: int,
+    head_dim: int,
+    block_size: int = 16,
+    dtype: torch.dtype = torch.bfloat16,
+    device: str = "cuda",
+    extra_slots: int = 2,
+):
+    """vLLM-layout caches with randomly permuted pages and ragged lengths.
+
+    Block-table slots past each sequence hold out-of-range ids to prove the
+    kernel never dereferences them."""
+    max_blocks = max(1, -(-max(seq_lens) // block_size)) + extra_slots
+    num_blocks = len(seq_lens) * max_blocks + 3
+    x = 8
+    k_cache = torch.randn(
+        num_blocks, num_kv_heads, head_dim // x, block_size, x, device=device
+    ).to(dtype)
+    v_cache = torch.randn(
+        num_blocks, num_kv_heads, head_dim, block_size, device=device
+    ).to(dtype)
+    perm = torch.randperm(num_blocks, device=device)
+    block_tables = torch.full(
+        (len(seq_lens), max_blocks),
+        num_blocks + 1000,
+        dtype=torch.int32,
+        device=device,
+    )
+    cursor = 0
+    for i, n in enumerate(seq_lens):
+        used = -(-n // block_size)
+        block_tables[i, :used] = perm[cursor : cursor + used].int()
+        cursor += used
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=device)
+    return k_cache, v_cache, block_tables, seq_lens_t
+
+
+def sdpa_reference(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    scale: float,
+    num_kv_heads: int,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Per-sequence gather + fp32 ``F.scaled_dot_product_attention``."""
+    batch, num_heads, head_dim = query.shape
+    block_size = v_cache.shape[-1]
+    outs = []
+    for b in range(batch):
+        n = int(seq_lens[b])
+        if n == 0:
+            outs.append(torch.zeros_like(query[b]))
+            continue
+        pages = block_tables[b, : -(-n // block_size)].long()
+        k = k_cache[pages].permute(1, 0, 3, 2, 4).float()
+        k = k.reshape(num_kv_heads, -1, head_dim)[:, :n]
+        v = v_cache[pages].permute(1, 0, 3, 2).float()
+        v = v.reshape(num_kv_heads, -1, head_dim)[:, :n]
+        if k_scale is not None and v_scale is not None:
+            ks = k_scale[pages].permute(1, 0, 2).reshape(num_kv_heads, -1)
+            vs = v_scale[pages].permute(1, 0, 2).reshape(num_kv_heads, -1)
+            k = k * ks[:, :n, None].float()
+            v = v * vs[:, :n, None].float()
+        out = F.scaled_dot_product_attention(
+            query[b].float()[None, :, None],
+            k[None],
+            v[None],
+            scale=scale,
+            enable_gqa=True,
+        )
+        outs.append(out[0, :, 0].to(query.dtype))
+    return torch.stack(outs)
+
+
+@requires_cuda
+@pytest.mark.parametrize("head_dim", HEAD_DIMS)
+@pytest.mark.parametrize("num_heads,num_kv_heads", HEAD_CONFIGS)
+@pytest.mark.parametrize(
+    "seq_lens", [[1, 17, 333, 0], [5000], [1024] * 6], ids=str
+)
+def test_paged_attention_matches_sdpa(
+    head_dim, num_heads, num_kv_heads, seq_lens
+):
+    torch.manual_seed(0)
+    k, v, bt, lens = make_vllm_cache(seq_lens, num_kv_heads, head_dim)
+    q = torch.randn(
+        len(seq_lens), num_heads, head_dim, device="cuda"
+    ).bfloat16()
+    scale = head_dim**-0.5
+    out = paged_attention_fwd(q, k, v, bt, lens, scale, num_kv_heads, 16)
+    ref = sdpa_reference(q, k, v, bt, lens, scale, num_kv_heads)
+    assert out.shape == q.shape and out.dtype == q.dtype
+    torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@requires_cuda
+@pytest.mark.parametrize("block_size", [8, 32])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_paged_attention_block_sizes_and_dtypes(block_size, dtype):
+    torch.manual_seed(1)
+    seq_lens = [3, 200, 4097]
+    k, v, bt, lens = make_vllm_cache(
+        seq_lens, 4, 128, block_size=block_size, dtype=dtype
+    )
+    q = torch.randn(3, 32, 128, device="cuda").to(dtype)
+    out = paged_attention_fwd(q, k, v, bt, lens, 128**-0.5, 4, block_size)
+    ref = sdpa_reference(q, k, v, bt, lens, 128**-0.5, 4)
+    torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@requires_cuda
+def test_paged_attention_max_seq_len_hint_and_no_host_sync():
+    """The CUDA path must not synchronise with the host (CUDA graphs, #316),
+    with or without a ``max_seq_len`` hint."""
+    torch.manual_seed(2)
+    seq_lens = [700, 9000, 1]
+    k, v, bt, lens = make_vllm_cache(seq_lens, 2, 256)
+    q = torch.randn(3, 16, 256, device="cuda").bfloat16()
+    ref = sdpa_reference(q, k, v, bt, lens, 256**-0.5, 2)
+    # 4000 underestimates the longest sequence: still exact, only slower.
+    for hint in (None, 9000, 20000, 4000):
+        paged_attention_fwd(q, k, v, bt, lens, 256**-0.5, 2, 16, hint)
+        torch.cuda.synchronize()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            out = paged_attention_fwd(q, k, v, bt, lens, 256**-0.5, 2, 16, hint)
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+        torch.testing.assert_close(
+            out.float(), ref.float(), atol=2e-2, rtol=2e-2
+        )
+
+
+@requires_cuda
+@pytest.mark.parametrize("int8", [False, True])
+@pytest.mark.parametrize("batch,seq_len", [(1, 9000), (64, 300)])
+def test_paged_attention_cuda_graph_replay_matches_eager(int8, batch, seq_len):
+    """Single and multi-split launches (incl. the programmatic dependent
+    launch of the merge kernel) capture into a CUDA graph and replay with
+    bit-identical outputs."""
+    torch.manual_seed(6)
+    k, v, bt, lens = make_vllm_cache([seq_len] * batch, 4, 128)
+    ks = vs = None
+    if int8:
+        k = (k.float() * 40).to(torch.int8)
+        v = (v.float() * 40).to(torch.int8)
+        ks = torch.rand(k.shape[0], 4, 16, device="cuda").half()
+        vs = torch.rand(k.shape[0], 4, 16, device="cuda").half()
+    q = torch.randn(batch, 32, 128, device="cuda").bfloat16()
+
+    def run():
+        return paged_attention_fwd(
+            q, k, v, bt, lens, 128**-0.5, 4, 16, seq_len, ks, vs
+        )
+
+    eager = run().clone()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        run()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run()
+    q.copy_(torch.randn_like(q))
+    expected = run().clone()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured, expected)
+    assert not torch.equal(captured, eager)
+
+
+@requires_cuda
 def test_paged_vs_sdpa():
     batch, num_heads, head_dim, seq_len = 2, 8, 64, 32
     block_size = 16
     query = torch.randn(
-        batch,
-        num_heads,
-        head_dim,
-        dtype=torch.float16,
-        device="cuda",
+        batch, num_heads, head_dim, dtype=torch.float16, device="cuda"
     )
     k_cache, v_cache, block_tables, seq_lens = make_paged_kv(
         batch, num_heads, head_dim, seq_len, block_size
     )
     k_cache, v_cache = k_cache.cuda().half(), v_cache.cuda().half()
+    block_tables, seq_lens = block_tables.cuda(), seq_lens.cuda()
     scale = 1.0 / math.sqrt(float(head_dim))
     out = paged_attention_fwd(
         query,
         k_cache,
         v_cache,
-        block_tables.cuda(),
-        seq_lens.cuda(),
+        block_tables,
+        seq_lens,
         scale,
         num_heads,
         block_size,
     )
+    ref = sdpa_reference(
+        query, k_cache, v_cache, block_tables, seq_lens, scale, num_heads
+    )
     assert out.shape == query.shape
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="no GPU")
+@requires_cuda
 def test_gqa_config():
     batch, num_heads, num_kv_heads, head_dim, seq_len = 2, 32, 8, 128, 16
     block_size = 16
     query = torch.randn(
-        batch,
-        num_heads,
-        head_dim,
-        dtype=torch.float16,
-        device="cuda",
+        batch, num_heads, head_dim, dtype=torch.float16, device="cuda"
     )
     k_cache, v_cache, block_tables, seq_lens = make_paged_kv(
         batch, num_kv_heads, head_dim, seq_len, block_size
     )
     k_cache, v_cache = k_cache.cuda().half(), v_cache.cuda().half()
+    block_tables, seq_lens = block_tables.cuda(), seq_lens.cuda()
     scale = 1.0 / math.sqrt(float(head_dim))
     out = paged_attention_fwd(
         query,
         k_cache,
         v_cache,
-        block_tables.cuda(),
-        seq_lens.cuda(),
+        block_tables,
+        seq_lens,
         scale,
         num_kv_heads,
         block_size,
     )
+    ref = sdpa_reference(
+        query, k_cache, v_cache, block_tables, seq_lens, scale, num_kv_heads
+    )
     assert out.shape == query.shape
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.gpu
@@ -92,13 +286,6 @@ def test_gqa_config():
 def test_int8_paged_attention_matches_dequantized_sdpa(num_heads, num_kv_heads):
     if not torch.cuda.is_available():
         pytest.skip("no GPU")
-    from moe_infinity.kernel.paged_attention_ops import (
-        probe_native_int8_binding,
-    )
-
-    available, _ = probe_native_int8_binding()
-    if not available:
-        pytest.skip("native paged_attention_int8_v1 binding unavailable")
     torch.manual_seed(19)
     batch, head_dim, seq_len, block_size = 2, 128, 33, 16
     query = torch.randn(
@@ -134,87 +321,149 @@ def test_int8_paged_attention_matches_dequantized_sdpa(num_heads, num_kv_heads):
         .permute(0, 2, 1)
         .contiguous()
     )
+    block_tables, seq_lens = block_tables.cuda(), seq_lens.cuda()
+    scale = 1.0 / math.sqrt(head_dim)
     actual = paged_attention_fwd(
         query,
         k_q,
         v_q,
-        block_tables.cuda(),
-        seq_lens.cuda(),
-        1.0 / math.sqrt(head_dim),
+        block_tables,
+        seq_lens,
+        scale,
         num_kv_heads,
         block_size,
         key_scale=k_scale,
         value_scale=v_scale,
     )
-    references = []
-    for seq_idx in range(batch):
-        logical_len = int(seq_lens[seq_idx])
-        page_count = math.ceil(logical_len / block_size)
-        page_ids = block_tables[seq_idx, :page_count].to(
-            k_q.device, dtype=torch.long
-        )
-        k_tokens = (
-            k_q.index_select(0, page_ids)
-            .permute(0, 3, 1, 2, 4)
-            .reshape(page_count * block_size, num_kv_heads, head_dim)[
-                :logical_len
-            ]
-            .float()
-        )
-        v_tokens = (
-            v_q.index_select(0, page_ids)
-            .permute(0, 3, 1, 2)
-            .reshape(page_count * block_size, num_kv_heads, head_dim)[
-                :logical_len
-            ]
-            .float()
-        )
-        k_scales = (
-            k_scale.index_select(0, page_ids)
-            .permute(0, 2, 1)
-            .reshape(page_count * block_size, num_kv_heads)[:logical_len]
-            .float()
-        )
-        v_scales = (
-            v_scale.index_select(0, page_ids)
-            .permute(0, 2, 1)
-            .reshape(page_count * block_size, num_kv_heads)[:logical_len]
-            .float()
-        )
-        k_tokens = k_tokens * k_scales.unsqueeze(-1)
-        v_tokens = v_tokens * v_scales.unsqueeze(-1)
-        repeat = num_heads // num_kv_heads
-        q_sdpa = (
-            query[seq_idx].to(dtype=torch.float32).unsqueeze(0).unsqueeze(2)
-        )
-        k_sdpa = (
-            k_tokens.repeat_interleave(repeat, dim=1)
-            .permute(1, 0, 2)
-            .unsqueeze(0)
-            .to(dtype=torch.float32)
-        )
-        v_sdpa = (
-            v_tokens.repeat_interleave(repeat, dim=1)
-            .permute(1, 0, 2)
-            .unsqueeze(0)
-            .to(dtype=torch.float32)
-        )
-        assert q_sdpa.shape == (1, num_heads, 1, head_dim)
-        assert k_sdpa.shape == (1, num_heads, logical_len, head_dim)
-        assert v_sdpa.shape == (1, num_heads, logical_len, head_dim)
-        assert q_sdpa.dtype == k_sdpa.dtype == v_sdpa.dtype == torch.float32
-        out_sdpa_fp32 = F.scaled_dot_product_attention(
-            q_sdpa,
-            k_sdpa,
-            v_sdpa,
-            scale=1.0 / math.sqrt(head_dim),
-            is_causal=False,
-        )
-        assert out_sdpa_fp32.shape == (1, num_heads, 1, head_dim)
-        references.append(out_sdpa_fp32[0, :, 0, :].to(dtype=query.dtype))
-    reference = torch.stack(references)
+    reference = sdpa_reference(
+        query,
+        k_q,
+        v_q,
+        block_tables,
+        seq_lens,
+        scale,
+        num_kv_heads,
+        k_scale,
+        v_scale,
+    )
     assert reference.shape == actual.shape == (batch, num_heads, head_dim)
     torch.testing.assert_close(actual, reference, atol=2e-2, rtol=2e-2)
+
+
+@requires_cuda
+@pytest.mark.parametrize("head_dim", [64, 128, 256])
+@pytest.mark.parametrize("num_heads,num_kv_heads", [(4, 4), (32, 2)])
+def test_int8_store_views_match_sdpa(head_dim, num_heads, num_kv_heads):
+    """int8 KV read in place through the (non-contiguous) kernel views of a
+    real ``FormatLayeredKVStore``, ragged lengths, multi-split."""
+    torch.manual_seed(3)
+    block_size = 16
+    seq_lens = [0, 5, 130, 3000]
+    pages_per_seq = [-(-n // block_size) for n in seq_lens]
+    num_pages = sum(pages_per_seq) + 4
+    store = allocate_layered_paged_kv_store(
+        owner_id="test",
+        format_name="int8_sym",
+        num_layers=2,
+        num_blocks=num_pages,
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        execution_dtype=torch.bfloat16,
+        device=torch.device("cuda"),
+    )
+    perm = torch.randperm(num_pages, device="cuda")
+    max_blocks = max(pages_per_seq) + 1
+    block_tables = torch.zeros(
+        len(seq_lens), max_blocks, dtype=torch.int32, device="cuda"
+    )
+    cursor = 0
+    for i, (n, used) in enumerate(zip(seq_lens, pages_per_seq)):
+        block_tables[i, :used] = perm[cursor : cursor + used].int()
+        cursor += used
+        if n == 0:
+            continue
+        pos = torch.arange(n, device="cuda")
+        slots = block_tables[i, pos // block_size].long() * block_size + (
+            pos % block_size
+        )
+        store.write_chunk(
+            layer_idx=1,
+            key_chunk=torch.randn(n, num_kv_heads, head_dim, device="cuda"),
+            value_chunk=torch.randn(n, num_kv_heads, head_dim, device="cuda"),
+            slot_mapping=slots,
+        )
+    k_view, v_view, k_scale, v_scale = store.paged_kernel_layer_view(1)
+    assert not v_view.is_contiguous()
+    lens = torch.tensor(seq_lens, dtype=torch.int32, device="cuda")
+    q = torch.randn(len(seq_lens), num_heads, head_dim, device="cuda")
+    q = q.bfloat16()
+    scale = head_dim**-0.5
+    out = paged_attention_fwd(
+        q,
+        k_view,
+        v_view,
+        block_tables,
+        lens,
+        scale,
+        num_kv_heads,
+        block_size,
+        key_scale=k_scale,
+        value_scale=v_scale,
+    )
+    ref = sdpa_reference(
+        q,
+        k_view,
+        v_view,
+        block_tables,
+        lens,
+        scale,
+        num_kv_heads,
+        k_scale,
+        v_scale,
+    )
+    torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@requires_cuda
+def test_paged_attention_kv_pool_over_2pow31_elements():
+    """Pages beyond element 2**31 of the pool must be addressed with 64-bit
+    offsets (illegal-address fault before #300)."""
+    num_kv_heads, head_dim, block_size = 8, 128, 16
+    per_block = num_kv_heads * head_dim * block_size
+    num_blocks = (1 << 31) // per_block + 64
+    need = 2 * num_blocks * per_block * 2
+    free, _ = torch.cuda.mem_get_info()
+    if free < need + (2 << 30):
+        pytest.skip("not enough GPU memory for a >2**31-element KV pool")
+    k = torch.empty(
+        num_blocks,
+        num_kv_heads,
+        head_dim // 8,
+        block_size,
+        8,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    v = torch.empty(
+        num_blocks,
+        num_kv_heads,
+        head_dim,
+        block_size,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    used = torch.arange(num_blocks - 40, num_blocks, device="cuda")
+    k[used] = torch.randn_like(k[used])
+    v[used] = torch.randn_like(v[used])
+    block_tables = used.int().view(2, 20)
+    lens = torch.tensor([320, 301], dtype=torch.int32, device="cuda")
+    q = torch.randn(2, 32, head_dim, device="cuda").bfloat16()
+    out = paged_attention_fwd(q, k, v, block_tables, lens, head_dim**-0.5, 8)
+    torch.cuda.synchronize()
+    ref = sdpa_reference(q, k, v, block_tables, lens, head_dim**-0.5, 8)
+    del k, v
+    torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
 
 
 def test_fallback_import():
@@ -246,3 +495,54 @@ def test_fallback_cpu():
         block_size,
     )
     assert out.shape == query.shape
+
+
+@pytest.mark.parametrize("num_heads,num_kv_heads", [(4, 4), (16, 2)])
+def test_reference_cpu_matches_sdpa(num_heads, num_kv_heads):
+    torch.manual_seed(4)
+    k, v, bt, lens = make_vllm_cache(
+        [0, 9, 40], num_kv_heads, 64, dtype=torch.float32, device="cpu"
+    )
+    q = torch.randn(3, num_heads, 64)
+    out = paged_attention_reference(q, k, v, bt, lens, 0.125, num_kv_heads)
+    ref = sdpa_reference(q, k, v, bt, lens, 0.125, num_kv_heads)
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+
+@pytest.fixture
+def previous_path(monkeypatch):
+    """Dispatch as on a GPU other than the RTX PRO 6000."""
+    from moe_infinity.kernel import fused_decode_attn
+
+    monkeypatch.setattr(
+        fused_decode_attn, "use_pro6000_decode_attention", lambda device: False
+    )
+
+
+@requires_cuda
+@pytest.mark.parametrize(
+    "head_dim,num_heads,num_kv_heads", [(128, 32, 4), (256, 16, 2)]
+)
+def test_previous_paths_on_other_gpus_match_sdpa(
+    previous_path, head_dim, num_heads, num_kv_heads
+):
+    """paged_attention_v1 (head_dim <= 128) and the SDPA fallback (256),
+    with max_seq_len omitted (no seq_lens.max() sync on this path either)."""
+    torch.manual_seed(8)
+    k, v, bt, lens = make_vllm_cache([1, 70, 300], num_kv_heads, head_dim)
+    q = torch.randn(3, num_heads, head_dim, device="cuda").bfloat16()
+    out = paged_attention_fwd(q, k, v, bt, lens, head_dim**-0.5, num_kv_heads)
+    ref = sdpa_reference(q, k, v, bt, lens, head_dim**-0.5, num_kv_heads)
+    torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@requires_cuda
+def test_previous_int8_path_on_other_gpus_matches_sdpa(previous_path):
+    test_int8_paged_attention_matches_dequantized_sdpa(32, 8)
+
+
+@requires_cuda
+def test_previous_path_kv_pool_over_2pow31_elements(previous_path):
+    if not paged_attention_ops.HAS_PAGED_ATTN:
+        pytest.skip("paged_attention_v1 extension not built")
+    test_paged_attention_kv_pool_over_2pow31_elements()
