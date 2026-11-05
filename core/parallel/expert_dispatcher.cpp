@@ -20,6 +20,7 @@
 #include "model/model_topology.h"
 #include "model/moe.h"
 #include "kernel/grouped_moe_decode_pro6000.h"
+#include "kernel/fused_moe_mlp.h"
 
 #include <c10/core/ScalarType.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -321,6 +322,17 @@ void ExpertDispatcher::SetScales(
   }
 
   fp8_in_store_ = true;
+}
+
+void ExpertDispatcher::SetExpertActivation(int kind, float alpha, float limit) {
+  TORCH_CHECK(kind >= static_cast<int>(MoEActivationKind::kSiLU) &&
+                  kind <= static_cast<int>(MoEActivationKind::kSwiGLUOAI),
+              "SetExpertActivation: unknown activation kind ", kind);
+  MoEActivation activation{static_cast<MoEActivationKind>(kind), alpha, limit};
+  check_moe_activation(activation);
+  for (auto* module : modules_) {
+    if (module != nullptr) module->SetActivation(activation);
+  }
 }
 
 ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,

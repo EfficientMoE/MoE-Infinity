@@ -9,6 +9,8 @@
 // 128 MiB L2, 99 KiB shared memory per block). fused_moe_ffn_into checks the
 // gate once per device and runs fused_moe_ffn_into_generic
 // (fused_moe_mlp_generic.cu, the previous 3-GEMM path) everywhere else.
+// Clamped SiLU and SwiGLU-OAI also take that generic path: the dual GEMM
+// below fuses SiLU only.
 //
 //   1. dual GEMM   fused_buf = silu(X · gate_projᵀ) ⊙ (X · up_projᵀ)   [M, I]
 //   2. GEMM        output    = fused_buf · down_projᵀ                    [M, H]
@@ -619,21 +621,56 @@ void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
   });
 }
 
+void check_moe_activation(const MoEActivation& act) {
+  switch (act.kind) {
+    case MoEActivationKind::kSiLU:
+      return;
+    case MoEActivationKind::kClampedSiLU:
+      TORCH_CHECK(act.limit > 0.0f,
+                  "clamped_silu activation requires limit > 0, got ",
+                  act.limit);
+      return;
+    case MoEActivationKind::kSwiGLUOAI:
+      TORCH_CHECK(act.limit > 0.0f && act.alpha > 0.0f,
+                  "swiglu_oai activation requires alpha > 0 and limit > 0, "
+                  "got alpha=",
+                  act.alpha, ", limit=", act.limit);
+      return;
+  }
+  TORCH_CHECK(false, "unknown MoE activation kind ",
+              static_cast<int>(act.kind));
+}
+
 void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
                         torch::Tensor& gate_proj,  // [I, H]
                         torch::Tensor& up_proj,    // [I, H]
                         torch::Tensor& down_proj,  // [H, I]
-                        torch::Tensor& gate_buf,   // [M, I] (unused)
+                        torch::Tensor& gate_buf,   // [M, I]
                         torch::Tensor& fused_buf,  // [M, I]
                         torch::Tensor& output,     // [M, H]
                         cudaStream_t stream) {
-  if (fused_moe_ffn_pro6000_enabled(hidden.get_device())) {
+  fused_moe_ffn_into(hidden, gate_proj, up_proj, down_proj, gate_buf, fused_buf,
+                     output, MoEActivation{}, stream);
+}
+
+void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
+                        torch::Tensor& gate_proj,  // [I, H]
+                        torch::Tensor& up_proj,    // [I, H]
+                        torch::Tensor& down_proj,  // [H, I]
+                        torch::Tensor& gate_buf,   // [M, I]
+                        torch::Tensor& fused_buf,  // [M, I]
+                        torch::Tensor& output,     // [M, H]
+                        const MoEActivation& activation, cudaStream_t stream) {
+  check_moe_activation(activation);
+  // Dual GEMM is SiLU. Other kinds use the generic epilogue on every GPU.
+  if (activation.kind == MoEActivationKind::kSiLU &&
+      fused_moe_ffn_pro6000_enabled(hidden.get_device())) {
     fused_moe_ffn_pro6000(hidden, gate_proj, up_proj, down_proj, fused_buf,
                           output, stream, -1, 0, -1, 0);
-  } else {
-    fused_moe_ffn_into_generic(hidden, gate_proj, up_proj, down_proj, gate_buf,
-                               fused_buf, output, stream);
+    return;
   }
+  fused_moe_ffn_into_generic(hidden, gate_proj, up_proj, down_proj, gate_buf,
+                             fused_buf, output, activation, stream);
 }
 
 bool fused_moe_ffn_pro6000_enabled(int device) {
