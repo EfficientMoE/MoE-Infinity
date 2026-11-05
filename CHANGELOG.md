@@ -7,7 +7,17 @@ All notable changes to MoE-Infinity will be documented in this file.
 ### Fixed
 - Expert-cache simulator: `extract_access_sequence` / `vectorized_access_sequence` with `include_prefill=False` now drop every non-decode record (by SGLang `forward_mode`), not just `records[0]`. Merged multi-request streams (`convert_sglang_traces --merge`) previously leaked one prefill pass per request into the "decode" stream — 52% of the accesses of the published Qwen3-30B-A3B and Qwen3-235B real-trace sweeps — which inflated LRU and Belady at small capacities (e.g. Qwen3-30B-A3B at 256 entries: LRU 0.4565 -> 0.0000, Belady 0.7028 -> 0.5013 on the decode-only stream). Records without `forward_mode` keep the old behaviour. Corrected tables: `benchmarks/cache_simulator/research/decode_policy_study.md`.
 
+- Phase-specific expert policy: admission modes now reach the native `configure_phase_policy` binding as `AdmissionMode` values instead of names, which the binding rejected.
+- Managed expert residency: a demand fetch whose reserved victim was dispatched or leased before it could be evicted now releases the reservation and picks again, instead of failing the forward pass with `failed to evict reserved expert victim`.
+- Expert dispatcher: two decode hangs. `wait_expert` now releases the GIL while it blocks, because an exec worker that drops the last C++ reference to a Python-owned tensor needs the GIL to finish the layer. Completion and routing notifications now take the pending mutex before notifying, so a completion can no longer arrive between the waiter's check and its wait and be lost.
+- Offloaded weight reads: an intermittent hang while loading the model. `ArcherPrioAioHandle` published a finished read and queued a new request without holding the mutex its waiters check under, so the wakeup could be lost and `Read()` (or the I/O scheduler) waited forever. Both now take the waiter's mutex before notifying, as do the AIO thread's shutdown and the legacy expert cache's "all cached experts locked" wait.
+
 ### Changed
+- `MoE.serve()` / `api_server_v2` now refuse at startup a model whose
+  attention would run without KV history (no `*PagedAttention` shim or no
+  paged backend: GPT-OSS, GLM-5.x, GLM-5.3-Flash, MiniMax-M3, Hy3) instead of
+  serving wrong multi-token output (#318). `MOE_STRICT_PAGED_ATTENTION=0`
+  restores the old warn-only behaviour.
 - The non-MLA paged KV cache now allocates one plane per decoder layer
   (previously all layers aliased one plane). Memory use for the paged KV
   cache grows by the layer count; deployments tuned to the undersized cache
@@ -15,7 +25,10 @@ All notable changes to MoE-Infinity will be documented in this file.
 
 ### Added
 
+- Selectable GPU expert-cache eviction policies: `ArcherConfig.expert_eviction_policy` / `--expert-eviction-policy` accepts `legacy` (default, unchanged behavior) or `lru`, `lfu`, `lfu_k`, `lhu`, `lru_k`, `arc`, `2q`, `lirs`, `s3fifo`, `sieve`, `w_tinylfu`, `layer_lru`, `lcnu`. The policies are C++ ports of the cache-simulator classes (`core/prefetch/eviction_policy.cpp`) that reproduce the simulator's hit counts exactly; a non-legacy policy runs per GPU inside `ExpertResidencyManager`, which then owns demand and prefetch admission. `lcnu` takes `expert_eviction_lcnu_alpha` / `_beta` and derives `top_k / num_experts` and the MoE layer count from the model. New `get_expert_policy_stats()` counters: `eviction_policy_active`, `eviction_policy_slots`, `policy_routed_hits`, `policy_routed_misses`, `policy_victims`, `policy_fallback_victims`; the snapshot now also exports the manager's existing counters (`enabled`, `starvation_promotions`). See `docs/configuration.md#expert-eviction-policy-fields`.
 - Expert-cache simulator: LCNU (`LayerCycleNextUsePolicy`, `lcnu`), an online eviction policy for batch-1 decode that evicts the expert with the farthest expected next use — layer-steps until its layer runs again plus the expected further decode steps until it is routed, from a recency + frequency estimate. On real decode traces (SGLang captures) it has the highest hit rate of every online policy at every capacity tested on Qwen3-235B-A22B-FP8 and Qwen1.5-MoE-A2.7B, and on Qwen3-30B-A3B up to half the key space (LIRS leads by 0.09 points at 4096 of 6144 slots). On both Qwen3 models it keeps about 2/3 of Belady's hits below one token's expert working set, where LRU, ARC, SIEVE and LFU-K get none. Also seven classic recency/frequency hybrids (ARC, 2Q, LRU-K, LIRS, S3-FIFO, SIEVE, W-TinyLFU) and a per-layer LRU (Mixtral-Offloading) baseline. `research/run_policies_real.py` gains parallel workers, `--policies`, and `--prefill skip|union|raw`; `research/lcnu_ablation.py` does held-out hyper-parameter selection, ablations, and a routing-oracle bound. Study and tables: `benchmarks/cache_simulator/research/decode_policy_study.md`; policy-selection advice: `research/recommendations.md`; round-2 research plan (prefetch vs eviction as separate, composable policies): `auto_research_prefetch_eviction.md` + `prompts/04-06`.
+- `MixtralPagedAttention` paged-attention shim: Mixtral serves with KV
+  history through the paged backend (#318).
 - DeepSeek-V4.1-Flash (`deepseek_v41`) Path B support: the model type is
   protected as `deepseek_v4_fp4` (previously the generic `quant_method:
   fp8` fallback silently mis-mapped it to the GLM 128x128 FP8 identity);

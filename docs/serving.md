@@ -68,6 +68,7 @@ Stable options from `api_server_v2.py`:
 | `--enable-contextpilot` | off | Enable ContextPilot middleware |
 | `--contextpilot-debug` | off | Enable ContextPilot fault-injection/admin hooks |
 | `--phase-specific-expert-policy` / `--no-phase-specific-expert-policy` | off | Enable or explicitly disable phase-specific admission, prefetch, eviction, and mixed-batch ordering over the shared expert cache |
+| `--expert-eviction-policy` | `legacy` | GPU expert-cache eviction policy: `legacy`, `lru`, `lfu`, `lfu_k`, `lhu`, `lru_k`, `arc`, `2q`, `lirs`, `s3fifo`, `sieve`, `w_tinylfu`, `layer_lru`, `lcnu`. See [Configuration](configuration.md#expert-eviction-policy-fields) |
 
 Internal / deprecated:
 
@@ -125,6 +126,19 @@ implications as the CLI. Configure `api_key` or `MOE_API_KEYS` before using a
 non-loopback bind on an untrusted network.
 
 `MoE.serve()` accepts the same serving knobs as the CLI for host, port, memory ratios, batch sizing, the prefix-cache flag, offload path, and DFlash drafter setup. With `--enable-prefix-caching` on a supported Qwen3 + FlashInfer runtime the flag activates request-path prefix KV reuse; otherwise the cold path runs unchanged.
+
+### Models without KV history are refused at startup
+
+Serving never passes `past_key_values` to the model: KV history lives in the
+paged KV cache and reaches attention only through a `*PagedAttention` shim
+(DeepSeek-V2/V3, Qwen3, Qwen3.5, OLMoE, Mixtral). For any other model, or when
+no paged attention backend was built (`use_native_engine=False`, e.g. GLM-5.x,
+GLM-5.3-Flash, MiniMax-M3, Hy3), every decode step would attend only to itself.
+`MoE.serve()` and `api_server_v2` therefore raise at startup, naming the model
+class and the reason. `MOE_STRICT_PAGED_ATTENTION=0` downgrades this to a
+one-time warning (multi-token output is then wrong); `MOE_STRICT_PAGED_ATTENTION=1`
+also turns the per-forward check of a directly built `ModelRunner` into an
+error. Use `MoE.generate()` for refused models.
 
 ## Decode CUDA graphs (experimental, opt-in)
 

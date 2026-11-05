@@ -370,3 +370,60 @@ python -m benchmarks.cache_simulator.research.run_policies_real \
     --capacities 512 1024 2048 4096 6144 8192 12032 \
     --tag qwen3_235b --out benchmarks/cache_simulator/research
 ```
+||||||| parent of fb72ad5 (docs(benchmarks): granite3.1-moe-3b real-trace results — third model, third capture stack)
+---
+
+# Addendum — granite3.1-moe-3b capture on Apple Silicon (llama.cpp), third capture stack
+
+Companion to `results_real_granite3_1_moe_3b_{decode,union}.{md,csv}`. Extends
+the real-trace series (#293 qwen3-235b, #294 qwen3-30b-a3b + qwen1.5-moe-a2.7b,
+all SGLang `per_token` captures) with a **small-E model captured by a different
+stack**: an observation-only llama.cpp eval-callback tracer on CPU decode
+(Apple M4, 24 GB, no GPU), running ollama's granite3.1-moe:3b GGUF
+(sha256-4cbc52994d8ce56d58f3ecadcd451a5dbb2a4f1142098c6b9f030d18ee5e052b).
+
+## Capture
+
+- Tracer: llama.cpp `examples/exp646-trace/trace.cpp` eval callback on
+  `ffn_moe_topk-*` tensors; writes CSV rows
+  `rowid,prompt_id,n_tokens,layer_name,e1..e8`. Observation-only: no model
+  behavior change (same binary on/off verified byte-identical output).
+- 8 hand-crafted short prompts (PROMPTS.txt sha256
+  43703bef14f0ce4f6b290c23280fdac7b99137f9bd640498b765ef9c0572bc75),
+  greedy n_predict=512; model determinism pre-verified (two identical runs).
+- Trace: 89,828 rows; decode stream = 2,493 forward passes x 32 layers x 8
+  experts = 638,208 accesses; 1,262 of 1,280 (layer, expert) keys touched.
+
+## Conversion + validation
+
+- Converted to the SGLang `per_token` record format (one record per decode
+  step, `topk_ids_of_layer[32,1,8]`, forward_mode=2; one extend record per
+  prompt prefill; identity physical->logical map).
+- Reconciliation gates (all exact): per-prompt decode-step counts equal the
+  sealed per-prompt token counts; total 2,493 steps / 638,208 accesses;
+  simulator-side parse independently reports 32 layers / 1,262 keys /
+  638,208 accesses.
+
+## Known capture artifacts (documented, not repaired)
+
+- **Layer-31 prefill gap**: the callback never reports `ffn_moe_topk-31` while
+  a batch has n_tokens>1 (split prefill graph); each prefill contributes 31
+  full layers plus ONE lone layer-31 row at n_tokens=1 (reclassified into the
+  prefill record; other layer-31 prefill slots use the -1 "unused" sentinel
+  both `extract_access_sequence` and `union_prefill_sequence` skip). The union
+  arm therefore undercounts layer-31 first-use fetches by at most 256 of
+  ~647k accesses. Decode captures all 32 layers.
+
+## Headline findings (see results files for full tables)
+
+- **Zero-hit sub-band replicates**: LRU = 0.0000 at every capacity <= 128
+  (= layers x top_k / 2); sharp cliff to 0.3503 at 256 = the per-step working
+  set (layers x top_k). The *inclusive* zero band up to and including
+  layers x top_k does NOT hold for this small-E model — consistent with the
+  prior series itself (qwen3-30b: LRU 0.3053 at its 384 boundary; a2.7b:
+  no zero band at all).
+- **LCNU parameter transfer holds cross-model AND cross-capture-stack**: with
+  the qwen-tuned defaults and no re-tuning, lcnu is the best online policy at
+  7 of 8 capacities (second at 1024 by 0.0024).
+- **Belady floors**: 0.6458 at 256 slots (>= 0.4242 static top-8 floor) and
+  0.8547 at 512 (>= 0.6785 top-16 floor).

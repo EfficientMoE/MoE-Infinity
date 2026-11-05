@@ -210,6 +210,7 @@ _STORE_SOURCES = [
     "core/model/moe.cpp",
     # prefetch
     "core/prefetch/archer_prefetch_handle.cpp",
+    "core/prefetch/eviction_policy.cpp",
     "core/prefetch/expert_residency.cpp",
     "core/prefetch/task_scheduler.cpp",
     "core/prefetch/task_thread.cpp",
@@ -452,6 +453,7 @@ if cuda_available:
                 sources=[
                     "extensions/kernel/v4_fp4/v4_fp4_binding.cpp",
                     "extensions/kernel/v4_fp4/v4_fp4_dequant.cu",
+                    "extensions/kernel/v4_fp4/v4_fp4_moe_sm120_pro6000.cu",
                     "extensions/kernel/v4_fp4/mxfp4_dequant.cu",
                     "extensions/kernel/v4_fp4/mxfp4_gptoss_moe.cu",
                     "extensions/kernel/v4_fp4/gptoss_expert.cpp",
