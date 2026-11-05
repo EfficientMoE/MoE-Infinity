@@ -2207,7 +2207,8 @@ void ExpertDispatcher::SyncExecStreamsWithCurrent() {
   }
 }
 
-void ExpertDispatcher::DispatchExperts(int layer_idx) {
+void ExpertDispatcher::DispatchExperts(
+    int layer_idx, c10::optional<torch::Tensor> active_flags_host) {
   TORCH_CHECK(router_mask_.defined(),
               "DispatchExperts: SetInputs must be called first");
   TORCH_CHECK(router_mask_.is_cuda(),
@@ -2236,18 +2237,28 @@ void ExpertDispatcher::DispatchExperts(int layer_idx) {
     }
     const int device = router_mask_.device().index();
     c10::cuda::CUDAGuard device_guard(device);
-    auto active_flags = router_mask_.to(torch::kBool).any(0).contiguous();
     auto host_options = torch::TensorOptions()
                             .dtype(torch::kBool)
                             .device(torch::kCPU)
                             .pinned_memory(true);
-    auto active_flags_host = torch::empty({num_experts_}, host_options);
-    active_flags_host.copy_(active_flags, true);
+    torch::Tensor flags_host;
+    if (active_flags_host.has_value() && active_flags_host->defined()) {
+      flags_host = *active_flags_host;
+      TORCH_CHECK(flags_host.device().is_cpu() &&
+                      flags_host.scalar_type() == torch::kBool &&
+                      flags_host.numel() == num_experts_,
+                  "DispatchExperts: active_flags_host must be a CPU bool "
+                  "tensor of num_experts elements");
+    } else {
+      auto active_flags = router_mask_.to(torch::kBool).any(0).contiguous();
+      flags_host = torch::empty({num_experts_}, host_options);
+      flags_host.copy_(active_flags, true);
+    }
     auto stream = c10::cuda::getCurrentCUDAStream(device).stream();
 
     RouteArgs args;
     args.layer_idx = layer_idx;
-    args.active_flags_host = active_flags_host;
+    args.active_flags_host = flags_host;
     args.generation = generation;
     if ((expert_drop_enabled_.load(std::memory_order_acquire) ||
          expert_drop_trace_enabled_.load(std::memory_order_acquire)) &&

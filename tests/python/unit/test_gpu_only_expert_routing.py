@@ -192,3 +192,39 @@ def test_gpu_routing_exposes_host_list_only_after_wait():
     assert prefetcher.corrected == [(5, [0, 2])]
     assert prefetcher.speculative == [(4, logits)]
     assert dispatcher.calls[-1][0] == "take_last_active_experts"
+
+
+def test_fused_router_flags_are_handed_to_the_dispatcher(monkeypatch):
+    import moe_infinity.distributed.expert_executor as ex
+
+    executor, dispatcher = make_executor(enabled=True)
+    executor._can_use_gpu_only_routing = lambda mask: True
+    calls = []
+    dispatcher.dispatch_experts = lambda layer, flags=None: calls.append(
+        (layer, flags)
+    )
+    hidden = torch.ones(1, 2)
+    mask = torch.tensor([[True, False, True]])
+    flags = torch.tensor([True, False, True])
+    monkeypatch.setattr(
+        ex, "_take_active_flags", lambda m: flags if m is mask else None
+    )
+    executor.dispatch_local(2, hidden, mask, mask.float())
+    assert calls == [(2, flags)]
+
+
+def test_old_binding_without_flags_argument_falls_back(monkeypatch):
+    import moe_infinity.distributed.expert_executor as ex
+
+    executor, dispatcher = make_executor(enabled=True)
+    executor._can_use_gpu_only_routing = lambda mask: True
+    flags = torch.tensor([True, False])
+    monkeypatch.setattr(ex, "_take_active_flags", lambda m: flags)
+    hidden = torch.ones(1, 2)
+    mask = torch.tensor([[True, False]])
+    for layer in (0, 1):
+        executor.dispatch_local(layer, hidden, mask, mask.float())
+        executor._pending_prefetch = None
+    native = [c for c in dispatcher.calls if c[0] == "dispatch_experts"]
+    assert native == [("dispatch_experts", 0), ("dispatch_experts", 1)]
+    assert executor._dispatch_accepts_flags is False

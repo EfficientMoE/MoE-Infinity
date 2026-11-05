@@ -346,7 +346,12 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<CallResult> WaitExpert() { return Wait(); }
   torch::Tensor WaitHiddenStates();
 
-  void DispatchExperts(int layer_idx);
+  // active_flags_host: optional pinned bool [num_experts] written by the
+  // routing kernel on the current stream (moe_infinity._router). When given,
+  // the mask reduction + device-to-host copy are skipped.
+  void DispatchExperts(
+      int layer_idx,
+      c10::optional<torch::Tensor> active_flags_host = c10::nullopt);
   std::vector<int> TakeLastActiveExperts();
   std::vector<int> TakeLastRoutedExperts();
   // GPT-OSS offloaded experts: allow the RTX PRO 6000 MXFP4 kernels (set by

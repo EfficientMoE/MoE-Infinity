@@ -8,7 +8,8 @@ Impl names:
   production paths   cutlass_fused, cutlass_fused_act, grouped_decode, grouped_prefill, fp8_prod,
                      gptoss_resident, gptoss_offload, triton_mxfp4,
                      v4_fp4_prod, v4_fp4_native, sdpa_shim, hf_eager, paged_fwd,
-                     paged_fwd_int8, hf_eager_decode, router_*, gdn_torch,
+                     paged_fwd_int8, hf_eager_decode, router_*, router_fused,
+                     gdn_torch,
                      kv_write_loop, kv_write_vec, moe_gqa, moe_gqa_swa,
                      moe_gqa_masked, moe_gqa_decode, moe_gqa_masked_decode
                      (HF models without a paged shim, runtime/hf_attention.py)
@@ -1371,6 +1372,44 @@ def _router_builder(T, H, E, k, fp32):
     return build
 
 
+def _router_scoring(key: str) -> str:
+    if key.startswith("deepseek-v4"):
+        return "sqrtsoftplus"
+    return "sigmoid" if key in _FP32_ROUTER else "softmax"
+
+
+def _router_fused_builder(T, H, E, k, scoring):
+    """Fused router (#315), the whole per-layer routing step.
+
+    `moe_infinity.kernel.router.fused_route` writes compact ids/weights, the
+    dense mask/weights and the active-expert flags (straight into pinned host
+    memory) in one launch (two at T > 1024: cuBLAS logits + routing). The
+    dispatcher consumes those flags (`dispatch_experts(layer, flags)`), so it
+    only enqueues a host callback: no mask reduction, no D2H copy, no host
+    sync.
+    """
+
+    def build():
+        from moe_infinity.kernel.router import make_router
+
+        x = _rand(T, H, scale=1.0)
+        w = _rand(E, H)
+        bias = torch.zeros(E, device="cuda") if scoring != "softmax" else None
+        # Built once per layer in the wrappers, like here.
+        route = make_router(
+            w, k, scoring=scoring, bias=bias,
+            eps=0.0 if scoring == "softmax" else 1e-20,
+            active_flags=True, compact=False,
+        )  # fmt: skip
+
+        def run():
+            return route(x)[3]
+
+        return run
+
+    return build
+
+
 def router_cases(model_keys: list[str] | None = None) -> list[Case]:
     out = []
     for key, m in MODELS.items():
@@ -1380,22 +1419,37 @@ def router_cases(model_keys: list[str] | None = None) -> list[Case]:
         pts = [("prefill", lbl, n) for lbl, n in PREFILL_TOKENS.items()]
         pts += [("decode", f"b{b}", b) for b in DECODE_BATCHES]
         for phase, lbl, T in pts:
+            common = dict(
+                suite="router",
+                model=key,
+                phase=phase,
+                size=lbl,
+                flops=2.0 * T * m.hidden * m.experts,
+                layers=m.moe_layers,
+                meta={"T": T, "H": m.hidden, "E": m.experts},
+            )
             out.append(
                 Case(
                     f"{key}|{lbl}|router_{'fp32' if fp32 else 'bf16'}",
-                    suite="router",
-                    model=key,
-                    phase=phase,
-                    size=lbl,
                     impl=f"router_{'fp32' if fp32 else 'bf16'}",
-                    flops=2.0 * T * m.hidden * m.experts,
                     bytes_min=T * m.hidden * BF16
                     + m.experts * m.hidden * (4 if fp32 else 2),
                     build=_router_builder(
                         T, m.hidden, m.experts, m.top_k, fp32
                     ),
-                    layers=m.moe_layers,
-                    meta={"T": T, "H": m.hidden, "E": m.experts},
+                    **common,
+                )
+            )
+            # bf16 gate weight read once (fp32 logits come from bf16 MMA)
+            out.append(
+                Case(
+                    f"{key}|{lbl}|router_fused",
+                    impl="router_fused",
+                    bytes_min=T * m.hidden * BF16 + m.experts * m.hidden * BF16,
+                    build=_router_fused_builder(
+                        T, m.hidden, m.experts, m.top_k, _router_scoring(key)
+                    ),
+                    **common,
                 )
             )
     return out
