@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "model/model_topology.h"
+#include "prefetch/eviction_policy.h"
 #include "prefetch/expert_policy.h"
 
 enum class AdmissionSource : std::uint8_t { DEMAND = 0, PREFETCH = 1 };
@@ -119,6 +121,8 @@ struct ResidencyEntry {
   ResidencyState state = ResidencyState::HOST_READY;
   std::uint32_t lease_count = 0;
   cudaEvent_t last_use_event = nullptr;
+  // (layer, expert) of the node when registered; eviction policies key on it.
+  std::optional<ExpertCacheKey> policy_key;
 };
 
 struct LeaseRecord {
@@ -186,6 +190,23 @@ class ExpertResidencyManager {
 
   void ConfigurePolicy(const PhasePolicyConfig& config);
   bool PolicyEnabled() const;
+  // Selects how victims are chosen on managed admissions. "legacy" (default)
+  // keeps the built-in least-recently-accessed choice; any name from
+  // EvictionPolicyNames() installs that policy per GPU and turns managed
+  // residency on. options.num_layers <= 0 means the number of distinct MoE
+  // layers registered with RegisterExpertKey. Fails for unknown names or
+  // while admissions are pending.
+  bool ConfigureEvictionPolicy(const std::string& name,
+                               const EvictionPolicyOptions& options);
+  std::string EvictionPolicyName() const;
+  // Managed residency (this manager owns admission and eviction) is on when
+  // the phase policy or a non-legacy eviction policy is configured.
+  bool ManagedResidency() const;
+  // (layer, expert) of an expert node; eviction policies key on it.
+  void RegisterExpertKey(std::size_t node_id, int layer, int expert);
+  // A routed (demand) access to `node` on `gpu_id`, in execution order and
+  // before any admission it causes. No-op without an eviction policy.
+  void RecordRouted(const NodePtr& node, int gpu_id);
   AdmissionMode AdmissionFor(ExpertPhase phase) const;
   std::uint32_t StarvationLimit() const;
   void RecordStarvationPromotion();
@@ -202,6 +223,17 @@ class ExpertResidencyManager {
     std::int64_t transition_reserved_bytes = 0;
     std::int64_t workspace_bytes = 0;
     std::vector<ResidencyEntry> entries;
+    // Eviction policy for this GPU, created on first use. While it exists:
+    // entries per policy key (the policy sees a key admitted when its count
+    // leaves 0 and evicted when it returns to 0) and the keys with a routed
+    // access still waiting for their admission.
+    std::unique_ptr<EvictionPolicy> policy;
+    std::int64_t policy_expert_bytes = 0;
+    std::unordered_map<ExpertCacheKey, std::uint32_t> policy_key_entries;
+    std::unordered_set<ExpertCacheKey> pending_demand;
+    // Victim-search scratch: evictable entry per dense (layer, expert) slot.
+    std::vector<const ResidencyEntry*> evictable_slots;
+    std::vector<std::size_t> evictable_used;
   };
 
   GpuState& StateFor(int gpu_id);
@@ -213,7 +245,27 @@ class ExpertResidencyManager {
   const ResidencyEntry* FindEntry(const GpuState& state,
                                   const ResidencyVariantKey& key) const;
   ResidencyEntry* FindEntry(const ResidencyVariantKey& key, int* gpu_id);
+  bool IsEvictable(const ResidencyEntry& entry,
+                   std::int64_t needed_bytes) const;
   NodePtr SelectVictim(const GpuState& state, std::int64_t needed_bytes) const;
+  NodePtr SelectPolicyVictim(GpuState& state, ExpertCacheKey incoming,
+                             bool need_room, std::int64_t needed_bytes);
+  // Not claimed by a dispatch or a prefetch (exec_state IDLE, no pending
+  // dispatches). The policy path only evicts idle experts: a policy may
+  // prefer experts used moments ago (LCNU does) that are still in flight.
+  static bool NodeIdle(const NodePtr& node);
+  NodePtr SelectIdleVictim(const GpuState& state,
+                           std::int64_t needed_bytes) const;
+  EvictionPolicy* PolicyFor(GpuState& state, std::int64_t expert_bytes);
+  std::optional<ExpertCacheKey> KeyOf(const NodePtr& node) const;
+  int RegisteredLayerCount() const;
+  std::optional<std::size_t> DenseSlot(ExpertCacheKey key) const;
+  // Keep the policy's resident set in step with the entries of `state`.
+  void TrackEntryAdded(GpuState& state,
+                       const std::optional<ExpertCacheKey>& key,
+                       AdmissionSource source);
+  void TrackEntryRemoved(GpuState& state,
+                         const std::optional<ExpertCacheKey>& key);
   std::uint32_t NodeLeaseCount(std::size_t node_id) const;
 
   mutable std::mutex mutex_;
@@ -228,6 +280,14 @@ class ExpertResidencyManager {
   std::vector<ResidencyVariantKey> protected_variants_;
   PhasePolicyConfig config_;
   ExpertPolicyStats counters_;
+  std::string eviction_policy_name_ = "legacy";
+  EvictionPolicyOptions eviction_options_;
+  std::unordered_map<std::size_t, ExpertCacheKey> node_keys_;
+  int max_registered_layer_ = -1;
+  int max_registered_expert_ = -1;
+  // Lock-free reads for the dispatch hot path.
+  std::atomic<bool> eviction_policy_active_{false};
+  std::atomic<bool> managed_residency_{false};
 
   std::uint64_t next_ticket_id_ = 1;
   std::uint64_t next_lease_id_ = 1;

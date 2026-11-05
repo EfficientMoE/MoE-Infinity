@@ -127,3 +127,33 @@ target_link_libraries(test_expert_residency_variants PRIVATE
 )
 
 add_test(NAME ExpertResidencyVariantTests COMMAND test_expert_residency_variants)
+
+add_executable(test_eviction_policy
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_eviction_policy.cpp
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/v4_fp4/mxfp4_dequant.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/v4_fp4/fp8_dequant.cu
+)
+
+set_target_properties(test_eviction_policy PROPERTIES
+  CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+)
+
+target_include_directories(test_eviction_policy PRIVATE
+  ${CMAKE_SOURCE_DIR}/core
+  ${CMAKE_SOURCE_DIR}/extensions
+  ${CUTLASS_DIR}/include
+  ${GTEST_INCLUDE_DIRS}
+)
+
+target_link_libraries(test_eviction_policy PRIVATE
+  -Wl,--whole-archive $<TARGET_FILE:archer_core> -Wl,--no-whole-archive
+  archer_core
+  ${GTEST_LIBRARIES}
+  GTest::gtest_main
+  ${TORCH_LIBRARIES}
+  ${torch_python_LIBRARY}
+  Python3::Python
+  pthread
+)
+
+add_test(NAME EvictionPolicyTests COMMAND test_eviction_policy)

@@ -238,7 +238,24 @@ ArcherPrioAioContext::ArcherPrioAioContext(const int block_size,
 
 ArcherPrioAioContext::~ArcherPrioAioContext() {}
 
-void ArcherPrioAioContext::NotifyExit() { schedule_cv_.notify_all(); }
+void ArcherPrioAioContext::NotifyExit() {
+  { std::lock_guard<std::mutex> lock(schedule_mutex_); }  // see AcceptRequest
+  schedule_cv_.notify_all();
+}
+
+// Wait() checks pending_callbacks under io_request->mutex, so the store must
+// happen under it too. A store and notify that land between that check and
+// the wait are lost, and Wait() blocks forever (seen as a hang while loading
+// offloaded weights).
+void ArcherPrioAioContext::CompleteRequest(
+    const std::shared_ptr<AioRequest>& io_request) {
+  io_request->callbacks.clear();
+  {
+    std::lock_guard<std::mutex> lock(io_request->mutex);
+    io_request->pending_callbacks.store(0);
+  }
+  io_request->cv.notify_one();
+}
 
 void ArcherPrioAioContext::Schedule() {
   std::shared_ptr<AioRequest> io_request = nullptr;
@@ -271,9 +288,7 @@ void ArcherPrioAioContext::Schedule() {
       thread_pool_->Enqueue(cb);
     }
     thread_pool_->Wait();
-    io_request->callbacks.clear();
-    io_request->pending_callbacks.store(0);
-    io_request->cv.notify_one();
+    CompleteRequest(io_request);
     return;
   }
 
@@ -298,9 +313,7 @@ void ArcherPrioAioContext::Schedule() {
     thread_pool_->Enqueue(cb);
   }
   thread_pool_->Wait();
-  io_request->callbacks.clear();
-  io_request->pending_callbacks.store(0);
-  io_request->cv.notify_one();
+  CompleteRequest(io_request);
 }
 
 void ArcherPrioAioContext::AcceptRequest(
@@ -314,6 +327,10 @@ void ArcherPrioAioContext::AcceptRequest(
       io_queue_low_.push_back(io_request);
     }
   }
+  // Schedule() checks the queues while holding schedule_mutex_. Taking it
+  // before notifying keeps the wakeup from landing between that check and the
+  // wait, which would leave this request queued with the scheduler asleep.
+  { std::lock_guard<std::mutex> lock(schedule_mutex_); }
   schedule_cv_.notify_one();
 }
 

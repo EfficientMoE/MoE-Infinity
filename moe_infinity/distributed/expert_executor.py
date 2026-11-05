@@ -738,6 +738,22 @@ class DistributedExpertExecutor:
         if prefetcher is None:
             prefetcher = self.prefetcher
 
+        if (
+            prefetcher is not None
+            and phase is ExpertPhase.MIXED
+            and torch.is_tensor(router_mask)
+            and router_mask.view(-1, num_expert).shape[0] > 1
+        ):
+            # HF-path prefill (no expert_phase_scope set, so phase stays
+            # MIXED): speculative prefetch plus the post-barrier
+            # correct_prefetch re-issue flood the expert cache with
+            # union-sized admissions per layer. Scheduler-side prefetch
+            # evicts outside the dispatcher's cached_experts_ accounting,
+            # so at small cache sizes demand fetches deadlock waiting on
+            # FindExpertEvict (#285). Only single-token (decode-shaped)
+            # dispatches issue prefetch on the MIXED-phase path.
+            prefetcher = None
+
         invocation_id = None
         if self._dispatcher_timing_ready(prefetcher):
             invocation_id = self.expert_dispatcher.set_inputs_with_invocation(
