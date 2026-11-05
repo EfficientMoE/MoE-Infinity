@@ -10,6 +10,7 @@
 #include "model/moe.h"
 #include "kernel/ops.h"
 #include "kernel/fp8_moe/fp8_moe.h"
+#include "kernel/grouped_moe_decode_pro6000.h"
 #include "kernel/fused_moe_mlp.h"
 #include "kernel/grouped_moe_prefill.h"
 
@@ -204,6 +205,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("hidden"), py::arg("inter"), py::arg("device") = -1,
         "Whether the sm120 / RTX PRO 6000 FP8 expert kernels run on device");
   m.def(
+      "grouped_moe_decode_pro6000",
+      [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
+         const torch::Tensor& router_weight, const torch::Tensor& expert_table,
+         int64_t inter, int64_t kcap, torch::Tensor out, bool zero_out) {
+        grouped_moe_decode_pro6000(hidden, router_mask, router_weight,
+                                   expert_table, inter, kcap, out, zero_out,
+                                   at::cuda::getCurrentCUDAStream().stream());
+      },
+      py::arg("hidden"), py::arg("router_mask"), py::arg("router_weight"),
+      py::arg("expert_table"), py::arg("inter"), py::arg("kcap"),
+      py::arg("out"), py::arg("zero_out") = false,
+      "Grouped decode MoE layer: out += sum_e w[:, e] * FFN_e(hidden) over "
+      "the experts in expert_table (int64 [n, 4]: gate*, up*, down*, id).");
+  m.def(
       "fused_moe_ffn_into",
       [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
          torch::Tensor down_proj, torch::Tensor gate_buf,
@@ -359,6 +374,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("layer_idx"), py::arg("active_flags_host") = py::none())
       .def("take_last_active_experts", &ExpertDispatcher::TakeLastActiveExperts)
       .def("get_routing_stats", &ExpertDispatcher::GetRoutingStats)
+      .def("set_grouped_decode", &ExpertDispatcher::SetGroupedDecode,
+           py::arg("enabled"), py::arg("top_k") = 0,
+           py::arg("activation_kind") = 0)
       .def("_set_dispatch_fault_for_test",
            &ExpertDispatcher::SetDispatchFaultForTest)
       .def("_fail_dispatch_for_test", &ExpertDispatcher::FailDispatchForTest)

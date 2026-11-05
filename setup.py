@@ -253,6 +253,7 @@ _STORE_SOURCES = [
     "core/model/fused_mlp.cu",
     "extensions/kernel/fused_moe_mlp.cu",
     "extensions/kernel/fused_moe_mlp_generic.cu",
+    "extensions/kernel/grouped_moe_decode_pro6000.cu",
     "extensions/kernel/grouped_moe_prefill.cu",
     "extensions/kernel/activation_kernels.cu",
     "extensions/kernel/topk_softmax_kernels.cu",

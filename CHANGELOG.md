@@ -13,6 +13,12 @@ All notable changes to MoE-Infinity will be documented in this file.
 - Offloaded weight reads: an intermittent hang while loading the model. `ArcherPrioAioHandle` published a finished read and queued a new request without holding the mutex its waiters check under, so the wakeup could be lost and `Read()` (or the I/O scheduler) waited forever. Both now take the waiter's mutex before notifying, as do the AIO thread's shutdown and the legacy expert cache's "all cached experts locked" wait.
 
 ### Changed
+- Decode-sized MoE layers (<= 256 tokens) run every GPU-resident BF16
+  gated-SiLU expert in one grouped kernel pair instead of one CUTLASS call per
+  expert (routing-weight multiply and scatter-add fused, no per-expert host
+  sync); experts still being fetched keep the per-expert path. 1.3-3.9x
+  faster MoE layers at decode for the Qwen3 / Qwen3.5 family on sm_120.
+  `MOE_GROUPED_DECODE=0` restores per-expert execution.
 - `MoE.serve()` / `api_server_v2` now refuse at startup a model whose
   attention would run without KV history (no `*PagedAttention` shim or no
   paged backend: GPT-OSS, GLM-5.x, GLM-5.3-Flash, MiniMax-M3, Hy3) instead of
