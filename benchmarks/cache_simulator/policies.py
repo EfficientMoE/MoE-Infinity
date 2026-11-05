@@ -1693,6 +1693,14 @@ POLICY_FACTORIES = {
     "w_tinylfu": lambda cap, **kw: WTinyLFUPolicy(cap, **kw),
     "layer_lru": lambda cap, **kw: LayerLRUPolicy(cap, **kw),
     "lcnu": lambda cap, **kw: LayerCycleNextUsePolicy(cap, **kw),
+    "rothead": lambda cap, **kw: _build_rothead(cap, **kw),
+    "hotfit": lambda cap, **kw: _build_hotfit(cap, **kw),
+    "shadowfit": lambda cap, **kw: _build_shadowfit(cap, **kw),
+    "decayfit": lambda cap, **kw: _build_decayfit(cap, **kw),
+    "costfit": lambda cap, **kw: _build_costfit(cap, **kw),
+    "costfit3": lambda cap, **kw: _build_costfit3(cap, **kw),
+    "shared_costfit": lambda cap, **kw: _build_shared_costfit(cap, **kw),
+    "shared_costfit3": lambda cap, **kw: _build_shared_costfit3(cap, **kw),
     # LCNU with decode-only routing statistics: prefill passes (visits wider
     # than ``decode_width``) give no routing evidence.
     "lcnu_p": lambda cap, **kw: LayerCycleNextUsePolicy(
@@ -1705,9 +1713,78 @@ POLICY_FACTORIES = {
     ),
 }
 
+
+def _build_rothead(cap, **kw):
+    # Lazy import: policies_rothead imports this module (no import cycle at
+    # call time because policies.py is fully initialized by then).
+    from benchmarks.cache_simulator.research.policies_rothead import (
+        RotHeadPolicy,
+    )
+
+    return RotHeadPolicy(cap, **kw)
+
+
+def _build_costfit(cap, **kw):
+    from .research.policies_costfit import CostFitPolicy
+
+    return CostFitPolicy(cap, **kw)
+
+
+def _build_costfit3(cap, **kw):
+    from .research.policies_costfit3 import CostFit3Policy
+
+    return CostFit3Policy(cap, **kw)
+
+
+def _build_shared_costfit(cap, **kw):
+    from .research.policies_shared_costfit import SharedCostFitPolicy
+
+    return SharedCostFitPolicy(cap, **kw)
+
+
+def _build_shared_costfit3(cap, **kw):
+    from .research.policies_shared_costfit import SharedCostFit3Policy
+
+    return SharedCostFit3Policy(cap, **kw)
+
+
+def _build_decayfit(cap, **kw):
+    from .research.policies_decayfit import DecayFitPolicy
+
+    return DecayFitPolicy(cap, **kw)
+
+
+def _build_shadowfit(cap, **kw):
+    from .research.policies_shadowfit import ShadowFitPolicy
+
+    return ShadowFitPolicy(cap, **kw)
+
+
+def _build_hotfit(cap, **kw):
+    # Lazy import for the same no-cycle reason as _build_rothead.
+    from benchmarks.cache_simulator.research.policies_hotfit import (
+        HotFitPolicy,
+    )
+
+    return HotFitPolicy(cap, **kw)
+
+
 #: Policies that accept the model geometry (``num_layers``; ``lcnu`` also
 #: ``prior = top_k / num_experts``) as keyword arguments.
-GEOMETRY_POLICIES = {"layer_lru", "lcnu", "lcnu_p", "lcnu_b"}
+GEOMETRY_POLICIES = {
+    "layer_lru",
+    "lcnu",
+    "lcnu_p",
+    "lcnu_b",
+    "rothead",
+    "hotfit",
+    "shadowfit",
+    "decayfit",
+    "costfit",
+    "costfit3",
+    "shared_costfit",
+    "shared_costfit3",
+}
 
 #: LCNU variants (take ``prior`` and ``decode_width`` too).
 LCNU_POLICIES = {"lcnu", "lcnu_p", "lcnu_b"}

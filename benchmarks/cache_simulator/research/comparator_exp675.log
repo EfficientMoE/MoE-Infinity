@@ -1,0 +1,15 @@
+[trace] data/belady/stream_qwen30b.pt accesses=1424640 stats={'files': 1, 'num_layers': 48, 'max_expert_id': 127, 'top_k': 8, 'distinct_keys': 5948, 'total_accesses': 1424640}
+  costfit vs shared_costfit cap=256: OK (hits=466269 switches=0)
+  costfit vs shared_costfit cap=1024: OK (hits=950790 switches=4)
+  costfit vs shared_costfit cap=4096: OK (hits=1408435 switches=1)
+  costfit3 vs shared_costfit3 cap=256: OK (hits=466269 switches=0)
+  costfit3 vs shared_costfit3 cap=1024: OK (hits=950790 switches=4)
+  costfit3 vs shared_costfit3 cap=4096: OK (hits=1408422 switches=1)
+[trace] benchmarks/cache_simulator/data/handcrafted8-greedy512/belady/stream_granite3b.pt accesses=638208 stats={'files': 1, 'num_layers': 32, 'max_expert_id': 39, 'top_k': 8, 'distinct_keys': 1262, 'total_accesses': 638208}
+  costfit vs shared_costfit cap=256: OK (hits=298786 switches=0)
+  costfit vs shared_costfit cap=1024: OK (hits=620381 switches=1)
+  costfit vs shared_costfit cap=4096: OK (hits=636946 switches=0)
+  costfit3 vs shared_costfit3 cap=256: OK (hits=298786 switches=0)
+  costfit3 vs shared_costfit3 cap=1024: OK (hits=620381 switches=1)
+  costfit3 vs shared_costfit3 cap=4096: OK (hits=636946 switches=0)
+COMPARATOR: ALL-OK
