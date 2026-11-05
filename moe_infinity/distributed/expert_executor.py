@@ -102,6 +102,24 @@ def _layer_expert_nbytes(prefetcher, layer_id, expert_ids):
     return entry or None
 
 
+_TAKE_ACTIVE_FLAGS = None
+
+
+def _take_active_flags(router_mask):
+    """Pinned active-expert flags the fused router produced for this mask."""
+    global _TAKE_ACTIVE_FLAGS
+    if _TAKE_ACTIVE_FLAGS is None:
+        try:
+            from moe_infinity.kernel.router import take_active_flags
+        except Exception:  # Triton / extension unavailable
+
+            def take_active_flags(_mask):
+                return None
+
+        _TAKE_ACTIVE_FLAGS = take_active_flags
+    return _TAKE_ACTIVE_FLAGS(router_mask)
+
+
 def _executor_evidence(**kwargs):
     # Lazy for the same package-cycle reason as ``_load_route_ahead_impl``.
     from moe_infinity.spec_decode.protocols import ExecutorEvidence
@@ -136,6 +154,7 @@ class DistributedExpertExecutor:
             getattr(archer_config, "gpu_only_expert_routing", False)
         )
         self._last_dispatch_used_native_routing = False
+        self._dispatch_accepts_flags = None
         self._fused_expert_drop = False
         self._gpu_route_fallback_count = 0
         self._pending_prefetch = None
@@ -378,6 +397,22 @@ class DistributedExpertExecutor:
         if route_ahead_ctx.is_active():
             return False
         return True
+
+    def _dispatch_native(self, layer_id, router_mask):
+        # Flags written by the fused routing kernel together with this exact
+        # mask let the dispatcher skip its mask reduction + D2H copy.
+        flags = _take_active_flags(router_mask)
+        if flags is not None and self._dispatch_accepts_flags is not False:
+            try:
+                self.expert_dispatcher.dispatch_experts(layer_id, flags)
+                self._dispatch_accepts_flags = True
+                return
+            except TypeError:
+                if self._dispatch_accepts_flags:
+                    raise
+                # Native extension predates the flags argument.
+                self._dispatch_accepts_flags = False
+        self.expert_dispatcher.dispatch_experts(layer_id)
 
     def _dispatch_eager_local(
         self, layer_id, router_mask, num_expert, phase=None
@@ -792,7 +827,7 @@ class DistributedExpertExecutor:
                             if profiler is not None
                             else nullcontext()
                         ):
-                            self.expert_dispatcher.dispatch_experts(layer_id)
+                            self._dispatch_native(layer_id, router_mask)
                 else:
                     if native_requested:
                         self._gpu_route_fallback_count += 1
