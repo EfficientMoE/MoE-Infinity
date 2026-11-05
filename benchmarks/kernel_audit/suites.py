@@ -12,7 +12,8 @@ Impl names:
                      kv_write_loop, moe_gqa, moe_gqa_swa, moe_gqa_masked,
                      moe_gqa_decode, moe_gqa_masked_decode (HF models
                      without a paged shim, runtime/hf_attention.py)
-  references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode
+  references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode,
+                     gptoss_offload_legacy (pre-#311 type-6 path)
 """
 
 from __future__ import annotations
@@ -165,8 +166,8 @@ def _gptoss_swiglu(gate, up, limit=7.0, alpha=1.702):
     return (up + 1) * (gate * torch.sigmoid(gate * alpha))
 
 
-def _gptoss_offload_builder(M: int, H: int, I: int, dequant: bool = True):
-    """C++ type-6 path (device_memory_ratio < 0.9): MXFP4 dequant + cuBLAS."""
+def _gptoss_legacy_builder(M: int, H: int, I: int, dequant: bool = True):
+    """Pre-#311 type-6 path: per-call MXFP4 dequant + cuBLAS + elementwise."""
 
     def build():
         from benchmarks.kernel_audit.ext import load
@@ -193,6 +194,50 @@ def _gptoss_offload_builder(M: int, H: int, I: int, dequant: bool = True):
             gate_up = torch.matmul(x, gw.transpose(0, 1)) + gu_bias
             act = _gptoss_swiglu(gate_up[:, 0::2], gate_up[:, 1::2])
             out.copy_(torch.matmul(act, dw.transpose(0, 1)) + d_bias)
+
+        return run
+
+    return build
+
+
+def _gptoss_offload_builder(M: int, H: int, I: int):
+    """C++ type-6 path (device_memory_ratio < 0.9): MoEMLP::ForwardHelper ->
+    gptoss_mxfp4_expert_forward_pro6000 (fused W4A16 MXFP4 GEMMs, scratch reused
+    across calls like an expert executor)."""
+
+    def build():
+        from benchmarks.kernel_audit.ext import load
+
+        ext = load()
+        x = _rand(M, H, scale=1.0)
+        gu_packed, gu_scale, gu_bias, d_packed, d_scale, d_bias = (
+            _mxfp4_weights(H, I)
+        )
+        out = torch.empty(M, H, device="cuda", dtype=torch.bfloat16)
+        # Per-executor scratch, sized like gptoss_mxfp4_expert_forward_pro6000
+        # allocates it (BF16 Wd, act and stream-K partials in one arena).
+        arena = torch.empty(
+            ext.gptoss_expert_arena_bytes(M, H, I),
+            device="cuda",
+            dtype=torch.uint8,
+        )
+        counters = torch.zeros(
+            2 * ext.mxfp4_stream_k_counters, device="cuda", dtype=torch.int32
+        )
+
+        def run():
+            ext.gptoss_mxfp4_expert_pro6000(
+                x,
+                gu_packed,
+                gu_scale,
+                gu_bias,
+                d_packed,
+                d_scale,
+                d_bias,
+                out,
+                arena,
+                counters,
+            )
 
         return run
 
@@ -260,6 +305,7 @@ _W_BYTES = {
     "fp8_prod": 1 + 4 / (128 * 128),
     "gptoss_resident": 0.5 + 1 / 32,
     "gptoss_offload": 0.5 + 1 / 32,
+    "gptoss_offload_legacy": 0.5 + 1 / 32,
     "v4_fp4_prod": 0.5 + 1 / 32,
 }
 
@@ -269,9 +315,10 @@ def _expert_impls(m: MoEModel):
         return [
             ("gptoss_resident", _gptoss_resident_builder),
             ("gptoss_offload", _gptoss_offload_builder),
+            ("gptoss_offload_legacy", _gptoss_legacy_builder),
             (
                 "gptoss_bf16cached",
-                lambda M, H, I: _gptoss_offload_builder(M, H, I, False),
+                lambda M, H, I: _gptoss_legacy_builder(M, H, I, False),
             ),
             ("cublas_ref", _cublas_ref_builder),
         ]
@@ -464,7 +511,11 @@ def expert_layer_graph_cases(model_keys: list[str] | None = None) -> list[Case]:
     out = []
     reps = 4
     for c in expert_cases(model_keys):
-        if c.phase != "decode" or c.impl not in ("cutlass_fused", "cublas_ref"):
+        if c.phase != "decode" or c.impl not in (
+            "cutlass_fused",
+            "cublas_ref",
+            "gptoss_offload",
+        ):
             continue
         n_exec = max(1, round(c.per_layer))
         H, I = c.meta["H"], c.meta["I"]
