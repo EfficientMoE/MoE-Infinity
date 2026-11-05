@@ -236,7 +236,11 @@ def test_vectorized_access_sequence_matches_reference():
                     for _ in range(layers)
                 ]
             )
-            records.append({"topk_ids_of_layer": arr})
+            record = {"topk_ids_of_layer": arr}
+            mode = rng.choice((None, None, 1, 2, 2, 3))
+            if mode is not None:
+                record["forward_mode"] = mode
+            records.append(record)
         for ignore in range(0, layers + 1):
             for include_prefill in (False, True):
                 ref = extract_access_sequence(

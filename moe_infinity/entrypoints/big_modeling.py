@@ -324,15 +324,15 @@ class MoE:
                 is_flash_attn_available = False
         except ImportError:
             print(
-                "[WARNING] FlashAttention is not available in the current environment. Using default attention."
+                "[WARNING] FlashAttention is not available in the current environment. Using GQA-native SDPA attention."
             )
+        # The offload engine picks the backend (runtime/hf_attention.py):
+        # flash_attention_2 when allowed, else GQA-native SDPA (sinks and
+        # sliding window included), eager only for classes without SDPA.
         with self.engine.init(cls=model_cls, ar_config=engine_config):
             self.model = model_cls.from_pretrained(
                 model_name_or_path,
                 config=model_config,
-                attn_implementation=(
-                    "flash_attention_2" if is_flash_attn_available else "eager"
-                ),
                 is_flash_attn_available=is_flash_attn_available,
                 trust_remote_code=True,
             )

@@ -1,9 +1,13 @@
 """Belady optimal cache simulator for expert routing traces.
 
 This script consumes ``.pt`` trace files where each file stores a dict with a
-``records`` list. The first element is the prefill step, and subsequent
-elements are decode steps. Each record owns a ``topk_ids_of_layer`` tensor of
-shape ``[num_layers, seq_len, topk]`` that records the activated experts.
+``records`` list of forward passes. Each record owns a ``topk_ids_of_layer``
+tensor of shape ``[num_layers, seq_len, topk]`` that records the activated
+experts. Records carrying SGLang's ``forward_mode`` are classified by it
+(``DECODE`` = 2); records without it follow the single-request layout where
+only the first element is the prefill step. Merged multi-request streams
+(``convert_sglang_traces --merge``) interleave one prefill per request, so the
+``forward_mode`` check is what keeps them out of the decode-only sequence.
 
 We simulate cache hits during decode using the Belady optimal policy. Each
 cache key is a tuple ``(layer_idx, expert_id)``. Layers before
@@ -117,21 +121,45 @@ def describe_trace(records: Sequence[dict], file_path: str) -> None:
     )
 
 
+#: ``sglang.srt.model_executor.forward_batch_info.ForwardMode.DECODE``.
+DECODE_FORWARD_MODE = 2
+
+
+def is_decode_record(record: dict, index: int) -> bool:
+    """Whether ``record`` (at position ``index``) is a pure decode pass.
+
+    Uses the recorded ``forward_mode`` when present (prefill / extend / mixed
+    passes are not decode). Without it, fall back to the single-request layout:
+    the first record is the prefill step and the rest are decode steps.
+    """
+
+    mode = record.get("forward_mode")
+    if mode is not None:
+        return int(mode) == DECODE_FORWARD_MODE
+    return index > 0
+
+
 def extract_access_sequence(
     records: Sequence[dict],
     *,
     ignore_layers: int,
     include_prefill: bool,
 ) -> List[Key]:
-    """Flatten records into a sequential access list of (layer, expert_id)."""
+    """Flatten records into a sequential access list of (layer, expert_id).
+
+    With ``include_prefill=False`` every non-decode record is dropped (see
+    :func:`is_decode_record`), including the per-request prefills of a merged
+    multi-request stream.
+    """
 
     if not records:
         return []
 
-    start_index = 0 if include_prefill else 1
     accesses: List[Key] = []
 
-    for record in records[start_index:]:
+    for index, record in enumerate(records):
+        if not include_prefill and not is_decode_record(record, index):
+            continue
         tensor = record["topk_ids_of_layer"]
         num_layers = tensor.shape[0]
         if ignore_layers >= num_layers:

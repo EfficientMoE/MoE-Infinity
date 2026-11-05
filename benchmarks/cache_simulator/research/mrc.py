@@ -32,6 +32,8 @@ from typing import Dict, Iterable, List, Sequence, Tuple, Union
 
 import numpy as np
 
+from benchmarks.cache_simulator.belady_cache_simulator import is_decode_record
+
 Key = Tuple[int, int]
 
 
@@ -70,12 +72,13 @@ def vectorized_access_sequence(
     if not records:
         return np.empty(0, dtype=np.int64), 0, 1
 
-    start_index = 0 if include_prefill else 1
     chunks: List[np.ndarray] = []
     num_layers = 0
     max_expert = -1
 
-    for record in records[start_index:]:
+    for index, record in enumerate(records):
+        if not include_prefill and not is_decode_record(record, index):
+            continue
         tensor = record["topk_ids_of_layer"]
         np_tensor = _to_numpy(tensor)
         num_layers = int(np_tensor.shape[0])
