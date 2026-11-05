@@ -1,0 +1,115 @@
+{
+  "experiment": "exp675a-moei-shared-costfit",
+  "date": "2026-11-03",
+  "question":
+      "Can N-way CostFit compositions share one key table (N-slot records) with bit-identical replacement decisions, at what memory/time economics?",
+  "prereg_sha256":
+      "0c34d992facd17aaa3bcafa5daa68085e191c7de48ef8c758457b0e1aeba0e1b",
+  "implementations": {
+    "sealed_baseline": [
+      "costfit (5 tables)",
+      "costfit3 (10 tables)"
+    ],
+    "shared": [
+      "shared_costfit (1 table, 2-slot)",
+      "shared_costfit3 (1 table, 3-slot)"
+    ]
+  },
+  "hosts": {
+    "implementation": "Mack Darwin arm64 py3.14.8 torch2.15.0",
+    "measurement_sweep_census_det":
+        "Winnie WSL Ubuntu py3.12.3 numpy2.5.4 torch2.15.0+cpu (12 core)",
+    "comparator_full_precision":
+        "Mack (Winnie churn killed 2 attempts; Winnie 10/12 cells matched)"
+  },
+  "grid": {
+    "caps": [
+      128,
+      256,
+      384,
+      512,
+      768,
+      1024,
+      1536,
+      2048,
+      3072,
+      4096
+    ],
+    "traces": {
+      "qwen3-30b-a3b": 1424640,
+      "granite3.1-moe-3b": 638208
+    },
+    "census_caps": [
+      256,
+      1024,
+      4096
+    ]
+  },
+  "results": {
+    "H1_parity": {
+      "sweep_cells_equal": "40/40",
+      "full_precision_comparator": "12/12 ALL-OK",
+      "verdict": "PASS"
+    },
+    "H2a_2way": {
+      "struct_ratio_range": [
+        0.52,
+        0.83
+      ],
+      "cells_struct_lt_0.9": "6/6",
+      "terminal_ratio_range": [
+        0.81,
+        1.10
+      ],
+      "cells_terminal_le_1.05": "5/6",
+      "failing_cell":
+          "granite cap=256 terminal x1.105 (union table > 2 small per-layer tables)",
+      "verdict": "PASS"
+    },
+    "H2b_3way": {
+      "struct_ratio_range": [
+        0.34,
+        0.57
+      ],
+      "cells_struct_lt_0.9": "6/6",
+      "terminal_ratio_range": [
+        0.64,
+        0.92
+      ],
+      "cells_terminal_lt_1.00": "6/6",
+      "verdict": "PASS"
+    },
+    "H3_time": {
+      "ns_per_access_ratio_range": [
+        1.13,
+        1.67
+      ],
+      "mean": 1.33,
+      "verdict": "INFORMATIONAL"
+    },
+    "H4_determinism": {
+      "cells": "4/4 exact",
+      "verdict": "PASS"
+    }
+  },
+  "verdict": "SHARED-STATE-VALIDATED",
+  "limitations": [
+    "CPU trace-replay simulation tier; not exllama/native serving or CUDA parity",
+    "time ratios under concurrent foreign host load (directions robust, magnitudes noisy)",
+    "3-repeat means for ns/access; byte counters exact"
+  ],
+  "tests":
+      "tests/python/unit/test_shared_costfit_parity.py 89 passed (independent author) + 54 pre-existing; 143 passed on measurement host",
+  "artifacts": [
+    "benchmarks/cache_simulator/research/policies_shared_costfit.py",
+    "benchmarks/cache_simulator/research/census_shared_costfit.py",
+    "benchmarks/cache_simulator/research/census_exp675-qwen30b.csv",
+    "benchmarks/cache_simulator/research/census_exp675-granite.csv",
+    "benchmarks/cache_simulator/research/comparator_exp675.log",
+    "benchmarks/cache_simulator/research/results_real_exp675-qwen30b.csv",
+    "benchmarks/cache_simulator/research/results_real_exp675-granite.csv",
+    "benchmarks/cache_simulator/research/results_real_exp675-det-qwen30b.csv",
+    "benchmarks/cache_simulator/research/results_real_exp675-det-granite.csv",
+    "benchmarks/cache_simulator/research/ADDENDUM26.md"
+  ]
+}

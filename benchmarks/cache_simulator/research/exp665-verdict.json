@@ -1,0 +1,225 @@
+{
+  "per_model": {
+    "qwen30b": {
+      "caps": {
+        "128": {
+          "shadowfit_csv": 0.208345,
+          "resim": 0.208345,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.208345,
+          "s3fifo": 0.0,
+          "best": 0.208345,
+          "best_policy": "lcnu",
+          "deficit_pp": 0.0,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "256": {
+          "shadowfit_csv": 0.327289,
+          "resim": 0.327289,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.327289,
+          "s3fifo": 0.068852,
+          "best": 0.327289,
+          "best_policy": "lcnu",
+          "deficit_pp": 0.0,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "384": {
+          "shadowfit_csv": 0.41476,
+          "resim": 0.41476,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.41476,
+          "s3fifo": 0.359777,
+          "best": 0.41476,
+          "best_policy": "lcnu",
+          "deficit_pp": 0.0,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "512": {
+          "shadowfit_csv": 0.485328,
+          "resim": 0.485328,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.485328,
+          "s3fifo": 0.422742,
+          "best": 0.485328,
+          "best_policy": "lcnu",
+          "deficit_pp": 0.0,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "768": {
+          "shadowfit_csv": 0.59048,
+          "resim": 0.59048,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.59048,
+          "s3fifo": 0.542383,
+          "best": 0.59048,
+          "best_policy": "lcnu",
+          "deficit_pp": 0.0,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "1024": {
+          "shadowfit_csv": 0.66852,
+          "resim": 0.66852,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.66852,
+          "s3fifo": 0.654659,
+          "best": 0.66852,
+          "best_policy": "lcnu",
+          "deficit_pp": 0.0,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "1536": {
+          "shadowfit_csv": 0.80538,
+          "resim": 0.80538,
+          "determinism_ok": true,
+          "switches": 1,
+          "lcnu": 0.787092,
+          "s3fifo": 0.808347,
+          "best": 0.808347,
+          "best_policy": "s3fifo",
+          "deficit_pp": 0.297,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "2048": {
+          "shadowfit_csv": 0.89369,
+          "resim": 0.89369,
+          "determinism_ok": true,
+          "switches": 1,
+          "lcnu": 0.86479,
+          "s3fifo": 0.895616,
+          "best": 0.895616,
+          "best_policy": "s3fifo",
+          "deficit_pp": 0.193,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "3072": {
+          "shadowfit_csv": 0.965522,
+          "resim": 0.965522,
+          "determinism_ok": true,
+          "switches": 1,
+          "lcnu": 0.944494,
+          "s3fifo": 0.968484,
+          "best": 0.968484,
+          "best_policy": "s3fifo",
+          "deficit_pp": 0.296,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "4096": {
+          "shadowfit_csv": 0.982309,
+          "resim": 0.982309,
+          "determinism_ok": true,
+          "switches": 1,
+          "lcnu": 0.977971,
+          "s3fifo": 0.988872,
+          "best": 0.988872,
+          "best_policy": "s3fifo",
+          "deficit_pp": 0.656,
+          "h_pass": false,
+          "switches_ok": true
+        }
+      },
+      "determinism_ok": true,
+      "near_dominance": false,
+      "stability": true,
+      "worst_deficit_pp": 0.656,
+      "max_switches": 1
+    },
+    "granite": {
+      "caps": {
+        "128": {
+          "shadowfit_csv": 0.283762,
+          "resim": 0.283762,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.283762,
+          "s3fifo": 0.0,
+          "best": 0.283762,
+          "best_policy": "lcnu",
+          "deficit_pp": 0.0,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "256": {
+          "shadowfit_csv": 0.468164,
+          "resim": 0.468164,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.468164,
+          "s3fifo": 0.378923,
+          "best": 0.468164,
+          "best_policy": "lcnu",
+          "deficit_pp": 0.0,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "512": {
+          "shadowfit_csv": 0.728697,
+          "resim": 0.728697,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.728697,
+          "s3fifo": 0.676469,
+          "best": 0.728697,
+          "best_policy": "lcnu",
+          "deficit_pp": 0.0,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "768": {
+          "shadowfit_csv": 0.886415,
+          "resim": 0.886415,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.886415,
+          "s3fifo": 0.87934,
+          "best": 0.886415,
+          "best_policy": "lcnu",
+          "deficit_pp": 0.0,
+          "h_pass": true,
+          "switches_ok": true
+        },
+        "1024": {
+          "shadowfit_csv": 0.970839,
+          "resim": 0.970839,
+          "determinism_ok": true,
+          "switches": 0,
+          "lcnu": 0.970839,
+          "s3fifo": 0.973187,
+          "best": 0.973187,
+          "best_policy": "s3fifo",
+          "deficit_pp": 0.235,
+          "h_pass": true,
+          "switches_ok": true
+        }
+      },
+      "determinism_ok": true,
+      "near_dominance": true,
+      "stability": true,
+      "worst_deficit_pp": 0.235,
+      "max_switches": 0
+    }
+  },
+  "rules": {
+    "margin": 0.005,
+    "max_switches": 6
+  },
+  "H1_30b": false,
+  "H2_granite": true,
+  "H3_stability": true,
+  "verdict": "FAIL"
+}
