@@ -46,8 +46,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Shims whose layers the runner registers with the paged backend (prefix reuse,
-# chunked prefill, layered store binding). Matched by class name, like
-# ``_get_paged_attention_classes``.
+# chunked prefill, layered store binding). Matched by class name through the
+# MRO, like ``_get_paged_attention_classes``.
 _LAYER_REGISTERED_SHIMS = frozenset(
     {
         "Qwen3PagedAttention",
@@ -83,6 +83,24 @@ HYBRID_CHUNKED_PREFILL_DISABLED_REASON = (
 )
 
 
+_PAGED_ATTENTION_SHIMS = frozenset(
+    {
+        "DeepseekV2PagedAttention",
+        "DeepseekV3PagedAttention",
+        "Qwen3PagedAttention",
+        "OlmoePagedAttention",
+        "Qwen3_5MoePagedAttention",
+        "MixtralPagedAttention",
+    }
+)
+
+
+def _is_shim_class(cls: type, names: frozenset[str]) -> bool:
+    # ``PagedAttentionLayerRegistry`` rebinds each shim module to a per-layer
+    # subclass (``Qwen3PagedAttentionLayer<N>``), so match through the MRO.
+    return any(base.__name__ in names for base in cls.__mro__)
+
+
 def paged_layer_index(module: object) -> int:
     """Index of ``module``'s plane in the paged KV store.
 
@@ -115,12 +133,18 @@ class PreparedDecodeBuffers:
     batch_bucket: int
     context_bucket: int
     real_batch_size: int = 0
+    # One int64 row per sequence: _STAGE_COLUMNS scalars then the block table.
+    # The host copy is pinned so a step uploads its metadata with one async
+    # copy; ``unpack_staging`` scatters it on the device (and is captured).
+    staging: torch.Tensor | None = None
+    host_staging: torch.Tensor | None = None
+    upload_done: object = None
 
     def data_ptrs(self) -> tuple[int, ...]:
         return tuple(tensor.data_ptr() for tensor in self.tensor_values())
 
     def tensor_values(self) -> tuple[torch.Tensor, ...]:
-        return (
+        values = (
             self.input_ids,
             self.position_ids,
             self.attention_mask,
@@ -129,6 +153,31 @@ class PreparedDecodeBuffers:
             self.attention_metadata.seq_lens,
             self.attention_metadata.slot_mapping,
         )
+        if self.staging is not None:
+            values += (self.staging,)
+        return values
+
+    def unpack_staging(self) -> None:
+        staging = self.staging
+        if staging is None:
+            raise ValueError("prepared decode buffers have no staging tensor")
+        metadata = self.attention_metadata
+        self.input_ids.copy_(staging[:, _STAGE_INPUT : _STAGE_INPUT + 1])
+        self.position_ids.copy_(
+            staging[:, _STAGE_POSITION : _STAGE_POSITION + 1]
+        )
+        self.active_rows.copy_(staging[:, _STAGE_ACTIVE])
+        metadata.seq_lens.copy_(staging[:, _STAGE_SEQ_LEN])
+        metadata.slot_mapping.copy_(staging[:, _STAGE_SLOT])
+        metadata.block_tables.copy_(staging[:, _STAGE_COLUMNS:])
+
+
+_STAGE_INPUT = 0
+_STAGE_POSITION = 1
+_STAGE_ACTIVE = 2
+_STAGE_SEQ_LEN = 3
+_STAGE_SLOT = 4
+_STAGE_COLUMNS = 5
 
 
 class ModelRunner:
@@ -161,6 +210,9 @@ class ModelRunner:
         self.paged_attention_registry = paged_attention_registry
         self.decode_graph_capability_provider = decode_graph_capability_provider
         self._warned_no_paged_shim = False
+        self._write_proof_cache: tuple[object, int, tuple[Any, ...]] | None = (
+            None
+        )
         self._linear_attention_state: LinearAttentionStateCache | None = None
         self._linear_attention_state_resolved = False
         self._sequence_state_limit: int | None = None
@@ -220,7 +272,11 @@ class ModelRunner:
 
         backend = self._get_attention_backend()
         if backend is None:
-            return DecodeGraphCapability(False, "native_paged_required")
+            return DecodeGraphCapability(
+                False,
+                "native_paged_required",
+                detail="engine exposes no attention backend",
+            )
 
         backend_capability_fn = getattr(
             backend, "decode_graph_capability", None
@@ -233,14 +289,31 @@ class ModelRunner:
         storage = self.paged_kv_storage
         backend_storage = getattr(backend, "storage", None)
         if storage is None or backend_storage is None:
-            return DecodeGraphCapability(False, "kv_storage_mismatch")
+            return DecodeGraphCapability(
+                False,
+                "kv_storage_mismatch",
+                detail=(
+                    f"{type(backend).__name__} is not bound to a "
+                    "PagedKVStorage"
+                    if backend_storage is None
+                    else "runner has no PagedKVStorage"
+                ),
+            )
         if storage is not backend_storage:
-            return DecodeGraphCapability(False, "kv_storage_mismatch")
+            return DecodeGraphCapability(
+                False,
+                "kv_storage_mismatch",
+                detail="runner and attention backend use different storage",
+            )
 
         kv_cache = getattr(self.engine, "kv_cache", None)
         cache_storage = getattr(kv_cache, "storage", None)
         if kv_cache is not None and cache_storage is not storage:
-            return DecodeGraphCapability(False, "kv_storage_mismatch")
+            return DecodeGraphCapability(
+                False,
+                "kv_storage_mismatch",
+                detail="serving KV cache is not bound to the backend storage",
+            )
 
         storage_device = canonical_device(storage.spec.device)
         if storage_device != canonical_device(self.device):
@@ -268,9 +341,17 @@ class ModelRunner:
         ):
             return DecodeGraphCapability(False, "layer_write_unproven")
 
-        proofs: list[PagedLayerWriteProof] = []
-        for binding in bindings:
-            proofs.append(
+        # The registry is fixed once installed, so its proofs are built once;
+        # the graph runner checks this capability before every replay.
+        cached = self._write_proof_cache
+        if (
+            cached is not None
+            and cached[0] is registry
+            and cached[1] == len(bindings)
+        ):
+            proofs = cached[2]
+        else:
+            proofs = tuple(
                 PagedLayerWriteProof(
                     class_fqn=binding.class_fqn,
                     layer_idx=binding.layer_idx,
@@ -279,13 +360,15 @@ class ModelRunner:
                     writes_before_attention=True,
                     allocation_free=True,
                 )
+                for binding in bindings
             )
+            self._write_proof_cache = (registry, len(bindings), proofs)
 
         return DecodeGraphCapability(
             True,
             "eligible",
             storage_owner_id=storage.owner_id,
-            layer_write_proofs=tuple(proofs),
+            layer_write_proofs=proofs,
         )
         self._warned_no_paged_shim = False
 
@@ -774,6 +857,16 @@ class ModelRunner:
             attention_metadata=metadata,
             batch_bucket=batch_bucket,
             context_bucket=context_bucket,
+            staging=torch.zeros(
+                (batch_bucket, _STAGE_COLUMNS + max_blocks),
+                dtype=torch.int64,
+                device=device,
+            ),
+            host_staging=torch.zeros(
+                (batch_bucket, _STAGE_COLUMNS + max_blocks),
+                dtype=torch.int64,
+                pin_memory=device.type == "cuda",
+            ),
         )
 
     def copy_decode_batch(
@@ -781,7 +874,14 @@ class ModelRunner:
         batch: BatchMetadata,
         buffers: PreparedDecodeBuffers,
         scratch_block_ids: list[int],
+        *,
+        unpack: bool = True,
     ) -> None:
+        """Stage ``batch`` into the static decode buffers.
+
+        The metadata is built on the host and uploaded with one copy; with
+        ``unpack=False`` the caller replays a graph that unpacks it itself.
+        """
         storage = self._require_paged_kv_storage()
         device = storage.spec.device
         for tensor in buffers.tensor_values():
@@ -804,12 +904,13 @@ class ModelRunner:
 
         block_size = storage.spec.block_size
         max_blocks = metadata.block_tables.shape[1]
+        num_blocks = storage.num_blocks
         for row in batch.block_tables:
-            for block_id in row:
-                if not 0 <= block_id < storage.num_blocks:
-                    raise ValueError(
-                        f"block id {block_id} outside authoritative storage"
-                    )
+            if row and not (0 <= min(row) and max(row) < num_blocks):
+                bad = next(b for b in row if not 0 <= b < num_blocks)
+                raise ValueError(
+                    f"block id {bad} outside authoritative storage"
+                )
 
         padded = buffers.batch_bucket - real
         scratch = list(scratch_block_ids)
@@ -824,42 +925,83 @@ class ModelRunner:
             if block_id not in reserved:
                 raise ValueError(f"scratch block id {block_id} is not reserved")
 
-        buffers.input_ids.zero_()
-        buffers.position_ids.zero_()
-        buffers.attention_mask.fill_(1)
-        buffers.active_rows.zero_()
-        metadata.block_tables.zero_()
-        metadata.seq_lens.fill_(1)
-        metadata.slot_mapping.zero_()
-
+        rows: list[tuple[int, int, int, list[int]]] = []
         for row_idx in range(real):
             context_len = batch.context_lengths[row_idx]
-            seq_len = context_len + 1
             block_table = batch.block_tables[row_idx]
-            if seq_len > buffers.context_bucket:
+            if context_len + 1 > buffers.context_bucket:
                 raise ValueError("sequence length exceeds context bucket")
-            token_pos = context_len
-            block_idx = token_pos // block_size
+            block_idx = context_len // block_size
             if block_idx >= max_blocks or block_idx >= len(block_table):
                 raise ValueError("block table too short for prepared context")
-            start = batch.token_offsets[row_idx]
-            token_id = batch.input_token_ids[start]
-
-            buffers.input_ids[row_idx, 0] = token_id
-            buffers.position_ids[row_idx, 0] = context_len
-            buffers.active_rows[row_idx] = True
-            for col, block_id in enumerate(block_table):
-                metadata.block_tables[row_idx, col] = block_id
-            metadata.seq_lens[row_idx] = seq_len
-            slot = block_table[block_idx] * block_size + token_pos % block_size
-            metadata.slot_mapping[row_idx] = slot
-
-        for offset, block_id in enumerate(scratch):
-            row_idx = real + offset
-            metadata.block_tables[row_idx, 0] = block_id
-            metadata.slot_mapping[row_idx] = block_id * block_size
-
+            if len(block_table) > max_blocks:
+                raise ValueError("block table wider than prepared context")
+            token_id = batch.input_token_ids[batch.token_offsets[row_idx]]
+            rows.append((token_id, context_len, block_idx, block_table))
+        self._stage_decode_rows(buffers, rows, scratch, unpack=unpack)
         buffers.real_batch_size = real
+
+    def stage_scratch_decode(
+        self, buffers: PreparedDecodeBuffers, scratch_block_ids: list[int]
+    ) -> None:
+        """Point every row of ``buffers`` at its own reserved scratch block."""
+        self._stage_decode_rows(
+            buffers, [], list(scratch_block_ids), unpack=True
+        )
+        buffers.real_batch_size = 0
+
+    def _stage_decode_rows(
+        self,
+        buffers: PreparedDecodeBuffers,
+        rows: list[tuple[int, int, int, list[int]]],
+        scratch: list[int],
+        *,
+        unpack: bool,
+    ) -> None:
+        storage = self._require_paged_kv_storage()
+        block_size = storage.spec.block_size
+        host = buffers.host_staging
+        staging = buffers.staging
+        if host is None or staging is None:
+            raise ValueError("prepared decode buffers have no staging tensor")
+        # The previous step's upload may still read the pinned host rows.
+        upload_done = buffers.upload_done
+        if upload_done is not None:
+            upload_done.synchronize()
+
+        table = host.numpy()
+        table.fill(0)
+        table[:, _STAGE_SEQ_LEN] = 1
+        for row_idx, (
+            token_id,
+            context_len,
+            block_idx,
+            block_table,
+        ) in enumerate(rows):
+            line = table[row_idx]
+            line[_STAGE_INPUT] = token_id
+            line[_STAGE_POSITION] = context_len
+            line[_STAGE_ACTIVE] = 1
+            line[_STAGE_SEQ_LEN] = context_len + 1
+            line[_STAGE_SLOT] = (
+                block_table[block_idx] * block_size + context_len % block_size
+            )
+            line[_STAGE_COLUMNS : _STAGE_COLUMNS + len(block_table)] = (
+                block_table
+            )
+        for offset, block_id in enumerate(scratch):
+            line = table[len(rows) + offset]
+            line[_STAGE_SLOT] = block_id * block_size
+            line[_STAGE_COLUMNS] = block_id
+
+        staging.copy_(host, non_blocking=True)
+        if staging.is_cuda:
+            if upload_done is None:
+                upload_done = torch.cuda.Event()
+                buffers.upload_done = upload_done
+            upload_done.record()
+        if unpack:
+            buffers.unpack_staging()
 
     def forward_prepared_decode(
         self, buffers: PreparedDecodeBuffers
@@ -1104,7 +1246,7 @@ class ModelRunner:
         if not isinstance(modules, Iterable):
             return registrations
         for module in modules:
-            if module.__class__.__name__ not in _LAYER_REGISTERED_SHIMS:
+            if not _is_shim_class(module.__class__, _LAYER_REGISTERED_SHIMS):
                 continue
             layer_idx = getattr(module, "layer_idx", None)
             if not isinstance(layer_idx, int):
@@ -1127,14 +1269,6 @@ class ModelRunner:
         return None
 
     def _get_paged_attention_classes(self) -> list[type[Any]]:
-        paged_class_names = {
-            "DeepseekV2PagedAttention",
-            "DeepseekV3PagedAttention",
-            "Qwen3PagedAttention",
-            "OlmoePagedAttention",
-            "Qwen3_5MoePagedAttention",
-            "MixtralPagedAttention",
-        }
         classes: list[type[Any]] = []
         seen: set[type[Any]] = set()
 
@@ -1150,7 +1284,7 @@ class ModelRunner:
             cls = module.__class__
             if cls in seen:
                 continue
-            if cls.__name__ not in paged_class_names:
+            if not _is_shim_class(cls, _PAGED_ATTENTION_SHIMS):
                 continue
             if not hasattr(cls, "set_paged_context") or not hasattr(
                 cls, "clear_paged_context"
@@ -1213,9 +1347,9 @@ class ModelRunner:
             return []
         found: list[Any] = []
         for module in modules:
-            if module.__class__.__name__ in _LAYER_REGISTERED_SHIMS and hasattr(
-                module, "layer_idx"
-            ):
+            if _is_shim_class(
+                module.__class__, _LAYER_REGISTERED_SHIMS
+            ) and hasattr(module, "layer_idx"):
                 found.append(module)
         return found
 
