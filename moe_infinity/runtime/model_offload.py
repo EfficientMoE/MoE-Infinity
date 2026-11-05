@@ -1542,6 +1542,21 @@ class OffloadEngine(object):
                 self.expert_prefetcher.expert_dispatcher = (
                     self.expert_dispatcher
                 )
+                if hasattr(self.expert_dispatcher, "set_grouped_decode"):
+                    from moe_infinity.runtime.grouped_moe_pro6000 import (
+                        grouped_decode_activation_kind,
+                        grouped_decode_pro6000_enabled,
+                    )
+
+                    # RTX PRO 6000 only; top-k sizes the kernel's workspace.
+                    top_k = getattr(
+                        moe_text_config(self.config), "num_experts_per_tok", 0
+                    )
+                    self.expert_dispatcher.set_grouped_decode(
+                        grouped_decode_pro6000_enabled(),
+                        int(top_k or 0),
+                        grouped_decode_activation_kind(self.config),
+                    )
                 if parse_expert_type(self.config) == 6 and hasattr(
                     self.expert_dispatcher, "set_gptoss_mxfp4_pro6000"
                 ):

@@ -5,7 +5,7 @@ issues the same kernels MoE-Infinity issues for that op on sm_120
 (torch 2.11 / cu130, no flash_attn / flashinfer / fla installed).
 
 Impl names:
-  production paths   cutlass_fused, cutlass_fused_act, grouped_prefill, fp8_prod,
+  production paths   cutlass_fused, cutlass_fused_act, grouped_decode, grouped_prefill, fp8_prod,
                      gptoss_resident, gptoss_offload, triton_mxfp4,
                      v4_fp4_prod, v4_fp4_native, sdpa_shim, hf_eager, paged_fwd,
                      paged_fwd_int8, hf_eager_decode, router_*, router_fused,
@@ -668,6 +668,45 @@ def expert_layer_graph_cases(model_keys: list[str] | None = None) -> list[Case]:
     return out
 
 
+def _grouped_decode_builder(n: int, M: int, T: int, E: int, H: int, I: int):
+    """Grouped decode path (#306): every expert of the layer in 2 launches.
+
+    RTX PRO 6000 only (the cases are skipped on other devices).
+
+    n experts with their own weight tensors (as in the expert cache), each
+    routed exactly M of the T tokens; calls the shipped
+    moe_infinity._store.grouped_moe_decode_pro6000 with the zero-init folded in.
+    """
+
+    def build():
+        import moe_infinity._store as store
+
+        experts = [(_rand(I, H), _rand(I, H), _rand(H, I)) for _ in range(n)]
+        mask = torch.zeros(T, E, dtype=torch.bool, device="cuda")
+        for j in range(n):
+            toks = (torch.arange(M, device="cuda") + j * M) % T
+            mask[toks, j] = True
+        weights = torch.rand(T, E, device="cuda") * mask
+        kcap = int(mask.sum(1).max())
+        table = torch.tensor(
+            [[t.data_ptr() for t in w] + [j] for j, w in enumerate(experts)],
+            dtype=torch.int64,
+            device="cuda",
+        )
+        x = _rand(T, H, scale=1.0)
+        out = torch.empty(T, H, device="cuda")
+
+        def run():
+            store.grouped_moe_decode_pro6000(
+                x, mask, weights, table, I, kcap, out, zero_out=True
+            )
+
+        run.keep = experts  # weights must outlive the pointer table
+        return run
+
+    return build
+
+
 def _grouped_prefill_builder(
     n: int, M: int, T: int, E: int, H: int, I: int, ext=None
 ):
@@ -708,6 +747,47 @@ def _grouped_prefill_builder(
     return build
 
 
+def _grouped_decode_cases(c: Case, n_exec: int) -> list[Case]:
+    m = MODELS[c.model]
+    if (
+        c.phase != "decode"
+        or c.impl != "cutlass_fused"
+        or m.expert_dtype != "bf16"
+        or m.expert_type not in (4, 5)
+    ):
+        return []
+    H, I, M, T = c.meta["H"], c.meta["I"], c.meta["M"], c.meta["tokens"]
+    mem = n_exec * 3 * H * I * BF16
+    skip = f"needs {mem / 1e9:.0f} GB" if mem > 60e9 else None
+    if skip is None and torch.cuda.is_available():
+        from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
+
+        if not supports(RTX_PRO_6000):
+            skip = "grouped_decode is RTX PRO 6000 only"
+    return [
+        Case(
+            cid=c.cid.replace("|", "|layer|", 1).replace(
+                "|cutlass_fused", "|grouped_decode"
+            ),
+            suite="expert_layer",
+            model=c.model,
+            phase=c.phase,
+            size=c.size,
+            impl="grouped_decode",
+            flops=c.flops * n_exec,
+            bytes_min=c.bytes_min * n_exec,
+            build=_grouped_decode_builder(
+                n_exec, M, T, max(m.experts, n_exec), H, I
+            ),
+            per_layer=1.0,
+            layers=c.layers,
+            meta={**c.meta, "n_exec": n_exec, "streams": 1},
+            skip=skip,
+            iters=5,
+        )
+    ]
+
+
 def _grouped_prefill_cases(c: Case, n_exec: int) -> list[Case]:
     if c.phase != "prefill" or c.impl != "cutlass_fused":
         return []
@@ -743,6 +823,7 @@ def expert_layer_cases(model_keys: list[str] | None = None) -> list[Case]:
     for c in expert_cases(model_keys):
         if c.impl == "gptoss_bf16cached":
             continue
+        out += _grouped_decode_cases(c, max(1, round(c.per_layer)))
         out += _grouped_prefill_cases(c, max(1, round(c.per_layer)))
         n_exec = max(1, round(c.per_layer))
         H, I = c.meta["H"], c.meta["I"]

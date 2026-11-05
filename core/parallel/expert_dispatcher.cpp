@@ -5,6 +5,7 @@
 
 #include "expert_dispatcher.h"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <thread>
 #include <optional>
@@ -18,6 +19,7 @@
 #include "utils/logger.h"
 #include "model/model_topology.h"
 #include "model/moe.h"
+#include "kernel/grouped_moe_decode_pro6000.h"
 #include "kernel/fused_moe_mlp.h"
 
 #include <c10/core/ScalarType.h>
@@ -355,6 +357,14 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       expert_drop_trace_path_ = trace_path;
       expert_drop_trace_enabled_.store(true, std::memory_order_release);
     }
+  }
+
+  if (const char* grouped = std::getenv("MOE_GROUPED_DECODE")) {
+    if (std::string(grouped) == "0") grouped_enabled_.store(false);
+  }
+  grouped_pending_.resize(kNumDevices());
+  for (int i = 0; i < kNumDevices(); ++i) {
+    grouped_pro6000_ok_.push_back(grouped_moe_decode_pro6000_device_ok(i));
   }
 
   admissions_paused_.assign(kNumDevices(), 0);
@@ -734,7 +744,12 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
     // std::unique_lock<std::mutex> lock(exec_mutex_[args.gpu_id]);
     // exec_queue_[args.gpu_id].push_back(std::move(exec_args));
     AdmitAndCount(args.gpu_id);
-    exec_queue_[args.gpu_id].Push(exec_args);
+    if (GroupedEligible(expert_node, args.gpu_id, args.remote)) {
+      std::lock_guard<std::mutex> lock(grouped_mutex_);
+      grouped_pending_[args.gpu_id].push_back(exec_args);
+    } else {
+      exec_queue_[args.gpu_id].Push(exec_args);
+    }
   } else {
     // std::unique_lock<std::mutex> lock(input_mutex_[args.gpu_id]);
     // input_queue_[args.gpu_id].push_back(std::move(args));
@@ -781,6 +796,7 @@ void ExpertDispatcher::RegisterExpert(
 }
 
 void ExpertDispatcher::NotifyFetchStart() {
+  FlushGroupedExperts();
   for (int i = 0; i < kNumDevices(); ++i) {
     // std::unique_lock<std::mutex> lock(input_mutex_[i]);
     input_queue_[i].NotifyAll();
@@ -1464,9 +1480,11 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       // Direct cache-hit items reach exec without passing through the fetch
       // worker, so exec owns their pending decrement. Fetch-forwarded items
       // were already decremented by the fetch worker.
-      if (!args.pending_counted_down && pending_by_device_[gpu_id] > 0) {
-        pending_by_device_[gpu_id] -= 1;
-      }
+      const std::int64_t items =
+          args.group ? static_cast<std::int64_t>(args.group->members.size())
+                     : (args.pending_counted_down ? 0 : 1);
+      pending_by_device_[gpu_id] =
+          std::max<std::int64_t>(0, pending_by_device_[gpu_id] - items);
     }
     struct ExecWorkerGuard {
       ExpertDispatcher* self;
@@ -1478,6 +1496,10 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       }
     } exec_guard{this, gpu_id};
 
+    if (args.group) {
+      GroupedExec(args, gpu_id, stream);
+      continue;
+    }
     if (args.expert_node == nullptr) {
       continue;
     }
@@ -1669,9 +1691,13 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
         output_tensor = output_tensor.to(final_hidden_states_.device());
       }
       if (batch_size == 1) {
-        final_hidden_states_.add_(
+        // index_add_ accumulates with atomics, so it is race-free against
+        // other exec streams and the grouped kernel adding into the same row.
+        final_hidden_states_.index_add_(
+            0, zero_index_.at(final_hidden_states_.device().index()),
             output_tensor *
-            router_weight_.index({torch::indexing::Slice(), expert_idx}));
+                router_weight_.index({torch::indexing::Slice(), expert_idx})
+                    .unsqueeze(1));
       } else {
         auto token_indices = torch::nonzero(token_mask).squeeze(1);
         auto weights =
@@ -1739,8 +1765,305 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
   }
 }
 
+namespace {
+
+// gate [I, H], up [I, H], down [H, I] of a gated-SiLU expert, in the order of
+// MoEMLP::ForwardHelper (Mixtral stores w1/w2/w3 = gate/down/up).
+bool ResolveGatedExpert(int expert_type, const NodePtr& node,
+                        std::array<torch::Tensor, 3>& gate_up_down) {
+  if (node == nullptr || node->tensor_ids.size() != 3) return false;
+  std::array<torch::Tensor, 3> params;
+  auto& index = GetTensorStore()->index();
+  for (std::size_t i = 0; i < 3; ++i) {
+    auto it = index.find(node->tensor_ids[i]);
+    if (it == index.end()) return false;
+    params[i] = it->second.tensor;
+  }
+  const bool mixtral = expert_type == MIXTRAL_MOE_DENSE_ACT_DENSE;
+  gate_up_down = {params[0], mixtral ? params[2] : params[1],
+                  mixtral ? params[1] : params[2]};
+  return true;
+}
+
+bool GroupedWeightOk(const torch::Tensor& w, int device, int64_t rows,
+                     int64_t cols) {
+  return w.defined() && w.is_cuda() && w.device().index() == device &&
+         w.scalar_type() == torch::kBFloat16 && w.is_contiguous() &&
+         w.dim() == 2 && w.size(0) == rows && w.size(1) == cols &&
+         reinterpret_cast<std::uintptr_t>(w.data_ptr()) % 16 == 0;
+}
+
+}  // namespace
+
+void ExpertDispatcher::SetGroupedDecode(bool enabled, int top_k,
+                                        int activation_kind) {
+  grouped_activation_kind_.store(activation_kind, std::memory_order_release);
+  grouped_enabled_.store(enabled, std::memory_order_release);
+  grouped_top_k_.store(std::max(0, top_k), std::memory_order_release);
+}
+
+bool ExpertDispatcher::GroupedEligible(const ExpertNodePtr& expert_node,
+                                       int gpu_id, bool remote) {
+  if (!grouped_enabled_.load(std::memory_order_acquire) || remote) {
+    return false;
+  }
+  // The grouped kernels are tuned for the RTX PRO 6000 (Gate::kRtxPro6000).
+  if (gpu_id < 0 || gpu_id >= static_cast<int>(grouped_pro6000_ok_.size()) ||
+      !grouped_pro6000_ok_[gpu_id]) {
+    return false;
+  }
+  if (expert_type_ != DEEPSEEK_MOE_DENSE_ACT_DENSE &&
+      expert_type_ != MIXTRAL_MOE_DENSE_ACT_DENSE) {
+    return false;
+  }
+  // The grouped kernels implement silu(gate) * up only.
+  if (grouped_activation_kind_.load(std::memory_order_acquire) != 0) {
+    return false;
+  }
+  if (fp8_in_store_ || dtype_to_torch(dtype_) != torch::kBFloat16 ||
+      overlap_timing_enabled_.load(std::memory_order_acquire)) {
+    return false;
+  }
+  const auto& h = hidden_states_;
+  if (!h.defined() || !h.is_cuda() || h.device().index() != gpu_id ||
+      h.dim() != 2 || h.scalar_type() != torch::kBFloat16 || h.stride(1) != 1 ||
+      h.stride(0) % 8 != 0 ||
+      reinterpret_cast<std::uintptr_t>(h.data_ptr()) % 16 != 0) {
+    return false;
+  }
+  const int64_t tokens = h.size(0);
+  // Prefill-sized batches never qualify; skip the tensor lookups below.
+  if (tokens > kGroupedMoePro6000MaxTokens) return false;
+  const int64_t hidden = h.size(1);
+  const auto& out = final_hidden_states_;
+  if (!out.defined() || out.device() != h.device() || out.stride(1) != 1) {
+    return false;
+  }
+  const auto rw_type =
+      router_weight_.defined() ? router_weight_.scalar_type() : torch::kInt;
+  if (!router_mask_.defined() || !router_mask_.is_cuda() ||
+      router_mask_.device() != h.device() || router_mask_.dim() != 2 ||
+      router_mask_.size(0) != tokens || router_mask_.size(1) != num_experts_ ||
+      (router_mask_.scalar_type() != torch::kBool &&
+       router_mask_.scalar_type() != torch::kByte) ||
+      !router_weight_.defined() || !router_weight_.is_cuda() ||
+      router_weight_.device() != h.device() ||
+      router_weight_.sizes() != router_mask_.sizes() ||
+      (rw_type != torch::kFloat32 && rw_type != torch::kBFloat16 &&
+       rw_type != torch::kFloat16)) {
+    return false;
+  }
+  if (manager_enabled_ && kExpertResidencyManager != nullptr) {
+    // Alternate representations (e.g. FP8 variants) need PrepareRepresentation
+    // and stay on the per-expert path.
+    auto active = kExpertResidencyManager->ActiveGeneration(
+        gpu_id,
+        LogicalExpertKey(expert_node->layer_idx, expert_node->expert_idx));
+    if (active.has_value()) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (execution_descriptors_.count(*active) != 0) return false;
+    }
+  }
+  std::array<torch::Tensor, 3> w;
+  if (!ResolveGatedExpert(expert_type_, expert_node->node, w)) return false;
+  const int64_t inter = w[0].defined() ? w[0].size(0) : 0;
+  if (!GroupedWeightOk(w[0], gpu_id, inter, hidden) ||
+      !GroupedWeightOk(w[1], gpu_id, inter, hidden) ||
+      !GroupedWeightOk(w[2], gpu_id, hidden, inter) ||
+      !grouped_moe_decode_pro6000_supported(tokens, hidden, inter)) {
+    return false;
+  }
+  const int top_k = grouped_top_k_.load(std::memory_order_acquire);
+  const int64_t kcap = top_k > 0 ? std::min(top_k, num_experts_) : num_experts_;
+  // Activation workspace [tokens * kcap, inter] bf16.
+  return tokens * kcap * inter * 2 <= (int64_t(1) << 30);
+}
+
+void ExpertDispatcher::FlushGroupedExperts() {
+  std::vector<std::vector<ExecArgs>> batches(grouped_pending_.size());
+  {
+    std::lock_guard<std::mutex> lock(grouped_mutex_);
+    for (std::size_t i = 0; i < grouped_pending_.size(); ++i) {
+      batches[i].swap(grouped_pending_[i]);
+    }
+  }
+  for (std::size_t i = 0; i < batches.size(); ++i) {
+    if (batches[i].empty()) continue;
+    ExecArgs item;
+    item.group = std::make_shared<GroupedExecBatch>();
+    item.group->members = std::move(batches[i]);
+    item.generation = item.group->members.front().generation;
+    item.pending_counted_down = true;
+    exec_queue_[i].Push(item);
+  }
+}
+
+void ExpertDispatcher::GroupedExec(ExecArgs& args, int gpu_id,
+                                   cudaStream_t stream) {
+  auto& members = args.group->members;
+  const std::uint64_t generation = args.generation;
+  std::vector<FailureContext> contexts;
+  contexts.reserve(members.size());
+  for (const ExecArgs& m : members) {
+    contexts.push_back(FailureContext{m.expert_node, gpu_id,
+                                      m.cache_slot_reserved,
+                                      m.cache_key_inserted, m.evict});
+  }
+  try {
+    int exec_fault = static_cast<int>(DispatchFaultPoint::EXEC_WORKER);
+    if (dispatch_fault_for_test_.compare_exchange_strong(
+            exec_fault, 0, std::memory_order_acq_rel)) {
+      throw std::runtime_error("injected exec failure");
+    }
+#ifndef NVTX_DISABLE
+    nvtx3::scoped_range r("expert_compute_grouped");
+#endif
+    c10::cuda::CUDAStream torch_stream =
+        c10::cuda::getStreamFromExternal(stream, gpu_id);
+    c10::cuda::CUDAStreamGuard guard(torch_stream);
+    for (ExecArgs& m : members) {
+      if (m.transfer_event != nullptr) {
+        CUDA_CHECK(cudaStreamWaitEvent(stream, m.transfer_event, 0));
+        kCudaEventPool->Release(m.transfer_event);
+        m.transfer_event = nullptr;
+      }
+    }
+    if (input_ready_event_ != nullptr) {
+      CUDA_CHECK(cudaStreamWaitEvent(stream, input_ready_event_, 0));
+    }
+
+    // Expert table {gate*, up*, down*, expert_id}: one pinned async H2D copy.
+    const int64_t n = static_cast<int64_t>(members.size());
+    auto table_host = torch::empty({n, 4}, torch::kLong);
+    auto* rows = table_host.data_ptr<int64_t>();
+    int64_t inter = -1;
+    for (int64_t j = 0; j < n; ++j) {
+      std::array<torch::Tensor, 3> w;
+      TORCH_CHECK(
+          ResolveGatedExpert(expert_type_, members[j].expert_node->node, w),
+          "grouped decode: expert tensors not found");
+      TORCH_CHECK(inter < 0 || inter == w[0].size(0),
+                  "grouped decode: experts of one group differ in shape");
+      inter = w[0].size(0);
+      for (int k = 0; k < 3; ++k) {
+        rows[j * 4 + k] = reinterpret_cast<int64_t>(w[k].data_ptr());
+      }
+      rows[j * 4 + 3] = members[j].expert_node->expert_idx;
+    }
+    auto table = table_host.pin_memory().to(CUDA_DEVICE(gpu_id),
+                                            /*non_blocking=*/true);
+    const int top_k = grouped_top_k_.load(std::memory_order_acquire);
+    const int64_t kcap =
+        top_k > 0 ? std::min(top_k, num_experts_) : num_experts_;
+
+    {
+      std::lock_guard<std::mutex> lock(accum_mutex_);
+      int output_fault = static_cast<int>(DispatchFaultPoint::OUTPUT);
+      if (dispatch_fault_for_test_.compare_exchange_strong(
+              output_fault, 0, std::memory_order_acq_rel)) {
+        throw std::runtime_error("injected output failure");
+      }
+      // Same straggler rule as OutputFunc.
+      if (current_generation_.load(std::memory_order_acquire) != generation ||
+          failed_generation_.load(std::memory_order_acquire) == generation) {
+        return;
+      }
+      grouped_moe_decode_pro6000(hidden_states_, router_mask_, router_weight_,
+                                 table, inter, kcap, final_hidden_states_,
+                                 false, stream);
+
+      cudaEvent_t output_done = AcquireCompletionEvent(gpu_id);
+      int event_fault =
+          static_cast<int>(DispatchFaultPoint::COMPLETION_EVENT_RECORD);
+      if (dispatch_fault_for_test_.compare_exchange_strong(
+              event_fault, 0, std::memory_order_acq_rel)) {
+        ReleaseCompletionEvent(output_done, gpu_id);
+        throw std::runtime_error("injected completion_event failure");
+      }
+      cudaError_t record_status = cudaEventRecord(output_done, stream);
+      if (record_status != cudaSuccess) {
+        ReleaseCompletionEvent(output_done, gpu_id);
+        throw std::runtime_error(
+            std::string("GroupedExec: cudaEventRecord failed: ") +
+            cudaGetErrorString(record_status));
+      }
+      std::lock_guard<std::mutex> state_lock(route_state_mutex_);
+      completion_events_.push_back(
+          CompletionEventRecord{output_done, generation, gpu_id});
+      completion_events_outstanding_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    auto retire = std::make_unique<GroupRetireArgs>();
+    retire->dispatcher = this;
+    retire->generation = generation;
+    for (const ExecArgs& m : members) {
+      retire->items.push_back(
+          ExpertRetireArgs{this, m.expert_node, m.generation, gpu_id, m.evict,
+                           m.managed_transient, m.residency_lease,
+                           m.execution_lease_id, m.execution_key});
+    }
+    pending_retirement_callbacks_.fetch_add(1, std::memory_order_acq_rel);
+    int retirement_fault =
+        static_cast<int>(DispatchFaultPoint::RETIREMENT_CALLBACK_LAUNCH);
+    if (dispatch_fault_for_test_.compare_exchange_strong(
+            retirement_fault, 0, std::memory_order_acq_rel)) {
+      pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
+      throw std::runtime_error("injected retirement_launch failure");
+    }
+    cudaError_t retire_status = cudaLaunchHostFunc(
+        stream, &ExpertDispatcher::GroupReadyToRetireCallback, retire.get());
+    if (retire_status != cudaSuccess) {
+      pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
+      throw std::runtime_error(
+          std::string("cudaLaunchHostFunc grouped retirement failed: ") +
+          cudaGetErrorString(retire_status));
+    }
+    retire.release();
+    grouped_batches_.fetch_add(1, std::memory_order_relaxed);
+    grouped_experts_.fetch_add(n, std::memory_order_relaxed);
+    for (std::int64_t j = 0; j < n; ++j) CompleteOne(generation);
+  } catch (...) {
+    for (ExecArgs& m : members) {
+      if (m.transfer_event != nullptr) {
+        kCudaEventPool->Release(m.transfer_event);
+        m.transfer_event = nullptr;
+      }
+      if (m.execution_lease_id != 0 && kDemandResidencyClient != nullptr) {
+        kDemandResidencyClient->ReleaseLease(m.execution_lease_id);
+        m.execution_lease_id = 0;
+      }
+      if (m.residency_lease != 0 && kExpertResidencyManager) {
+        kExpertResidencyManager->ReleaseLease(m.residency_lease);
+        m.residency_lease = 0;
+      }
+      if (m.managed_transient) m.expert_node->node->is_overflow = false;
+    }
+    FailDispatch(generation, std::current_exception(), contexts);
+  }
+}
+
+void CUDART_CB ExpertDispatcher::GroupReadyToRetireCallback(void* opaque) {
+  std::unique_ptr<GroupRetireArgs> batch(static_cast<GroupRetireArgs*>(opaque));
+  ExpertDispatcher* dispatcher = batch->dispatcher;
+  try {
+    for (ExpertRetireArgs& item : batch->items) {
+      dispatcher->retirement_queue_.Push(item);
+    }
+  } catch (...) {
+    // CUDA host-callback thread: no FailureContext (see
+    // ExpertReadyToRetireCallback).
+    dispatcher->FailDispatch(batch->generation, std::current_exception());
+  }
+  if (dispatcher->pending_retirement_callbacks_.fetch_sub(
+          1, std::memory_order_acq_rel) == 1) {
+    std::lock_guard<std::mutex> lock(dispatcher->retirement_callback_mutex_);
+    dispatcher->retirement_callback_cv_.notify_all();
+  }
+}
+
 std::vector<ExpertDispatcher::CallResult> ExpertDispatcher::Wait() {
   // int wait_count = 0;
+  FlushGroupedExperts();
 
   std::unique_lock<std::mutex> lock(pending_mutex_);
   pending_cv_.wait(lock, [&] { return pending_.load() == 0; });
@@ -1760,6 +2083,9 @@ torch::Tensor ExpertDispatcher::WaitHiddenStates() {
 #ifndef NVTX_DISABLE
   nvtx3::scoped_range range("expert_completion_handoff");
 #endif
+  // Safety net for callers that enqueue without NotifyFetchStart. While the
+  // route worker is still enqueueing it flushes the group itself.
+  if (!route_pending_.load(std::memory_order_acquire)) FlushGroupedExperts();
   std::unique_lock<std::mutex> lock(pending_mutex_);
   pending_cv_.wait(lock, [&] {
     return !route_pending_.load(std::memory_order_acquire) &&
@@ -1857,6 +2183,15 @@ void ExpertDispatcher::SetInputs(const torch::Tensor& hidden_states,
   router_mask_ = router_mask;
   router_weight_ = router_weight;  // this can be float32
   final_hidden_states_ = torch::zeros_like(hidden_states, options);
+  {
+    // Created on the caller stream before input_ready_event_, which every
+    // exec stream waits on before its first use.
+    std::lock_guard<std::mutex> lock(accum_mutex_);
+    auto& zero_index = zero_index_[device];
+    if (!zero_index.defined()) {
+      zero_index = torch::zeros({1}, options.dtype(torch::kLong));
+    }
+  }
 
   if (input_ready_event_ == nullptr) {
     cudaEventCreateWithFlags(&input_ready_event_, cudaEventDisableTiming);
@@ -2417,6 +2752,8 @@ std::map<std::string, std::int64_t> ExpertDispatcher::GetRoutingStats() const {
       {"pending",
        static_cast<std::int64_t>(pending_.load(std::memory_order_acquire))},
       {"route_pending", route_pending_.load(std::memory_order_acquire) ? 1 : 0},
+      {"grouped_batches", grouped_batches_.load(std::memory_order_relaxed)},
+      {"grouped_experts", grouped_experts_.load(std::memory_order_relaxed)},
   };
 }
 
