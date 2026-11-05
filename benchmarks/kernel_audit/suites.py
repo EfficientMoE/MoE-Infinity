@@ -7,11 +7,12 @@ issues the same kernels MoE-Infinity issues for that op on sm_120
 Impl names:
   production paths   cutlass_fused, grouped_prefill, fp8_prod, gptoss_resident,
                      gptoss_offload, triton_mxfp4, v4_fp4_prod, v4_fp4_native,
-                     sdpa_shim, hf_eager, paged_v1, sdpa_fallback,
+                     sdpa_shim, hf_eager, paged_fwd, paged_fwd_int8,
                      hf_eager_decode, router_*, gdn_torch, kv_write_loop,
                      kv_write_vec, moe_gqa, moe_gqa_swa, moe_gqa_masked,
-                     moe_gqa_decode, moe_gqa_masked_decode (HF models without
-                     a paged shim, runtime/hf_attention.py)
+                     moe_gqa_decode, moe_gqa_masked_decode
+                     (HF models without a paged shim, runtime/hf_attention.py)
+  (paged_v1 / sdpa_fallback rows in results/ are the pre-#298/#299 kernels)
   references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode,
                      read_ceiling, kv_copy_ref,
                      gptoss_offload_legacy (pre-#311 type-6 path)
@@ -1010,18 +1011,28 @@ def _paged_kv(B: int, L: int, KVH: int, d: int, layout: str):
     return kc, vc, bt, lens
 
 
-def _paged_fwd_builder(B, L, H, KVH, d):
-    """Production decode: paged_attention_fwd (v1 kernel for D<=128, SDPA
-    Python fallback for D=256)."""
+def _paged_fwd_builder(B, L, H, KVH, d, int8=False):
+    """Production decode: paged_attention_fwd (split-KV Triton kernel) on the
+    vLLM-layout cache of PagedAttentionBackend; int8=True uses int8 payloads
+    with per-token fp16 scales (FormatLayeredKVStore int8_sym)."""
 
     def build():
         from moe_infinity.kernel.paged_attention_ops import paged_attention_fwd
 
         kc, vc, bt, lens = _paged_kv(B, L, KVH, d, "vllm")
+        ks = vs = None
+        if int8:
+            kc = kc.mul_(40).to(torch.int8)
+            vc = vc.mul_(40).to(torch.int8)
+            nblk = kc.shape[0]
+            ks = torch.rand(nblk, KVH, KV_BLOCK, device="cuda").half()
+            vs = torch.rand(nblk, KVH, KV_BLOCK, device="cuda").half()
         q = torch.randn(B, H, d, device="cuda", dtype=torch.bfloat16)
-        return lambda: paged_attention_fwd(
-            q, kc, vc, bt, lens, d**-0.5, KVH, KV_BLOCK, L
+        fn = lambda: paged_attention_fwd(  # noqa: E731
+            q, kc, vc, bt, lens, d**-0.5, KVH, KV_BLOCK, L, ks, vs
         )
+        fn()  # compile outside timing
+        return fn
 
     return build
 
@@ -1093,18 +1104,6 @@ def _moe_gqa_decode_builder(B, L, H, KVH, dqk, dv, sinks, masked):
     return build
 
 
-# Production paged decode is extremely slow; sample a few points only.
-_PAGED_POINTS = {(1, "1K"), (1, "2K"), (16, "1K"), (1, "9K")}
-_FALLBACK_POINTS = {
-    (1, "1K"),
-    (1, "9K"),
-    (16, "1K"),
-    (16, "9K"),
-    (1, "50K"),
-    (1, "200K"),
-}
-
-
 def attn_decode_cases(model_keys: list[str] | None = None) -> list[Case]:
     out = []
     for key, m in MODELS.items():
@@ -1139,18 +1138,28 @@ def attn_decode_cases(model_keys: list[str] | None = None) -> list[Case]:
                     meta=meta,
                 )
                 if key in _SHIM_MODELS:
-                    pts = _PAGED_POINTS if dqk <= 128 else _FALLBACK_POINTS
-                    if (B, lbl) in pts:
-                        impl = "paged_v1" if dqk <= 128 else "sdpa_fallback"
-                        out.append(
-                            Case(
-                                f"{key}|b{B}@{lbl}|{impl}",
-                                impl=impl,
-                                build=_paged_fwd_builder(B, L, H, KVH, dqk),
-                                iters=2,
-                                **common,
-                            )
+                    out.append(
+                        Case(
+                            f"{key}|b{B}@{lbl}|paged_fwd",
+                            impl="paged_fwd",
+                            build=_paged_fwd_builder(B, L, H, KVH, dqk),
+                            **common,
                         )
+                    )
+                    int8_common = dict(common)
+                    int8_common["bytes_min"] = (
+                        B * L * KVH * (dqk + dv + 4) + B * H * (dqk + dv) * BF16
+                    )
+                    out.append(
+                        Case(
+                            f"{key}|b{B}@{lbl}|paged_fwd_int8",
+                            impl="paged_fwd_int8",
+                            build=_paged_fwd_builder(
+                                B, L, H, KVH, dqk, int8=True
+                            ),
+                            **int8_common,
+                        )
+                    )
                 else:
                     out.append(
                         Case(
@@ -1184,7 +1193,7 @@ def attn_decode_cases(model_keys: list[str] | None = None) -> list[Case]:
                                 **common,
                             )
                         )
-                if dqk == dv and dqk in (64, 128):
+                if dqk == dv and dqk in (64, 80, 96, 112, 128, 256):
                     out.append(
                         Case(
                             f"{key}|b{B}@{lbl}|triton_decode",

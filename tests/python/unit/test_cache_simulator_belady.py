@@ -64,6 +64,34 @@ def opt_min_misses(accesses, capacity):
     return rec(0, frozenset())
 
 
+def opt_min_misses_bypass(accesses, capacity):
+    """Exhaustive optimum when a missed key may be served without caching."""
+    assert capacity >= 1
+    n = len(accesses)
+    memo = {}
+
+    def rec(i, cache):
+        if i == n:
+            return 0
+        state = (i, cache)
+        cached = memo.get(state)
+        if cached is not None:
+            return cached
+        key = accesses[i]
+        if key in cache:
+            res = rec(i + 1, cache)
+        elif len(cache) < capacity:
+            res = 1 + rec(i + 1, cache | {key})
+        else:
+            res = 1 + rec(i + 1, cache)  # bypass
+            for victim in cache:
+                res = min(res, 1 + rec(i + 1, (cache - {victim}) | {key}))
+        memo[state] = res
+        return res
+
+    return rec(0, frozenset())
+
+
 def lru_misses(accesses, capacity):
     """Reference LRU replacement; OPT must never do worse than this."""
     cache: OrderedDict = OrderedDict()
@@ -173,6 +201,28 @@ def test_matches_brute_force_optimum_and_cross_impl():
             cache = run_strategy_cache(cache_cls, accesses, capacity)
             assert cache.misses == optimum, (cache_cls, accesses, capacity)
             assert cache.hits + cache.misses == length
+
+
+def test_bypass_matches_brute_force_optimum():
+    rng = random.Random(20261104)
+    for _ in range(150):
+        length = rng.randrange(1, 15)
+        capacity = rng.randrange(1, 6)
+        accesses = random_trace(rng, length)
+        b_hits, b_misses, _ = belady_simulate(accesses, capacity, bypass=True)
+        assert b_misses == opt_min_misses_bypass(accesses, capacity), (
+            accesses,
+            capacity,
+        )
+        assert b_hits + b_misses == length
+        # Optional admission can only help.
+        assert b_misses <= belady_simulate(accesses, capacity)[1]
+
+
+def test_bypass_hand_case():
+    # cap 1, A B A: classic MIN must cache B (0 hits); bypassing B keeps A.
+    assert belady_simulate([A, B, A], 1)[:2] == (0, 3)
+    assert belady_simulate([A, B, A], 1, bypass=True)[:2] == (1, 2)
 
 
 def test_no_belady_anomaly_misses_non_increasing_in_capacity():
