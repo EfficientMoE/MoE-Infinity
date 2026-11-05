@@ -652,6 +652,9 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
     DLOG_WARN("adaptive precision target failed; using current generation");
   }
 
+  // Routed accesses reach the eviction policy in execution order, after the
+  // expert is claimed (no longer idle, so no policy picks it as a victim
+  // while it is in flight) and before the admission a miss causes.
   {
     auto expected = NodeExecState::IDLE;
     if (!expert_node->node->exec_state.compare_exchange_strong(
@@ -661,6 +664,9 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
             1, std::memory_order_acq_rel);
         args.wait_for_prefetch = true;
         args.gpu_id = expert_node->node->default_device.index();
+        if (kExpertResidencyManager) {
+          kExpertResidencyManager->RecordRouted(expert_node->node, args.gpu_id);
+        }
         AdmitAndCount(args.gpu_id);
         input_queue_[args.gpu_id].Push(args);
         return;
@@ -670,6 +676,11 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
           expert_idx, " layer_idx ", layer_idx, " node ",
           expert_node->node->str(), " state=", static_cast<int>(expected), ")");
     }
+  }
+  if (kExpertResidencyManager) {
+    const auto& device = expert_node->node->device;
+    kExpertResidencyManager->RecordRouted(
+        expert_node->node, device.is_cuda() ? device.index() : args.gpu_id);
   }
   expert_node->node->last_access_time = MCIROSECONDS_SINCE_EPOCH;
 
@@ -692,7 +703,8 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
     exec_args.hit = true;
     exec_args.invocation_id = args.invocation_id;
     exec_args.generation = args.generation;
-    if (kExpertResidencyManager && kExpertResidencyManager->PolicyEnabled()) {
+    if (kExpertResidencyManager &&
+        kExpertResidencyManager->ManagedResidency()) {
       kExpertResidencyManager->RecordAccess(expert_node->node, args.phase,
                                             true);
       exec_args.residency_lease = kExpertResidencyManager->AcquireLease(
@@ -755,6 +767,10 @@ void ExpertDispatcher::RegisterExpert(
     } else if (cached_node != node) {
       DLOG_FATAL("RegisterExpert: tensor_id has multiple nodes", tensor_id);
     }
+  }
+  if (cached_node != nullptr && kExpertResidencyManager) {
+    kExpertResidencyManager->RegisterExpertKey(cached_node->id, layer_idx,
+                                               expert_idx);
   }
 }
 
@@ -1178,7 +1194,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
           exec_args.hit = true;
           exec_args.generation = args.generation;
           if (kExpertResidencyManager &&
-              kExpertResidencyManager->PolicyEnabled()) {
+              kExpertResidencyManager->ManagedResidency()) {
             kExpertResidencyManager->RecordAccess(expert_node->node, args.phase,
                                                   true);
             exec_args.residency_lease = kExpertResidencyManager->AcquireLease(
@@ -1205,8 +1221,8 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       }
 
       bool cache_hit = expert_node->node->device.is_cuda();
-      const bool managed =
-          kExpertResidencyManager && kExpertResidencyManager->PolicyEnabled();
+      const bool managed = kExpertResidencyManager &&
+                           kExpertResidencyManager->ManagedResidency();
       ResidencyTicket residency_ticket;
 
       if (managed && !cache_hit) {
@@ -1218,14 +1234,19 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
               expert_node->node, gpu_id, args.phase,
               kExpertResidencyManager->AdmissionFor(args.phase),
               AdmissionSource::DEMAND);
-          if (residency_ticket.valid) break;
+          if (residency_ticket.valid &&
+              (residency_ticket.reserved_victim == nullptr ||
+               kExpertResidencyManager->EvictReserved(residency_ticket))) {
+            break;
+          }
+          // No victim yet, or the reserved one was dispatched or leased
+          // after it was picked: release the reservation and pick again.
+          if (residency_ticket.valid) {
+            kExpertResidencyManager->AbortAdmission(residency_ticket);
+          }
           std::this_thread::sleep_for(std::chrono::microseconds(10));
         }
         if (main_thread_stop_flag_.load(std::memory_order_acquire)) break;
-        if (residency_ticket.reserved_victim != nullptr) {
-          TORCH_CHECK(kExpertResidencyManager->EvictReserved(residency_ticket),
-                      "failed to evict reserved expert victim");
-        }
         expert_node->node->is_overflow = residency_ticket.transient;
       }
 
@@ -1974,15 +1995,30 @@ void ExpertDispatcher::FailDispatch(
     if (context.overload_owned && context.gpu_id >= 0) {
       gpu_overload_[context.gpu_id].store(false, std::memory_order_release);
     }
-    if (context.gpu_id >= 0) cache_cv_[context.gpu_id].notify_all();
+    if (context.gpu_id >= 0) NotifyCacheWaiters(context.gpu_id);
   }
   route_failures_.fetch_add(1, std::memory_order_relaxed);
   last_active_experts_count_.store(0, std::memory_order_relaxed);
   pending_.store(0, std::memory_order_release);
   route_pending_.store(false, std::memory_order_release);
-  pending_cv_.notify_all();
+  NotifyPendingWaiters();
   route_callback_cv_.notify_all();
   retirement_callback_cv_.notify_all();
+}
+
+void ExpertDispatcher::NotifyPendingWaiters() noexcept {
+  // pending_ and route_pending_ change outside pending_mutex_. Taking it
+  // here orders the change against a waiter's predicate check, so the
+  // notification cannot land between that check and the wait (lost wakeup).
+  { std::lock_guard<std::mutex> lock(pending_mutex_); }
+  pending_cv_.notify_all();
+}
+
+void ExpertDispatcher::NotifyCacheWaiters(int gpu_id) noexcept {
+  // Same ordering for the legacy cache-full wait in GPUFetchFunc: the node
+  // state its FindExpertEvict predicate reads changes outside cache_mutex_.
+  { std::lock_guard<std::mutex> lock(cache_mutex_[gpu_id]); }
+  cache_cv_[gpu_id].notify_all();
 }
 
 void ExpertDispatcher::CompleteOne(std::uint64_t generation) noexcept {
@@ -1991,7 +2027,7 @@ void ExpertDispatcher::CompleteOne(std::uint64_t generation) noexcept {
   size_t previous = pending_.fetch_sub(1, std::memory_order_acq_rel);
   if (previous <= 1) {
     pending_.store(0, std::memory_order_release);
-    pending_cv_.notify_all();
+    NotifyPendingWaiters();
   }
 }
 
@@ -2084,7 +2120,7 @@ void ExpertDispatcher::RouteFunc() noexcept {
               std::chrono::steady_clock::now() - started);
       last_route_handoff_us_.store(elapsed.count(), std::memory_order_relaxed);
       route_pending_.store(false, std::memory_order_release);
-      pending_cv_.notify_all();
+      NotifyPendingWaiters();
     } catch (...) {
       FailDispatch(args.generation, std::current_exception(), routed_contexts);
     }
@@ -2524,7 +2560,7 @@ void ExpertDispatcher::RetirementFunc() {
       if (args.residency_lease != 0 && kExpertResidencyManager) {
         kExpertResidencyManager->ReleaseLease(args.residency_lease);
       }
-      cache_cv_[args.gpu_id].notify_all();
+      NotifyCacheWaiters(args.gpu_id);
     } catch (...) {
       FailDispatch(args.generation, std::current_exception(),
                    {FailureContext{args.expert_node, args.gpu_id, false, false,

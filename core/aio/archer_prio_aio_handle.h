@@ -46,6 +46,8 @@ class ArcherPrioAioContext {
                                      const std::int64_t total_size);
 
  private:
+  void CompleteRequest(const std::shared_ptr<AioRequest>& io_request);
+
   std::int64_t block_size_;
 
   std::mutex io_queue_high_mutex_;

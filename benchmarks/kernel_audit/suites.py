@@ -7,16 +7,16 @@ issues the same kernels MoE-Infinity issues for that op on sm_120
 Impl names:
   production paths   cutlass_fused, grouped_prefill, fp8_native, fp8_prod,
                      gptoss_resident, gptoss_offload,
-                     v4_fp4_prod, sdpa_shim, hf_eager, paged_v1,
+                     v4_fp4_prod, v4_fp4_native, sdpa_shim, hf_eager, paged_v1,
                      sdpa_fallback, hf_eager_decode, router_*, gdn_torch,
-                     kv_write_loop, moe_gqa, moe_gqa_swa, moe_gqa_masked,
-                     moe_gqa_decode, moe_gqa_masked_decode (HF models
-                     without a paged shim, runtime/hf_attention.py)
+                     kv_write_loop, kv_write_vec, moe_gqa, moe_gqa_swa,
+                     moe_gqa_masked, moe_gqa_decode, moe_gqa_masked_decode
+                     (HF models without a paged shim, runtime/hf_attention.py)
   previous paths     fp8_prod (per-call FP8 -> BF16 dequant + CUTLASS; still
                      the production path off sm_120 / RTX PRO 6000)
   FP8 reference      fp8_scaled_mm_ref (cuBLASLt torch._scaled_mm, Rule B)
   references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode,
-                     gptoss_offload_legacy (pre-#311 type-6 path)
+                     kv_copy_ref, gptoss_offload_legacy (pre-#311 type-6 path)
 """
 
 from __future__ import annotations
@@ -91,6 +91,28 @@ def _cutlass_builder(M: int, H: int, I: int):
         fb = torch.empty_like(gb)
         out = torch.empty(M, H, device="cuda", dtype=torch.bfloat16)
         return lambda: ext.fused_moe_ffn_into(x, g, u, d, gb, fb, out)
+
+    return build
+
+
+_MOE_MLP_MODULES: dict = {}
+
+
+def _moemlp_native_builder(M: int, H: int, I: int):
+    """Full C++ MoEMLP::forward (staging copies + CUTLASS FFN + output clone),
+    chunked in kMaxTokens rows for M > 8192."""
+
+    def build():
+        from moe_infinity import _store
+
+        # Staging buffers are sized on first use and never freed, so reuse
+        # one module per expert shape.
+        mlp = _MOE_MLP_MODULES.get((H, I))
+        if mlp is None:
+            mlp = _MOE_MLP_MODULES[(H, I)] = _store._moe_mlp_for_test(0, 5)
+        x = _rand(M, H, scale=1.0)
+        params = [_rand(I, H), _rand(I, H), _rand(H, I)]
+        return lambda: mlp.forward(x, params)
 
     return build
 
@@ -356,9 +378,69 @@ def _v4_fp4_builder(M: int, H: int, I: int):
     return build
 
 
+def _v4_fp4_expert_weights(H: int, I: int) -> dict:
+    """Random packed e2m1 weights + ue8m0 scales of one V4 routed expert."""
+    w = {}
+    for name, (n, k) in (("w1", (I, H)), ("w3", (I, H)), ("w2", (H, I))):
+        w[name] = torch.randint(
+            0, 255, (n, k // 2), device="cuda", dtype=torch.uint8
+        )
+        w["s" + name[1]] = torch.randint(
+            118, 124, (n, k // 32), device="cuda", dtype=torch.uint8
+        )
+    return w
+
+
+def _v4_fp4_native_builder(M: int, H: int, I: int):
+    """DeepSeek-V4 native W4A8 block-scaled path, one expert per call."""
+
+    def build():
+        import moe_infinity._v4_fp4 as v4
+
+        x = _rand(M, H, scale=1.0)
+        w = _v4_fp4_expert_weights(H, I)
+        args = [w[k] for k in ("w1", "s1", "w2", "s2", "w3", "s3")]
+        return lambda: v4.v4_expert_forward_fp4_sm120_pro6000(x, *args, 10.0)
+
+    return build
+
+
+def _v4_fp4_native_layer_builder(T: int, n_exp: int, H: int, I: int, k: int):
+    """One MoE layer on the native path: a single grouped call for T tokens
+    routed top-k over n_exp distinct (cold) experts, routing on device."""
+
+    def build():
+        import moe_infinity._v4_fp4 as v4
+
+        experts = [_v4_fp4_expert_weights(H, I) for _ in range(n_exp)]
+        table = torch.tensor(
+            [
+                [e[n].data_ptr() for n in ("w1", "s1", "w3", "s3", "w2", "s2")]
+                for e in experts
+            ],
+            dtype=torch.int64,
+            device="cuda",
+        )
+        # balanced routing: slot j of all tokens goes to expert j % n_exp,
+        # so every expert receives ~T*k/n_exp rows (the case's M)
+        ids = (torch.arange(T * k, device="cuda") % n_exp).view(T, k)
+        ids = ids.to(torch.int32)
+        wts = torch.rand(T, k, device="cuda")
+        x = _rand(T, H, scale=1.0)
+
+        def run():
+            v4.v4_moe_forward_sm120_pro6000(x, ids, wts, table, I, 10.0)
+
+        run.experts = experts  # keep the weights alive
+        return run
+
+    return build
+
+
 # weight bytes per element of one expert in each storage format
 _W_BYTES = {
     "cutlass_fused": BF16,
+    "moemlp_native": BF16,
     "cublas_ref": BF16,
     "gptoss_bf16cached": BF16,
     "fp8_prod": 1 + 4 / (128 * 128),
@@ -368,6 +450,7 @@ _W_BYTES = {
     "gptoss_offload": 0.5 + 1 / 32,
     "gptoss_offload_legacy": 0.5 + 1 / 32,
     "v4_fp4_prod": 0.5 + 1 / 32,
+    "v4_fp4_native": 0.5 + 1 / 32,
 }
 
 
@@ -390,8 +473,10 @@ def _expert_impls(m: MoEModel):
         impls.append(("fp8_prod", _fp8_prod_builder))
     if m.expert_dtype.startswith("fp4"):
         impls.append(("v4_fp4_prod", _v4_fp4_builder))
+        impls.append(("v4_fp4_native", _v4_fp4_native_builder))
     impls += [
         ("cutlass_fused", _cutlass_builder),
+        ("moemlp_native", _moemlp_native_builder),
         ("cublas_ref", _cublas_ref_builder),
     ]
     return impls
@@ -688,6 +773,14 @@ def expert_layer_cases(model_keys: list[str] | None = None) -> list[Case]:
         H, I = c.meta["H"], c.meta["I"]
         eb = 3 * H * I * _W_BYTES[c.impl]
         streams = 1 if c.impl in _SEQUENTIAL_IMPLS else EXEC_STREAMS
+        if c.impl == "v4_fp4_native":  # one grouped launch per layer
+            m = MODELS[c.model]
+            build = _v4_fp4_native_layer_builder(
+                c.meta["tokens"], n_exec, H, I, m.top_k
+            )
+            streams = 1
+        else:
+            build = _layer_builder(c, n_exec, eb, streams)
         out.append(
             Case(
                 cid=c.cid.replace("|", "|layer|", 1),
@@ -698,7 +791,7 @@ def expert_layer_cases(model_keys: list[str] | None = None) -> list[Case]:
                 impl=c.impl,
                 flops=c.flops * n_exec,
                 bytes_min=c.bytes_min * n_exec,
-                build=_layer_builder(c, n_exec, eb, streams),
+                build=build,
                 per_layer=1.0,
                 layers=c.layers,
                 meta={**c.meta, "n_exec": n_exec, "streams": streams},
@@ -726,22 +819,17 @@ def _sdpa_shim_builder(T, H, KVH, d):
     """PagedAttentionBackend._prefill_forward without FlashInfer."""
 
     def build():
+        from moe_infinity.runtime.attention_backend import causal_prefill_sdpa
+
         query = torch.randn(T, H, d, device="cuda", dtype=torch.bfloat16)
         key = torch.randn(T, KVH, d, device="cuda", dtype=torch.bfloat16)
         value = torch.randn(T, KVH, d, device="cuda", dtype=torch.bfloat16)
-        F = torch.nn.functional
-        ratio = H // KVH
 
         def run():
             q = query.transpose(0, 1).unsqueeze(0)
             k = key.transpose(0, 1).unsqueeze(0)
             v = value.transpose(0, 1).unsqueeze(0)
-            if ratio > 1:
-                k = k.repeat_interleave(ratio, dim=1)
-                v = v.repeat_interleave(ratio, dim=1)
-            out = F.scaled_dot_product_attention(
-                q, k, v, scale=d**-0.5, is_causal=True
-            )
+            out = causal_prefill_sdpa(q, k, v, d**-0.5)
             return out.squeeze(0).transpose(0, 1)
 
         return run
@@ -1514,6 +1602,57 @@ def _kv_write_builder(T, KVH, d):
     return build
 
 
+def _kv_write_vec_builder(T, KVH, d, decode):
+    """PagedAttentionBackend.write_kv (single Triton scatter launch).
+
+    Decode: one token per sequence, each in its own randomly placed block.
+    Prefill: one sequence over a shuffled block table.
+    """
+
+    def build():
+        from moe_infinity.runtime.attention_backend import PagedAttentionBackend
+        from moe_infinity.runtime.attention_types import KVCacheSpec
+
+        nblk = (T if decode else -(-T // KV_BLOCK)) + 1
+        spec = KVCacheSpec(
+            num_kv_heads=KVH,
+            head_dim=d,
+            dtype=torch.bfloat16,
+            block_size=KV_BLOCK,
+        )
+        backend = PagedAttentionBackend(
+            spec, nblk, torch.device("cuda"), num_layers=1
+        )
+        k_src = torch.randn(T, KVH, d, device="cuda", dtype=torch.bfloat16)
+        v_src = torch.randn(T, KVH, d, device="cuda", dtype=torch.bfloat16)
+        table = torch.randperm(nblk, device="cuda")
+        if decode:
+            slots = table[:T] * KV_BLOCK + torch.randint(
+                0, KV_BLOCK, (T,), device="cuda"
+            )
+        else:
+            pos = torch.arange(T, device="cuda")
+            slots = table[pos // KV_BLOCK] * KV_BLOCK + pos % KV_BLOCK
+
+        def run():
+            backend.write_kv(k_src, v_src, slots, 0)
+
+        return run
+
+    return build
+
+
+def _kv_copy_ref_builder(T, KVH, d):
+    """Roof reference: one contiguous copy of the same K+V bytes."""
+
+    def build():
+        src = torch.randn(2 * T * KVH * d, device="cuda", dtype=torch.bfloat16)
+        dst = torch.empty_like(src)
+        return lambda: dst.copy_(src)
+
+    return build
+
+
 def kv_write_cases(model_keys: list[str] | None = None) -> list[Case]:
     out = []
     for key in ("qwen3-235b-a22b", "qwen3.5-35b-a3b"):
@@ -1523,31 +1662,45 @@ def kv_write_cases(model_keys: list[str] | None = None) -> list[Case]:
         for phase, lbl, T in (
             ("decode", "b1", 1),
             ("decode", "b16", 16),
+            ("decode", "b64", 64),
+            ("decode", "b256", 256),
             ("prefill", "1K", 1024),
+            ("prefill", "2K", 2048),
+            ("prefill", "4K", 4096),
+            ("prefill", "9K", 9216),
+            ("prefill", "16K", 16384),
+            ("prefill", "50K", 51200),
         ):
-            out.append(
-                Case(
-                    f"{key}|{lbl}|kv_write_loop",
-                    suite="kv_write",
-                    model=key,
-                    phase=phase,
-                    size=lbl,
-                    impl="kv_write_loop",
-                    flops=0.0,
-                    bytes_min=2
-                    * T
-                    * m.attn.kv_heads
-                    * m.attn.head_dim
-                    * BF16
-                    * 2,
-                    build=_kv_write_builder(
-                        T, m.attn.kv_heads, m.attn.head_dim
-                    ),
-                    layers=m.attn.full_layers,
-                    meta={"T": T},
-                    iters=5,
-                )
+            h, d = m.attn.kv_heads, m.attn.head_dim
+            builds = {}
+            if lbl in ("b1", "b16", "1K"):
+                builds["kv_write_loop"] = _kv_write_builder(T, h, d)
+            builds["kv_write_vec"] = _kv_write_vec_builder(
+                T, h, d, phase == "decode"
             )
+            builds["kv_copy_ref"] = _kv_copy_ref_builder(T, h, d)
+            for impl, build in builds.items():
+                out.append(
+                    Case(
+                        f"{key}|{lbl}|{impl}",
+                        suite="kv_write",
+                        model=key,
+                        phase=phase,
+                        size=lbl,
+                        impl=impl,
+                        flops=0.0,
+                        bytes_min=2
+                        * T
+                        * m.attn.kv_heads
+                        * m.attn.head_dim
+                        * BF16
+                        * 2,
+                        build=build,
+                        layers=m.attn.full_layers,
+                        meta={"T": T},
+                        iters=5 if impl == "kv_write_loop" else None,
+                    )
+                )
     return out
 
 

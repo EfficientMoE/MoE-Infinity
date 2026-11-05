@@ -53,6 +53,13 @@ try:
 except ImportError:
     Qwen3_5MoePagedAttention = None
 
+try:
+    from moe_infinity.boundary.mixtral_paged_attention import (
+        MixtralPagedAttention,
+    )
+except ImportError:
+    MixtralPagedAttention = None
+
 
 def _model_module(name: str):
     return importlib.import_module(
@@ -68,6 +75,9 @@ def install_transformers_model_overrides() -> None:
     mixtral = _model_module("mixtral")
     mixtral._old_sparse_mlp = mixtral.MixtralSparseMoeBlock
     mixtral.MixtralSparseMoeBlock = SyncMixtralSparseMoeBlock
+    if MixtralPagedAttention is not None:
+        mixtral._old_mixtral_attention = mixtral.MixtralAttention
+        mixtral.MixtralAttention = MixtralPagedAttention
 
     qwen3 = _model_module("qwen3_moe")
     qwen3._old_sparse_mlp = qwen3.Qwen3MoeSparseMoeBlock
@@ -175,6 +185,10 @@ def restore_context_transformers_model_overrides() -> None:
     if hasattr(olmoe, "_old_olmoe_attention"):
         olmoe.OlmoeAttention = olmoe._old_olmoe_attention
 
+    mixtral = _model_module("mixtral")
+    if hasattr(mixtral, "_old_mixtral_attention"):
+        mixtral.MixtralAttention = mixtral._old_mixtral_attention
+
     try:
         glm = _model_module("glm_moe_dsa")
         if hasattr(glm, "_old_glm_moe_dsa_moe"):
@@ -212,6 +226,8 @@ def restore_runtime_transformers_model_overrides() -> None:
 
     mixtral = _model_module("mixtral")
     mixtral.MixtralSparseMoeBlock = mixtral._old_sparse_mlp
+    if hasattr(mixtral, "_old_mixtral_attention"):
+        mixtral.MixtralAttention = mixtral._old_mixtral_attention
 
     qwen3 = _model_module("qwen3_moe")
     qwen3.Qwen3MoeSparseMoeBlock = qwen3._old_sparse_mlp

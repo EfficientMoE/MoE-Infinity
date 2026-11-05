@@ -203,6 +203,9 @@ struct MoEMLP : public torch::nn::Module {
                         cudaEvent_t kernel_stop = nullptr);
 
   void SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids);
+  // Binds expert parameters directly (SetTensorsFromIds resolves ids from the
+  // tensor store and forwards here).
+  void SetTensors(const std::vector<torch::Tensor>& tensors);
   // allow_pro6000: the dispatcher's RTX_PRO_6000 setting; combined with the
   // device check once, on the first call.
   void DequantMxfp4Params(cudaStream_t stream, bool allow_pro6000);
@@ -221,9 +224,13 @@ struct MoEMLP : public torch::nn::Module {
   // use dequant (always on other hardware).
   bool TryBindFp8Sm120Pro6000(const std::array<torch::Tensor, 3>& weights,
                               const std::array<torch::Tensor, 3>& scales);
+  void AllocateStaging(int64_t hdim, int64_t idim, std::size_t num_inter);
+  void ResizeStaging(int64_t rows);
 
  private:
   std::vector<torch::Tensor> buffer_;
+  // Column count of each staging slot in buffer_ (rows are kMaxTokens).
+  std::vector<int64_t> staging_cols_;
   std::vector<torch::Tensor> param_;
   std::vector<torch::Tensor> gpt_oss_param_;
   GptOssExpertScratch gpt_oss_scratch_;

@@ -15,11 +15,37 @@
 
 void BindTensorStoreSurface(py::class_<ArcherPrefetchHandle>& cls);
 
+// Test/benchmark-only handle that runs the production MoEMLP::forward on
+// caller-provided weights, bypassing the tensor store and dispatcher. Staging
+// buffers live for the process lifetime (as in ExpertDispatcher), so reuse one
+// instance per expert shape.
+struct MoEMLPForTest {
+  MoEMLPForTest(int dtype, int expert_type)
+      : module(std::make_unique<MoEMLP>(dtype, expert_type)) {}
+
+  torch::Tensor Forward(torch::Tensor hidden_states,
+                        const std::vector<torch::Tensor>& params) {
+    py::gil_scoped_release release;
+    module->SetTensors(params);
+    return module->forward(hidden_states,
+                           at::cuda::getCurrentCUDAStream().stream());
+  }
+
+  std::unique_ptr<MoEMLP> module;
+};
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  py::class_<MoEMLPForTest>(m, "_moe_mlp_for_test")
+      .def(py::init<int, int>(), py::arg("dtype"), py::arg("expert_type"))
+      .def("forward", &MoEMLPForTest::Forward, py::arg("hidden_states"),
+           py::arg("params"));
+
   m.def("init_moe_layer", InitMoELayer,
         "Initialize the MoE layer with the specified parameters.");
   m.def("topk_softmax", TopKSoftmax,
         "Perform top-k softmax operation on the MoE layer.");
+  m.def("eviction_policy_names", &EvictionPolicyNames,
+        "Expert-cache eviction policies accepted besides \"legacy\".");
 
   py::class_<PrefetchAdmission>(m, "prefetch_admission")
       .def_readonly("accepted_tensor_ids",
@@ -150,6 +176,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("prefill_admission"), py::arg("decode_admission"),
            py::arg("prefill_weight"), py::arg("decode_weight"),
            py::arg("starvation_limit"))
+      .def("configure_eviction_policy",
+           &ArcherPrefetchHandle::ConfigureEvictionPolicy, py::arg("name"),
+           py::arg("num_layers") = 0, py::arg("lcnu_alpha") = 0.3,
+           py::arg("lcnu_beta") = 0.5, py::arg("lcnu_prior") = 1.0 / 16)
+      .def("get_eviction_policy", &ArcherPrefetchHandle::GetEvictionPolicy)
       .def("get_expert_policy_stats",
            &ArcherPrefetchHandle::GetExpertPolicyStats)
       .def("reset_cache", &ArcherPrefetchHandle::ResetCache);
@@ -302,7 +333,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            &ExpertDispatcher::SetOverlapComputeTimingEnabled)
       .def("drain_compute_samples", &ExpertDispatcher::DrainComputeSamples)
       .def("set_expected_queue", &ExpertDispatcher::SetExpectedQueue)
-      .def("wait_expert", &ExpertDispatcher::WaitHiddenStates)
+      // Release the GIL while blocked: a worker that drops the last C++
+      // reference to a Python-owned tensor needs it to finish the layer.
+      .def("wait_expert", &ExpertDispatcher::WaitHiddenStates,
+           py::call_guard<py::gil_scoped_release>())
       .def("dispatch_experts", &ExpertDispatcher::DispatchExperts)
       .def("take_last_active_experts", &ExpertDispatcher::TakeLastActiveExperts)
       .def("get_routing_stats", &ExpertDispatcher::GetRoutingStats)

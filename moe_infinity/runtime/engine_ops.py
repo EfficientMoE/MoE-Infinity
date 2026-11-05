@@ -29,6 +29,20 @@ def gptoss_grouped_pro6000_enabled(device=None) -> bool:
     return supports(SM120, device) and supports(RTX_PRO_6000, device)
 
 
+def v4_moe_sm120_pro6000_supported(device=None) -> bool:
+    """Whether the grouped DeepSeek-V4 FP4 MoE (``v4_moe_forward_sm120_pro6000``)
+    may run on ``device``.
+
+    Its kernels use sm_120a block-scaled MMA and were tuned on the RTX PRO
+    6000 (99 KiB shared memory, 188-SM persistent grid, 128 MiB L2), so both
+    gates must pass. Other devices keep Path B (``v4_expert_forward`` per
+    expert: BF16 dequant + cuBLAS).
+    """
+    from moe_infinity.utils.hw_profile import RTX_PRO_6000, SM120, supports
+
+    return supports(SM120, device) and supports(RTX_PRO_6000, device)
+
+
 def register_engine_ops() -> None:
     global _registered
     if _registered:
@@ -71,5 +85,12 @@ def register_engine_ops() -> None:
         )
     else:
         _register(v4_fp4_ext=_v4_fp4)
+        from moe_store.hooks import ops as _ops
+
+        # older moe-store releases have no such hook: the grouped path stays off
+        if hasattr(_ops, "v4_moe_sm120_pro6000_supported"):
+            _register(
+                v4_moe_sm120_pro6000_supported=v4_moe_sm120_pro6000_supported
+            )
 
     _registered = True
