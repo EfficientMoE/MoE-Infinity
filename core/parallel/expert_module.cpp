@@ -4,9 +4,14 @@
 // EfficientMoE Team
 
 #include "expert_module.h"
+
+#include <cstdlib>
+#include <string>
+
 #include "utils/cuda_utils.h"
 #include "utils/logger.h"
 #include "kernel/fused_moe_mlp.h"
+#include "kernel/fp8_moe/fp8_moe.h"
 #include "kernel/hw_profile.h"
 #include "kernel/v4_fp4/mxfp4_gptoss_moe.h"
 extern void fp8_dequant_blockwise_cuda(const void* weight, const void* scale,
@@ -75,6 +80,10 @@ void MoEMLP::SetRepresentation(const ExpertExecutionDescriptor& descriptor) {
 
 void MoEMLP::PrepareRepresentation(cudaStream_t stream) {
   if (representation_execution_kind_ != 1) return;
+  if (TryBindFp8Sm120Pro6000({param_[0], param_[2], param_[4]},
+                             {param_[1], param_[3], param_[5]})) {
+    return;
+  }
   int device = at::cuda::current_device();
   std::array<torch::Tensor, 3> dequantized;
   for (std::size_t projection = 0; projection < 3; ++projection) {
@@ -101,6 +110,12 @@ void MoEMLP::PrepareRepresentation(cudaStream_t stream) {
 }
 
 void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
+  fp8_sm120_pro6000_ = false;
+  if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
+    DLOG_FATAL_IF(tensor_ids.size() != 6,
+                  "GPT-OSS expert requires blocks/scales/bias for two "
+                  "projections");
+  }
   // Safety: exec_state is FETCHING/EXECUTING throughout forward(), so the
   // expert's GPU memory cannot be evicted until OutputFunc resets to IDLE.
   std::vector<torch::Tensor> tensors;
@@ -112,6 +127,9 @@ void MoEMLP::SetTensorsFromIds(const std::vector<std::uint32_t>& tensor_ids) {
 }
 
 void MoEMLP::SetTensors(const std::vector<torch::Tensor>& tensors) {
+  // SetTensors is also the direct bind path (tests). A new parameter set must
+  // not keep a previous native FP8 binding.
+  fp8_sm120_pro6000_ = false;
   if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
     TORCH_CHECK(tensors.size() == 6,
                 "GPT-OSS expert requires blocks/scales/bias for two "
@@ -350,6 +368,17 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
     auto& down_proj =
         (expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE) ? param_[2] : param_[1];
 
+    if (fp8_sm120_pro6000_) {
+      const int up = expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ? 1 : 2;
+      const int down = expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ? 2 : 1;
+      fused_fp8_moe_ffn_sm120_pro6000_into(
+          input, fp8_sm120_pro6000_weights_[0], fp8_sm120_pro6000_scales_[0],
+          fp8_sm120_pro6000_weights_[up], fp8_sm120_pro6000_scales_[up],
+          fp8_sm120_pro6000_weights_[down], fp8_sm120_pro6000_scales_[down],
+          output, stream);
+      return;
+    }
+
     TORCH_CHECK(gate_proj.scalar_type() == torch::kBFloat16 &&
                     up_proj.scalar_type() == torch::kBFloat16 &&
                     down_proj.scalar_type() == torch::kBFloat16,
@@ -368,13 +397,79 @@ void MoEMLP::ForwardHelper(cudaStream_t stream) {
   DLOG_FATAL("MoEMLP::forward: expert_type not supported", expert_type_);
 }
 
+void MoEMLP::SetFp8Sm120Pro6000Allowed(bool allowed) {
+  fp8_sm120_pro6000_allowed_ = allowed;
+}
+
 void MoEMLP::SetFp8Scales(const std::vector<torch::Tensor>& scales) {
   fp8_scales_ = scales;
   has_fp8_scales_ = !scales.empty();
 }
 
+bool MoEMLP::TryBindFp8Sm120Pro6000(
+    const std::array<torch::Tensor, 3>& weights,
+    const std::array<torch::Tensor, 3>& scales) {
+  // Hardware-gated (SM120 + RTX_PRO_6000, docs/hardware-gated-kernels.md):
+  // the native FP8 kernels run only on the RTX PRO 6000 Blackwell; on every
+  // other device this returns false and the per-call dequant-to-BF16 path
+  // below runs. MOE_FP8_NATIVE=0 forces that path everywhere.
+  static const bool kNativeEnabled = [] {
+    const char* env = std::getenv("MOE_FP8_NATIVE");
+    return env == nullptr || std::string(env) != "0";
+  }();
+  fp8_sm120_pro6000_ = false;
+  if (!kNativeEnabled || !fp8_sm120_pro6000_allowed_) return false;
+  if (expert_type_ != DEEPSEEK_MOE_DENSE_ACT_DENSE &&
+      expert_type_ != MIXTRAL_MOE_DENSE_ACT_DENSE) {
+    return false;
+  }
+  if (dtype_to_torch(dtype_) != torch::kBFloat16) return false;
+  for (std::size_t i = 0; i < 3; ++i) {
+    const auto& w = weights[i];
+    const auto& s = scales[i];
+    if (!w.defined() || !s.defined() || w.dim() != 2 || !w.is_cuda() ||
+        !s.is_cuda() || !w.is_contiguous() || !s.is_contiguous() ||
+        s.scalar_type() != torch::kFloat32 ||
+        (w.scalar_type() != torch::kFloat8_e4m3fn &&
+         w.scalar_type() != torch::kUInt8)) {
+      return false;
+    }
+  }
+  const int up = expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ? 1 : 2;
+  const int down = expert_type_ == DEEPSEEK_MOE_DENSE_ACT_DENSE ? 2 : 1;
+  const int64_t inter = weights[0].size(0);
+  const int64_t hidden = weights[0].size(1);
+  if (weights[up].size(0) != inter || weights[up].size(1) != hidden ||
+      weights[down].size(0) != hidden || weights[down].size(1) != inter) {
+    return false;
+  }
+  const int64_t scale_numel = (inter / 128) * (hidden / 128);
+  for (const auto& s : scales) {
+    if (s.numel() != scale_numel) return false;
+  }
+  // Gate evaluated once per module (each module serves one GPU and one
+  // expert shape) and kept.
+  if (fp8_sm120_pro6000_gate_ < 0) {
+    fp8_sm120_pro6000_gate_ = fp8_moe_sm120_pro6000_supported(
+                                  hidden, inter, at::cuda::current_device())
+                                  ? 1
+                                  : 0;
+  }
+  if (fp8_sm120_pro6000_gate_ == 0) return false;
+  fp8_sm120_pro6000_weights_ = weights;
+  fp8_sm120_pro6000_scales_ = scales;
+  fp8_sm120_pro6000_ = true;
+  return true;
+}
+
 void MoEMLP::DequantFp8Params(cudaStream_t stream) {
   if (!has_fp8_scales_) return;
+  if (fp8_scales_.size() >= 3 && param_.size() >= 3 &&
+      TryBindFp8Sm120Pro6000(
+          {param_[0], param_[1], param_[2]},
+          {fp8_scales_[0], fp8_scales_[1], fp8_scales_[2]})) {
+    return;
+  }
   int device = at::cuda::current_device();
   for (size_t i = 0; i < fp8_scales_.size() && i < param_.size(); ++i) {
     auto& w = param_[i];

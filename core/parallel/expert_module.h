@@ -211,6 +211,9 @@ struct MoEMLP : public torch::nn::Module {
   // device check once, on the first call.
   void DequantMxfp4Params(cudaStream_t stream, bool allow_pro6000);
   void SetFp8Scales(const std::vector<torch::Tensor>& scales);
+  // Python-side dispatch decision (moe_infinity/kernel/fp8_experts.py); the
+  // hardware gate is still checked here.
+  void SetFp8Sm120Pro6000Allowed(bool allowed);
   void DequantFp8Params(cudaStream_t stream);
   void SetRepresentation(const ExpertExecutionDescriptor& descriptor);
   void PrepareRepresentation(cudaStream_t stream);
@@ -219,6 +222,11 @@ struct MoEMLP : public torch::nn::Module {
 
  private:
   void ForwardHelper(cudaStream_t stream);
+  // Binds FP8 weights + fp32 block scales (projection order of param_) to the
+  // sm120 / RTX PRO 6000 FP8 kernels instead of de-quantising them; false =
+  // use dequant (always on other hardware).
+  bool TryBindFp8Sm120Pro6000(const std::array<torch::Tensor, 3>& weights,
+                              const std::array<torch::Tensor, 3>& scales);
   void AllocateStaging(int64_t hdim, int64_t idim, std::size_t num_inter);
   void ResizeStaging(int64_t rows);
 
@@ -243,6 +251,12 @@ struct MoEMLP : public torch::nn::Module {
 
   std::vector<torch::Tensor> fp8_scales_;
   bool has_fp8_scales_ = false;
+  // Native FP8 experts, gated to sm_120 + RTX PRO 6000 (see expert_module.cpp).
+  bool fp8_sm120_pro6000_ = false;
+  bool fp8_sm120_pro6000_allowed_ = true;
+  int fp8_sm120_pro6000_gate_ = -1;  // -1 = not evaluated yet
+  std::array<torch::Tensor, 3> fp8_sm120_pro6000_weights_;
+  std::array<torch::Tensor, 3> fp8_sm120_pro6000_scales_;
   std::uint8_t representation_execution_kind_ = 0;
   MoEActivation activation_;
 };

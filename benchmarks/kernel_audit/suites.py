@@ -5,7 +5,7 @@ issues the same kernels MoE-Infinity issues for that op on sm_120
 (torch 2.11 / cu130, no flash_attn / flashinfer / fla installed).
 
 Impl names:
-  production paths   cutlass_fused, cutlass_fused_act, grouped_decode, grouped_prefill, fp8_prod,
+  production paths   cutlass_fused, cutlass_fused_act, grouped_decode, grouped_prefill, fp8_native, fp8_prod,
                      gptoss_resident, gptoss_offload, triton_mxfp4,
                      v4_fp4_prod, v4_fp4_native, sdpa_shim, hf_eager, paged_fwd,
                      paged_fwd_int8, hf_eager_decode, router_*, router_fused,
@@ -13,6 +13,9 @@ Impl names:
                      kv_write_loop, kv_write_vec, moe_gqa, moe_gqa_swa,
                      moe_gqa_masked, moe_gqa_decode, moe_gqa_masked_decode
                      (HF models without a paged shim, runtime/hf_attention.py)
+  previous paths     fp8_prod (per-call FP8 -> BF16 dequant + CUTLASS; still
+                     the production path off sm_120 / RTX PRO 6000)
+  FP8 reference      fp8_scaled_mm_ref (cuBLASLt torch._scaled_mm, Rule B)
   (paged_v1 / sdpa_fallback rows in results/ are the pre-#298/#299 kernels)
   references         cublas_ref, sdpa_gqa, sdpa_flash_decode, triton_decode,
                      read_ceiling, kv_copy_ref,
@@ -193,6 +196,62 @@ def _fp8_prod_builder(M: int, H: int, I: int):
                 ext.fp8_dequant_blockwise(wi, si, o)
                 deq.append(o)
             ext.fused_moe_ffn_into(x, deq[0], deq[1], deq[2], gb, fb, out)
+
+        return run
+
+    return build
+
+
+def _fp8_native_builder(M: int, H: int, I: int):
+    """Native FP8 experts (#310): block-scaled GEMV (M <= 8) or CUTLASS
+    sm_120 blockwise FP8 GEMM, reading the e4m3 weights once. Gated to
+    sm_120 + RTX PRO 6000 (other GPUs run fp8_prod in production)."""
+
+    def build():
+        from benchmarks.kernel_audit.ext import load
+
+        ext = load()
+        if not ext.fp8_moe_sm120_pro6000_supported(H, I, -1):
+            raise RuntimeError(
+                "fp8_native runs only on sm_120 + RTX PRO 6000 builds/devices"
+            )
+        x = _rand(M, H, scale=1.0)
+        shapes = ((I, H), (I, H), (H, I))
+        w = [
+            torch.randint(0, 120, s, device="cuda", dtype=torch.uint8)
+            for s in shapes
+        ]
+        sc = [
+            torch.rand(-(-s[0] // 128), -(-s[1] // 128), device="cuda")
+            for s in shapes
+        ]
+        out = torch.empty(M, H, device="cuda", dtype=torch.bfloat16)
+        return lambda: ext.fused_fp8_moe_ffn_sm120_pro6000_into(
+            x, w[0], sc[0], w[1], sc[1], w[2], sc[2], out
+        )
+
+    return build
+
+
+def _scaled_mm_ref_builder(M: int, H: int, I: int):
+    """Rule-B reference for fp8_native: the same W8A8 expert through cuBLASLt
+    (torch._scaled_mm, per-tensor scales, gate|up concatenated) with eager
+    SiLU*up and e4m3 casts in between."""
+
+    def build():
+        f8 = torch.float8_e4m3fn
+        x = _rand(M, H, scale=1.0)
+        gu = torch.randint(0, 120, (2 * I, H), device="cuda", dtype=torch.uint8)
+        d = torch.randint(0, 120, (H, I), device="cuda", dtype=torch.uint8)
+        gu, d = gu.view(f8), d.view(f8)
+        one = torch.ones((), device="cuda")
+
+        def run():
+            h = torch._scaled_mm(
+                x.to(f8), gu.T, one, one, out_dtype=torch.bfloat16
+            )
+            a = (torch.nn.functional.silu(h[:, :I]) * h[:, I:]).to(f8)
+            return torch._scaled_mm(a, d.T, one, one, out_dtype=torch.bfloat16)
 
         return run
 
@@ -419,6 +478,8 @@ _W_BYTES = {
     "cublas_ref": BF16,
     "gptoss_bf16cached": BF16,
     "fp8_prod": 1 + 4 / (128 * 128),
+    "fp8_native": 1 + 4 / (128 * 128),
+    "fp8_scaled_mm_ref": 1,
     "gptoss_resident": 0.5 + 1 / 32,
     "gptoss_offload": 0.5 + 1 / 32,
     "gptoss_offload_legacy": 0.5 + 1 / 32,
@@ -441,6 +502,8 @@ def _expert_impls(m: MoEModel):
         ]
     impls = []
     if m.expert_dtype.startswith("fp8"):
+        impls.append(("fp8_native", _fp8_native_builder))
+        impls.append(("fp8_scaled_mm_ref", _scaled_mm_ref_builder))
         impls.append(("fp8_prod", _fp8_prod_builder))
     if m.expert_dtype.startswith("fp4"):
         impls.append(("v4_fp4_prod", _v4_fp4_builder))

@@ -9,6 +9,7 @@
 #include "prefetch/archer_prefetch_handle.h"
 #include "model/moe.h"
 #include "kernel/ops.h"
+#include "kernel/fp8_moe/fp8_moe.h"
 #include "kernel/grouped_moe_decode_pro6000.h"
 #include "kernel/fused_moe_mlp.h"
 #include "kernel/grouped_moe_prefill.h"
@@ -188,6 +189,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   //    &ArcherPrefetchHandle::SetNodeCachePriority);
 
   m.def("silu_and_mul", &silu_and_mul, "Fused SiLU(gate) * up");
+  m.def(
+      "fp8_moe_ffn_sm120_pro6000_into",
+      [](const torch::Tensor& hidden, const torch::Tensor& gate_w,
+         const torch::Tensor& gate_s, const torch::Tensor& up_w,
+         const torch::Tensor& up_s, const torch::Tensor& down_w,
+         const torch::Tensor& down_s, torch::Tensor output) {
+        fused_fp8_moe_ffn_sm120_pro6000_into(
+            hidden, gate_w, gate_s, up_w, up_s, down_w, down_s, output,
+            at::cuda::getCurrentCUDAStream().stream());
+      },
+      "Native FP8 (e4m3, 128x128 block-scaled) SwiGLU expert into output "
+      "(RTX PRO 6000 / sm_120 only)");
+  m.def("fp8_moe_sm120_pro6000_supported", &fp8_moe_sm120_pro6000_supported,
+        py::arg("hidden"), py::arg("inter"), py::arg("device") = -1,
+        "Whether the sm120 / RTX PRO 6000 FP8 expert kernels run on device");
   m.def(
       "grouped_moe_decode_pro6000",
       [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
@@ -454,6 +470,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
       .def("set_scales", &ExpertDispatcher::SetScales,
            "Store fp8 block scales for dequant-on-copy (fp8-in-store path)")
+      .def("set_fp8_sm120_pro6000_experts",
+           &ExpertDispatcher::SetFp8Sm120Pro6000Experts, py::arg("allowed"),
+           "Allow the sm120 / RTX PRO 6000 native FP8 expert kernels")
       .def("set_expert_activation", &ExpertDispatcher::SetExpertActivation,
            py::arg("kind"), py::arg("alpha") = 1.0f, py::arg("limit") = 0.0f,
            "Set the routed-expert gated activation (0=silu, 1=clamped_silu, "
