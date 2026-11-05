@@ -1535,7 +1535,7 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
       }
 
       if (expert_type_ == GPT_OSS_MOE_DENSE_ACT_DENSE) {
-        modules_[thread_idx]->DequantMxfp4Params(stream);
+        modules_[thread_idx]->DequantMxfp4Params(stream, gptoss_mxfp4_pro6000_);
       }
 
       cudaEvent_t kernel_start = nullptr;

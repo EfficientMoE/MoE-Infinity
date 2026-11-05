@@ -3,11 +3,14 @@
 
 // EfficientMoE Team
 
+#include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 #include "parallel/expert_dispatcher.h"
 #include "prefetch/archer_prefetch_handle.h"
 #include "model/moe.h"
 #include "kernel/ops.h"
+#include "kernel/fused_moe_mlp.h"
+#include "kernel/grouped_moe_prefill.h"
 
 void BindTensorStoreSurface(py::class_<ArcherPrefetchHandle>& cls);
 
@@ -156,6 +159,74 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gelu_and_mul", &gelu_and_mul, "Fused GeLU(gate) * up");
   m.def("gelu_tanh_and_mul", &gelu_tanh_and_mul, "Fused GeLU-tanh(gate) * up");
   m.def("fatrelu_and_mul", &fatrelu_and_mul, "Fused FatReLU(gate) * up");
+  m.def(
+      "fused_moe_ffn_into",
+      [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
+         torch::Tensor down_proj, torch::Tensor gate_buf,
+         torch::Tensor fused_buf, torch::Tensor output) {
+        fused_moe_ffn_into(hidden, gate_proj, up_proj, down_proj, gate_buf,
+                           fused_buf, output,
+                           at::cuda::getCurrentCUDAStream().stream());
+      },
+      "BF16 expert FFN (CUTLASS) on the current stream");
+  m.def(
+      "fused_moe_ffn_pro6000",
+      [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
+         torch::Tensor down_proj, torch::Tensor fused_buf, torch::Tensor output,
+         int dual_cfg, int dual_splits, int down_cfg, int down_splits) {
+        fused_moe_ffn_pro6000(hidden, gate_proj, up_proj, down_proj, fused_buf,
+                              output, at::cuda::getCurrentCUDAStream().stream(),
+                              dual_cfg, dual_splits, down_cfg, down_splits);
+      },
+      "fused_moe_ffn_into with an explicit tile config per GEMM (tests)");
+  m.def(
+      "grouped_moe_prefill",
+      [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
+         const torch::Tensor& router_weight, const torch::Tensor& expert_table,
+         int64_t inter, int64_t kcap, torch::Tensor out, bool zero_out,
+         int dual_cfg, int down_cfg, int combine) {
+        grouped_moe_prefill_cfg(hidden, router_mask, router_weight,
+                                expert_table, inter, kcap, out, zero_out,
+                                dual_cfg, down_cfg, combine,
+                                at::cuda::getCurrentCUDAStream().stream());
+      },
+      py::arg("hidden"), py::arg("router_mask"), py::arg("router_weight"),
+      py::arg("expert_table"), py::arg("inter"), py::arg("kcap"),
+      py::arg("out"), py::arg("zero_out") = false, py::arg("dual_cfg") = -1,
+      py::arg("down_cfg") = -1, py::arg("combine") = -1,
+      "Grouped prefill MoE layer: out += sum_e w[:, e] * FFN_e(hidden) over "
+      "the experts in expert_table (int64 [n, 4]: gate*, up*, down*, id); "
+      "same interface as grouped_moe_decode.");
+  m.def(
+      "fused_moe_ffn_into_generic",
+      [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
+         torch::Tensor down_proj, torch::Tensor gate_buf,
+         torch::Tensor fused_buf, torch::Tensor output) {
+        fused_moe_ffn_into_generic(hidden, gate_proj, up_proj, down_proj,
+                                   gate_buf, fused_buf, output,
+                                   at::cuda::getCurrentCUDAStream().stream());
+      },
+      "fused_moe_ffn_into's fallback on non-RTX PRO 6000 GPUs (tests)");
+  m.def(
+      "grouped_moe_prefill_per_expert",
+      [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
+         const torch::Tensor& router_weight, const torch::Tensor& expert_table,
+         int64_t inter, torch::Tensor out, bool zero_out) {
+        grouped_moe_prefill_per_expert(
+            hidden, router_mask, router_weight, expert_table, inter, out,
+            zero_out, at::cuda::getCurrentCUDAStream().stream());
+      },
+      "grouped_moe_prefill's fallback on non-RTX PRO 6000 GPUs (tests)");
+  m.def("fused_moe_ffn_pro6000_enabled", &fused_moe_ffn_pro6000_enabled,
+        py::arg("device"),
+        "True if fused_moe_ffn_into runs the RTX PRO 6000 path on device");
+  m.def("grouped_moe_prefill_pro6000_enabled",
+        &grouped_moe_prefill_pro6000_enabled, py::arg("device"),
+        "True if grouped_moe_prefill runs the grouped RTX PRO 6000 kernels");
+  m.def("fused_moe_ffn_tile_shapes", &fused_moe_ffn_tile_shapes,
+        "Threadblock (M, N, K) of every (gate/up, down) config");
+  m.def("fused_moe_ffn_num_configs", &fused_moe_ffn_num_configs,
+        "(gate/up configs, down configs) of fused_moe_ffn_pro6000");
 
   py::class_<ExpertDispatcher::ResizeToken>(m, "expert_resize_token")
       .def_readonly("id", &ExpertDispatcher::ResizeToken::id)
@@ -188,6 +259,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("phase") = static_cast<int>(ExpertPhase::MIXED))
       .def("resident_on_gpu", &ExpertDispatcher::ResidentOnGpu,
            py::arg("layer_idx"))
+      .def("set_gptoss_mxfp4_pro6000", &ExpertDispatcher::SetGptOssMxfp4Pro6000,
+           py::arg("enabled"))
       .def("set_expert_drop_policy", &ExpertDispatcher::SetExpertDropPolicy,
            py::arg("enabled"), py::arg("min_k"), py::arg("mass_budget"),
            py::arg("flatness_floor"), py::arg("head_budget") = 0.0,
