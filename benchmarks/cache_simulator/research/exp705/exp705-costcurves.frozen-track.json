@@ -1,0 +1,263 @@
+{
+ "exp": "exp705-costcurves",
+ "traces": {
+  "granite": {
+   "b_e_bytes": 4718592,
+   "b_e_MiB": 4.5,
+   "src": "ibm-granite/granite-3.1-3b-a800m-instruct",
+   "N_decode_accesses": 638208,
+   "N_matches_sealed": true,
+   "APT": 256,
+   "WS20": 1228,
+   "WS20_det": true,
+   "CROSS1_slots": 768,
+   "CROSS1_GiB": 3.375,
+   "CROSS1_pct_keyspace": 60.0,
+   "lo_bound_GiB_2048": null,
+   "total_expert_GiB": 5.625,
+   "spread_recompute_match": false,
+   "C1_hardware": true,
+   "C2_working_set": false,
+   "C2_ratio": -0.375,
+   "C3_cliff": true,
+   "table": [
+    {
+     "cap": 128,
+     "cache_GiB": 0.5625,
+     "spread_pp": 28.52,
+     "premium_B_per_token": 344510064.2,
+     "lcnu_miss_GiB_per_token": 0.80577
+    },
+    {
+     "cap": 192,
+     "cache_GiB": 0.8438,
+     "spread_pp": 38.237,
+     "premium_B_per_token": 461887493.9,
+     "lcnu_miss_GiB_per_token": 0.69577
+    },
+    {
+     "cap": 256,
+     "cache_GiB": 1.125,
+     "spread_pp": 20.654,
+     "premium_B_per_token": 249491965.9,
+     "lcnu_miss_GiB_per_token": 0.59832
+    },
+    {
+     "cap": 384,
+     "cache_GiB": 1.6875,
+     "spread_pp": 19.354,
+     "premium_B_per_token": 233788491.7,
+     "lcnu_miss_GiB_per_token": 0.43514
+    },
+    {
+     "cap": 512,
+     "cache_GiB": 2.25,
+     "spread_pp": 14.262,
+     "premium_B_per_token": 172279191.3,
+     "lcnu_miss_GiB_per_token": 0.30522
+    },
+    {
+     "cap": 640,
+     "cache_GiB": 2.8125,
+     "spread_pp": 5.357,
+     "premium_B_per_token": 64710393.2,
+     "lcnu_miss_GiB_per_token": 0.20403
+    },
+    {
+     "cap": 768,
+     "cache_GiB": 3.375,
+     "spread_pp": 0.377,
+     "premium_B_per_token": 4554007.5,
+     "lcnu_miss_GiB_per_token": 0.12778
+    },
+    {
+     "cap": 896,
+     "cache_GiB": 3.9375,
+     "spread_pp": 0.052,
+     "premium_B_per_token": 628139.0,
+     "lcnu_miss_GiB_per_token": 0.0723
+    },
+    {
+     "cap": 1024,
+     "cache_GiB": 4.5,
+     "spread_pp": 0.16,
+     "premium_B_per_token": 1932735.3,
+     "lcnu_miss_GiB_per_token": 0.03281
+    }
+   ]
+  },
+  "hi": {
+   "b_e_bytes": 9437184,
+   "b_e_MiB": 9.0,
+   "src": "Qwen/Qwen3-30B-A3B",
+   "N_decode_accesses": 786432,
+   "N_matches_sealed": true,
+   "APT": 384,
+   "WS20": 3396,
+   "WS20_det": true,
+   "CROSS1_slots": 1792,
+   "CROSS1_GiB": 15.75,
+   "CROSS1_pct_keyspace": 29.2,
+   "lo_bound_GiB_2048": null,
+   "total_expert_GiB": 54.0,
+   "spread_recompute_match": false,
+   "C1_hardware": true,
+   "C2_working_set": false,
+   "C2_ratio": -0.472,
+   "C3_cliff": true,
+   "table": [
+    {
+     "cap": 768,
+     "cache_GiB": 6.75,
+     "spread_pp": 24.933,
+     "premium_B_per_token": 903541665.3,
+     "lcnu_miss_GiB_per_token": 1.27438
+    },
+    {
+     "cap": 896,
+     "cache_GiB": 7.875,
+     "spread_pp": 23.851,
+     "premium_B_per_token": 864331298.2,
+     "lcnu_miss_GiB_per_token": 1.12866
+    },
+    {
+     "cap": 1024,
+     "cache_GiB": 9.0,
+     "spread_pp": 18.718,
+     "premium_B_per_token": 678317606.8,
+     "lcnu_miss_GiB_per_token": 0.99874
+    },
+    {
+     "cap": 1152,
+     "cache_GiB": 10.125,
+     "spread_pp": 15.378,
+     "premium_B_per_token": 557280059.7,
+     "lcnu_miss_GiB_per_token": 0.88248
+    },
+    {
+     "cap": 1280,
+     "cache_GiB": 11.25,
+     "spread_pp": 11.537,
+     "premium_B_per_token": 418086880.5,
+     "lcnu_miss_GiB_per_token": 0.77381
+    },
+    {
+     "cap": 1408,
+     "cache_GiB": 12.375,
+     "spread_pp": 5.776,
+     "premium_B_per_token": 209315231.2,
+     "lcnu_miss_GiB_per_token": 0.67351
+    },
+    {
+     "cap": 1536,
+     "cache_GiB": 13.5,
+     "spread_pp": 5.072,
+     "premium_B_per_token": 183803125.4,
+     "lcnu_miss_GiB_per_token": 0.57973
+    },
+    {
+     "cap": 1792,
+     "cache_GiB": 15.75,
+     "spread_pp": 0.269,
+     "premium_B_per_token": 9748233.6,
+     "lcnu_miss_GiB_per_token": 0.42109
+    },
+    {
+     "cap": 2048,
+     "cache_GiB": 18.0,
+     "spread_pp": 0.029,
+     "premium_B_per_token": 1050924.8,
+     "lcnu_miss_GiB_per_token": 0.30031
+    }
+   ]
+  },
+  "lo": {
+   "b_e_bytes": 9437184,
+   "b_e_MiB": 9.0,
+   "src": "Qwen/Qwen3-30B-A3B",
+   "N_decode_accesses": 638208,
+   "N_matches_sealed": true,
+   "APT": 384,
+   "WS20": 4662,
+   "WS20_det": true,
+   "CROSS1_slots": null,
+   "CROSS1_GiB": null,
+   "CROSS1_pct_keyspace": null,
+   "lo_bound_GiB_2048": 18.0,
+   "total_expert_GiB": 54.0,
+   "spread_recompute_match": false,
+   "C1_hardware": null,
+   "C2_working_set": true,
+   "C2_ratio": null,
+   "C3_cliff": null,
+   "table": [
+    {
+     "cap": 768,
+     "cache_GiB": 6.75,
+     "spread_pp": 21.042,
+     "premium_B_per_token": 762536546.8,
+     "lcnu_miss_GiB_per_token": 1.51212
+    },
+    {
+     "cap": 896,
+     "cache_GiB": 7.875,
+     "spread_pp": 20.213,
+     "premium_B_per_token": 732494592.7,
+     "lcnu_miss_GiB_per_token": 1.38116
+    },
+    {
+     "cap": 1024,
+     "cache_GiB": 9.0,
+     "spread_pp": 19.562,
+     "premium_B_per_token": 708903142.7,
+     "lcnu_miss_GiB_per_token": 1.26742
+    },
+    {
+     "cap": 1152,
+     "cache_GiB": 10.125,
+     "spread_pp": 16.763,
+     "premium_B_per_token": 607470779.1,
+     "lcnu_miss_GiB_per_token": 1.16094
+    },
+    {
+     "cap": 1280,
+     "cache_GiB": 11.25,
+     "spread_pp": 14.172,
+     "premium_B_per_token": 513576083.1,
+     "lcnu_miss_GiB_per_token": 1.05935
+    },
+    {
+     "cap": 1408,
+     "cache_GiB": 12.375,
+     "spread_pp": 13.095,
+     "premium_B_per_token": 474546910.0,
+     "lcnu_miss_GiB_per_token": 0.9639
+    },
+    {
+     "cap": 1536,
+     "cache_GiB": 13.5,
+     "spread_pp": 10.851,
+     "premium_B_per_token": 393227073.0,
+     "lcnu_miss_GiB_per_token": 0.87709
+    },
+    {
+     "cap": 1792,
+     "cache_GiB": 15.75,
+     "spread_pp": 4.211,
+     "premium_B_per_token": 152601530.2,
+     "lcnu_miss_GiB_per_token": 0.72475
+    },
+    {
+     "cap": 2048,
+     "cache_GiB": 18.0,
+     "spread_pp": 2.116,
+     "premium_B_per_token": 76681272.4,
+     "lcnu_miss_GiB_per_token": 0.59772
+    }
+   ]
+  }
+ },
+ "elapsed_s": 1.7,
+ "C4_all": false,
+ "verdict": "ANCHOR-FAIL"
+}
