@@ -14,6 +14,26 @@ from typing import Optional, Union
 import torch
 from transformers import HfArgumentParser
 
+# Values of ArcherConfig.expert_eviction_policy. "legacy" is the built-in
+# victim choice; the rest are the native policies of
+# core/prefetch/eviction_policy.cpp (EvictionPolicyNames()).
+EXPERT_EVICTION_POLICIES = (
+    "legacy",
+    "lru",
+    "lfu",
+    "lfu_k",
+    "lhu",
+    "lru_k",
+    "arc",
+    "2q",
+    "lirs",
+    "s3fifo",
+    "sieve",
+    "w_tinylfu",
+    "layer_lru",
+    "lcnu",
+)
+
 
 @dataclass
 class ArcherConfig:
@@ -292,6 +312,24 @@ class ArcherConfig:
             "help": "Positive maximum prefetch bypasses before promotion."
         },
     )
+    expert_eviction_policy: str = field(
+        default="legacy",
+        metadata={
+            "help": "GPU expert-cache eviction policy: legacy (built-in victim choice, default) or one of lru, lfu, lfu_k, lhu, lru_k, arc, 2q, lirs, s3fifo, sieve, w_tinylfu, layer_lru, lcnu. Any other value than legacy routes expert admission and eviction through the shared residency manager."
+        },
+    )
+    expert_eviction_lcnu_alpha: float = field(
+        default=0.3,
+        metadata={
+            "help": "LCNU: rate of the per-expert routing EMA, in (0, 1)."
+        },
+    )
+    expert_eviction_lcnu_beta: float = field(
+        default=0.5,
+        metadata={
+            "help": "LCNU: weight of the routing EMA against the long-run routing frequency, in [0, 1]."
+        },
+    )
     overlap_prefetch_policy: str = field(
         default="off",
         metadata={
@@ -568,6 +606,29 @@ class ArcherConfig:
             raise ValueError(
                 f"expert_policy_starvation_limit must be > 0, got {self.expert_policy_starvation_limit}"
             )
+        if self.expert_eviction_policy not in EXPERT_EVICTION_POLICIES:
+            raise ValueError(
+                f"expert_eviction_policy must be one of {EXPERT_EVICTION_POLICIES}, got {self.expert_eviction_policy!r}"
+            )
+        if not 0.0 < self.expert_eviction_lcnu_alpha < 1.0:
+            raise ValueError(
+                f"expert_eviction_lcnu_alpha must be in (0, 1), got {self.expert_eviction_lcnu_alpha}"
+            )
+        if not 0.0 <= self.expert_eviction_lcnu_beta <= 1.0:
+            raise ValueError(
+                f"expert_eviction_lcnu_beta must be in [0, 1], got {self.expert_eviction_lcnu_beta}"
+            )
+        if self.expert_eviction_policy != "legacy":
+            # Adaptive-memory resizes evict experts outside the residency
+            # manager, and precision variants carry no policy key.
+            for name in (
+                "adaptive_memory_enabled",
+                "adaptive_expert_precision",
+            ):
+                if getattr(self, name):
+                    raise ValueError(
+                        f"expert_eviction_policy={self.expert_eviction_policy!r} cannot be combined with {name}=True yet"
+                    )
         valid_policies = ("off", "observe", "enforce")
         if self.overlap_prefetch_policy not in valid_policies:
             raise ValueError(

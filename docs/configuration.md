@@ -233,6 +233,61 @@ does not create separate phase pools or duplicate weights. See
 ordering and rollback, and [Benchmarking](benchmarking.md#phase-specific-expert-policy-matrix)
 for the required A/B matrix.
 
+### Expert eviction policy fields
+
+`expert_eviction_policy` picks which resident expert leaves the GPU cache when
+a fetch needs room. The default `legacy` keeps the built-in choice. Any other
+value installs that policy, one instance per GPU, in the shared residency
+manager, which then owns expert admission and eviction for the dispatcher and
+the prefetch queue (the same managed path as the phase-specific policy, which
+can be enabled on top). Policy capacity is the expert cache size in bytes
+divided by one expert's size.
+
+| Field | Type | Default | Valid values / range | Effect |
+| --- | --- | --- | --- | --- |
+| `expert_eviction_policy` | `str` | `"legacy"` | `legacy`, `lru`, `lfu`, `lfu_k`, `lhu`, `lru_k`, `arc`, `2q`, `lirs`, `s3fifo`, `sieve`, `w_tinylfu`, `layer_lru`, `lcnu` | GPU expert-cache eviction policy. |
+| `expert_eviction_lcnu_alpha` | `float` | `0.3` | `(0, 1)` | `lcnu` only: rate of the per-expert routing EMA. |
+| `expert_eviction_lcnu_beta` | `float` | `0.5` | `[0, 1]` | `lcnu` only: weight of that EMA against the expert's long-run routing frequency. |
+
+`lcnu` (layer-cycle next-use) evicts the expert whose next use is expected
+farthest away: the layer-steps until its layer runs again plus
+`layers * (1/p - 1)`, where `p` is the expert's estimated routing probability
+per layer visit. It had the best decode hit rate of the online policies on
+real Qwen3-235B-A22B, Qwen3-30B-A3B and Qwen1.5-MoE-A2.7B traces; which policy
+to pick for which cache size is in
+[`benchmarks/cache_simulator/research/recommendations.md`](../benchmarks/cache_simulator/research/recommendations.md).
+The engine passes `prior = top_k / num_experts` from the model config and
+counts the MoE layers from the registered experts.
+
+```json
+{
+  "expert_eviction_policy": "lcnu"
+}
+```
+
+Every native policy reproduces the cache simulator's hit counts exactly
+(`tests/python/unit/test_eviction_policy_parity.py`). Driven through the
+residency manager they still do, except that when an `s3fifo` promotion pass
+owes a second eviction, the manager takes it at the next admission
+(`tests/cpp/unit/prefetch/test_eviction_policy.cpp`). Routed experts reach the
+policy in dispatch order; a prefetched expert is admitted like a demand fetch,
+so the policy, not the prefetcher, decides what it displaces. A policy only
+evicts idle experts: one that is being dispatched or prefetched is skipped,
+and if it was dispatched after being picked, the admission picks again. Not supported yet:
+`adaptive_memory_enabled` and `adaptive_expert_precision` (rejected at config
+time) and GPTQ checkpoints (the setting is ignored with a warning). To roll
+back, set `"expert_eviction_policy": "legacy"` or restart the server without
+`--expert-eviction-policy`.
+
+`get_expert_policy_stats()` reports `eviction_policy_active`,
+`eviction_policy_slots` (policy capacity summed over GPUs),
+`policy_routed_hits` / `policy_routed_misses` (residency at the time each
+routed expert was dispatched), `policy_victims`,
+`policy_victims_dispatched` (picked victims that were dispatched before they
+could be evicted, so the admission picked again), and
+`policy_fallback_victims` (admissions where the policy had no eligible victim
+and the built-in choice was used).
+
 ## Memory ratio rules
 
 `__post_init__` does not enforce a hard invariant up front.
