@@ -1,0 +1,1830 @@
+{
+  "verdict": "IN_BURST_KEPT_VISIBLE",
+  "bars": {
+    "h1": false,
+    "h2": true,
+    "h3": true,
+    "h4": true,
+    "acc": true
+  },
+  "rows": [
+    {
+      "d": 256,
+      "cap": 512,
+      "lcnu": {
+        "loop": 0.673977,
+        "burst": 0.042969,
+        "rec": 0.666992
+      },
+      "s3fifo": {
+        "loop": 0.681016,
+        "burst": 0.015625,
+        "rec": 0.669189
+      },
+      "center": {
+        "loop": 0.680792,
+        "burst": 0.015625,
+        "rec": 0.669189
+      },
+      "ring10": {
+        "loop": 0.684453,
+        "burst": 0.015625,
+        "rec": 0.674072
+      },
+      "ring25": {
+        "loop": 0.679592,
+        "burst": 0.027344,
+        "rec": 0.665771
+      },
+      "lazy2": {
+        "loop": 0.677351,
+        "burst": 0.03125,
+        "rec": 0.661865
+      },
+      "ringfit3": {
+        "loop": 0.680605,
+        "burst": 0.015625,
+        "rec": 0.669189
+      },
+      "ringfit3_10": {
+        "loop": 0.683268,
+        "burst": 0.015625,
+        "rec": 0.674072
+      },
+      "ringfit3_lazy2": {
+        "loop": 0.680792,
+        "burst": 0.015625,
+        "rec": 0.669189
+      },
+      "burst_def_cf_pp": 2.734,
+      "rec_def_cf_pp": -0.22,
+      "rec_def_lazy2_pp": 0.513,
+      "burst_def_lazy2_pp": 1.172,
+      "loop_vs_l_lazy2_pp": 0.337,
+      "rec_def_ringfit3_pp": -0.22,
+      "burst_def_ringfit3_pp": 2.734,
+      "loop_vs_l_ringfit3_pp": 0.663,
+      "rec_def_ringfit3_10_pp": -0.708,
+      "burst_def_ringfit3_10_pp": 2.734,
+      "loop_vs_l_ringfit3_10_pp": 0.929,
+      "rec_def_ringfit3_lazy2_pp": -0.22,
+      "burst_def_ringfit3_lazy2_pp": 2.734,
+      "loop_vs_l_ringfit3_lazy2_pp": 0.682,
+      "adopt_ringfit3": {
+        "burst": "s3fifo",
+        "rec": "s3fifo",
+        "sw": 2,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_10": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 3,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 2
+        }
+      },
+      "adopt_ringfit3_lazy2": {
+        "burst": "s3fifo",
+        "rec": "s3fifo",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 0
+        }
+      }
+    },
+    {
+      "d": 256,
+      "cap": 2048,
+      "lcnu": {
+        "loop": 0.871266,
+        "burst": 0.0625,
+        "rec": 0.869141
+      },
+      "s3fifo": {
+        "loop": 0.854646,
+        "burst": 0.128906,
+        "rec": 0.847412
+      },
+      "center": {
+        "loop": 0.87079,
+        "burst": 0.0625,
+        "rec": 0.869141
+      },
+      "ring10": {
+        "loop": 0.872748,
+        "burst": 0.054688,
+        "rec": 0.87085
+      },
+      "ring25": {
+        "loop": 0.871793,
+        "burst": 0.0625,
+        "rec": 0.869141
+      },
+      "lazy2": {
+        "loop": 0.871505,
+        "burst": 0.0625,
+        "rec": 0.869141
+      },
+      "ringfit3": {
+        "loop": 0.871676,
+        "burst": 0.0625,
+        "rec": 0.869141
+      },
+      "ringfit3_10": {
+        "loop": 0.872631,
+        "burst": 0.054688,
+        "rec": 0.87085
+      },
+      "ringfit3_lazy2": {
+        "loop": 0.870793,
+        "burst": 0.0625,
+        "rec": 0.869141
+      },
+      "burst_def_cf_pp": 0.0,
+      "rec_def_cf_pp": 0.0,
+      "rec_def_lazy2_pp": 0.0,
+      "burst_def_lazy2_pp": 0.0,
+      "loop_vs_l_lazy2_pp": 0.024,
+      "rec_def_ringfit3_pp": 0.0,
+      "burst_def_ringfit3_pp": 0.0,
+      "loop_vs_l_ringfit3_pp": 0.041,
+      "rec_def_ringfit3_10_pp": -0.171,
+      "burst_def_ringfit3_10_pp": 0.781,
+      "loop_vs_l_ringfit3_10_pp": 0.136,
+      "rec_def_ringfit3_lazy2_pp": 0.0,
+      "burst_def_ringfit3_lazy2_pp": 0.0,
+      "loop_vs_l_ringfit3_lazy2_pp": -0.047,
+      "adopt_ringfit3": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 0,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_10": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 0,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_lazy2": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 2,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 1
+        }
+      }
+    },
+    {
+      "d": 1024,
+      "cap": 512,
+      "lcnu": {
+        "loop": 0.67323,
+        "burst": 0.082031,
+        "rec": 0.662842
+      },
+      "s3fifo": {
+        "loop": 0.680201,
+        "burst": 0.02832,
+        "rec": 0.663574
+      },
+      "center": {
+        "loop": 0.679977,
+        "burst": 0.02832,
+        "rec": 0.663574
+      },
+      "ring10": {
+        "loop": 0.683653,
+        "burst": 0.030273,
+        "rec": 0.673828
+      },
+      "ring25": {
+        "loop": 0.678824,
+        "burst": 0.050781,
+        "rec": 0.664307
+      },
+      "lazy2": {
+        "loop": 0.676612,
+        "burst": 0.050781,
+        "rec": 0.661377
+      },
+      "ringfit3": {
+        "loop": 0.679789,
+        "burst": 0.02832,
+        "rec": 0.663574
+      },
+      "ringfit3_10": {
+        "loop": 0.682469,
+        "burst": 0.030273,
+        "rec": 0.673828
+      },
+      "ringfit3_lazy2": {
+        "loop": 0.679977,
+        "burst": 0.02832,
+        "rec": 0.663574
+      },
+      "burst_def_cf_pp": 5.371,
+      "rec_def_cf_pp": -0.073,
+      "rec_def_lazy2_pp": 0.146,
+      "burst_def_lazy2_pp": 3.125,
+      "loop_vs_l_lazy2_pp": 0.338,
+      "rec_def_ringfit3_pp": -0.073,
+      "burst_def_ringfit3_pp": 5.371,
+      "loop_vs_l_ringfit3_pp": 0.656,
+      "rec_def_ringfit3_10_pp": -1.099,
+      "burst_def_ringfit3_10_pp": 5.176,
+      "loop_vs_l_ringfit3_10_pp": 0.924,
+      "rec_def_ringfit3_lazy2_pp": -0.073,
+      "burst_def_ringfit3_lazy2_pp": 5.371,
+      "loop_vs_l_ringfit3_lazy2_pp": 0.675,
+      "adopt_ringfit3": {
+        "burst": "s3fifo",
+        "rec": "s3fifo",
+        "sw": 2,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_10": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 3,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 2
+        }
+      },
+      "adopt_ringfit3_lazy2": {
+        "burst": "s3fifo",
+        "rec": "s3fifo",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 0
+        }
+      }
+    },
+    {
+      "d": 1024,
+      "cap": 2048,
+      "lcnu": {
+        "loop": 0.870189,
+        "burst": 0.142578,
+        "rec": 0.857666
+      },
+      "s3fifo": {
+        "loop": 0.853583,
+        "burst": 0.183594,
+        "rec": 0.833984
+      },
+      "center": {
+        "loop": 0.869713,
+        "burst": 0.142578,
+        "rec": 0.857666
+      },
+      "ring10": {
+        "loop": 0.871765,
+        "burst": 0.086914,
+        "rec": 0.869141
+      },
+      "ring25": {
+        "loop": 0.870717,
+        "burst": 0.142578,
+        "rec": 0.857666
+      },
+      "lazy2": {
+        "loop": 0.870487,
+        "burst": 0.138672,
+        "rec": 0.861572
+      },
+      "ringfit3": {
+        "loop": 0.870599,
+        "burst": 0.142578,
+        "rec": 0.857666
+      },
+      "ringfit3_10": {
+        "loop": 0.871648,
+        "burst": 0.086914,
+        "rec": 0.869141
+      },
+      "ringfit3_lazy2": {
+        "loop": 0.869774,
+        "burst": 0.138672,
+        "rec": 0.861572
+      },
+      "burst_def_cf_pp": 0.0,
+      "rec_def_cf_pp": 0.0,
+      "rec_def_lazy2_pp": -0.391,
+      "burst_def_lazy2_pp": 0.391,
+      "loop_vs_l_lazy2_pp": 0.03,
+      "rec_def_ringfit3_pp": 0.0,
+      "burst_def_ringfit3_pp": 0.0,
+      "loop_vs_l_ringfit3_pp": 0.041,
+      "rec_def_ringfit3_10_pp": -1.147,
+      "burst_def_ringfit3_10_pp": 5.566,
+      "loop_vs_l_ringfit3_10_pp": 0.146,
+      "rec_def_ringfit3_lazy2_pp": -0.391,
+      "burst_def_ringfit3_lazy2_pp": 0.391,
+      "loop_vs_l_ringfit3_lazy2_pp": -0.041,
+      "adopt_ringfit3": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 0,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_10": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 0,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_lazy2": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 2,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 1
+        }
+      }
+    },
+    {
+      "d": 2048,
+      "cap": 512,
+      "lcnu": {
+        "loop": 0.672249,
+        "burst": 0.084473,
+        "rec": 0.6604
+      },
+      "s3fifo": {
+        "loop": 0.679088,
+        "burst": 0.043945,
+        "rec": 0.647461
+      },
+      "center": {
+        "loop": 0.678864,
+        "burst": 0.043945,
+        "rec": 0.647461
+      },
+      "ring10": {
+        "loop": 0.682594,
+        "burst": 0.028809,
+        "rec": 0.674072
+      },
+      "ring25": {
+        "loop": 0.677794,
+        "burst": 0.05127,
+        "rec": 0.663086
+      },
+      "lazy2": {
+        "loop": 0.675498,
+        "burst": 0.048828,
+        "rec": 0.660645
+      },
+      "ringfit3": {
+        "loop": 0.678677,
+        "burst": 0.043945,
+        "rec": 0.647461
+      },
+      "ringfit3_10": {
+        "loop": 0.681409,
+        "burst": 0.028809,
+        "rec": 0.674072
+      },
+      "ringfit3_lazy2": {
+        "loop": 0.678864,
+        "burst": 0.043945,
+        "rec": 0.647461
+      },
+      "burst_def_cf_pp": 4.053,
+      "rec_def_cf_pp": 1.294,
+      "rec_def_lazy2_pp": -0.024,
+      "burst_def_lazy2_pp": 3.564,
+      "loop_vs_l_lazy2_pp": 0.325,
+      "rec_def_ringfit3_pp": 1.294,
+      "burst_def_ringfit3_pp": 4.053,
+      "loop_vs_l_ringfit3_pp": 0.643,
+      "rec_def_ringfit3_10_pp": -1.367,
+      "burst_def_ringfit3_10_pp": 5.566,
+      "loop_vs_l_ringfit3_10_pp": 0.916,
+      "rec_def_ringfit3_lazy2_pp": 1.294,
+      "burst_def_ringfit3_lazy2_pp": 4.053,
+      "loop_vs_l_ringfit3_lazy2_pp": 0.662,
+      "adopt_ringfit3": {
+        "burst": "s3fifo",
+        "rec": "s3fifo",
+        "sw": 2,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_10": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 3,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 2
+        }
+      },
+      "adopt_ringfit3_lazy2": {
+        "burst": "s3fifo",
+        "rec": "s3fifo",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 0
+        }
+      }
+    },
+    {
+      "d": 2048,
+      "cap": 2048,
+      "lcnu": {
+        "loop": 0.869092,
+        "burst": 0.168457,
+        "rec": 0.854248
+      },
+      "s3fifo": {
+        "loop": 0.852243,
+        "burst": 0.217285,
+        "rec": 0.822266
+      },
+      "center": {
+        "loop": 0.868616,
+        "burst": 0.168457,
+        "rec": 0.854248
+      },
+      "ring10": {
+        "loop": 0.870521,
+        "burst": 0.091797,
+        "rec": 0.871338
+      },
+      "ring25": {
+        "loop": 0.86962,
+        "burst": 0.168457,
+        "rec": 0.854248
+      },
+      "lazy2": {
+        "loop": 0.869344,
+        "burst": 0.154785,
+        "rec": 0.859863
+      },
+      "ringfit3": {
+        "loop": 0.869502,
+        "burst": 0.168457,
+        "rec": 0.854248
+      },
+      "ringfit3_10": {
+        "loop": 0.870404,
+        "burst": 0.091797,
+        "rec": 0.871338
+      },
+      "ringfit3_lazy2": {
+        "loop": 0.868632,
+        "burst": 0.154785,
+        "rec": 0.859863
+      },
+      "burst_def_cf_pp": 0.0,
+      "rec_def_cf_pp": 0.0,
+      "rec_def_lazy2_pp": -0.562,
+      "burst_def_lazy2_pp": 1.367,
+      "loop_vs_l_lazy2_pp": 0.025,
+      "rec_def_ringfit3_pp": 0.0,
+      "burst_def_ringfit3_pp": 0.0,
+      "loop_vs_l_ringfit3_pp": 0.041,
+      "rec_def_ringfit3_10_pp": -1.709,
+      "burst_def_ringfit3_10_pp": 7.666,
+      "loop_vs_l_ringfit3_10_pp": 0.131,
+      "rec_def_ringfit3_lazy2_pp": -0.562,
+      "burst_def_ringfit3_lazy2_pp": 1.367,
+      "loop_vs_l_ringfit3_lazy2_pp": -0.046,
+      "adopt_ringfit3": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 0,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_10": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 0,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_lazy2": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 2,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 1
+        }
+      }
+    },
+    {
+      "d": 4096,
+      "cap": 512,
+      "lcnu": {
+        "loop": 0.670432,
+        "burst": 0.088379,
+        "rec": 0.677979
+      },
+      "s3fifo": {
+        "loop": 0.67682,
+        "burst": 0.077637,
+        "rec": 0.608154
+      },
+      "center": {
+        "loop": 0.676597,
+        "burst": 0.077637,
+        "rec": 0.608154
+      },
+      "ring10": {
+        "loop": 0.680503,
+        "burst": 0.028809,
+        "rec": 0.685303
+      },
+      "ring25": {
+        "loop": 0.675725,
+        "burst": 0.05249,
+        "rec": 0.675049
+      },
+      "lazy2": {
+        "loop": 0.673618,
+        "burst": 0.048096,
+        "rec": 0.671631
+      },
+      "ringfit3": {
+        "loop": 0.676409,
+        "burst": 0.077637,
+        "rec": 0.608154
+      },
+      "ringfit3_10": {
+        "loop": 0.679318,
+        "burst": 0.028809,
+        "rec": 0.685303
+      },
+      "ringfit3_lazy2": {
+        "loop": 0.676597,
+        "burst": 0.077637,
+        "rec": 0.608154
+      },
+      "burst_def_cf_pp": 1.074,
+      "rec_def_cf_pp": 6.982,
+      "rec_def_lazy2_pp": 0.635,
+      "burst_def_lazy2_pp": 4.028,
+      "loop_vs_l_lazy2_pp": 0.319,
+      "rec_def_ringfit3_pp": 6.982,
+      "burst_def_ringfit3_pp": 1.074,
+      "loop_vs_l_ringfit3_pp": 0.598,
+      "rec_def_ringfit3_10_pp": -0.732,
+      "burst_def_ringfit3_10_pp": 5.957,
+      "loop_vs_l_ringfit3_10_pp": 0.889,
+      "rec_def_ringfit3_lazy2_pp": 6.982,
+      "burst_def_ringfit3_lazy2_pp": 1.074,
+      "loop_vs_l_ringfit3_lazy2_pp": 0.616,
+      "h1_rec_def_pp": 6.982,
+      "adopt_ringfit3": {
+        "burst": "s3fifo",
+        "rec": "s3fifo",
+        "sw": 2,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_10": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 3,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 2
+        }
+      },
+      "adopt_ringfit3_lazy2": {
+        "burst": "s3fifo",
+        "rec": "s3fifo",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 0
+        }
+      }
+    },
+    {
+      "d": 4096,
+      "cap": 2048,
+      "lcnu": {
+        "loop": 0.866895,
+        "burst": 0.187988,
+        "rec": 0.867188
+      },
+      "s3fifo": {
+        "loop": 0.850109,
+        "burst": 0.296631,
+        "rec": 0.813477
+      },
+      "center": {
+        "loop": 0.866419,
+        "burst": 0.187988,
+        "rec": 0.867188
+      },
+      "ring10": {
+        "loop": 0.868,
+        "burst": 0.095703,
+        "rec": 0.881592
+      },
+      "ring25": {
+        "loop": 0.867422,
+        "burst": 0.187988,
+        "rec": 0.867188
+      },
+      "lazy2": {
+        "loop": 0.867061,
+        "burst": 0.16626,
+        "rec": 0.871338
+      },
+      "ringfit3": {
+        "loop": 0.867305,
+        "burst": 0.187988,
+        "rec": 0.867188
+      },
+      "ringfit3_10": {
+        "loop": 0.867659,
+        "burst": 0.095703,
+        "rec": 0.867188
+      },
+      "ringfit3_lazy2": {
+        "loop": 0.866349,
+        "burst": 0.16626,
+        "rec": 0.871338
+      },
+      "burst_def_cf_pp": 0.0,
+      "rec_def_cf_pp": 0.0,
+      "rec_def_lazy2_pp": -0.415,
+      "burst_def_lazy2_pp": 2.173,
+      "loop_vs_l_lazy2_pp": 0.017,
+      "rec_def_ringfit3_pp": 0.0,
+      "burst_def_ringfit3_pp": 0.0,
+      "loop_vs_l_ringfit3_pp": 0.041,
+      "rec_def_ringfit3_10_pp": 0.0,
+      "burst_def_ringfit3_10_pp": 9.229,
+      "loop_vs_l_ringfit3_10_pp": 0.076,
+      "rec_def_ringfit3_lazy2_pp": -0.415,
+      "burst_def_ringfit3_lazy2_pp": 2.173,
+      "loop_vs_l_ringfit3_lazy2_pp": -0.055,
+      "adopt_ringfit3": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 1,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 0,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_10": {
+        "burst": "ring",
+        "rec": "lcnu",
+        "sw": 2,
+        "sw_by": {
+          "lcnu": 1,
+          "s3fifo": 0,
+          "ring": 1
+        }
+      },
+      "adopt_ringfit3_lazy2": {
+        "burst": "ring",
+        "rec": "ring",
+        "sw": 2,
+        "sw_by": {
+          "lcnu": 0,
+          "s3fifo": 1,
+          "ring": 1
+        }
+      }
+    }
+  ],
+  "det": true,
+  "repl": "exp681 costfit + exp685 ring10/ring25 exact",
+  "grid": [
+    {
+      "d": 256,
+      "mid": 319488,
+      "caps": {
+        "512": {
+          "lcnu": {
+            "loop": 0.6739768003806089,
+            "burst": 0.04296875,
+            "rec": 0.6669921875
+          },
+          "s3fifo": {
+            "loop": 0.6810161884014423,
+            "burst": 0.015625,
+            "rec": 0.669189453125
+          },
+          "center": {
+            "loop": 0.6807923928285257,
+            "burst": 0.015625,
+            "rec": 0.669189453125,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                8191,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {},
+            "acc": true,
+            "loop2": 0.6807923928285257
+          },
+          "ring10": {
+            "loop": 0.6844529371995193,
+            "burst": 0.015625,
+            "rec": 0.674072265625
+          },
+          "ring25": {
+            "loop": 0.6795920347556089,
+            "burst": 0.02734375,
+            "rec": 0.665771484375
+          },
+          "lazy2": {
+            "loop": 0.6773509490184295,
+            "burst": 0.03125,
+            "rec": 0.661865234375
+          },
+          "ringfit3": {
+            "loop": 0.6806045923477564,
+            "burst": 0.015625,
+            "rec": 0.669189453125,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                4095,
+                "ring"
+              ],
+              [
+                258047,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_10": {
+            "loop": 0.6832682291666666,
+            "burst": 0.015625,
+            "rec": 0.674072265625,
+            "switches": 3,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                4095,
+                "ring"
+              ],
+              [
+                16383,
+                "s3fifo"
+              ],
+              [
+                90111,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 2
+            },
+            "acc": true
+          },
+          "ringfit3_lazy2": {
+            "loop": 0.6807923928285257,
+            "burst": 0.015625,
+            "rec": 0.669189453125,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                8191,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 0
+            },
+            "acc": true
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "loop": 0.8712659004407052,
+            "burst": 0.0625,
+            "rec": 0.869140625
+          },
+          "s3fifo": {
+            "loop": 0.8546455578926282,
+            "burst": 0.12890625,
+            "rec": 0.847412109375
+          },
+          "center": {
+            "loop": 0.8707901392227564,
+            "burst": 0.0625,
+            "rec": 0.869140625,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                28671,
+                "s3fifo"
+              ],
+              [
+                135167,
+                "lcnu"
+              ]
+            ],
+            "choice_switches": {},
+            "acc": true,
+            "loop2": 0.8707901392227564
+          },
+          "ring10": {
+            "loop": 0.8727479592347757,
+            "burst": 0.0546875,
+            "rec": 0.870849609375
+          },
+          "ring25": {
+            "loop": 0.8717933067908654,
+            "burst": 0.0625,
+            "rec": 0.869140625
+          },
+          "lazy2": {
+            "loop": 0.8715053460536859,
+            "burst": 0.0625,
+            "rec": 0.869140625
+          },
+          "ringfit3": {
+            "loop": 0.8716759314903846,
+            "burst": 0.0625,
+            "rec": 0.869140625,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                16383,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 0,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_10": {
+            "loop": 0.8726305839342948,
+            "burst": 0.0546875,
+            "rec": 0.870849609375,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                16383,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 0,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_lazy2": {
+            "loop": 0.8707932692307693,
+            "burst": 0.0625,
+            "rec": 0.869140625,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                28671,
+                "s3fifo"
+              ],
+              [
+                135167,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 1
+            },
+            "acc": true
+          }
+        }
+      }
+    },
+    {
+      "d": 1024,
+      "mid": 319488,
+      "caps": {
+        "512": {
+          "lcnu": {
+            "loop": 0.6732302934695513,
+            "burst": 0.08203125,
+            "rec": 0.662841796875
+          },
+          "s3fifo": {
+            "loop": 0.6802008213141025,
+            "burst": 0.0283203125,
+            "rec": 0.66357421875
+          },
+          "center": {
+            "loop": 0.6799770257411859,
+            "burst": 0.0283203125,
+            "rec": 0.66357421875,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                8191,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {},
+            "acc": true,
+            "loop2": 0.6799770257411859
+          },
+          "ring10": {
+            "loop": 0.6836532201522436,
+            "burst": 0.0302734375,
+            "rec": 0.673828125
+          },
+          "ring25": {
+            "loop": 0.6788236177884616,
+            "burst": 0.05078125,
+            "rec": 0.664306640625
+          },
+          "lazy2": {
+            "loop": 0.6766122671274039,
+            "burst": 0.05078125,
+            "rec": 0.661376953125
+          },
+          "ringfit3": {
+            "loop": 0.6797892252604166,
+            "burst": 0.0283203125,
+            "rec": 0.66357421875,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                4095,
+                "ring"
+              ],
+              [
+                258047,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_10": {
+            "loop": 0.6824685121193911,
+            "burst": 0.0302734375,
+            "rec": 0.673828125,
+            "switches": 3,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                4095,
+                "ring"
+              ],
+              [
+                16383,
+                "s3fifo"
+              ],
+              [
+                90111,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 2
+            },
+            "acc": true
+          },
+          "ringfit3_lazy2": {
+            "loop": 0.6799770257411859,
+            "burst": 0.0283203125,
+            "rec": 0.66357421875,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                8191,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 0
+            },
+            "acc": true
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "loop": 0.8701891776842948,
+            "burst": 0.142578125,
+            "rec": 0.857666015625
+          },
+          "s3fifo": {
+            "loop": 0.8535829201722757,
+            "burst": 0.18359375,
+            "rec": 0.833984375
+          },
+          "center": {
+            "loop": 0.8697134164663461,
+            "burst": 0.142578125,
+            "rec": 0.857666015625,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                28671,
+                "s3fifo"
+              ],
+              [
+                135167,
+                "lcnu"
+              ]
+            ],
+            "choice_switches": {},
+            "acc": true,
+            "loop2": 0.8697134164663461
+          },
+          "ring10": {
+            "loop": 0.87176513671875,
+            "burst": 0.0869140625,
+            "rec": 0.869140625
+          },
+          "ring25": {
+            "loop": 0.8707165840344552,
+            "burst": 0.142578125,
+            "rec": 0.857666015625
+          },
+          "lazy2": {
+            "loop": 0.8704865284455128,
+            "burst": 0.138671875,
+            "rec": 0.861572265625
+          },
+          "ringfit3": {
+            "loop": 0.8705992087339743,
+            "burst": 0.142578125,
+            "rec": 0.857666015625,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                16383,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 0,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_10": {
+            "loop": 0.8716477614182693,
+            "burst": 0.0869140625,
+            "rec": 0.869140625,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                16383,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 0,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_lazy2": {
+            "loop": 0.8697744516225961,
+            "burst": 0.138671875,
+            "rec": 0.861572265625,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                28671,
+                "s3fifo"
+              ],
+              [
+                135167,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 1
+            },
+            "acc": true
+          }
+        }
+      }
+    },
+    {
+      "d": 2048,
+      "mid": 319488,
+      "caps": {
+        "512": {
+          "lcnu": {
+            "loop": 0.672249035957532,
+            "burst": 0.08447265625,
+            "rec": 0.660400390625
+          },
+          "s3fifo": {
+            "loop": 0.6790881034655448,
+            "burst": 0.0439453125,
+            "rec": 0.6474609375
+          },
+          "center": {
+            "loop": 0.6788643078926282,
+            "burst": 0.0439453125,
+            "rec": 0.6474609375,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                8191,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {},
+            "acc": true,
+            "loop2": 0.6788643078926282
+          },
+          "ring10": {
+            "loop": 0.6825937124399039,
+            "burst": 0.02880859375,
+            "rec": 0.674072265625
+          },
+          "ring25": {
+            "loop": 0.6777938451522436,
+            "burst": 0.05126953125,
+            "rec": 0.6630859375
+          },
+          "lazy2": {
+            "loop": 0.6754979842748398,
+            "burst": 0.048828125,
+            "rec": 0.66064453125
+          },
+          "ringfit3": {
+            "loop": 0.6786765074118589,
+            "burst": 0.0439453125,
+            "rec": 0.6474609375,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                4095,
+                "ring"
+              ],
+              [
+                258047,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_10": {
+            "loop": 0.6814090044070513,
+            "burst": 0.02880859375,
+            "rec": 0.674072265625,
+            "switches": 3,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                4095,
+                "ring"
+              ],
+              [
+                16383,
+                "s3fifo"
+              ],
+              [
+                90111,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 2
+            },
+            "acc": true
+          },
+          "ringfit3_lazy2": {
+            "loop": 0.6788643078926282,
+            "burst": 0.0439453125,
+            "rec": 0.6474609375,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                8191,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 0
+            },
+            "acc": true
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "loop": 0.8690921098758013,
+            "burst": 0.16845703125,
+            "rec": 0.854248046875
+          },
+          "s3fifo": {
+            "loop": 0.8522432767427884,
+            "burst": 0.21728515625,
+            "rec": 0.822265625
+          },
+          "center": {
+            "loop": 0.8686163486578525,
+            "burst": 0.16845703125,
+            "rec": 0.854248046875,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                28671,
+                "s3fifo"
+              ],
+              [
+                135167,
+                "lcnu"
+              ]
+            ],
+            "choice_switches": {},
+            "acc": true,
+            "loop2": 0.8686163486578525
+          },
+          "ring10": {
+            "loop": 0.8705209585336539,
+            "burst": 0.091796875,
+            "rec": 0.871337890625
+          },
+          "ring25": {
+            "loop": 0.8696195162259616,
+            "burst": 0.16845703125,
+            "rec": 0.854248046875
+          },
+          "lazy2": {
+            "loop": 0.8693440755208334,
+            "burst": 0.15478515625,
+            "rec": 0.85986328125
+          },
+          "ringfit3": {
+            "loop": 0.8695021409254807,
+            "burst": 0.16845703125,
+            "rec": 0.854248046875,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                16383,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 0,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_10": {
+            "loop": 0.8704035832331731,
+            "burst": 0.091796875,
+            "rec": 0.871337890625,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                16383,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 0,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_lazy2": {
+            "loop": 0.8686319986979166,
+            "burst": 0.15478515625,
+            "rec": 0.85986328125,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                28671,
+                "s3fifo"
+              ],
+              [
+                135167,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 1
+            },
+            "acc": true
+          }
+        }
+      }
+    },
+    {
+      "d": 4096,
+      "mid": 319488,
+      "caps": {
+        "512": {
+          "lcnu": {
+            "loop": 0.6704320663060898,
+            "burst": 0.08837890625,
+            "rec": 0.677978515625
+          },
+          "s3fifo": {
+            "loop": 0.6768204126602564,
+            "burst": 0.07763671875,
+            "rec": 0.608154296875
+          },
+          "center": {
+            "loop": 0.6765966170873398,
+            "burst": 0.07763671875,
+            "rec": 0.608154296875,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                8191,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {},
+            "acc": true,
+            "loop2": 0.6765966170873398
+          },
+          "ring10": {
+            "loop": 0.6805028670873398,
+            "burst": 0.02880859375,
+            "rec": 0.685302734375
+          },
+          "ring25": {
+            "loop": 0.6757249098557693,
+            "burst": 0.052490234375,
+            "rec": 0.675048828125
+          },
+          "lazy2": {
+            "loop": 0.6736184144631411,
+            "burst": 0.048095703125,
+            "rec": 0.671630859375
+          },
+          "ringfit3": {
+            "loop": 0.6764088166065705,
+            "burst": 0.07763671875,
+            "rec": 0.608154296875,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                4095,
+                "ring"
+              ],
+              [
+                258047,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_10": {
+            "loop": 0.6793181590544872,
+            "burst": 0.02880859375,
+            "rec": 0.685302734375,
+            "switches": 3,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                4095,
+                "ring"
+              ],
+              [
+                16383,
+                "s3fifo"
+              ],
+              [
+                90111,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 2
+            },
+            "acc": true
+          },
+          "ringfit3_lazy2": {
+            "loop": 0.6765966170873398,
+            "burst": 0.07763671875,
+            "rec": 0.608154296875,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                8191,
+                "s3fifo"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 0
+            },
+            "acc": true
+          }
+        },
+        "2048": {
+          "lcnu": {
+            "loop": 0.8668948442508013,
+            "burst": 0.18798828125,
+            "rec": 0.8671875
+          },
+          "s3fifo": {
+            "loop": 0.8501086112780448,
+            "burst": 0.296630859375,
+            "rec": 0.8134765625
+          },
+          "center": {
+            "loop": 0.8664190830328525,
+            "burst": 0.18798828125,
+            "rec": 0.8671875,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                28671,
+                "s3fifo"
+              ],
+              [
+                135167,
+                "lcnu"
+              ]
+            ],
+            "choice_switches": {},
+            "acc": true,
+            "loop2": 0.8664190830328525
+          },
+          "ring10": {
+            "loop": 0.8679997370793269,
+            "burst": 0.095703125,
+            "rec": 0.881591796875
+          },
+          "ring25": {
+            "loop": 0.8674222506009616,
+            "burst": 0.18798828125,
+            "rec": 0.8671875
+          },
+          "lazy2": {
+            "loop": 0.8670607346754807,
+            "burst": 0.166259765625,
+            "rec": 0.871337890625
+          },
+          "ringfit3": {
+            "loop": 0.8673048753004807,
+            "burst": 0.18798828125,
+            "rec": 0.8671875,
+            "switches": 1,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                16383,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 0,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_10": {
+            "loop": 0.8676585662059295,
+            "burst": 0.095703125,
+            "rec": 0.8671875,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                16383,
+                "ring"
+              ],
+              [
+                323583,
+                "lcnu"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 1,
+              "s3fifo": 0,
+              "ring": 1
+            },
+            "acc": true
+          },
+          "ringfit3_lazy2": {
+            "loop": 0.8663486578525641,
+            "burst": 0.166259765625,
+            "rec": 0.871337890625,
+            "switches": 2,
+            "tl": [
+              [
+                0,
+                "lcnu"
+              ],
+              [
+                28671,
+                "s3fifo"
+              ],
+              [
+                135167,
+                "ring"
+              ]
+            ],
+            "choice_switches": {
+              "lcnu": 0,
+              "s3fifo": 1,
+              "ring": 1
+            },
+            "acc": true
+          }
+        }
+      }
+    }
+  ],
+  "stride_diag": [
+    {
+      "d": 256,
+      "distinct": 245,
+      "rehit_keys": 11,
+      "gap_mean": 116.82,
+      "gap_p90": 209.0,
+      "load_mean": 218.0,
+      "load_p90": 218.0
+    },
+    {
+      "d": 1024,
+      "distinct": 873,
+      "rehit_keys": 138,
+      "gap_mean": 319.41,
+      "gap_p90": 685.5,
+      "load_mean": 380.6,
+      "load_p90": 674.0
+    },
+    {
+      "d": 2048,
+      "distinct": 1510,
+      "rehit_keys": 440,
+      "gap_mean": 628.8,
+      "gap_p90": 1316.9,
+      "load_mean": 625.9,
+      "load_p90": 1127.5
+    },
+    {
+      "d": 4096,
+      "distinct": 2260,
+      "rehit_keys": 1171,
+      "gap_mean": 1216.1,
+      "gap_p90": 2555.0,
+      "load_mean": 932.0,
+      "load_p90": 1690.2
+    }
+  ],
+  "prediction":
+      "pre-registered: H1 FAILS at cap512 (sticky s3fifo lead, ring cannot clear MARGIN+GAMMA*sw_mass); uncertain: ring10 whole-loop lead 0.6805 vs s3fifo 0.6768 could adopt at some boundary",
+  "rules": {
+    "streams": "exp681 exact (68120261103)",
+    "arms": [
+      "lcnu",
+      "s3fifo",
+      "center",
+      "ring10",
+      "ring25",
+      "lazy2",
+      "ringfit3",
+      "ringfit3_10",
+      "ringfit3_lazy2"
+    ],
+    "bars": {
+      "REPL1": "center == exp681 costfit exact (exit 4)",
+      "REPL2": "ring10+ring25 == exp685 exact (exit 5)",
+      "H1": "ringfit3 rec_def <= 2.5pp @ d4096/cap512 (primary)",
+      "H2": "ringfit3 burst_def <= center burst_def ALL cells",
+      "H3": "new arms loop >= lcnu-0.5pp ALL cells",
+      "H4": "ringfit3* switches <= 6; credited==loop; center loop2",
+      "det": "byte-identical double grid (exit 2)"
+    },
+    "verdicts": "RING-FIRST-CLASS > IN_BURST_KEPT_VISIBLE > HARM"
+  },
+  "elapsed_s": 1471.5
+}

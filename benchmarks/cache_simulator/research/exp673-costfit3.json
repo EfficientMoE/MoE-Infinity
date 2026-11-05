@@ -1,0 +1,589 @@
+{
+  "verdict": "MECHANISM-GENERALIZES-3WAY",
+  "H1": true,
+  "H2": true,
+  "H3": true,
+  "informative_cells": 27,
+  "violations": [],
+  "determinism_two_runs_synth": true,
+  "synthetic": {
+    "flipA": {
+      "128": {
+        "lcnu": {
+          "rate": 0.19503,
+          "prop": 0.19503,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.257912,
+          "prop": 0.257912,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.257088,
+          "prop": 0.257088,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.257084,
+          "prop": 0.257084,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.257084,
+          "prop": 0.257084,
+          "switches": 1,
+          "choice_switches": {
+            "lcnu": 0,
+            "s3fifo": 1,
+            "rothead": 0
+          }
+        }
+      },
+      "256": {
+        "lcnu": {
+          "rate": 0.31794,
+          "prop": 0.31794,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.361675,
+          "prop": 0.361675,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.360985,
+          "prop": 0.360985,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.360981,
+          "prop": 0.360981,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.360981,
+          "prop": 0.360981,
+          "switches": 1,
+          "choice_switches": {
+            "lcnu": 0,
+            "s3fifo": 1,
+            "rothead": 0
+          }
+        }
+      },
+      "512": {
+        "lcnu": {
+          "rate": 0.471104,
+          "prop": 0.471104,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.479195,
+          "prop": 0.479195,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.479084,
+          "prop": 0.479084,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.479084,
+          "prop": 0.479084,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.479084,
+          "prop": 0.479084,
+          "switches": 1,
+          "choice_switches": {
+            "lcnu": 0,
+            "s3fifo": 1,
+            "rothead": 0
+          }
+        }
+      },
+      "1024": {
+        "lcnu": {
+          "rate": 0.619598,
+          "prop": 0.619598,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.609291,
+          "prop": 0.609291,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.609398,
+          "prop": 0.609398,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.619411,
+          "prop": 0.619411,
+          "switches": 2,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.619411,
+          "prop": 0.619411,
+          "switches": 2,
+          "choice_switches": {
+            "lcnu": 1,
+            "s3fifo": 0,
+            "rothead": 1
+          }
+        }
+      },
+      "2048": {
+        "lcnu": {
+          "rate": 0.756199,
+          "prop": 0.756199,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.743557,
+          "prop": 0.743557,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.743587,
+          "prop": 0.743587,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.754852,
+          "prop": 0.754852,
+          "switches": 2,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.754852,
+          "prop": 0.754852,
+          "switches": 2,
+          "choice_switches": {
+            "lcnu": 1,
+            "s3fifo": 0,
+            "rothead": 1
+          }
+        }
+      },
+      "4096": {
+        "lcnu": {
+          "rate": 0.895519,
+          "prop": 0.895519,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.8927,
+          "prop": 0.8927,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.8927,
+          "prop": 0.8927,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.895519,
+          "prop": 0.895519,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.895519,
+          "prop": 0.895519,
+          "switches": 0,
+          "choice_switches": {
+            "lcnu": 0,
+            "s3fifo": 0,
+            "rothead": 0
+          }
+        }
+      }
+    },
+    "flipB": {
+      "128": {
+        "lcnu": {
+          "rate": 0.390907,
+          "prop": 0.390907,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.367794,
+          "prop": 0.367794,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.368889,
+          "prop": 0.368889,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.390907,
+          "prop": 0.390907,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.388454,
+          "prop": 0.388454,
+          "switches": 2,
+          "choice_switches": {
+            "lcnu": 1,
+            "s3fifo": 0,
+            "rothead": 1
+          }
+        }
+      },
+      "256": {
+        "lcnu": {
+          "rate": 0.516376,
+          "prop": 0.516376,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.461441,
+          "prop": 0.461441,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.462971,
+          "prop": 0.462971,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.516376,
+          "prop": 0.516376,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.516376,
+          "prop": 0.516376,
+          "switches": 0,
+          "choice_switches": {
+            "lcnu": 0,
+            "s3fifo": 0,
+            "rothead": 0
+          }
+        }
+      },
+      "512": {
+        "lcnu": {
+          "rate": 0.617897,
+          "prop": 0.617897,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.5341,
+          "prop": 0.5341,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.534962,
+          "prop": 0.534962,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.617897,
+          "prop": 0.617897,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.617897,
+          "prop": 0.617897,
+          "switches": 0,
+          "choice_switches": {
+            "lcnu": 0,
+            "s3fifo": 0,
+            "rothead": 0
+          }
+        }
+      },
+      "1024": {
+        "lcnu": {
+          "rate": 0.692081,
+          "prop": 0.692081,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.635681,
+          "prop": 0.635681,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.635681,
+          "prop": 0.635681,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.692081,
+          "prop": 0.692081,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.692081,
+          "prop": 0.692081,
+          "switches": 0,
+          "choice_switches": {
+            "lcnu": 0,
+            "s3fifo": 0,
+            "rothead": 0
+          }
+        }
+      },
+      "2048": {
+        "lcnu": {
+          "rate": 0.79221,
+          "prop": 0.79221,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.760628,
+          "prop": 0.760628,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.760628,
+          "prop": 0.760628,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.791489,
+          "prop": 0.791489,
+          "switches": 2,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.791489,
+          "prop": 0.791489,
+          "switches": 2,
+          "choice_switches": {
+            "lcnu": 1,
+            "s3fifo": 0,
+            "rothead": 1
+          }
+        }
+      },
+      "4096": {
+        "lcnu": {
+          "rate": 0.916626,
+          "prop": 0.916626,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "s3fifo": {
+          "rate": 0.901344,
+          "prop": 0.901344,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "rothead": {
+          "rate": 0.901344,
+          "prop": 0.901344,
+          "switches": 1,
+          "choice_switches": null
+        },
+        "costfit": {
+          "rate": 0.916626,
+          "prop": 0.916626,
+          "switches": 0,
+          "choice_switches": null
+        },
+        "costfit3": {
+          "rate": 0.916626,
+          "prop": 0.916626,
+          "switches": 0,
+          "choice_switches": {
+            "lcnu": 0,
+            "s3fifo": 0,
+            "rothead": 0
+          }
+        }
+      }
+    }
+  },
+  "real": {
+    "qwen30b": {
+      "caps": [
+        128,
+        256,
+        384,
+        512,
+        768,
+        1024,
+        1536,
+        2048,
+        3072,
+        4096
+      ],
+      "costfit3": {
+        "128": 0.208345,
+        "256": 0.327289,
+        "384": 0.41476,
+        "512": 0.485328,
+        "768": 0.59048,
+        "1024": 0.66739,
+        "1536": 0.809119,
+        "2048": 0.894648,
+        "3072": 0.968409,
+        "4096": 0.988616
+      },
+      "costfit2": {
+        "128": 0.208345,
+        "256": 0.327289,
+        "384": 0.41476,
+        "512": 0.485328,
+        "768": 0.59048,
+        "1024": 0.66739,
+        "1536": 0.809308,
+        "2048": 0.894752,
+        "3072": 0.968435,
+        "4096": 0.988625
+      },
+      "inner": {
+        "lcnu": {
+          "128": 0.208345,
+          "256": 0.327289,
+          "384": 0.41476,
+          "512": 0.485328,
+          "768": 0.59048,
+          "1024": 0.66852,
+          "1536": 0.787092,
+          "2048": 0.86479,
+          "3072": 0.944494,
+          "4096": 0.977971
+        },
+        "s3fifo": {
+          "128": 0.0,
+          "256": 0.068852,
+          "384": 0.359777,
+          "512": 0.422742,
+          "768": 0.542383,
+          "1024": 0.654659,
+          "1536": 0.808347,
+          "2048": 0.895616,
+          "3072": 0.968484,
+          "4096": 0.988872
+        }
+      },
+      "rothead": {
+        "128": 0.00189,
+        "256": 0.070781,
+        "384": 0.36017,
+        "512": 0.423346,
+        "768": 0.542841,
+        "1024": 0.654672,
+        "1536": 0.808159,
+        "2048": 0.895512,
+        "3072": 0.968458,
+        "4096": 0.988863
+      }
+    },
+    "granite": {
+      "caps": [
+        128,
+        256,
+        512,
+        768,
+        1024
+      ],
+      "costfit3": {
+        "128": 0.283762,
+        "256": 0.468164,
+        "512": 0.728697,
+        "768": 0.886415,
+        "1024": 0.972067
+      },
+      "costfit2": {
+        "128": 0.283762,
+        "256": 0.468164,
+        "512": 0.728697,
+        "768": 0.886415,
+        "1024": 0.972067
+      },
+      "inner": {
+        "lcnu": {
+          "128": 0.283762,
+          "256": 0.468164,
+          "512": 0.728697,
+          "768": 0.886415,
+          "1024": 0.970839
+        },
+        "s3fifo": {
+          "128": 0.0,
+          "256": 0.378923,
+          "512": 0.676469,
+          "768": 0.87934,
+          "1024": 0.973187
+        }
+      },
+      "rothead": {
+        "128": 0.235346,
+        "256": 0.452688,
+        "512": 0.718692,
+        "768": 0.884451,
+        "1024": 0.970975
+      }
+    }
+  },
+  "frozen": {
+    "N": 262144,
+    "P": 16384,
+    "H": 2048,
+    "R": 4096,
+    "E": 128,
+    "L": 48,
+    "syn_caps": [
+      128,
+      256,
+      512,
+      1024,
+      2048,
+      4096
+    ],
+    "prior": 0.0625,
+    "params": "exp667 center M0.005 G0.0025 HL32768"
+  }
+}

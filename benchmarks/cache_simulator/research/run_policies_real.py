@@ -84,6 +84,14 @@ POLICY_ORDER = [
     "w_tinylfu",
     "layer_lru",
     "lcnu",
+    "rothead",
+    "hotfit",
+    "shadowfit",
+    "decayfit",
+    "costfit",
+    "costfit3",
+    "shared_costfit",
+    "shared_costfit3",
     "single_layer_ahead",
     "stride_prefetch",
     "multi_layer_ahead",
@@ -108,6 +116,14 @@ PRETTY = {
     "w_tinylfu": "W-TinyLFU",
     "layer_lru": "Per-layer LRU",
     "lcnu": "LCNU (layer-cycle next-use)",
+    "rothead": "RotHead (rotation-adaptive)",
+    "hotfit": "HotFit (hot-set-fit adaptive)",
+    "shadowfit": "ShadowFit (cumulative-rate shadow arbitration)",
+    "decayfit": "DecayFit (decayed-rate shadow arbitration)",
+    "costfit": "CostFit (self-limiting switch-cost arbitration)",
+    "costfit3": "CostFit3 (3-candidate self-limiting arbitration)",
+    "shared_costfit": "SharedCostFit (CostFit, shared per-key metadata table)",
+    "shared_costfit3": "SharedCostFit3 (CostFit3, shared per-key metadata table)",
     "single_layer_ahead": "1-layer-ahead*",
     "stride_prefetch": "Stride*",
     "multi_layer_ahead": "Multi-layer*",
@@ -219,9 +235,25 @@ def geometry_kwargs(name: str, stats: Dict[str, int]) -> Dict[str, float]:
         return {}
     kwargs: Dict[str, float] = {"num_layers": stats["num_layers"]}
     num_experts = stats["max_expert_id"] + 1
-    if name in LCNU_POLICIES and stats["top_k"] > 0 and num_experts > 0:
+    if (
+        name
+        in LCNU_POLICIES
+        | {
+            "rothead",
+            "hotfit",
+            "shadowfit",
+            "decayfit",
+            "costfit",
+            "costfit3",
+            "shared_costfit",
+            "shared_costfit3",
+        }
+        and stats["top_k"] > 0
+        and num_experts > 0
+    ):
         kwargs["prior"] = min(1.0, stats["top_k"] / num_experts)
-        if name != "lcnu":  # prefill-aware variants detect prefill visits
+        if name in LCNU_POLICIES and name != "lcnu":
+            # prefill-aware LCNU variants detect prefill visits
             kwargs["decode_width"] = stats["top_k"]
     return kwargs
 

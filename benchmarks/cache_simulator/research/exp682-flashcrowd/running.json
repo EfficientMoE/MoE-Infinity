@@ -1,0 +1,15 @@
+{
+  "exp": "exp682-flashcrowd",
+  "pid": 96270,
+  "dir": "/Users/mfethe/warp-work/exp682-moei-flashcrowd",
+  "result_file": "exp682-flashcrowd.json",
+  "log": "exp682-flashcrowd.log",
+  "launched_by": "builder2f118b57ae89 fire 2026-11-04T17:2xZ",
+  "frozen": {
+    "runner_sha256_16": "e3a7269cb034f158",
+    "prereg_sha256_16": "eccac5a24effd2fe"
+  },
+  "gate_at_launch": "Data avail 96 GiB >= 15 GiB",
+  "next_hint":
+      "verdict -> ADDENDUM + research/ copy + commit push mfethe1 exp651/qwen30b-results; follow-up branches preregistered in PREREG.md"
+}

@@ -1,0 +1,5448 @@
+{
+  "n_seed": 9,
+  "n_trials": 45,
+  "best_feasible_f": 0.027,
+  "best_params": {
+    "margin": 0.0016164844791733762,
+    "gamma": 0.009989643116869357,
+    "half_life": 160974.82764885513
+  },
+  "best_seed_f": 0.072,
+  "pearson_pred_vs_obs": 0.122,
+  "trials_half_life_outside_2x_center": 22,
+  "trials": [
+    {
+      "margin": 0.0025,
+      "gamma": 0.00125,
+      "half_life": 32768,
+      "f": 0.115,
+      "g": 6,
+      "src": "exp668-seed"
+    },
+    {
+      "margin": 0.0025,
+      "gamma": 0.0025,
+      "half_life": 32768,
+      "f": 0.072,
+      "g": 4,
+      "src": "exp668-seed"
+    },
+    {
+      "margin": 0.0025,
+      "gamma": 0.005,
+      "half_life": 32768,
+      "f": 0.086,
+      "g": 3,
+      "src": "exp668-seed"
+    },
+    {
+      "margin": 0.005,
+      "gamma": 0.00125,
+      "half_life": 32768,
+      "f": 0.112,
+      "g": 4,
+      "src": "exp668-seed"
+    },
+    {
+      "margin": 0.005,
+      "gamma": 0.0025,
+      "half_life": 32768,
+      "f": 0.113,
+      "g": 4,
+      "src": "exp668-seed"
+    },
+    {
+      "margin": 0.005,
+      "gamma": 0.005,
+      "half_life": 32768,
+      "f": 0.116,
+      "g": 3,
+      "src": "exp668-seed"
+    },
+    {
+      "margin": 0.01,
+      "gamma": 0.00125,
+      "half_life": 32768,
+      "f": 0.332,
+      "g": 2,
+      "src": "exp668-seed"
+    },
+    {
+      "margin": 0.01,
+      "gamma": 0.0025,
+      "half_life": 32768,
+      "f": 0.332,
+      "g": 2,
+      "src": "exp668-seed"
+    },
+    {
+      "margin": 0.01,
+      "gamma": 0.005,
+      "half_life": 32768,
+      "f": 0.332,
+      "g": 2,
+      "src": "exp668-seed"
+    },
+    {
+      "params": {
+        "margin": 0.0016164844791733762,
+        "gamma": 0.009989643116869357,
+        "half_life": 160974.82764885513
+      },
+      "f": 0.027,
+      "g_max_switches": 1,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.808684,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.034
+            },
+            "2048": {
+              "rate": 0.895459,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.016
+            },
+            "3072": {
+              "rate": 0.968297,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.019
+            },
+            "4096": {
+              "rate": 0.988667,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.021
+            }
+          },
+          "worst_deficit_pp": 0.021,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.972918,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.027
+            }
+          },
+          "worst_deficit_pp": 0.027,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 1,
+      "acq": 0.2581,
+      "t_s": 231.1
+    },
+    {
+      "params": {
+        "margin": 0.0035568407147487974,
+        "gamma": 0.008458852067908113,
+        "half_life": 4160.853593410667
+      },
+      "f": 0.171,
+      "g_max_switches": 8,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.414625,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.013
+            },
+            "512": {
+              "rate": 0.485158,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.017
+            },
+            "768": {
+              "rate": 0.590254,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.023
+            },
+            "1024": {
+              "rate": 0.666812,
+              "loop_eq_prop": true,
+              "switches": 8,
+              "deficit_pp": 0.171
+            },
+            "1536": {
+              "rate": 0.808462,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": -0.011
+            },
+            "2048": {
+              "rate": 0.894598,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.102
+            },
+            "3072": {
+              "rate": 0.968157,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.033
+            },
+            "4096": {
+              "rate": 0.988036,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.084
+            }
+          },
+          "worst_deficit_pp": 0.171,
+          "max_switches": 8,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886073,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.034
+            },
+            "1024": {
+              "rate": 0.973136,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.034,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": false,
+      "trial": 2,
+      "acq": 0.2461,
+      "t_s": 527.2
+    },
+    {
+      "params": {
+        "margin": 0.0010474895585033733,
+        "gamma": 0.00758310690810471,
+        "half_life": 75483.26361682652
+      },
+      "f": 0.141,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.806932,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.141
+            },
+            "2048": {
+              "rate": 0.89558,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            },
+            "3072": {
+              "rate": 0.96855,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.007
+            },
+            "4096": {
+              "rate": 0.988827,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.141,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.012,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 3,
+      "acq": 0.1646,
+      "t_s": 939.7
+    },
+    {
+      "params": {
+        "margin": 0.0012533878348045219,
+        "gamma": 0.009853884385519015,
+        "half_life": 16292.697371254944
+      },
+      "f": 0.079,
+      "g_max_switches": 4,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66773,
+              "loop_eq_prop": true,
+              "switches": 4,
+              "deficit_pp": 0.079
+            },
+            "1536": {
+              "rate": 0.808674,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.033
+            },
+            "2048": {
+              "rate": 0.894909,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.071
+            },
+            "3072": {
+              "rate": 0.968641,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.016
+            },
+            "4096": {
+              "rate": 0.988894,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.002
+            }
+          },
+          "worst_deficit_pp": 0.079,
+          "max_switches": 4,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885719,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.07
+            },
+            "1024": {
+              "rate": 0.973148,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            }
+          },
+          "worst_deficit_pp": 0.07,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 4,
+      "acq": 0.1739,
+      "t_s": 1198.7
+    },
+    {
+      "params": {
+        "margin": 0.0012281885562441743,
+        "gamma": 0.009880429454994266,
+        "half_life": 260613.11525801054
+      },
+      "f": 0.571,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.802637,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.571
+            },
+            "2048": {
+              "rate": 0.89558,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            },
+            "3072": {
+              "rate": 0.968297,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.019
+            },
+            "4096": {
+              "rate": 0.988667,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.021
+            }
+          },
+          "worst_deficit_pp": 0.571,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973017,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.017
+            }
+          },
+          "worst_deficit_pp": 0.017,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 5,
+      "acq": 0.1754,
+      "t_s": 1410.6
+    },
+    {
+      "params": {
+        "margin": 0.0012458648801778845,
+        "gamma": 0.00960648809607919,
+        "half_life": 25237.76735625925
+      },
+      "f": 0.106,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.668478,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.004
+            },
+            "1536": {
+              "rate": 0.808008,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.034
+            },
+            "2048": {
+              "rate": 0.894557,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.106
+            },
+            "3072": {
+              "rate": 0.968629,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.015
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.106,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885937,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.048
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.048,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 6,
+      "acq": 0.0494,
+      "t_s": 1600.8
+    },
+    {
+      "params": {
+        "margin": 0.0040629146606243755,
+        "gamma": 0.009832188667020849,
+        "half_life": 9995.364031891922
+      },
+      "f": 0.297,
+      "g_max_switches": 6,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.665553,
+              "loop_eq_prop": true,
+              "switches": 6,
+              "deficit_pp": 0.297
+            },
+            "1536": {
+              "rate": 0.808682,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.034
+            },
+            "2048": {
+              "rate": 0.89502,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.06
+            },
+            "3072": {
+              "rate": 0.968641,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.016
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.297,
+          "max_switches": 6,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885258,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.116
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.116,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 7,
+      "acq": 0.075,
+      "t_s": 1804.7
+    },
+    {
+      "params": {
+        "margin": 0.0010267102733605205,
+        "gamma": 0.002820782874133279,
+        "half_life": 127788.54070265016
+      },
+      "f": 0.099,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.807982,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.037
+            },
+            "2048": {
+              "rate": 0.89463,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.099
+            },
+            "3072": {
+              "rate": 0.968435,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            },
+            "4096": {
+              "rate": 0.988756,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.099,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973017,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.017
+            }
+          },
+          "worst_deficit_pp": 0.017,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 8,
+      "acq": 0.0264,
+      "t_s": 2062.7
+    },
+    {
+      "params": {
+        "margin": 0.0012852633237189833,
+        "gamma": 0.0005130749127240516,
+        "half_life": 23659.05315440056
+      },
+      "f": 0.05,
+      "g_max_switches": 10,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.668019,
+              "loop_eq_prop": true,
+              "switches": 10,
+              "deficit_pp": 0.05
+            },
+            "1536": {
+              "rate": 0.809198,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": -0.085
+            },
+            "2048": {
+              "rate": 0.895377,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.024
+            },
+            "3072": {
+              "rate": 0.968677,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.019
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.05,
+          "max_switches": 10,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886322,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.009
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.009,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": false,
+      "trial": 9,
+      "acq": 0.0124,
+      "t_s": 2376.9
+    },
+    {
+      "params": {
+        "margin": 0.019639026855623652,
+        "gamma": 0.009498475973102,
+        "half_life": 166130.6377332199
+      },
+      "f": 0.921,
+      "g_max_switches": 1,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.804738,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.361
+            },
+            "2048": {
+              "rate": 0.891293,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.432
+            },
+            "3072": {
+              "rate": 0.95927,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.921
+            },
+            "4096": {
+              "rate": 0.98293,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.594
+            }
+          },
+          "worst_deficit_pp": 0.921,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.970839,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.235
+            }
+          },
+          "worst_deficit_pp": 0.235,
+          "max_switches": 0,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 10,
+      "acq": 0.0003,
+      "t_s": 2615.0
+    },
+    {
+      "params": {
+        "margin": 0.0010020463464871187,
+        "gamma": 0.0012930795955633494,
+        "half_life": 32861.78728891063
+      },
+      "f": 0.175,
+      "g_max_switches": 8,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.666774,
+              "loop_eq_prop": true,
+              "switches": 8,
+              "deficit_pp": 0.175
+            },
+            "1536": {
+              "rate": 0.809222,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.087
+            },
+            "2048": {
+              "rate": 0.895065,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.055
+            },
+            "3072": {
+              "rate": 0.968629,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.015
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.175,
+          "max_switches": 8,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886051,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.036
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.036,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": false,
+      "trial": 11,
+      "acq": 0.0013,
+      "t_s": 2787.4
+    },
+    {
+      "params": {
+        "margin": 0.001019163919331394,
+        "gamma": 0.006621426047265091,
+        "half_life": 153545.3987860043
+      },
+      "f": 0.283,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.805521,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.283
+            },
+            "2048": {
+              "rate": 0.89558,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            },
+            "3072": {
+              "rate": 0.968435,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            },
+            "4096": {
+              "rate": 0.988756,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.283,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973017,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.017
+            }
+          },
+          "worst_deficit_pp": 0.017,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 12,
+      "acq": 0.0,
+      "t_s": 2961.0
+    },
+    {
+      "params": {
+        "margin": 0.0010296301994621034,
+        "gamma": 0.009277255392880402,
+        "half_life": 128121.81374312133
+      },
+      "f": 0.38,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.804551,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.38
+            },
+            "2048": {
+              "rate": 0.89558,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            },
+            "3072": {
+              "rate": 0.968435,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            },
+            "4096": {
+              "rate": 0.988756,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.38,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973017,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.017
+            }
+          },
+          "worst_deficit_pp": 0.017,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 13,
+      "acq": 0.0,
+      "t_s": 3168.4
+    },
+    {
+      "params": {
+        "margin": 0.001009131273415258,
+        "gamma": 0.0014572000521956472,
+        "half_life": 47832.07902580592
+      },
+      "f": 0.105,
+      "g_max_switches": 5,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66766,
+              "loop_eq_prop": true,
+              "switches": 4,
+              "deficit_pp": 0.086
+            },
+            "1536": {
+              "rate": 0.809079,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.073
+            },
+            "2048": {
+              "rate": 0.894568,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.105
+            },
+            "3072": {
+              "rate": 0.968612,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.013
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.105,
+          "max_switches": 5,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.005,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 14,
+      "acq": 0.0033,
+      "t_s": 3352.3
+    },
+    {
+      "params": {
+        "margin": 0.013972932848932317,
+        "gamma": 0.007861659741817155,
+        "half_life": 4108.5911708199155
+      },
+      "f": 0.125,
+      "g_max_switches": 6,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.590254,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.023
+            },
+            "1024": {
+              "rate": 0.66825,
+              "loop_eq_prop": true,
+              "switches": 6,
+              "deficit_pp": 0.027
+            },
+            "1536": {
+              "rate": 0.809574,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.123
+            },
+            "2048": {
+              "rate": 0.895009,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.061
+            },
+            "3072": {
+              "rate": 0.968435,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            },
+            "4096": {
+              "rate": 0.987617,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.125
+            }
+          },
+          "worst_deficit_pp": 0.125,
+          "max_switches": 6,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.972185,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.1
+            }
+          },
+          "worst_deficit_pp": 0.1,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 15,
+      "acq": 0.0,
+      "t_s": 3529.8
+    },
+    {
+      "params": {
+        "margin": 0.01935993736744828,
+        "gamma": 0.0005143560016970138,
+        "half_life": 4125.553332369577
+      },
+      "f": 0.332,
+      "g_max_switches": 14,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.668737,
+              "loop_eq_prop": true,
+              "switches": 14,
+              "deficit_pp": -0.022
+            },
+            "1536": {
+              "rate": 0.809127,
+              "loop_eq_prop": true,
+              "switches": 9,
+              "deficit_pp": -0.078
+            },
+            "2048": {
+              "rate": 0.895588,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.003
+            },
+            "3072": {
+              "rate": 0.968297,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.019
+            },
+            "4096": {
+              "rate": 0.985549,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.332
+            }
+          },
+          "worst_deficit_pp": 0.332,
+          "max_switches": 14,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.970839,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.235
+            }
+          },
+          "worst_deficit_pp": 0.235,
+          "max_switches": 0,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": false,
+      "trial": 16,
+      "acq": 0.0001,
+      "t_s": 3711.5
+    },
+    {
+      "params": {
+        "margin": 0.0011555186552333662,
+        "gamma": 0.009253784940096947,
+        "half_life": 16765.873133625737
+      },
+      "f": 0.079,
+      "g_max_switches": 4,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66773,
+              "loop_eq_prop": true,
+              "switches": 4,
+              "deficit_pp": 0.079
+            },
+            "1536": {
+              "rate": 0.808952,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.06
+            },
+            "2048": {
+              "rate": 0.894909,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.071
+            },
+            "3072": {
+              "rate": 0.968641,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.016
+            },
+            "4096": {
+              "rate": 0.988894,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.002
+            }
+          },
+          "worst_deficit_pp": 0.079,
+          "max_switches": 4,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885719,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.07
+            },
+            "1024": {
+              "rate": 0.973148,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            }
+          },
+          "worst_deficit_pp": 0.07,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 17,
+      "acq": 0.0,
+      "t_s": 3886.3
+    },
+    {
+      "params": {
+        "margin": 0.0014743539725852294,
+        "gamma": 0.009672700669193885,
+        "half_life": 37087.86511693191
+      },
+      "f": 0.066,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.668097,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.042
+            },
+            "1536": {
+              "rate": 0.807686,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.066
+            },
+            "2048": {
+              "rate": 0.89558,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            },
+            "3072": {
+              "rate": 0.968612,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.013
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.066,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885793,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.062
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.062,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 18,
+      "acq": 0.0,
+      "t_s": 4200.3
+    },
+    {
+      "params": {
+        "margin": 0.0010485211712552437,
+        "gamma": 0.009067870126495747,
+        "half_life": 42560.16179092708
+      },
+      "f": 0.083,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667991,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.053
+            },
+            "1536": {
+              "rate": 0.80752,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.083
+            },
+            "2048": {
+              "rate": 0.89558,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            },
+            "3072": {
+              "rate": 0.968629,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.015
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.083,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885711,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.07
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.07,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 19,
+      "acq": 0.0,
+      "t_s": 4359.1
+    },
+    {
+      "params": {
+        "margin": 0.0011644731850861722,
+        "gamma": 0.00821237883239959,
+        "half_life": 23824.749478953003
+      },
+      "f": 0.112,
+      "g_max_switches": 4,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667397,
+              "loop_eq_prop": true,
+              "switches": 4,
+              "deficit_pp": 0.112
+            },
+            "1536": {
+              "rate": 0.808674,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.033
+            },
+            "2048": {
+              "rate": 0.894735,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.088
+            },
+            "3072": {
+              "rate": 0.968677,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.019
+            },
+            "4096": {
+              "rate": 0.988894,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.002
+            }
+          },
+          "worst_deficit_pp": 0.112,
+          "max_switches": 4,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885937,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.048
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.048,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 20,
+      "acq": 0.0,
+      "t_s": 4518.0
+    },
+    {
+      "params": {
+        "margin": 0.001143983290998782,
+        "gamma": 0.0006237687125326745,
+        "half_life": 180273.94505847606
+      },
+      "f": 0.105,
+      "g_max_switches": 5,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.808421,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.007
+            },
+            "2048": {
+              "rate": 0.894568,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.105
+            },
+            "3072": {
+              "rate": 0.968435,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            },
+            "4096": {
+              "rate": 0.988747,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.105,
+          "max_switches": 5,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973017,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.017
+            }
+          },
+          "worst_deficit_pp": 0.017,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 21,
+      "acq": 0.0,
+      "t_s": 4697.0
+    },
+    {
+      "params": {
+        "margin": 0.018462830625092783,
+        "gamma": 0.009402744314790356,
+        "half_life": 4114.817491411819
+      },
+      "f": 0.332,
+      "g_max_switches": 6,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.666943,
+              "loop_eq_prop": true,
+              "switches": 6,
+              "deficit_pp": 0.158
+            },
+            "1536": {
+              "rate": 0.808682,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.034
+            },
+            "2048": {
+              "rate": 0.894735,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.088
+            },
+            "3072": {
+              "rate": 0.968297,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.019
+            },
+            "4096": {
+              "rate": 0.985549,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.332
+            }
+          },
+          "worst_deficit_pp": 0.332,
+          "max_switches": 6,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.970839,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.235
+            }
+          },
+          "worst_deficit_pp": 0.235,
+          "max_switches": 0,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 22,
+      "acq": 0.0,
+      "t_s": 4868.3
+    },
+    {
+      "params": {
+        "margin": 0.0015544842635675442,
+        "gamma": 0.005620743124380141,
+        "half_life": 17620.26162553938
+      },
+      "f": 0.169,
+      "g_max_switches": 6,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.666827,
+              "loop_eq_prop": true,
+              "switches": 6,
+              "deficit_pp": 0.169
+            },
+            "1536": {
+              "rate": 0.809095,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.075
+            },
+            "2048": {
+              "rate": 0.895404,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.021
+            },
+            "3072": {
+              "rate": 0.968641,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.016
+            },
+            "4096": {
+              "rate": 0.988894,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.002
+            }
+          },
+          "worst_deficit_pp": 0.169,
+          "max_switches": 6,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886003,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.041
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.041,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 23,
+      "acq": 0.0,
+      "t_s": 5222.7
+    },
+    {
+      "params": {
+        "margin": 0.0010530883957570458,
+        "gamma": 0.002316462809371342,
+        "half_life": 44401.91914052599
+      },
+      "f": 0.089,
+      "g_max_switches": 4,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667635,
+              "loop_eq_prop": true,
+              "switches": 4,
+              "deficit_pp": 0.089
+            },
+            "1536": {
+              "rate": 0.808922,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.057
+            },
+            "2048": {
+              "rate": 0.895249,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.037
+            },
+            "3072": {
+              "rate": 0.968612,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.013
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.089,
+          "max_switches": 4,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885837,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.058
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.058,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 24,
+      "acq": 0.0,
+      "t_s": 5407.3
+    },
+    {
+      "params": {
+        "margin": 0.0011657134697762317,
+        "gamma": 0.009738708668416685,
+        "half_life": 37913.97325824373
+      },
+      "f": 0.066,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667991,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.053
+            },
+            "1536": {
+              "rate": 0.807686,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.066
+            },
+            "2048": {
+              "rate": 0.89558,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            },
+            "3072": {
+              "rate": 0.968629,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.015
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.066,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885793,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.062
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.062,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 25,
+      "acq": 0.0,
+      "t_s": 5557.4
+    },
+    {
+      "params": {
+        "margin": 0.0010706025786302563,
+        "gamma": 0.0071828440266282646,
+        "half_life": 37837.10426568379
+      },
+      "f": 0.106,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.668275,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.024
+            },
+            "1536": {
+              "rate": 0.808326,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.002
+            },
+            "2048": {
+              "rate": 0.894557,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.106
+            },
+            "3072": {
+              "rate": 0.968629,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.015
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.106,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885793,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.062
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.062,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 26,
+      "acq": 0.0,
+      "t_s": 5754.9
+    },
+    {
+      "params": {
+        "margin": 0.0011082305167103886,
+        "gamma": 0.002809826856716729,
+        "half_life": 48684.57506325432
+      },
+      "f": 0.057,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.668141,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.038
+            },
+            "1536": {
+              "rate": 0.808705,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.036
+            },
+            "2048": {
+              "rate": 0.895044,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.057
+            },
+            "3072": {
+              "rate": 0.968592,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.011
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.057,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.012,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 27,
+      "acq": 0.0,
+      "t_s": 6005.2
+    },
+    {
+      "params": {
+        "margin": 0.0011805312329091937,
+        "gamma": 0.0018002098677768182,
+        "half_life": 48799.04203706642
+      },
+      "f": 0.037,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.668247,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.027
+            },
+            "1536": {
+              "rate": 0.808922,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.057
+            },
+            "2048": {
+              "rate": 0.895249,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.037
+            },
+            "3072": {
+              "rate": 0.968592,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.011
+            },
+            "4096": {
+              "rate": 0.988842,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.003
+            }
+          },
+          "worst_deficit_pp": 0.037,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.012,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 28,
+      "acq": 0.0,
+      "t_s": 6223.9
+    },
+    {
+      "params": {
+        "margin": 0.001132302566657965,
+        "gamma": 0.0010903655376557865,
+        "half_life": 44389.46420069391
+      },
+      "f": 0.115,
+      "g_max_switches": 6,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667368,
+              "loop_eq_prop": true,
+              "switches": 6,
+              "deficit_pp": 0.115
+            },
+            "1536": {
+              "rate": 0.809079,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.073
+            },
+            "2048": {
+              "rate": 0.89492,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.07
+            },
+            "3072": {
+              "rate": 0.968612,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.013
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.115,
+          "max_switches": 6,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.88597,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.045
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.045,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 29,
+      "acq": 0.0,
+      "t_s": 6445.0
+    },
+    {
+      "params": {
+        "margin": 0.01940499959265157,
+        "gamma": 0.0005058982565254037,
+        "half_life": 14158.092782257136
+      },
+      "f": 0.363,
+      "g_max_switches": 4,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667444,
+              "loop_eq_prop": true,
+              "switches": 4,
+              "deficit_pp": 0.108
+            },
+            "1536": {
+              "rate": 0.809165,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.082
+            },
+            "2048": {
+              "rate": 0.895228,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.039
+            },
+            "3072": {
+              "rate": 0.968214,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.027
+            },
+            "4096": {
+              "rate": 0.985247,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.363
+            }
+          },
+          "worst_deficit_pp": 0.363,
+          "max_switches": 4,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.970839,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.235
+            }
+          },
+          "worst_deficit_pp": 0.235,
+          "max_switches": 0,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 30,
+      "acq": 0.0,
+      "t_s": 6672.3
+    },
+    {
+      "params": {
+        "margin": 0.0017648467013464634,
+        "gamma": 0.009776604195229754,
+        "half_life": 4113.842225629916
+      },
+      "f": 0.108,
+      "g_max_switches": 6,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.414639,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.012
+            },
+            "512": {
+              "rate": 0.485158,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.017
+            },
+            "768": {
+              "rate": 0.590254,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.023
+            },
+            "1024": {
+              "rate": 0.667441,
+              "loop_eq_prop": true,
+              "switches": 6,
+              "deficit_pp": 0.108
+            },
+            "1536": {
+              "rate": 0.808462,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": -0.011
+            },
+            "2048": {
+              "rate": 0.894598,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.102
+            },
+            "3072": {
+              "rate": 0.968224,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.026
+            },
+            "4096": {
+              "rate": 0.988047,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.083
+            }
+          },
+          "worst_deficit_pp": 0.108,
+          "max_switches": 6,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886073,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.034
+            },
+            "1024": {
+              "rate": 0.973148,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            }
+          },
+          "worst_deficit_pp": 0.034,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 31,
+      "acq": 0.0,
+      "t_s": 6969.1
+    },
+    {
+      "params": {
+        "margin": 0.001109504715396165,
+        "gamma": 0.009807308438402504,
+        "half_life": 47285.04276971002
+      },
+      "f": 0.101,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667656,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.086
+            },
+            "1536": {
+              "rate": 0.807332,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.101
+            },
+            "2048": {
+              "rate": 0.89558,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            },
+            "3072": {
+              "rate": 0.968612,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.013
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.101,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.012,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 32,
+      "acq": 0.0,
+      "t_s": 7190.4
+    },
+    {
+      "params": {
+        "margin": 0.0012438844920787495,
+        "gamma": 0.0005636557252223413,
+        "half_life": 53146.68002904651
+      },
+      "f": 0.062,
+      "g_max_switches": 5,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667896,
+              "loop_eq_prop": true,
+              "switches": 4,
+              "deficit_pp": 0.062
+            },
+            "1536": {
+              "rate": 0.809079,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.073
+            },
+            "2048": {
+              "rate": 0.895039,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.058
+            },
+            "3072": {
+              "rate": 0.968571,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.009
+            },
+            "4096": {
+              "rate": 0.988842,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.003
+            }
+          },
+          "worst_deficit_pp": 0.062,
+          "max_switches": 5,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.012,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 33,
+      "acq": 0.0,
+      "t_s": 7408.9
+    },
+    {
+      "params": {
+        "margin": 0.001103959561538356,
+        "gamma": 0.008780485439645623,
+        "half_life": 20353.728036017856
+      },
+      "f": 0.1,
+      "g_max_switches": 4,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667524,
+              "loop_eq_prop": true,
+              "switches": 4,
+              "deficit_pp": 0.1
+            },
+            "1536": {
+              "rate": 0.808674,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.033
+            },
+            "2048": {
+              "rate": 0.894745,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.087
+            },
+            "3072": {
+              "rate": 0.968641,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.016
+            },
+            "4096": {
+              "rate": 0.988894,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.002
+            }
+          },
+          "worst_deficit_pp": 0.1,
+          "max_switches": 4,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886003,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.041
+            },
+            "1024": {
+              "rate": 0.973148,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            }
+          },
+          "worst_deficit_pp": 0.041,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 34,
+      "acq": 0.0,
+      "t_s": 7703.2
+    },
+    {
+      "params": {
+        "margin": 0.0010900492512208846,
+        "gamma": 0.0016337399970374267,
+        "half_life": 198441.4886015871
+      },
+      "f": 0.074,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.808086,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.026
+            },
+            "2048": {
+              "rate": 0.89488,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.074
+            },
+            "3072": {
+              "rate": 0.968435,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            },
+            "4096": {
+              "rate": 0.988747,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.074,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973017,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.017
+            }
+          },
+          "worst_deficit_pp": 0.017,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 35,
+      "acq": 0.0,
+      "t_s": 7902.8
+    },
+    {
+      "params": {
+        "margin": 0.0011303982611953135,
+        "gamma": 0.0009658654048171612,
+        "half_life": 48055.87295560204
+      },
+      "f": 0.07,
+      "g_max_switches": 5,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667865,
+              "loop_eq_prop": true,
+              "switches": 4,
+              "deficit_pp": 0.066
+            },
+            "1536": {
+              "rate": 0.809079,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.073
+            },
+            "2048": {
+              "rate": 0.89492,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.07
+            },
+            "3072": {
+              "rate": 0.968592,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.011
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.07,
+          "max_switches": 5,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.012,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 36,
+      "acq": 0.0,
+      "t_s": 8087.0
+    },
+    {
+      "params": {
+        "margin": 0.0011263189328722368,
+        "gamma": 0.009637546926235255,
+        "half_life": 32757.215865145034
+      },
+      "f": 0.062,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.668133,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.039
+            },
+            "1536": {
+              "rate": 0.807832,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.051
+            },
+            "2048": {
+              "rate": 0.895606,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            },
+            "3072": {
+              "rate": 0.968629,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.015
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.051,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885793,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.062
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.062,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 37,
+      "acq": 0.0,
+      "t_s": 8330.0
+    },
+    {
+      "params": {
+        "margin": 0.0026617975015852113,
+        "gamma": 0.009570172827949537,
+        "half_life": 4104.888510116455
+      },
+      "f": 0.102,
+      "g_max_switches": 6,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.414639,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.012
+            },
+            "512": {
+              "rate": 0.485158,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.017
+            },
+            "768": {
+              "rate": 0.590254,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.023
+            },
+            "1024": {
+              "rate": 0.667637,
+              "loop_eq_prop": true,
+              "switches": 6,
+              "deficit_pp": 0.088
+            },
+            "1536": {
+              "rate": 0.808462,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": -0.011
+            },
+            "2048": {
+              "rate": 0.894598,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.102
+            },
+            "3072": {
+              "rate": 0.968217,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.027
+            },
+            "4096": {
+              "rate": 0.988059,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.081
+            }
+          },
+          "worst_deficit_pp": 0.102,
+          "max_switches": 6,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886073,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.034
+            },
+            "1024": {
+              "rate": 0.973148,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.004
+            }
+          },
+          "worst_deficit_pp": 0.034,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 38,
+      "acq": 0.0,
+      "t_s": 8650.2
+    },
+    {
+      "params": {
+        "margin": 0.00109202693908814,
+        "gamma": 0.0015702182531232246,
+        "half_life": 166414.83894473585
+      },
+      "f": 0.057,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.808252,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.01
+            },
+            "2048": {
+              "rate": 0.895044,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.057
+            },
+            "3072": {
+              "rate": 0.968435,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            },
+            "4096": {
+              "rate": 0.988756,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.057,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973017,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.017
+            }
+          },
+          "worst_deficit_pp": 0.017,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 39,
+      "acq": 0.0,
+      "t_s": 8831.9
+    },
+    {
+      "params": {
+        "margin": 0.0012403014089329137,
+        "gamma": 0.0019908167886847133,
+        "half_life": 173190.3615446986
+      },
+      "f": 0.091,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.807963,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.038
+            },
+            "2048": {
+              "rate": 0.894709,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.091
+            },
+            "3072": {
+              "rate": 0.968435,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            },
+            "4096": {
+              "rate": 0.988721,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.015
+            }
+          },
+          "worst_deficit_pp": 0.091,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973017,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.017
+            }
+          },
+          "worst_deficit_pp": 0.017,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 40,
+      "acq": 0.0,
+      "t_s": 9061.1
+    },
+    {
+      "params": {
+        "margin": 0.001129134872669915,
+        "gamma": 0.001576379466064807,
+        "half_life": 36837.79248842193
+      },
+      "f": 0.111,
+      "g_max_switches": 6,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.667409,
+              "loop_eq_prop": true,
+              "switches": 6,
+              "deficit_pp": 0.111
+            },
+            "1536": {
+              "rate": 0.809222,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.087
+            },
+            "2048": {
+              "rate": 0.894773,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.084
+            },
+            "3072": {
+              "rate": 0.968629,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.015
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.111,
+          "max_switches": 6,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886051,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.036
+            },
+            "1024": {
+              "rate": 0.973071,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.036,
+          "max_switches": 2,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 41,
+      "acq": 0.0,
+      "t_s": 9418.6
+    },
+    {
+      "params": {
+        "margin": 0.0012583441672674649,
+        "gamma": 0.009635342462775894,
+        "half_life": 24530.628041524964
+      },
+      "f": 0.098,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.668478,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.004
+            },
+            "1536": {
+              "rate": 0.808166,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.018
+            },
+            "2048": {
+              "rate": 0.894637,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.098
+            },
+            "3072": {
+              "rate": 0.968677,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.019
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.098,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885937,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.048
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.048,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 42,
+      "acq": 0.0,
+      "t_s": 9617.5
+    },
+    {
+      "params": {
+        "margin": 0.001001896928712712,
+        "gamma": 0.0017864896648283365,
+        "half_life": 186979.47121651232
+      },
+      "f": 0.074,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.808086,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.026
+            },
+            "2048": {
+              "rate": 0.89488,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.074
+            },
+            "3072": {
+              "rate": 0.968435,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            },
+            "4096": {
+              "rate": 0.988756,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.074,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973017,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.017
+            }
+          },
+          "worst_deficit_pp": 0.017,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 43,
+      "acq": 0.0,
+      "t_s": 9780.4
+    },
+    {
+      "params": {
+        "margin": 0.0013257852218782108,
+        "gamma": 0.0006799220974390474,
+        "half_life": 137134.3202469334
+      },
+      "f": 0.105,
+      "g_max_switches": 5,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.66852,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1536": {
+              "rate": 0.808403,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": -0.006
+            },
+            "2048": {
+              "rate": 0.894568,
+              "loop_eq_prop": true,
+              "switches": 5,
+              "deficit_pp": 0.105
+            },
+            "3072": {
+              "rate": 0.968435,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            },
+            "4096": {
+              "rate": 0.988747,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.012
+            }
+          },
+          "worst_deficit_pp": 0.105,
+          "max_switches": 5,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.886415,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "1024": {
+              "rate": 0.973017,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.017
+            }
+          },
+          "worst_deficit_pp": 0.017,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 44,
+      "acq": 0.0,
+      "t_s": 10001.8
+    },
+    {
+      "params": {
+        "margin": 0.0010898202368281739,
+        "gamma": 0.009846341226060736,
+        "half_life": 28002.464580150703
+      },
+      "f": 0.131,
+      "g_max_switches": 3,
+      "per_model": {
+        "qwen30b": {
+          "caps": {
+            "128": {
+              "rate": 0.208345,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "256": {
+              "rate": 0.327289,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "384": {
+              "rate": 0.41476,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.485328,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "768": {
+              "rate": 0.59048,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": -0.0
+            },
+            "1024": {
+              "rate": 0.668299,
+              "loop_eq_prop": true,
+              "switches": 2,
+              "deficit_pp": 0.022
+            },
+            "1536": {
+              "rate": 0.808008,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.034
+            },
+            "2048": {
+              "rate": 0.894311,
+              "loop_eq_prop": true,
+              "switches": 3,
+              "deficit_pp": 0.131
+            },
+            "3072": {
+              "rate": 0.968629,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": -0.015
+            },
+            "4096": {
+              "rate": 0.988858,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.001
+            }
+          },
+          "worst_deficit_pp": 0.131,
+          "max_switches": 3,
+          "loop_eq_prop_all": true
+        },
+        "granite": {
+          "caps": {
+            "128": {
+              "rate": 0.283762,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "256": {
+              "rate": 0.468164,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "512": {
+              "rate": 0.728697,
+              "loop_eq_prop": true,
+              "switches": 0,
+              "deficit_pp": 0.0
+            },
+            "768": {
+              "rate": 0.885907,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.051
+            },
+            "1024": {
+              "rate": 0.973134,
+              "loop_eq_prop": true,
+              "switches": 1,
+              "deficit_pp": 0.005
+            }
+          },
+          "worst_deficit_pp": 0.051,
+          "max_switches": 1,
+          "loop_eq_prop_all": true
+        }
+      },
+      "feasible": true,
+      "trial": 45,
+      "acq": 0.0,
+      "t_s": 10201.8
+    }
+  ],
+  "rules": {
+    "kernel": "RBF ls=0.25 sig=1.0 noise=0.0001",
+    "rng_seed": 20261104,
+    "candidates_per_iter": 2048,
+    "space": "M[0.001,0.02] G[0.0005,0.01] HL[4096,262144]log"
+  }
+}

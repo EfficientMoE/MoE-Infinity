@@ -1,0 +1,36 @@
+unit: 3/3 bite (window drives challenge; decayed lead ignored)
+d=256 done [173s]
+d=1024 done [341s]
+d=2048 done [509s]
+d=4096 done [681s]
+d=256 done [174s]
+d=1024 done [373s]
+d=2048 done [555s]
+d=4096 done [748s]
+VERDICT: HARM/THRASH | det: True | repl: exp681 costfit + exp685 ring10/ring25 + exp686a ringfit3_10 exact | bars: {'h1': True, 'h2': False, 'h3': True, 'h4': False, 'acc': True}
+cell: {'d': 256, 'cap': 512, 'burst_def_cf_pp': 2.734, 'burst_def_windowfit3_10_pp': 2.734, 'rec_def_cf_pp': -0.22, 'rec_def_windowfit3_10_pp': -0.708, 'loop_vs_l_windowfit3_10_pp': 0.907}
+  adopt: windowfit3_10 {'burst': 'ring', 'rec': 'ring', 'sw': 8, 'sw_by': {'lcnu': 0, 's3fifo': 4, 'ring': 4}}
+  adopt: windowfit3_25 {'burst': 'ring', 'rec': 'ring', 'sw': 8, 'sw_by': {'lcnu': 0, 's3fifo': 4, 'ring': 4}}
+cell: {'d': 256, 'cap': 2048, 'burst_def_cf_pp': 0.0, 'burst_def_windowfit3_10_pp': 0.781, 'rec_def_cf_pp': 0.0, 'rec_def_windowfit3_10_pp': -0.171, 'loop_vs_l_windowfit3_10_pp': 0.013}
+  adopt: windowfit3_10 {'burst': 'ring', 'rec': 'ring', 'sw': 9, 'sw_by': {'lcnu': 0, 's3fifo': 4, 'ring': 5}}
+  adopt: windowfit3_25 {'burst': 'lcnu', 'rec': 'lcnu', 'sw': 9, 'sw_by': {'lcnu': 1, 's3fifo': 4, 'ring': 4}}
+cell: {'d': 1024, 'cap': 512, 'burst_def_cf_pp': 5.371, 'burst_def_windowfit3_10_pp': 5.176, 'rec_def_cf_pp': -0.073, 'rec_def_windowfit3_10_pp': -1.099, 'loop_vs_l_windowfit3_10_pp': 0.905}
+  adopt: windowfit3_10 {'burst': 'ring', 'rec': 'ring', 'sw': 8, 'sw_by': {'lcnu': 0, 's3fifo': 4, 'ring': 4}}
+  adopt: windowfit3_25 {'burst': 'ring', 'rec': 'ring', 'sw': 9, 'sw_by': {'lcnu': 1, 's3fifo': 4, 'ring': 4}}
+cell: {'d': 1024, 'cap': 2048, 'burst_def_cf_pp': 0.0, 'burst_def_windowfit3_10_pp': 5.566, 'rec_def_cf_pp': 0.0, 'rec_def_windowfit3_10_pp': -1.147, 'loop_vs_l_windowfit3_10_pp': 0.022}
+  adopt: windowfit3_10 {'burst': 'ring', 'rec': 'ring', 'sw': 9, 'sw_by': {'lcnu': 0, 's3fifo': 4, 'ring': 5}}
+  adopt: windowfit3_25 {'burst': 'lcnu', 'rec': 'lcnu', 'sw': 9, 'sw_by': {'lcnu': 1, 's3fifo': 4, 'ring': 4}}
+cell: {'d': 2048, 'cap': 512, 'burst_def_cf_pp': 4.053, 'burst_def_windowfit3_10_pp': 5.566, 'rec_def_cf_pp': 1.294, 'rec_def_windowfit3_10_pp': -1.367, 'loop_vs_l_windowfit3_10_pp': 0.904}
+  adopt: windowfit3_10 {'burst': 'ring', 'rec': 'ring', 'sw': 10, 'sw_by': {'lcnu': 1, 's3fifo': 4, 'ring': 5}}
+  adopt: windowfit3_25 {'burst': 'ring', 'rec': 'ring', 'sw': 9, 'sw_by': {'lcnu': 1, 's3fifo': 4, 'ring': 4}}
+cell: {'d': 2048, 'cap': 2048, 'burst_def_cf_pp': 0.0, 'burst_def_windowfit3_10_pp': 7.666, 'rec_def_cf_pp': 0.0, 'rec_def_windowfit3_10_pp': -1.709, 'loop_vs_l_windowfit3_10_pp': 0.008}
+  adopt: windowfit3_10 {'burst': 'ring', 'rec': 'ring', 'sw': 9, 'sw_by': {'lcnu': 0, 's3fifo': 4, 'ring': 5}}
+  adopt: windowfit3_25 {'burst': 'lcnu', 'rec': 'lcnu', 'sw': 9, 'sw_by': {'lcnu': 1, 's3fifo': 4, 'ring': 4}}
+cell: {'d': 4096, 'cap': 512, 'burst_def_cf_pp': 1.074, 'burst_def_windowfit3_10_pp': 5.957, 'rec_def_cf_pp': 6.982, 'rec_def_windowfit3_10_pp': -0.732, 'loop_vs_l_windowfit3_10_pp': 1.015}
+  adopt: windowfit3_10 {'burst': 'ring', 'rec': 'ring', 'sw': 11, 'sw_by': {'lcnu': 2, 's3fifo': 4, 'ring': 5}}
+  adopt: windowfit3_25 {'burst': 'ring', 'rec': 'ring', 'sw': 11, 'sw_by': {'lcnu': 2, 's3fifo': 4, 'ring': 5}}
+cell: {'d': 4096, 'cap': 2048, 'burst_def_cf_pp': 0.0, 'burst_def_windowfit3_10_pp': 9.229, 'rec_def_cf_pp': 0.0, 'rec_def_windowfit3_10_pp': -1.44, 'loop_vs_l_windowfit3_10_pp': -0.033}
+  adopt: windowfit3_10 {'burst': 'ring', 'rec': 'ring', 'sw': 14, 'sw_by': {'lcnu': 3, 's3fifo': 4, 'ring': 7}}
+  adopt: windowfit3_25 {'burst': 'lcnu', 'rec': 'lcnu', 'sw': 14, 'sw_by': {'lcnu': 3, 's3fifo': 4, 'ring': 7}}
+h0: {'incumbent_at_mid': 'ring', 'switch_indices_near_mid': [327679], 'first_ring_adoption_gte_mid': 331775, 'recovery_end': 327680, 'tl_full': [[0, 'lcnu'], [4095, 'ring'], [8191, 's3fifo'], [12287, 'ring'], [16383, 's3fifo'], [32767, 'ring'], [57343, 's3fifo'], [77823, 'ring'], [327679, 'lcnu'], [331775, 'ring'], [335871, 'lcnu'], [339967, 's3fifo']]}
+RUN_EXIT=0
