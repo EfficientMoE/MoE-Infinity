@@ -92,6 +92,7 @@ POLICY_ORDER = [
     "costfit3",
     "shared_costfit",
     "shared_costfit3",
+    "follow",
     "single_layer_ahead",
     "stride_prefetch",
     "multi_layer_ahead",
@@ -124,6 +125,7 @@ PRETTY = {
     "costfit3": "CostFit3 (3-candidate self-limiting arbitration)",
     "shared_costfit": "SharedCostFit (CostFit, shared per-key metadata table)",
     "shared_costfit3": "SharedCostFit3 (CostFit3, shared per-key metadata table)",
+    "follow": "FOLLOW (CostFit over LCNU/S3-FIFO ghosts, one real set)",
     "single_layer_ahead": "1-layer-ahead*",
     "stride_prefetch": "Stride*",
     "multi_layer_ahead": "Multi-layer*",
@@ -247,6 +249,7 @@ def geometry_kwargs(name: str, stats: Dict[str, int]) -> Dict[str, float]:
             "costfit3",
             "shared_costfit",
             "shared_costfit3",
+            "follow",
         }
         and stats["top_k"] > 0
         and num_experts > 0

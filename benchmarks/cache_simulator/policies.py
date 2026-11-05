@@ -1701,6 +1701,7 @@ POLICY_FACTORIES = {
     "costfit3": lambda cap, **kw: _build_costfit3(cap, **kw),
     "shared_costfit": lambda cap, **kw: _build_shared_costfit(cap, **kw),
     "shared_costfit3": lambda cap, **kw: _build_shared_costfit3(cap, **kw),
+    "follow": lambda cap, **kw: _build_follow(cap, **kw),
     # LCNU with decode-only routing statistics: prefill passes (visits wider
     # than ``decode_width``) give no routing evidence.
     "lcnu_p": lambda cap, **kw: LayerCycleNextUsePolicy(
@@ -1728,6 +1729,12 @@ def _build_costfit(cap, **kw):
     from .research.policies_costfit import CostFitPolicy
 
     return CostFitPolicy(cap, **kw)
+
+
+def _build_follow(cap, **kw):
+    from .research.policies_follow import FollowPolicy
+
+    return FollowPolicy(cap, **kw)
 
 
 def _build_costfit3(cap, **kw):
@@ -1784,6 +1791,7 @@ GEOMETRY_POLICIES = {
     "costfit3",
     "shared_costfit",
     "shared_costfit3",
+    "follow",
 }
 
 #: LCNU variants (take ``prior`` and ``decode_width`` too).
