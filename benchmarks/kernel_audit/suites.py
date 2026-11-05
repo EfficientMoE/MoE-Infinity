@@ -17,6 +17,7 @@ Impl names:
 
 from __future__ import annotations
 
+import functools
 import math
 import os
 from dataclasses import dataclass, field
@@ -1159,31 +1160,215 @@ def _gdn_builder(T, Hv, dk, dv):
     return build
 
 
-def gdn_cases(model_keys: list[str] | None = None) -> list[Case]:
-    out = []
-    m = MODELS["qwen3.5-35b-a3b"]
-    if model_keys and m.key not in model_keys:
-        return out
-    Hv, dk, dv = 32, 128, 128
-    for lbl in ("1K", "2K", "9K"):
-        T = PREFILL_TOKENS[lbl]
-        # chunked delta rule: ~ (4*C*dk + 2*dk*dv*... ) per token; use 6*T*Hv*dk*dv
-        out.append(
-            Case(
-                f"{m.key}|{lbl}|gdn_torch",
-                suite="gdn",
-                model=m.key,
-                phase="prefill",
-                size=lbl,
-                impl="gdn_torch",
-                flops=6.0 * T * Hv * dk * dv,
-                bytes_min=T * Hv * (2 * dk + 2 * dv) * BF16,
-                build=_gdn_builder(T, Hv, dk, dv),
-                layers=m.attn.linear_layers,
-                meta={"T": T},
-                iters=3,
+def _fla_missing() -> str | None:
+    try:
+        import fla.ops  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        return f"flash-linear-attention unavailable: {exc}"
+    return None
+
+
+def _gdn_fla_builder(T, Hv, dk, dv, fused=False):
+    def build():
+        if fused:
+            from moe_infinity.kernel.linear_attention_fused import (
+                chunk_gated_delta_rule_fused as chunk_gated_delta_rule,
             )
+        else:
+            from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+
+        q = torch.randn(1, T, Hv, dk, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(1, T, Hv, dk, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(1, T, Hv, dv, device="cuda", dtype=torch.bfloat16)
+        g = -torch.rand(1, T, Hv, device="cuda", dtype=torch.float32)
+        beta = torch.rand(1, T, Hv, device="cuda", dtype=torch.bfloat16)
+
+        def run():
+            # opt-in CUDA recurrence path is chosen per call
+            os.environ["MOE_LINEAR_ATTN_CUDA_PRO6000"] = (
+                "1" if fused == "cuda" else "0"
+            )
+            return chunk_gated_delta_rule(
+                q,
+                k,
+                v,
+                g=g,
+                beta=beta,
+                output_final_state=True,
+                use_qk_l2norm_in_kernel=True,
+            )
+
+        return run
+
+    return build
+
+
+def _kda_inputs(T, H, d):
+    q = torch.randn(1, T, H, d, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(1, T, H, d, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(1, T, H, d, device="cuda", dtype=torch.bfloat16)
+    # GLM-5.3-Flash safe gate: -5 * sigmoid(.) per channel, fp32
+    g = -5.0 * torch.sigmoid(torch.randn(1, T, H, d, device="cuda") - 4.0)
+    beta = torch.rand(1, T, H, device="cuda", dtype=torch.bfloat16)
+    return q, k, v, g, beta
+
+
+def _kda_builder(T, H, d, impl):
+    def build():
+        if impl == "kda_fla":
+            from fla.ops.kda import chunk_kda as fn
+        elif impl == "kda_fused":
+            from moe_infinity.kernel.linear_attention_fused import (
+                chunk_kda_fused as fn,
+            )
+        else:
+            import inspect
+
+            from transformers.models.glm5_next import modeling_glm5_next as mg
+
+            # undecorated torch reference (the module global may be fla)
+            fn = inspect.unwrap(mg.chunk_kimi_delta_attention)
+        q, k, v, g, beta = _kda_inputs(T, H, d)
+        return lambda: fn(
+            q,
+            k,
+            v,
+            g=g,
+            beta=beta,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
         )
+
+    return build
+
+
+def _gdn_decode_builder(B, Hv, dk, dv, impl):
+    def build():
+        if impl == "gdn_fla_decode":
+            from fla.ops.gated_delta_rule import (
+                fused_recurrent_gated_delta_rule as fn,
+            )
+        else:
+            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+                torch_recurrent_gated_delta_rule as fn,
+            )
+        q = torch.randn(B, 1, Hv, dk, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(B, 1, Hv, dk, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(B, 1, Hv, dv, device="cuda", dtype=torch.bfloat16)
+        g = -torch.rand(B, 1, Hv, device="cuda", dtype=torch.float32)
+        beta = torch.rand(B, 1, Hv, device="cuda", dtype=torch.bfloat16)
+        h0 = torch.zeros(B, Hv, dk, dv, device="cuda", dtype=torch.float32)
+        return lambda: fn(
+            q,
+            k,
+            v,
+            g=g,
+            beta=beta,
+            initial_state=h0,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    return build
+
+
+def gdn_cases(model_keys: list[str] | None = None) -> list[Case]:
+    """Linear attention: Qwen3.5 GDN (prefill + decode), GLM-5.3-Flash KDA.
+
+    ``*_torch`` is the transformers fallback, ``*_fla`` the chunked / fused
+    Triton kernels of flash-linear-attention, ``*_fused`` MoE-Infinity's
+    fused prefill (moe_infinity.kernel.linear_attention_fused, #304).
+    """
+    out = []
+    fla_skip = _fla_missing()
+    m = MODELS["qwen3.5-35b-a3b"]
+    if not model_keys or m.key in model_keys:
+        Hv, dk, dv = 32, 128, 128
+        for lbl in ("1K", "2K", "9K", "12K", "50K"):
+            T = PREFILL_TOKENS[lbl]
+            # chunked delta rule: ~ (4*C*dk + 2*dk*dv*... ) per token; use 6*T*Hv*dk*dv
+            for impl, builder in (
+                ("gdn_torch", _gdn_builder),
+                ("gdn_fla", _gdn_fla_builder),
+                ("gdn_fused", functools.partial(_gdn_fla_builder, fused=True)),
+                (
+                    "gdn_fused_cuda",
+                    functools.partial(_gdn_fla_builder, fused="cuda"),
+                ),
+            ):
+                if impl == "gdn_torch" and T > 9216:
+                    continue
+                out.append(
+                    Case(
+                        f"{m.key}|{lbl}|{impl}",
+                        suite="gdn",
+                        model=m.key,
+                        phase="prefill",
+                        size=lbl,
+                        impl=impl,
+                        flops=6.0 * T * Hv * dk * dv,
+                        bytes_min=T * Hv * (2 * dk + 2 * dv) * BF16,
+                        build=builder(T, Hv, dk, dv),
+                        layers=m.attn.linear_layers,
+                        meta={"T": T},
+                        skip=fla_skip if impl != "gdn_torch" else None,
+                        iters=3 if impl == "gdn_torch" else None,
+                    )
+                )
+        for B in (1, 16):
+            for impl in ("gdn_torch_decode", "gdn_fla_decode"):
+                out.append(
+                    Case(
+                        f"{m.key}|b{B}|{impl}",
+                        suite="gdn",
+                        model=m.key,
+                        phase="decode",
+                        size=f"b{B}",
+                        impl=impl,
+                        flops=6.0 * B * Hv * dk * dv,
+                        # fp32 state read + write dominates
+                        bytes_min=2 * B * Hv * dk * dv * 4
+                        + B * Hv * (2 * dk + 2 * dv) * BF16,
+                        build=_gdn_decode_builder(B, Hv, dk, dv, impl),
+                        layers=m.attn.linear_layers,
+                        meta={"T": B},
+                        skip=fla_skip if impl == "gdn_fla_decode" else None,
+                    )
+                )
+    m = MODELS["glm-5.3-flash"]
+    if not model_keys or m.key in model_keys:
+        H, d = 64, 128  # linear_attn_config: num_heads=64, head_dim=128
+        for lbl in ("1K", "2K", "9K", "12K"):
+            T = PREFILL_TOKENS[lbl]
+            for impl in ("kda_torch", "kda_fla", "kda_fused"):
+                skip = fla_skip if impl != "kda_torch" else None
+                if impl == "kda_torch":
+                    try:
+                        from transformers.models.glm5_next import (  # noqa: F401
+                            modeling_glm5_next,
+                        )
+                    except Exception:  # noqa: BLE001
+                        skip = "transformers < 5.16 (no glm5_next)"
+                    if T > 2048:
+                        # [H, T/64, 64, 64, d] fp32 decay tensors: ~19 GB each
+                        skip = "torch KDA reference: O(T*64*d) fp32 temporaries"
+                out.append(
+                    Case(
+                        f"{m.key}|{lbl}|{impl}",
+                        suite="gdn",
+                        model=m.key,
+                        phase="prefill",
+                        size=lbl,
+                        impl=impl,
+                        flops=6.0 * T * H * d * d,
+                        bytes_min=T * H * (4 * d * BF16 + d * 4),
+                        build=_kda_builder(T, H, d, impl),
+                        layers=m.attn.linear_layers,
+                        meta={"T": T},
+                        skip=skip,
+                        iters=3 if impl == "kda_torch" else None,
+                    )
+                )
     return out
 
 
