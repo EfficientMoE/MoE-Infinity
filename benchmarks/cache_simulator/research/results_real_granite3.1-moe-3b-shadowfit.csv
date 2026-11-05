@@ -1,0 +1,11 @@
+model,dataset,policy,capacity,hit_rate,effective_hit_rate,is_oracle_upper_bound,provenance
+granite3.1-moe-3b,handcrafted8-greedy512/decode/decode,belady,128,0.421924,0.421924,0,real
+granite3.1-moe-3b,handcrafted8-greedy512/decode/decode,shadowfit,128,0.283762,0.283762,0,real
+granite3.1-moe-3b,handcrafted8-greedy512/decode/decode,belady,256,0.645768,0.645768,0,real
+granite3.1-moe-3b,handcrafted8-greedy512/decode/decode,shadowfit,256,0.468164,0.468164,0,real
+granite3.1-moe-3b,handcrafted8-greedy512/decode/decode,belady,512,0.854698,0.854698,0,real
+granite3.1-moe-3b,handcrafted8-greedy512/decode/decode,shadowfit,512,0.728697,0.728697,0,real
+granite3.1-moe-3b,handcrafted8-greedy512/decode/decode,belady,768,0.950110,0.950110,0,real
+granite3.1-moe-3b,handcrafted8-greedy512/decode/decode,shadowfit,768,0.886415,0.886415,0,real
+granite3.1-moe-3b,handcrafted8-greedy512/decode/decode,belady,1024,0.989724,0.989724,0,real
+granite3.1-moe-3b,handcrafted8-greedy512/decode/decode,shadowfit,1024,0.970839,0.970839,0,real

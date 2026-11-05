@@ -1,0 +1,10 @@
+SMOKE S1 ok: sha assertion bites on perturbed seed
+stream 4 done [56s]
+SMOKE S2 H0 machinery replication cells 4 ok True
+SMOKE S3 H0 negative control detects True
+stream 0 done [9s]
+stream 9 done [14s]
+stream 0 done [9s]
+stream 9 done [14s]
+SMOKE S4 det True adjudicate well-formed True accounting True
+SMOKE_OK

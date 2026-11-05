@@ -345,6 +345,34 @@ def test_build_policy_unknown_name():
         build_policy("does_not_exist", 4)
 
 
+def test_costfit3_n_way_arbitration_accounting():
+    # 3-candidate arbitration: credited-rate property, deterministic, and the
+    # switch bookkeeping must be internally consistent (total == per-choice).
+    rng = random.Random(7)
+    accesses = bursty_decode_trace(rng, 400, 6, 16, 2)
+    cap = 6 * 2 - 2
+    pol = build_policy("costfit3", cap, num_layers=6, prior=2 / 16)
+    hits = sum(1 for k in accesses if pol.on_access(k))
+    assert pol.hit_rate == pytest.approx(hits / len(accesses))
+    assert pol.effective_hit_rate == pol.hit_rate  # credited at access time
+    assert pol.switches == sum(pol.choice_switches.values())
+    assert pol.uses_oracle is False
+    # deterministic: a second run must agree bit-for-bit
+    pol2 = build_policy("costfit3", cap, num_layers=6, prior=2 / 16)
+    hits2 = sum(1 for k in accesses if pol2.on_access(k))
+    assert (hits2, pol2.switches, pol2.choice_switches) == (
+        hits,
+        pol.switches,
+        pol.choice_switches,
+    )
+    # no-regression vs the sealed 2-way arbiter on the same stream
+    pol_c2 = build_policy("costfit", cap, num_layers=6, prior=2 / 16)
+    hits_c2 = sum(1 for k in accesses if pol_c2.on_access(k))
+    assert (
+        hits >= hits_c2 - len(accesses) * 0.001
+    )  # within 0.1% of stream length
+
+
 def test_full_capacity_only_compulsory_misses():
     accesses = [A, B, C, A, B, C, A]
     distinct = len({*accesses})
