@@ -19,10 +19,40 @@ from moe_infinity.kernel.paged_attention_ops import (
     paged_attention_fwd,
     probe_native_int8_binding,
 )
+from moe_infinity.kernel.paged_kv_write import (
+    flashinfer_kv_scatter_,
+    paged_kv_scatter_,
+)
 from moe_infinity.runtime import flashinfer_utils
 from moe_infinity.runtime.attention_types import (
     AttentionMetadata as RuntimeAttentionMetadata,
 )
+
+
+def _same_device(t: torch.Tensor, device: torch.device) -> bool:
+    if t.device == device:
+        return True
+    return (
+        device.type == "cuda"
+        and device.index is None
+        and t.is_cuda
+        and t.device.index == torch.cuda.current_device()
+    )
+
+
+def _slots_on(slot_mapping: torch.Tensor, device: torch.device) -> torch.Tensor:
+    if slot_mapping.dtype not in (torch.int32, torch.int64):
+        slot_mapping = slot_mapping.to(dtype=torch.long)
+    if not _same_device(slot_mapping, device):
+        slot_mapping = slot_mapping.to(device=device)
+    return slot_mapping
+
+
+def _on(t: torch.Tensor, device: torch.device, dtype: torch.dtype):
+    # Skip the no-op ``.to`` call: it costs ~1 us of host time per tensor.
+    if t.dtype is dtype and _same_device(t, device):
+        return t
+    return t.to(device=device, dtype=dtype)
 
 
 def _allocate_resize_tensor(
@@ -67,6 +97,70 @@ def _flashinfer_usable_on(module: object, device: torch.device | None) -> bool:
         return True
     module_name = getattr(module, "__name__", "")
     return not module_name.startswith("flashinfer")
+
+
+# None until the first GQA call; False once torch rejects ``enable_gqa``.
+_SDPA_ENABLE_GQA: Optional[bool] = None
+_FLASH_GQA_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _use_native_gqa(q: torch.Tensor) -> bool:
+    return (
+        _SDPA_ENABLE_GQA is not False
+        and q.is_cuda
+        and q.dtype in _FLASH_GQA_DTYPES
+    )
+
+
+def _sdpa_with_scale(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float,
+    is_causal: bool,
+) -> torch.Tensor:
+    try:
+        return F.scaled_dot_product_attention(
+            q, k, v, scale=scale, is_causal=is_causal
+        )
+    except TypeError:
+        return F.scaled_dot_product_attention(
+            q * scale, k, v, is_causal=is_causal
+        )
+
+
+def causal_prefill_sdpa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    """Causal SDPA over ``q [B, H, T, d]`` and GQA ``k``/``v [B, KVH, T, d]``.
+
+    fp16/bf16 CUDA inputs use SDPA's native GQA (FlashAttention reads each
+    K/V head once). Other inputs, or torch without ``enable_gqa``, expand K/V
+    with ``repeat_interleave``: there ``enable_gqa`` would only reach the math
+    backend, which materialises the T x T scores.
+    """
+    global _SDPA_ENABLE_GQA
+    num_heads, num_kv_heads = int(q.shape[1]), int(k.shape[1])
+    if num_heads % num_kv_heads != 0:
+        raise ValueError("query num_heads must be divisible by num_kv_heads")
+    head_ratio = num_heads // num_kv_heads
+    if head_ratio == 1:
+        return _sdpa_with_scale(q, k, v, scale, is_causal=True)
+    if _use_native_gqa(q):
+        try:
+            out = F.scaled_dot_product_attention(
+                q, k, v, scale=scale, is_causal=True, enable_gqa=True
+            )
+            _SDPA_ENABLE_GQA = True
+            return out
+        except TypeError:
+            _SDPA_ENABLE_GQA = False
+    k = k.repeat_interleave(head_ratio, dim=1)
+    v = v.repeat_interleave(head_ratio, dim=1)
+    return _sdpa_with_scale(q, k, v, scale, is_causal=True)
 
 
 @dataclass
@@ -686,51 +780,35 @@ class PagedAttentionBackend:
         if head_dim != self.spec.head_dim:
             raise ValueError("head_dim mismatch with cache spec")
 
-        block_size = self.spec.block_size
         k_store = self._k_store(layer_idx)
         v_store = self._v_store(layer_idx)
-        x = k_store.shape[-1]
+        # Storage-bound CUDA writes go through the capture-safe writer. Every
+        # other write uses the vectorised scatter already on main.
+        if self.storage is not None and key.is_cuda:
+            k_src = _on(key, self.device, k_store.dtype)
+            v_src = _on(value, self.device, v_store.dtype)
+            slots = _slots_on(slot_mapping, self.device)
+            if k_src.is_cuda and k_src.device == self.storage.spec.device:
+                # Storage-bound backends serve the CUDA-graph decode path: one
+                # launch per layer, no host sync, so the write can be captured.
+                from moe_infinity.kernel.paged_kv_write import paged_kv_write_
 
-        k_src = key.to(device=self.device, dtype=k_store.dtype)
-        v_src = value.to(device=self.device, dtype=v_store.dtype)
-        slots = slot_mapping.to(device=self.device, dtype=torch.long)
-
-        if (
-            self.storage is not None
-            and k_src.is_cuda
-            and k_src.device == self.storage.spec.device
-        ):
-            # Storage-bound backends serve the CUDA-graph decode path: one
-            # launch per layer, no host sync, so the write can be captured.
-            from moe_infinity.kernel.paged_kv_write import paged_kv_write_
-
-            paged_kv_write_(
-                self.storage,
-                layer_idx=layer_idx,
-                key=k_src.contiguous(),
-                value=v_src.contiguous(),
-                slot_mapping=slots,
-            )
-            return
-
-        for i in range(num_tokens):
-            slot = int(slots[i].item())
-            if slot < 0:
-                raise ValueError("slot_mapping contains negative slot index")
-
-            block_id = slot // block_size
-            token_offset = slot % block_size
-            if block_id >= self.num_gpu_blocks:
-                raise ValueError(
-                    "slot_mapping points past allocated GPU blocks"
+                paged_kv_write_(
+                    self.storage,
+                    layer_idx=layer_idx,
+                    key=k_src.contiguous(),
+                    value=v_src.contiguous(),
+                    slot_mapping=slots,
                 )
+                return
 
-            k_store[block_id, :, :, token_offset, :] = k_src[i].reshape(
-                self.spec.num_kv_heads,
-                self.spec.head_dim // x,
-                x,
-            )
-            v_store[block_id, :, :, token_offset] = v_src[i]
+        paged_kv_scatter_(
+            k_store,
+            v_store,
+            _on(key, self.device, k_store.dtype),
+            _on(value, self.device, v_store.dtype),
+            _slots_on(slot_mapping, self.device),
+        )
 
     def _k_store(self, layer_idx: int) -> torch.Tensor:
         if self._block_store is not None:
@@ -781,25 +859,12 @@ class PagedAttentionBackend:
         if head_dim != self.spec.head_dim:
             raise ValueError("head_dim mismatch with cache spec")
 
-        k_src = key.to(device=self.device, dtype=self.spec.dtype)
-        v_src = value.to(device=self.device, dtype=self.spec.dtype)
-        slots = slot_mapping.to(device=self.device, dtype=torch.long)
-
-        block_size = self.spec.block_size
-        for i in range(num_tokens):
-            slot = int(slots[i].item())
-            if slot < 0:
-                raise ValueError("slot_mapping contains negative slot index")
-
-            block_id = slot // block_size
-            token_offset = slot % block_size
-            if block_id >= self.num_gpu_blocks:
-                raise ValueError(
-                    "slot_mapping points past allocated GPU blocks"
-                )
-
-            fi_store[block_id, 0, token_offset] = k_src[i]
-            fi_store[block_id, 1, token_offset] = v_src[i]
+        flashinfer_kv_scatter_(
+            fi_store,
+            _on(key, self.device, self.spec.dtype),
+            _on(value, self.device, self.spec.dtype),
+            _slots_on(slot_mapping, self.device),
+        )
 
     def forward(
         self,
@@ -965,18 +1030,20 @@ class PagedAttentionBackend:
                 seq_len=seq_len,
                 execution_dtype=torch.float32,
             )
-            k = k.permute(1, 0, 2)
-            v = v.permute(1, 0, 2)
-            if head_ratio > 1:
-                k = k.repeat_interleave(head_ratio, dim=0)
-                v = v.repeat_interleave(head_ratio, dim=0)
+            k_sdpa = k.permute(1, 0, 2).unsqueeze(0)
+            v_sdpa = v.permute(1, 0, 2).unsqueeze(0)
+            # One unmasked query token: the query heads sharing a KV head
+            # become that head's query rows, so K/V are never expanded.
             q_sdpa = (
-                query[seq_idx].to(dtype=torch.float32).unsqueeze(0).unsqueeze(2)
+                query[seq_idx]
+                .to(dtype=torch.float32)
+                .reshape(num_kv_heads, head_ratio, -1)
+                .unsqueeze(0)
             )
-            k_sdpa = k.unsqueeze(0)
-            v_sdpa = v.unsqueeze(0)
             out_fp32 = self._run_sdpa_fp32(q_sdpa, k_sdpa, v_sdpa, attn_scale)
-            outputs.append(out_fp32[0, :, 0, :].to(dtype=query_dtype))
+            outputs.append(
+                out_fp32[0].reshape(num_heads, -1).to(dtype=query_dtype)
+            )
         return torch.stack(outputs, dim=0)
 
     @staticmethod
@@ -1074,39 +1141,12 @@ class PagedAttentionBackend:
             .unsqueeze(0)
         )
 
-        num_heads = q.shape[1]
-        num_kv_heads = k.shape[1]
-        if num_heads % num_kv_heads != 0:
-            raise ValueError(
-                "query num_heads must be divisible by num_kv_heads"
-            )
-        head_ratio = num_heads // num_kv_heads
-        if head_ratio > 1:
-            k = k.repeat_interleave(head_ratio, dim=1)
-            v = v.repeat_interleave(head_ratio, dim=1)
-
         attn_scale = (
             float(scale)
             if scale is not None
             else 1.0 / math.sqrt(float(self.spec.head_dim))
         )
-
-        try:
-            out = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                scale=attn_scale,
-                is_causal=True,
-            )
-        except TypeError:
-            out = F.scaled_dot_product_attention(
-                q * attn_scale,
-                k,
-                v,
-                is_causal=True,
-            )
-
+        out = causal_prefill_sdpa(q, k, v, attn_scale)
         return out.squeeze(0).transpose(0, 1)
 
     def _decode_forward(

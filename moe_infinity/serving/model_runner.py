@@ -49,8 +49,28 @@ logger = logging.getLogger(__name__)
 # chunked prefill, layered store binding). Matched by class name through the
 # MRO, like ``_get_paged_attention_classes``.
 _LAYER_REGISTERED_SHIMS = frozenset(
-    {"Qwen3PagedAttention", "OlmoePagedAttention", "Qwen3_5MoePagedAttention"}
+    {
+        "Qwen3PagedAttention",
+        "OlmoePagedAttention",
+        "Qwen3_5MoePagedAttention",
+        "MixtralPagedAttention",
+    }
 )
+
+# Serving never hands ``past_key_values`` to full-attention layers: KV history
+# exists only through a *PagedAttention shim plus a paged backend. Without
+# them every decode step attends only to itself (issue #318). The serving
+# entry points refuse such models at startup unless this is "0"; a runner
+# built directly (no startup check) only raises per forward when it is "1".
+STRICT_PAGED_ATTENTION_ENV = "MOE_STRICT_PAGED_ATTENTION"
+
+
+def strict_paged_attention(default: bool = True) -> bool:
+    value = os.environ.get(STRICT_PAGED_ATTENTION_ENV)
+    if value is None or value == "":
+        return default
+    return value != "0"
+
 
 # Hybrid models (linear-attention + full-attention layers) keep per-sequence
 # recurrent state outside the paged KV cache. Reusing a cached KV prefix or
@@ -70,6 +90,7 @@ _PAGED_ATTENTION_SHIMS = frozenset(
         "Qwen3PagedAttention",
         "OlmoePagedAttention",
         "Qwen3_5MoePagedAttention",
+        "MixtralPagedAttention",
     }
 )
 
@@ -769,20 +790,9 @@ class ModelRunner:
         )
 
         # Backend present but no shim matched => paged cache is never wired into
-        # attention and decode silently degenerates; surface it (see issue #191).
+        # attention and decode silently degenerates (issues #191, #318).
         if backend is not None and not paged_attention_classes:
-            _msg = (
-                "MoE-Infinity serving: no paged-attention shim matched the "
-                f"served model ({type(self.model).__name__}); the paged KV "
-                "cache is NOT wired into its attention, so multi-token decode "
-                "output will be INCORRECT. Implement a *PagedAttention shim for "
-                "this model (reference: moe_store/wrappers/qwen3_paged_attention.py)."
-            )
-            if os.environ.get("MOE_STRICT_PAGED_ATTENTION", "0") == "1":
-                raise RuntimeError(_msg)
-            if not self._warned_no_paged_shim:
-                logger.warning(_msg)
-                self._warned_no_paged_shim = True
+            self.require_paged_kv_history(strict_by_default=False)
 
         with torch.no_grad():
             if not use_paged_context:
@@ -1284,6 +1294,49 @@ class ModelRunner:
             classes.append(cls)
 
         return classes
+
+    def paged_kv_history_unsupported_reason(self) -> str | None:
+        """Why serving cannot keep KV history for this model, or None."""
+        classes = self._get_paged_attention_classes()
+        if not classes:
+            return "no *PagedAttention shim matched its attention layers"
+        if self._get_attention_backend() is None:
+            return "no paged attention backend was built for it"
+        config = getattr(self.model, "config", None)
+        for cls in classes:
+            reason_fn = getattr(cls, "paged_unsupported_reason", None)
+            reason = reason_fn(config) if callable(reason_fn) else None
+            if reason:
+                return f"{cls.__name__}: {reason}"
+        return None
+
+    def require_paged_kv_history(
+        self, *, strict_by_default: bool = True
+    ) -> None:
+        """Raise unless the served model keeps KV history across steps.
+
+        ``MOE_STRICT_PAGED_ATTENTION`` overrides ``strict_by_default``: "0"
+        only warns once, "1" always raises.
+        """
+        reason = self.paged_kv_history_unsupported_reason()
+        if reason is None:
+            return
+        config = getattr(self.model, "config", None)
+        model_type = getattr(config, "model_type", None)
+        msg = (
+            "MoE-Infinity serving cannot keep KV history for "
+            f"{type(self.model).__name__} (model_type={model_type!r}): "
+            f"{reason}. Every decode step would attend only to itself, so "
+            "multi-token output would be INCORRECT. Use MoE.generate() for "
+            "this model, or implement a *PagedAttention shim (reference: "
+            "moe_infinity/boundary/mixtral_paged_attention.py). Set "
+            f"{STRICT_PAGED_ATTENTION_ENV}=0 to serve it anyway."
+        )
+        if strict_paged_attention(strict_by_default):
+            raise RuntimeError(msg)
+        if not self._warned_no_paged_shim:
+            logger.warning(msg)
+            self._warned_no_paged_shim = True
 
     def _get_qwen3_paged_attention_modules(self) -> list[Any]:
         modules_fn = getattr(self.model, "modules", None)

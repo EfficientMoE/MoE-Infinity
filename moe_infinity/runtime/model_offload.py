@@ -97,6 +97,8 @@ from moe_infinity.runtime.expert_variant_manifest import (
     ExpertVariantManifest,
     load_derivative_overlay,
 )
+from moe_infinity.runtime.gptoss_offload import gptoss_mxfp4_pro6000_enabled
+from moe_infinity.runtime.hf_attention import select_attn_implementation
 from moe_infinity.runtime.hooks import *
 from moe_infinity.runtime.resident_precision import (
     load_time_fp8_plan,
@@ -684,6 +686,29 @@ def _has_fp8_blockwise(config: object) -> bool:
     return "fp8" in method
 
 
+_NATIVE_ADMISSION_MODES = {"cache": 0, "transient_on_pressure": 1}
+
+
+def _expert_routing_prior(config: object, num_experts: int) -> Optional[float]:
+    """``top_k / num_experts``: the per-layer routing probability of an expert."""
+    if not num_experts or num_experts <= 0:
+        return None
+    sources = [moe_text_config(config), config]
+    sources += [getattr(source, "ffn_config", None) for source in list(sources)]
+    for source in sources:
+        if source is None:
+            continue
+        for name in ("num_experts_per_tok", "moe_top_k", "experts_per_token"):
+            value = (
+                source.get(name)
+                if isinstance(source, dict)
+                else getattr(source, name, None)
+            )
+            if isinstance(value, int) and 0 < value <= num_experts:
+                return value / num_experts
+    return None
+
+
 def _compute_config_fingerprint(config: object) -> str:
     fields = [
         "model_type",
@@ -864,13 +889,48 @@ class OffloadEngine(object):
             return
         configure = getattr(self.archer_engine, "configure_phase_policy", None)
         if callable(configure):
+            # The native binding takes AdmissionMode values, not names.
             configure(
                 phase_policy.enabled,
-                phase_policy.prefill_admission,
-                phase_policy.decode_admission,
+                _NATIVE_ADMISSION_MODES[phase_policy.prefill_admission],
+                _NATIVE_ADMISSION_MODES[phase_policy.decode_admission],
                 phase_policy.prefill_eviction_weight,
                 phase_policy.decode_eviction_weight,
                 phase_policy.starvation_limit,
+            )
+
+    def _configure_native_eviction_policy(self) -> None:
+        name = getattr(self.archer_config, "expert_eviction_policy", "legacy")
+        if name == "legacy":
+            return
+        if is_gptq_quantized(self.config):
+            # GPTQ experts are fetched by hooks, not the expert dispatcher.
+            warnings.warn(
+                f"expert_eviction_policy={name!r} is ignored for GPTQ "
+                "checkpoints; the built-in eviction stays in use",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+        configure = getattr(
+            self.archer_engine, "configure_eviction_policy", None
+        )
+        if not callable(configure):
+            raise RuntimeError(
+                f"expert_eviction_policy={name!r} needs a native engine with "
+                "configure_eviction_policy; rebuild moe_infinity._store"
+            )
+        kwargs = {
+            "num_layers": 0,  # native side: number of registered MoE layers
+            "lcnu_alpha": float(self.archer_config.expert_eviction_lcnu_alpha),
+            "lcnu_beta": float(self.archer_config.expert_eviction_lcnu_beta),
+        }
+        prior = _expert_routing_prior(self.config, self.num_experts)
+        if prior is not None:
+            kwargs["lcnu_prior"] = prior
+        if not configure(name, **kwargs):
+            raise RuntimeError(
+                f"native engine rejected expert_eviction_policy={name!r}"
             )
 
     @property
@@ -1440,18 +1500,15 @@ class OffloadEngine(object):
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
                 )
-                _model_type = getattr(self.config, "model_type", "")
-                _force_eager = _model_type in ("glm_moe_dsa", "glm5_next")
+                attn_implementation = select_attn_implementation(
+                    cls, self.config, is_flash_attn_available
+                )
                 model = cls._from_config(
                     self.config,
                     torch_dtype=self.dtype_cls
                     if self.config.model_type != "deepseek_v3"
                     else torch.bfloat16,
-                    attn_implementation=(
-                        "eager"
-                        if _force_eager or not is_flash_attn_available
-                        else "flash_attention_2"
-                    ),
+                    attn_implementation=attn_implementation,
                 )
 
                 if self.config.model_type == "deepseek_v3":
@@ -1475,6 +1532,14 @@ class OffloadEngine(object):
                 self.expert_prefetcher.expert_dispatcher = (
                     self.expert_dispatcher
                 )
+                if parse_expert_type(self.config) == 6 and hasattr(
+                    self.expert_dispatcher, "set_gptoss_mxfp4_pro6000"
+                ):
+                    # RTX PRO 6000-tuned MXFP4 expert kernels; other devices
+                    # keep the de-quantise + matmul path.
+                    self.expert_dispatcher.set_gptoss_mxfp4_pro6000(
+                        gptoss_mxfp4_pro6000_enabled()
+                    )
 
                 for name, param in model.named_parameters(recurse=True):
                     # remove base_model_prefix from self.name_id_map
@@ -1541,6 +1606,7 @@ class OffloadEngine(object):
                     )
 
                 self._configure_native_phase_policy()
+                self._configure_native_eviction_policy()
 
                 self.expert_executor.set_expert_dispatcher(
                     self.expert_dispatcher

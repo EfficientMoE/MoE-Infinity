@@ -84,6 +84,12 @@ jobs:
             -m "not gpu and not multi_gpu and not slow and not perf and not network" \
             -x --timeout=120 -v
 
+      - name: Run expert-drop tail-class replay fixture
+        # Deterministic, offline re-derivation of the committed tail-class
+        # latency artifacts (PR #295); guards report/latency drift.
+        run: |
+          pytest benchmarks/expert_drop/test_tailclass_replay.py -v --timeout=120
+
       - name: Run DFlash unified validation E2E
         run: |
           pytest tests/python/integration/test_dflash_unified_validation_e2e.py \
