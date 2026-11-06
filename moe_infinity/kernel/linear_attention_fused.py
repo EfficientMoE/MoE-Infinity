@@ -97,7 +97,6 @@ def chunk_gated_delta_rule_fused(
     if scale is None:
         scale = k.shape[-1] ** -0.5
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
-    gc = chunk_local_cumsum(g.float(), chunk_size=64, scale=RCP_LN2)
     if os.environ.get(ENV_CUDA, "0") == "1":
         from moe_infinity.kernel import gdn_recur_cuda
         from moe_infinity.kernel.gdn_blocked import (
@@ -109,7 +108,7 @@ def chunk_gated_delta_rule_fused(
                 q,
                 k,
                 v,
-                gc,
+                g.contiguous(),
                 beta.contiguous(),
                 scale,
                 initial_state=None
@@ -118,7 +117,9 @@ def chunk_gated_delta_rule_fused(
                 output_final_state=output_final_state,
                 norm_qk=use_qk_l2norm_in_kernel,
                 use_cuda=True,
+                cumsum_g=True,
             )
+    gc = chunk_local_cumsum(g.float(), chunk_size=64, scale=RCP_LN2)
     if use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q)[0]
     w, u, kn = gdn_fwd_prep(
@@ -149,35 +150,23 @@ def chunk_kda_fused(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    from fla.modules.l2norm import l2norm_fwd
-    from fla.ops.kda.chunk_intra import chunk_kda_fwd_intra
-    from fla.ops.utils import chunk_local_cumsum
-    from fla.ops.utils.constant import RCP_LN2
-
-    from moe_infinity.kernel.gdn_fused import delta_rule_fwd_h_o
+    from moe_infinity.kernel.gdn_blocked import chunk_kda_blocked
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
-    if use_qk_l2norm_in_kernel:
-        q = l2norm_fwd(q)[0]
-        k = l2norm_fwd(k)[0]
-    gc = chunk_local_cumsum(g.float(), chunk_size=64, scale=RCP_LN2)
-    w, u, _, kg, Aqk, _ = chunk_kda_fwd_intra(
-        q=q, k=k, v=v, gk=gc, beta=beta.contiguous(), scale=scale
-    )
     if initial_state is not None:
         initial_state = initial_state.contiguous()
-    return delta_rule_fwd_h_o(
+    return chunk_kda_blocked(
         q,
-        kg,
-        w,
-        u,
-        gc,
+        k,
+        v,
+        g.contiguous(),
+        beta.contiguous(),
         scale,
-        Aqk=Aqk,
         initial_state=initial_state,
         output_final_state=output_final_state,
+        norm_qk=use_qk_l2norm_in_kernel,
     )
 
 
