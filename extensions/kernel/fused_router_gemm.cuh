@@ -24,9 +24,12 @@ template <int BM, int BN>
 struct WideCfg {
   static constexpr int kBM = BM;
   static constexpr int kBK = 32;
-  static constexpr int kStages = BM >= 128 ? 3 : (BM <= 32 ? 5 : 4);
-  using TB = cutlass::gemm::GemmShape<kBM, BN, kBK>;
-  using Warp = cutlass::gemm::GemmShape<kBM / 2, 64, kBK>;
+  static constexpr int kHalves = BN > 384 ? 2 : 1;
+  static constexpr int kMmaN = BN / kHalves;
+  static constexpr int kStages =
+      (BM >= 128 || kMmaN > 256) ? 3 : (BM <= 32 ? 5 : 4);
+  using TB = cutlass::gemm::GemmShape<kBM, kMmaN, kBK>;
+  using Warp = cutlass::gemm::GemmShape<kBM / 2, kMmaN / 4, kBK>;
   using Inst = cutlass::gemm::GemmShape<16, 8, 16>;
   using Mma = typename cutlass::gemm::threadblock::DefaultMma<
       cutlass::bfloat16_t, cutlass::layout::RowMajor, 8, cutlass::bfloat16_t,
@@ -34,11 +37,14 @@ struct WideCfg {
       cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80, TB, Warp, Inst,
       kStages, cutlass::arch::OpMultiplyAdd>::ThreadblockMma;
   static constexpr int kWarpsM = kBM / Warp::kM;  // 2
-  static constexpr int kWarpsN = BN / Warp::kN;
+  static constexpr int kWarpsN = kMmaN / Warp::kN;
   static constexpr int kThreads = 32 * kWarpsM * kWarpsN;
   static constexpr int kRowsPerRound = kBM / kWarpsM;  // rows per staging
-  // epilogue: 8 lanes per row (16 for 32-row tiles, so all 256 threads work)
-  static constexpr int kLanesPerRow = kThreads / (kBM / kWarpsM) > 8 ? 16 : 8;
+  // epilogue: 8 lanes per row (16 for 32-row tiles, 32 for BN > 256)
+  static constexpr int kLanesPerRow = BN > 256 ? 32
+                                               : (kThreads / (kBM / kWarpsM) > 8
+                                                      ? 16
+                                                      : 8);
   static constexpr int kRowsPerPass = kThreads / kLanesPerRow;  // epilogue rows
   // One warp row of the fp32 tile is staged at a time.
   static constexpr int kTileBytes = kRowsPerRound * BN * 4;
@@ -90,27 +96,34 @@ __global__ void __launch_bounds__(WideCfg<BM, BN>::kThreads, 1)
     const cutlass::layout::ColumnMajor lb(static_cast<int>(ldw));
     typename Mma::IteratorA::Params pa{la};
     typename Mma::IteratorB::Params pb{lb};
-    typename Mma::IteratorA it_a(pa, const_cast<cutlass::bfloat16_t*>(x),
-                                 cutlass::MatrixCoord(T, H), tid,
-                                 cutlass::MatrixCoord(t_base, 0));
-    typename Mma::IteratorB it_b(pb, const_cast<cutlass::bfloat16_t*>(w),
-                                 cutlass::MatrixCoord(H, E), tid,
-                                 cutlass::MatrixCoord(0, 0));
-    Mma mma(storage, tid, warp, lane);
-    typename Mma::FragmentC acc;
-    acc.clear();
-    mma((H + C::kBK - 1) / C::kBK, acc, it_a, it_b, acc);
-    __syncthreads();  // mainloop smem is reused for the logits tile
+    typename Mma::FragmentC acc[C::kHalves];
+#pragma unroll
+    for (int h = 0; h < C::kHalves; ++h) {
+      typename Mma::IteratorA it_a(pa, const_cast<cutlass::bfloat16_t*>(x),
+                                   cutlass::MatrixCoord(T, H), tid,
+                                   cutlass::MatrixCoord(t_base, 0));
+      typename Mma::IteratorB it_b(pb, const_cast<cutlass::bfloat16_t*>(w),
+                                   cutlass::MatrixCoord(H, E), tid,
+                                   cutlass::MatrixCoord(0, h * C::kMmaN));
+      Mma mma(storage, tid, warp, lane);
+      acc[h].clear();
+      mma((H + C::kBK - 1) / C::kBK, acc[h], it_a, it_b, acc[h]);
+      __syncthreads();  // mainloop smem is reused for the next half / logits
+                        // tile
+    }
 
     float* cs = reinterpret_cast<float*>(smem);  // [kRowsPerRound][BN]
     for (int round = 0; round < C::kWarpsM; ++round) {
       if (warp_m == round) {
-        typename Mma::Operator::IteratorC it_c(
-            typename Mma::Operator::IteratorC::TensorRef(
-                cs, cutlass::layout::RowMajor(BN)),
-            lane);
-        it_c.add_tile_offset({0, warp_n});
-        it_c.store(acc);
+#pragma unroll
+        for (int h = 0; h < C::kHalves; ++h) {
+          typename Mma::Operator::IteratorC it_c(
+              typename Mma::Operator::IteratorC::TensorRef(
+                  cs, cutlass::layout::RowMajor(BN)),
+              lane);
+          it_c.add_tile_offset({0, h * C::kWarpsN + warp_n});
+          it_c.store(acc[h]);
+        }
       }
       __syncthreads();
       for (int pass = 0; pass < C::kRowsPerRound / C::kRowsPerPass; ++pass) {
@@ -149,13 +162,12 @@ __global__ void __launch_bounds__(WideCfg<BM, BN>::kThreads, 1)
               ti[i] = i;
             }
 #pragma unroll
-            for (int w2 = kPer / 2; w2 > 0; w2 >>= 1)
+            for (int st2 = 1; st2 < kPer; st2 <<= 1)
 #pragma unroll
-              for (int i = 0; i < w2; ++i)
-                if (tk[i + w2] > tk[i] ||
-                    (tk[i + w2] == tk[i] && ti[i + w2] < ti[i])) {
-                  tk[i] = tk[i + w2];
-                  ti[i] = ti[i + w2];
+              for (int i = 0; i + st2 < kPer; i += 2 * st2)
+                if (tk[i + st2] > tk[i]) {
+                  tk[i] = tk[i + st2];
+                  ti[i] = ti[i + st2];
                 }
             uint64_t best =
                 tk[0] == 0u
@@ -284,7 +296,7 @@ inline bool try_launch_wide(const at::Tensor& x, const at::Tensor& w, int H,
                             const EpilogueParams& p, int sc, bool big_tiles,
                             cudaStream_t stream, int device) {
   if (x.scalar_type() != at::kBFloat16 || p.n_group > 1 ||
-      p.logits_out != nullptr || p.K > kWideMaxK || p.E <= 128 || p.E > 256)
+      p.logits_out != nullptr || p.K > kWideMaxK || p.E <= 128 || p.E > 512)
     return false;
   // The call site passes a tile height, but this argument is a bool, so every
   // non-zero value used to select the 128-row tile. Pick 64 vs 128 by wave
@@ -310,18 +322,25 @@ inline bool try_launch_wide(const at::Tensor& x, const at::Tensor& w, int H,
       else
         launch_wide<BM, BN, kSqrtSoftplus, KM>(x, w, H, p, stream, device);
     };
-    if (p.K <= 8)
-      by_k(std::integral_constant<int, 8>{});
-    else
-      by_k(std::integral_constant<int, kWideMaxK>{});
+    by_k(std::integral_constant<int, kWideMaxK>{});
   };
-  // 384 / 512-wide tiles need more threads than the 64 x 32 A tile has
-  // 16-byte accesses (CUTLASS thread map); those routers keep cuBLASLt.
   (void)big_tiles;
-  if (use128)
-    go(std::integral_constant<int, 128>{}, std::integral_constant<int, 256>{});
-  else
-    go(std::integral_constant<int, 64>{}, std::integral_constant<int, 256>{});
+  if (p.E <= 256) {
+    if (use128)
+      go(std::integral_constant<int, 128>{},
+         std::integral_constant<int, 256>{});
+    else
+      go(std::integral_constant<int, 64>{}, std::integral_constant<int, 256>{});
+  } else if (p.E <= 320) {
+    if (use128 && n128 < kWideBigWaves * sms) return false;
+    go(std::integral_constant<int, 64>{}, std::integral_constant<int, 320>{});
+  } else if (p.E <= 384) {
+    if (n64 > sms) return false;
+    go(std::integral_constant<int, 64>{}, std::integral_constant<int, 384>{});
+  } else {
+    if (n128 < kWideBigWaves * sms) return false;
+    go(std::integral_constant<int, 64>{}, std::integral_constant<int, 512>{});
+  }
   return true;
 }
 

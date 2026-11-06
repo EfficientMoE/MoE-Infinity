@@ -811,7 +811,9 @@ __global__ void __launch_bounds__(kThreads)
   const int n_items = a.n_t * a.n_e * a.n_split;
   for (int item = blockIdx.x; item < n_items; item += gridDim.x) {
     if constexpr (BT == 64 && kDecMma) {
-      if (a.be == 64)
+      if (a.be == 32)
+        logits_item_mma<Tin, 32>(a, p, item, smem);
+      else if (a.be == 64)
         logits_item_mma<Tin, 64>(a, p, item, smem);
       else if (a.be == 128)
         logits_item_mma<Tin, 128>(a, p, item, smem);
@@ -833,10 +835,11 @@ __global__ void __launch_bounds__(kThreads)
     reduce_and_route<VPL, SC>(a, q, 0, p.T, smem, 1);
     if (threadIdx.x == 0) p.state->tile_count = 0;
   } else {
-    const int R = min(p.T, static_cast<int>(gridDim.x));
+    const int g = static_cast<int>(gridDim.x);
+    const int tpc = (p.T + g - 1) / g;
+    const int R = (p.T + tpc - 1) / tpc;
     const int rank = last_arrivals(p.state, R);
     if (rank < 0) return;
-    const int tpc = (p.T + R - 1) / R;
     const int t_begin = rank * tpc;
     reduce_and_route<VPL, SC>(a, q, t_begin, min(p.T, t_begin + tpc), smem, R);
     leave_routers(p.state, R);
@@ -1142,7 +1145,14 @@ void launch_fused(const at::Tensor& x, const at::Tensor& w, int H,
   // 64 x 64; routers with E < 128 keep the WMMA item (a wider MMA tile
   // mostly multiplies padding there; measured slower at b256).
   const int be =
-      BT == 64 && kDecMma ? (E < 128 ? 0 : (T > 64 && E >= 256 ? 128 : 64)) : 0;
+      BT == 64 && kDecMma
+          ? (E < 128
+                 ? 0
+                 : (T <= 64 && E <= 288
+                        ? 32
+                        : (T > 64 && E >= 256 && !(T > 1024 && E == 288) ? 128
+                                                                         : 64)))
+          : 0;
   const int n_e =
       (E + (be ? be : Tile<BT>::kBE) - 1) / (be ? be : Tile<BT>::kBE);
   constexpr int kHC = Tile<BT>::kHC;
