@@ -1390,14 +1390,9 @@ std::vector<at::Tensor> fused_route(
       T > kFusedMaxTokens ||
       (gemm_min_tokens > 0 ? T >= gemm_min_tokens
                            : (T > 256 && T * E > kFusedMaxElems));
-  // Fused CUTLASS GEMM + top-k, E in (128, 256] (pro6000 tile table):
-  //  - 64-token tiles while they fit one wave of SMs (4K-12K tokens: 1.1-1.4x
-  //    faster than cuBLASLt + routing);
-  //  - 128-token tiles from kWideBigWaves waves of them (200K: 0.80-0.87 of
-  //    the tensor-core roof vs 0.61-0.79 for cuBLASLt + routing);
-  //  - 32-token tiles in between (1-4 waves of 64-row tiles: the finer
-  //    tiles halve the last-wave loss; 12K / 50K 3-10 % faster than
-  //    cuBLASLt + routing).
+  // Fused CUTLASS GEMM + top-k, E in (128, 256]. try_launch_wide picks a
+  // 64-row or 128-row tile by wave fill (9K and 50K use 64-row; 12K ties and
+  // 200K stays 128-row).
   const int sms = at::cuda::getDeviceProperties(device)->multiProcessorCount;
   const bool wide_one_wave = (T + 63) / 64 <= sms;
   const bool wide_big = (T + 127) / 128 >= kWideBigWaves * sms;

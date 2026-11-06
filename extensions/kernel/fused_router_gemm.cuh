@@ -286,6 +286,18 @@ inline bool try_launch_wide(const at::Tensor& x, const at::Tensor& w, int H,
   if (x.scalar_type() != at::kBFloat16 || p.n_group > 1 ||
       p.logits_out != nullptr || p.K > kWideMaxK || p.E <= 128 || p.E > 256)
     return false;
+  // The call site passes a tile height, but this argument is a bool, so every
+  // non-zero value used to select the 128-row tile. Pick 64 vs 128 by wave
+  // fill on this GPU: 9K is 144/188 with 64-row tiles and 72/188 with 128-row
+  // tiles; 50K is 0.85 vs 0.71. Equal fill keeps 128-row (half the gate
+  // re-reads). 12K ties; 200K stays 128-row.
+  const int sms = at::cuda::getDeviceProperties(device)->multiProcessorCount;
+  const int n64 = (p.T + 63) / 64;
+  const int n128 = (p.T + 127) / 128;
+  const int w64 = sms > 0 ? (n64 + sms - 1) / sms : 1;
+  const int w128 = sms > 0 ? (n128 + sms - 1) / sms : 1;
+  const bool use128 =
+      static_cast<long long>(n128) * w64 >= static_cast<long long>(n64) * w128;
   auto go = [&](auto bm, auto bn) {
     constexpr int BM = decltype(bm)::value;
     constexpr int BN = decltype(bn)::value;
@@ -305,7 +317,8 @@ inline bool try_launch_wide(const at::Tensor& x, const at::Tensor& w, int H,
   };
   // 384 / 512-wide tiles need more threads than the 64 x 32 A tile has
   // 16-byte accesses (CUTLASS thread map); those routers keep cuBLASLt.
-  if (big_tiles)
+  (void)big_tiles;
+  if (use128)
     go(std::integral_constant<int, 128>{}, std::integral_constant<int, 256>{});
   else
     go(std::integral_constant<int, 64>{}, std::integral_constant<int, 256>{});
