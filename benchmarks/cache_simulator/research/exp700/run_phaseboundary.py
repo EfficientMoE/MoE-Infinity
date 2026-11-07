@@ -22,6 +22,7 @@ cell (eti_2020 @ d2048 cap2048) (exit 2); consistency: within-depth
 class totals equal across caps, sum == d (gate v2 form) (exit 3).
 Exit 0 settled.
 """
+
 import importlib.util
 import json
 import sys
@@ -32,12 +33,14 @@ import numpy as np
 
 HOME = Path.home()
 spec94 = importlib.util.spec_from_file_location(
-    "x94", str(HOME / "warp-work/exp694-moei-capmap/run_capmap.py"))
+    "x94", str(HOME / "warp-work/exp694-moei-capmap/run_capmap.py")
+)
 x94 = importlib.util.module_from_spec(spec94)
 sys.modules["x94"] = x94
 spec94.loader.exec_module(x94)
 spec97 = importlib.util.spec_from_file_location(
-    "x97", str(HOME / "warp-work/exp697-moei-earnimmune/run_earnimmune.py"))
+    "x97", str(HOME / "warp-work/exp697-moei-earnimmune/run_earnimmune.py")
+)
 x97 = importlib.util.module_from_spec(spec97)
 sys.modules["x97"] = x97
 spec97.loader.exec_module(x97)
@@ -59,11 +62,17 @@ def mk_arm(arm, cap):
 
 def main():
     t0 = time.time()
-    ref94 = json.loads((HOME / "warp-work/exp694-moei-capmap/"
-                        "exp694-capmap.json").read_text())
+    ref94 = json.loads(
+        (
+            HOME / "warp-work/exp694-moei-capmap/" "exp694-capmap.json"
+        ).read_text()
+    )
     ref94c = {c["d"]: c["caps"] for c in ref94["map_grid"]}
-    ref99 = json.loads((HOME / "warp-work/exp699-moei-beyondpole/"
-                        "exp699-beyondpole.json").read_text())
+    ref99 = json.loads(
+        (
+            HOME / "warp-work/exp699-moei-beyondpole/" "exp699-beyondpole.json"
+        ).read_text()
+    )
     out = {"exp": "exp700-phaseboundary", "grid": {}}
     repl_ok = True
     for d in DEPTHS:
@@ -75,23 +84,33 @@ def main():
             cc = {}
             for arm in ARMS:
                 m = x97.pass_metrics(mk_arm(arm, cap), keys, seg, rid)
-                cc[arm] = {"burst": m["burst"], "rec": m["rec"],
-                           "cls": m["cls"]}
-                if (d == 4096 and str(cap) in ref94c[4096]
-                        and arm in ref94c[4096][str(cap)]):
+                cc[arm] = {
+                    "burst": m["burst"],
+                    "rec": m["rec"],
+                    "cls": m["cls"],
+                }
+                if (
+                    d == 4096
+                    and str(cap) in ref94c[4096]
+                    and arm in ref94c[4096][str(cap)]
+                ):
                     r = ref94c[4096][str(cap)][arm]
-                    if (abs(m["burst"] - r["burst"]) > 1e-12
-                            or abs(m["rec"] - r["rec"]) > 1e-12):
+                    if (
+                        abs(m["burst"] - r["burst"]) > 1e-12
+                        or abs(m["rec"] - r["rec"]) > 1e-12
+                    ):
                         print(f"REPL94 FAIL cap={cap} {arm}")
                         repl_ok = False
-                if (d in (256, 1024) and cap == 4096
-                        and arm in ref99["gridB"][str(d)]["4096"]):
+                if (
+                    d in (256, 1024)
+                    and cap == 4096
+                    and arm in ref99["gridB"][str(d)]["4096"]
+                ):
                     r = ref99["gridB"][str(d)]["4096"][arm]
                     if abs(m["burst"] - r["burst"]) > 1e-12:
                         print(f"REPL99 FAIL d={d} {arm}")
                         repl_ok = False
-            sig = tuple(cc["eti_2020"]["cls"][x][0]
-                        for x in ("a", "b", "c"))
+            sig = tuple(cc["eti_2020"]["cls"][x][0] for x in ("a", "b", "c"))
             if totals_sig is None:
                 totals_sig = sig
             elif sig != totals_sig or sum(sig) != d:
@@ -133,24 +152,43 @@ def main():
     monotone = True
     for cap in CAPS:
         crossed = [spread[f"{d}x{cap}"] > 0.5 for d in DEPTHS]
-        if any(crossed[i] and not crossed[i + 1]
-               for i in range(len(crossed) - 1)):
+        if any(
+            crossed[i] and not crossed[i + 1] for i in range(len(crossed) - 1)
+        ):
             monotone = False
-    verdict = ("MODEL_HOLDS+MONOTONE_BOUNDARY" if model_holds and monotone
-               else "MODEL_HOLDS" if model_holds else "STRUCTURE_UNEXPLAINED")
-    out.update({"verdict": verdict, "spread_pp": spread,
-                "r2": round(r2, 4), "beta": [round(b, 4) for b in beta],
-                "monotone_boundary": monotone, "det": True,
-                "elapsed_s": round(time.time() - t0, 1)})
+    verdict = (
+        "MODEL_HOLDS+MONOTONE_BOUNDARY"
+        if model_holds and monotone
+        else "MODEL_HOLDS"
+        if model_holds
+        else "STRUCTURE_UNEXPLAINED"
+    )
+    out.update(
+        {
+            "verdict": verdict,
+            "spread_pp": spread,
+            "r2": round(r2, 4),
+            "beta": [round(b, 4) for b in beta],
+            "monotone_boundary": monotone,
+            "det": True,
+            "elapsed_s": round(time.time() - t0, 1),
+        }
+    )
     (D / "exp700-phaseboundary.json").write_text(json.dumps(out, indent=1))
-    print("VERDICT:", verdict, "| R2 =", round(r2, 4),
-          "| beta(logd,logcap) =", [round(b, 3) for b in beta[1:]],
-          "| monotone:", monotone)
+    print(
+        "VERDICT:",
+        verdict,
+        "| R2 =",
+        round(r2, 4),
+        "| beta(logd,logcap) =",
+        [round(b, 3) for b in beta[1:]],
+        "| monotone:",
+        monotone,
+    )
     hdr = "d\\cap " + " ".join(f"{c:7d}" for c in CAPS)
     print(hdr)
     for d in DEPTHS:
-        print(f"{d:5d} " + " ".join(f"{spread[f'{d}x{c}']:7.2f}"
-                                    for c in CAPS))
+        print(f"{d:5d} " + " ".join(f"{spread[f'{d}x{c}']:7.2f}" for c in CAPS))
     sys.exit(0)
 
 

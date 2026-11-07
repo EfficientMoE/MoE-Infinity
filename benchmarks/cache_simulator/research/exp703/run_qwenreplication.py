@@ -5,6 +5,7 @@ Two frozen contrast streams (exp656 assets): hi (high Gini), lo
 (low Gini). Bars/gates pre-registered in LEDGER.md before freeze.
 Exit codes: 0 settled | 2 det | 3 structure | 5 anchor.
 """
+
 import importlib.util
 import json
 import sys
@@ -18,17 +19,20 @@ HOME = Path.home()
 sys.path.insert(0, str(HOME / "warp-work/moei-granite3b"))
 
 spec85 = importlib.util.spec_from_file_location(
-    "x85", str(HOME / "warp-work/exp685-moei-ring/run_ring.py"))
+    "x85", str(HOME / "warp-work/exp685-moei-ring/run_ring.py")
+)
 x85 = importlib.util.module_from_spec(spec85)
 sys.modules["x85"] = x85
 spec85.loader.exec_module(x85)
 spec93 = importlib.util.spec_from_file_location(
-    "x93", str(HOME / "warp-work/exp693-moei-ssr/run_ssr.py"))
+    "x93", str(HOME / "warp-work/exp693-moei-ssr/run_ssr.py")
+)
 x93 = importlib.util.module_from_spec(spec93)
 sys.modules["x93"] = x93
 spec93.loader.exec_module(x93)
 spec97 = importlib.util.spec_from_file_location(
-    "x97", str(HOME / "warp-work/exp697-moei-earnimmune/run_earnimmune.py"))
+    "x97", str(HOME / "warp-work/exp697-moei-earnimmune/run_earnimmune.py")
+)
 x97 = importlib.util.module_from_spec(spec97)
 sys.modules["x97"] = x97
 spec97.loader.exec_module(x97)
@@ -41,13 +45,21 @@ ARMS = ["lcnu", "ring10", "ssr_10", "eti_2020"]
 STREAMS = {
     "hi": {
         "pt": HOME / "warp-work/exp656-moei-within/stream_qwen30b_hi.pt",
-        "N": 786432, "distinct": 5097, "prompts": [512, 512, 512, 512],
-        "n_win": 192, "burst_n": 20, "anchor": 0.704076,
+        "N": 786432,
+        "distinct": 5097,
+        "prompts": [512, 512, 512, 512],
+        "n_win": 192,
+        "burst_n": 20,
+        "anchor": 0.704076,
     },
     "lo": {
         "pt": HOME / "warp-work/exp656-moei-within/stream_qwen30b_lo.pt",
-        "N": 638208, "distinct": 5842, "prompts": [512, 512, 126, 512],
-        "n_win": 155, "burst_n": 16, "anchor": 0.624469,
+        "N": 638208,
+        "distinct": 5842,
+        "prompts": [512, 512, 126, 512],
+        "n_win": 155,
+        "burst_n": 16,
+        "anchor": 0.624469,
     },
 }
 NL = 48
@@ -89,8 +101,12 @@ def run_stream(tag, cfg):
     keys, per_prompt, starts = load_stream(cfg["pt"])
     n = len(keys)
     n_win = n // W
-    if not (n == cfg["N"] and len(set(keys)) == cfg["distinct"]
-            and per_prompt == cfg["prompts"] and n_win == cfg["n_win"]):
+    if not (
+        n == cfg["N"]
+        and len(set(keys)) == cfg["distinct"]
+        and per_prompt == cfg["prompts"]
+        and n_win == cfg["n_win"]
+    ):
         print(f"STRUCTURE FAIL {tag}", n, len(set(keys)), per_prompt, n_win)
         sys.exit(3)
     first_seen = {}
@@ -114,7 +130,7 @@ def run_stream(tag, cfg):
     cls = {w: classify(w) for w in range(1, n_win)}
     nov = {w: cls[w][0] / W for w in cls}
     order = sorted(nov, key=lambda w: -nov[w])
-    burst = set(order[:cfg["burst_n"]])
+    burst = set(order[: cfg["burst_n"]])
     c_burst = float(np.mean([cls[w][2] / W for w in burst]))
     # S1: window index reaching 90% of all first-sights
     total_a = sum(cls[w][0] for w in cls)
@@ -124,8 +140,10 @@ def run_stream(tag, cfg):
         if cum >= 0.9 * total_a:
             w90 = w
             break
-    print(f"{tag}: c_burst={c_burst:.3f} w90={w90}/{n_win} [{time.time()-t0:.0f}s]",
-          flush=True)
+    print(
+        f"{tag}: c_burst={c_burst:.3f} w90={w90}/{n_win} [{time.time()-t0:.0f}s]",
+        flush=True,
+    )
 
     start_wins = {i // W for i in starts}
 
@@ -135,11 +153,14 @@ def run_stream(tag, cfg):
         for i, k in enumerate(keys):
             h[i] = pol.on_access(k)
         wh = h[: n_win * W].reshape(n_win, W)
-        return {"whole": float(h.mean()),
-                "burst": float(wh[sorted(burst)].mean())}
+        return {
+            "whole": float(h.mean()),
+            "burst": float(wh[sorted(burst)].mean()),
+        }
 
-    grid = {str(cap): {arm: policy_cell(arm, cap) for arm in ARMS}
-            for cap in CAPS}
+    grid = {
+        str(cap): {arm: policy_cell(arm, cap) for arm in ARMS} for cap in CAPS
+    }
     print(f"{tag}: policies done [{time.time()-t0:.0f}s]", flush=True)
     if classify(1) != cls[1]:
         print(f"DET FAIL classifier {tag}")
@@ -158,9 +179,12 @@ def run_stream(tag, cfg):
     lcnu_best = all(
         grid[str(cap)]["lcnu"]["burst"]
         == max(grid[str(cap)][a]["burst"] for a in ARMS)
-        for cap in CAPS)
+        for cap in CAPS
+    )
     return {
-        "N": n, "windows": n_win, "total_first_sights": total_a,
+        "N": n,
+        "windows": n_win,
+        "total_first_sights": total_a,
         "burst_windows": sorted(burst),
         "burst_with_session_start": sorted(burst & start_wins),
         "session_start_windows": sorted(start_wins),
@@ -171,8 +195,11 @@ def run_stream(tag, cfg):
         "S2_LCNU_BEST": bool(lcnu_best),
         "S3_spread_pp": spread,
         "policy_grid": grid,
-        "anchor": {"lcnu1024_whole": grid["1024"]["lcnu"]["whole"],
-                   "ref": cfg["anchor"], "ok": bool(anchor_ok)},
+        "anchor": {
+            "lcnu1024_whole": grid["1024"]["lcnu"]["whole"],
+            "ref": cfg["anchor"],
+            "ok": bool(anchor_ok),
+        },
         "elapsed_s": round(time.time() - t0, 1),
     }, anchor_ok
 
@@ -187,17 +214,20 @@ def main():
         anchors_ok = anchors_ok and ok
         print(f"{tag} settled [{time.time()-t0:.0f}s]", flush=True)
     h1 = [out["streams"][t]["H1"] for t in STREAMS]
-    out["verdict"] = ("REPLICATED" if all(h1)
-                      else "PARTIAL" if any(h1) else "REFUTED")
+    out["verdict"] = (
+        "REPLICATED" if all(h1) else "PARTIAL" if any(h1) else "REFUTED"
+    )
     out["anchors_ok"] = anchors_ok
     out["total_elapsed_s"] = round(time.time() - t0, 1)
     (D / "exp703-qwenreplication.json").write_text(json.dumps(out, indent=1))
     print("VERDICT:", out["verdict"])
     for t in STREAMS:
         s = out["streams"][t]
-        print(f"  {t}: c={s['c_share_burst']:.3f} w90={s['w90_index']}"
-              f"/{s['windows']} LCNU_BEST={s['S2_LCNU_BEST']}"
-              f" spread={s['S3_spread_pp']}")
+        print(
+            f"  {t}: c={s['c_share_burst']:.3f} w90={s['w90_index']}"
+            f"/{s['windows']} LCNU_BEST={s['S2_LCNU_BEST']}"
+            f" spread={s['S3_spread_pp']}"
+        )
     if not anchors_ok:
         sys.exit(5)
     sys.exit(0)

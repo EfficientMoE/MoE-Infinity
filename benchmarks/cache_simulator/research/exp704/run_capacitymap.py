@@ -5,6 +5,7 @@ Frozen traces: granite (exp650 asset), qwen30b hi/lo (exp656
 assets). Bars/gates pre-registered in LEDGER.md before freeze.
 Exit codes: 0 settled | 2 det | 3 structure | 5 anchor.
 """
+
 import importlib.util
 import json
 import sys
@@ -36,33 +37,59 @@ W = 4096
 ARMS = ["lcnu", "ring10", "ssr_10", "eti_2020"]
 TRACES = {
     "granite": {
-        "pt": HOME / "warp-work/exp650-moei-granite3b-trace-pr/stream_granite3b.pt",
-        "nl": 32, "prior": 0.2,
-        "N": 638208, "distinct": 1262, "prompts": [313, 512, 336, 245, 169, 197, 512, 209],
-        "n_win": 155, "burst_n": 16,
+        "pt": HOME
+        / "warp-work/exp650-moei-granite3b-trace-pr/stream_granite3b.pt",
+        "nl": 32,
+        "prior": 0.2,
+        "N": 638208,
+        "distinct": 1262,
+        "prompts": [313, 512, 336, 245, 169, 197, 512, 209],
+        "n_win": 155,
+        "burst_n": 16,
         "caps": [128, 192, 256, 384, 512, 640, 768, 896, 1024],
-        "anchors": {128: 0.283762, 256: 0.468164, 512: 0.728697,
-                    768: 0.886415, 1024: 0.970839},
+        "anchors": {
+            128: 0.283762,
+            256: 0.468164,
+            512: 0.728697,
+            768: 0.886415,
+            1024: 0.970839,
+        },
         "det_cell": ("lcnu", 256),
     },
     "hi": {
         "pt": HOME / "warp-work/exp656-moei-within/stream_qwen30b_hi.pt",
-        "nl": 48, "prior": 8 / 128,
-        "N": 786432, "distinct": 5097, "prompts": [512, 512, 512, 512],
-        "n_win": 192, "burst_n": 20,
+        "nl": 48,
+        "prior": 8 / 128,
+        "N": 786432,
+        "distinct": 5097,
+        "prompts": [512, 512, 512, 512],
+        "n_win": 192,
+        "burst_n": 20,
         "caps": [768, 896, 1024, 1152, 1280, 1408, 1536, 1792, 2048],
-        "anchors": {896: 0.665581, 1024: 0.704076, 1152: 0.738525,
-                    1280: 0.770724},
+        "anchors": {
+            896: 0.665581,
+            1024: 0.704076,
+            1152: 0.738525,
+            1280: 0.770724,
+        },
         "det_cell": ("lcnu", 1024),
     },
     "lo": {
         "pt": HOME / "warp-work/exp656-moei-within/stream_qwen30b_lo.pt",
-        "nl": 48, "prior": 8 / 128,
-        "N": 638208, "distinct": 5842, "prompts": [512, 512, 126, 512],
-        "n_win": 155, "burst_n": 16,
+        "nl": 48,
+        "prior": 8 / 128,
+        "N": 638208,
+        "distinct": 5842,
+        "prompts": [512, 512, 126, 512],
+        "n_win": 155,
+        "burst_n": 16,
         "caps": [768, 896, 1024, 1152, 1280, 1408, 1536, 1792, 2048],
-        "anchors": {896: 0.590768, 1024: 0.624469, 1152: 0.656018,
-                    1280: 0.686120},
+        "anchors": {
+            896: 0.590768,
+            1024: 0.624469,
+            1152: 0.656018,
+            1280: 0.686120,
+        },
         "det_cell": ("lcnu", 1024),
     },
 }
@@ -103,10 +130,20 @@ def run_trace(tag, cfg):
     keys, per_prompt = load_stream(cfg["pt"])
     n = len(keys)
     n_win = n // W
-    if not (n == cfg["N"] and len(set(keys)) == cfg["distinct"]
-            and per_prompt == cfg["prompts"] and n_win == cfg["n_win"]):
-        print(f"STRUCTURE FAIL {tag}", n, len(set(keys)), per_prompt, n_win,
-              flush=True)
+    if not (
+        n == cfg["N"]
+        and len(set(keys)) == cfg["distinct"]
+        and per_prompt == cfg["prompts"]
+        and n_win == cfg["n_win"]
+    ):
+        print(
+            f"STRUCTURE FAIL {tag}",
+            n,
+            len(set(keys)),
+            per_prompt,
+            n_win,
+            flush=True,
+        )
         sys.exit(3)
     first_seen = {}
     for i, k in enumerate(keys):
@@ -118,8 +155,10 @@ def run_trace(tag, cfg):
         nov[w] = sum(1 for i in range(ws, ws + W) if first_seen[keys[i]] == i)
     order = sorted(nov, key=lambda w: -nov[w])
     burst = sorted(order[: cfg["burst_n"]])
-    print(f"{tag}: stream ok, burst={burst[:6]}... [{time.time()-t0:.0f}s]",
-          flush=True)
+    print(
+        f"{tag}: stream ok, burst={burst[:6]}... [{time.time()-t0:.0f}s]",
+        flush=True,
+    )
 
     def policy_cell(arm, cap):
         pol = mk_arm(arm, cap, cfg["nl"], cfg["prior"])
@@ -127,25 +166,36 @@ def run_trace(tag, cfg):
         for i, k in enumerate(keys):
             h[i] = pol.on_access(k)
         wh = h[: n_win * W].reshape(n_win, W)
-        return {"whole": float(h.mean()),
-                "burst": float(wh[burst].mean())}
+        return {"whole": float(h.mean()), "burst": float(wh[burst].mean())}
 
     grid = {}
     for cap in cfg["caps"]:
         grid[str(cap)] = {arm: policy_cell(arm, cap) for arm in ARMS}
         print(f"{tag}: cap {cap} done [{time.time()-t0:.0f}s]", flush=True)
 
-    spread = {str(cap): round(
-        (max(grid[str(cap)][a]["burst"] for a in ARMS)
-         - min(grid[str(cap)][a]["burst"] for a in ARMS)) * 100, 3)
-        for cap in cfg["caps"]}
+    spread = {
+        str(cap): round(
+            (
+                max(grid[str(cap)][a]["burst"] for a in ARMS)
+                - min(grid[str(cap)][a]["burst"] for a in ARMS)
+            )
+            * 100,
+            3,
+        )
+        for cap in cfg["caps"]
+    }
     ring_never = all(
         grid[str(cap)]["ring10"]["burst"] < grid[str(cap)]["lcnu"]["burst"]
-        for cap in cfg["caps"])
-    anchors = {str(cap): {
-        "mine": grid[str(cap)]["lcnu"]["whole"], "ref": ref,
-        "ok": bool(abs(grid[str(cap)]["lcnu"]["whole"] - ref) <= BAND)}
-        for cap, ref in cfg["anchors"].items()}
+        for cap in cfg["caps"]
+    )
+    anchors = {
+        str(cap): {
+            "mine": grid[str(cap)]["lcnu"]["whole"],
+            "ref": ref,
+            "ok": bool(abs(grid[str(cap)]["lcnu"]["whole"] - ref) <= BAND),
+        }
+        for cap, ref in cfg["anchors"].items()
+    }
 
     da, dc = cfg["det_cell"]
     if policy_cell(da, dc) != grid[str(dc)][da]:
@@ -174,17 +224,26 @@ def main():
         res = run_trace(tag, cfg)
         out["traces"][tag] = res
         anchor_fail = anchor_fail or any(
-            not a["ok"] for a in res["anchors"].values())
-        print(f"{tag} settled B1={res['B1_DECAY']} "
-              f"CROSS1={res['B2_CROSS1']} RING={res['B3_RING_NEVER_WINS']} "
-              f"[{time.time()-t0:.0f}s]", flush=True)
+            not a["ok"] for a in res["anchors"].values()
+        )
+        print(
+            f"{tag} settled B1={res['B1_DECAY']} "
+            f"CROSS1={res['B2_CROSS1']} RING={res['B3_RING_NEVER_WINS']} "
+            f"[{time.time()-t0:.0f}s]",
+            flush=True,
+        )
     out["verdict"] = "CAPACITY_MAP"
     out["B3_all"] = all(t["B3_RING_NEVER_WINS"] for t in out["traces"].values())
     out["B1_all"] = all(t["B1_DECAY"] for t in out["traces"].values())
     out["total_elapsed_s"] = round(time.time() - t0, 1)
     (D / "exp704-capacitymap.json").write_text(json.dumps(out, indent=1))
-    print("VERDICT: CAPACITY_MAP B1_all=", out["B1_all"],
-          "B3_all=", out["B3_all"], flush=True)
+    print(
+        "VERDICT: CAPACITY_MAP B1_all=",
+        out["B1_all"],
+        "B3_all=",
+        out["B3_all"],
+        flush=True,
+    )
     for t in out["traces"]:
         print(f"  {t}: spread={out['traces'][t]['spread_pp']}")
     if anchor_fail:

@@ -11,6 +11,7 @@ Covers the two disclosed repairs (DEVIATIONS D1/D2) plus frozen constants:
 - byte model constants and WS20 semantics frozen in PREREG.md.
 No sealed artifact is read or mutated; inputs are synthetic fixtures.
 """
+
 import hashlib
 import importlib.util
 import json
@@ -21,7 +22,9 @@ import pytest
 import torch
 
 D = Path(__file__).parent
-spec = importlib.util.spec_from_file_location("run_costcurves", D / "run_costcurves.py")
+spec = importlib.util.spec_from_file_location(
+    "run_costcurves", D / "run_costcurves.py"
+)
 rc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rc)
 
@@ -46,7 +49,9 @@ def _make_trace(tmp_path, decode_records=3, L=4, k=2, E=10):
     pre = torch.zeros((L, 5, k), dtype=torch.int32)
     for l in range(L):
         pre[l] = torch.tensor([[((l * 7 + j) % E) for j in range(k)]] * 5)
-    recs.append({"topk_ids_of_layer": pre, "forward_mode": 1})  # must be skipped
+    recs.append(
+        {"topk_ids_of_layer": pre, "forward_mode": 1}
+    )  # must be skipped
     for _ in range(decode_records):
         t = torch.zeros((L, 1, k), dtype=torch.int32)
         for l in range(L):
@@ -69,13 +74,17 @@ def test_loader_d1_shape_and_multiplicity(tmp_path):
 
 
 def test_spread_recompute_d2_burst_not_whole():
-    grid = {"128": {
-        "lcnu": {"whole": 0.50, "burst": 0.60},
-        "ring10": {"whole": 0.20, "burst": 0.10},
-    }}
+    grid = {
+        "128": {
+            "lcnu": {"whole": 0.50, "burst": 0.60},
+            "ring10": {"whole": 0.20, "burst": 0.10},
+        }
+    }
     got = rc.spread_recompute({"policy_grid": grid})
-    assert got[128] == pytest.approx(50.0)            # burst max-min x100
-    assert got[128] != pytest.approx(30.0)            # whole would give 30 (mutation bite)
+    assert got[128] == pytest.approx(50.0)  # burst max-min x100
+    assert got[128] != pytest.approx(
+        30.0
+    )  # whole would give 30 (mutation bite)
 
 
 def test_main_smoke_exit_zero(capsys):
@@ -87,9 +96,13 @@ def test_main_smoke_exit_zero(capsys):
 def test_sealed_outputs_present_and_pinned():
     # The sealed artifacts this test guards are still the frozen ones.
     sums = dict(
-        line.split()[::-1] for line in (D / "SHA256SUMS").read_text().splitlines()
+        line.split()[::-1]
+        for line in (D / "SHA256SUMS").read_text().splitlines()
     )
-    for name in ("run_costcurves.py", "exp705-costcurves.json",
-                 "exp705-costcurves.frozen-track.json"):
+    for name in (
+        "run_costcurves.py",
+        "exp705-costcurves.json",
+        "exp705-costcurves.frozen-track.json",
+    ):
         h = hashlib.sha256((D / name).read_bytes()).hexdigest()
         assert sums[name] == h, name
