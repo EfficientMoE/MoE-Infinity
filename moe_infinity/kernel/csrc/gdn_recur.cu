@@ -112,12 +112,15 @@ __device__ __forceinline__ void to_b(const float (*acc)[4], uint32_t (*b)[2]) {
 }
 
 template <bool kGateVec = false>
-__global__ void __launch_bounds__(NW * 32) recur_pro6000_kernel(
-    const __nv_bfloat16* __restrict__ qg, const __nv_bfloat16* __restrict__ kd,
-    const __nv_bfloat16* __restrict__ w, const __nv_bfloat16* __restrict__ u,
-    const __nv_bfloat16* __restrict__ S, const float* __restrict__ g,
-    __nv_bfloat16* __restrict__ o, float* __restrict__ h, int T, int t_base,
-    int TB, int nb, int H) {
+__global__ void __launch_bounds__(NW * 32)
+    recur_pro6000_kernel(const __nv_bfloat16* __restrict__ qg,
+                         const __nv_bfloat16* __restrict__ kd,
+                         const __nv_bfloat16* __restrict__ w,
+                         const __nv_bfloat16* __restrict__ u,
+                         const __nv_bfloat16* __restrict__ S,
+                         const float* __restrict__ g,
+                         __nv_bfloat16* __restrict__ o, float* __restrict__ h,
+                         int T, int t_base, int TB, int nb, int H) {
   extern __shared__ __align__(128) unsigned char smem_raw[];
   __nv_bfloat16* sW = reinterpret_cast<__nv_bfloat16*>(smem_raw);  // 2 tiles
   __nv_bfloat16* sQ = sW + 2 * TILE;                               // 2 tiles

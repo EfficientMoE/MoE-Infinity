@@ -6,54 +6,96 @@ Every number is parsed at runtime from sealed primary artifacts:
   - exp705/exp705-costcurves.json (sealed WS20 + byte constants)
   - exp708/exp708-beyondlaw.json  (sealed lo ceiling result, for the 3/3 synthesis)
 No hand math, no hand-transcribed hashes."""
-import json, os, hashlib
+
+import hashlib
+import json
+import os
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-R = json.load(open(os.path.join(BASE, 'exp709', 'exp709-ceiling2.json')))
-J704 = json.load(open('/Users/mfethe/warp-work/exp704-moei-capacitymap/exp704-capacitymap.json'))['traces']
-E705 = json.load(open(os.path.join(BASE, 'exp705', 'exp705-costcurves.json')))['traces']
-R8 = json.load(open(os.path.join(BASE, 'exp708', 'exp708-beyondlaw.json')))
-ARMS = ['lcnu', 'ring10', 'ssr_10', 'eti_2020']
-ANCH = {'hi': 2048, 'granite': 1024}
-CROSS1 = {t: int(J704[t]['B2_CROSS1']) for t in ('hi', 'granite')}
+R = json.load(open(os.path.join(BASE, "exp709", "exp709-ceiling2.json")))
+J704 = json.load(
+    open(
+        "/Users/mfethe/warp-work/exp704-moei-capacitymap/exp704-capacitymap.json"
+    )
+)["traces"]
+E705 = json.load(open(os.path.join(BASE, "exp705", "exp705-costcurves.json")))[
+    "traces"
+]
+R8 = json.load(open(os.path.join(BASE, "exp708", "exp708-beyondlaw.json")))
+ARMS = ["lcnu", "ring10", "ssr_10", "eti_2020"]
+ANCH = {"hi": 2048, "granite": 1024}
+CROSS1 = {t: int(J704[t]["B2_CROSS1"]) for t in ("hi", "granite")}
 
 res = {}
-for t in ('hi', 'granite'):
-    x = R['traces'][t]; ws = E705[t]['WS20']; be = E705[t]['b_e_bytes']
-    caps = sorted(int(c) for c in x['policy_grid'])
-    assert caps[-1] == ws == x['WS20']
+for t in ("hi", "granite"):
+    x = R["traces"][t]
+    ws = E705[t]["WS20"]
+    be = E705[t]["b_e_bytes"]
+    caps = sorted(int(c) for c in x["policy_grid"])
+    assert caps[-1] == ws == x["WS20"]
     rec = {}
     for c in caps:
-        cell = x['policy_grid'][str(c)]; assert sorted(cell) == sorted(ARMS)
-        b = [cell[a]['burst'] for a in ARMS]
+        cell = x["policy_grid"][str(c)]
+        assert sorted(cell) == sorted(ARMS)
+        b = [cell[a]["burst"] for a in ARMS]
         rec[c] = round((max(b) - min(b)) * 100, 3)
-        assert rec[c] == x['spread_pp'][str(c)]
+        assert rec[c] == x["spread_pp"][str(c)]
     a = ANCH[t]
-    assert x['policy_grid'][str(a)] == J704[t]['policy_grid'][str(a)]
-    assert x['spread_pp'][str(a)] == J704[t]['spread_pp'][str(a)]
-    assert x['burst_windows'] == J704[t]['burst_windows']
-    assert x['C4_det'] is True
+    assert x["policy_grid"][str(a)] == J704[t]["policy_grid"][str(a)]
+    assert x["spread_pp"][str(a)] == J704[t]["spread_pp"][str(a)]
+    assert x["burst_windows"] == J704[t]["burst_windows"]
+    assert x["C4_det"] is True
     beyond = [c for c in caps if c > a]
     smax_cap = max(beyond, key=lambda c: rec[c])
-    res[t] = dict(ws=ws, be=be, caps=caps, rec=rec, smax=rec[smax_cap], smax_cap=smax_cap,
-                  flat=rec[smax_cap] <= 1.0, ws20=rec[ws], x=x)
-verdict = 'CEILING_FLAT_BOTH' if all(r['flat'] for r in res.values()) else 'CEILING_RISE'
-assert verdict == R['verdict']
+    res[t] = dict(
+        ws=ws,
+        be=be,
+        caps=caps,
+        rec=rec,
+        smax=rec[smax_cap],
+        smax_cap=smax_cap,
+        flat=rec[smax_cap] <= 1.0,
+        ws20=rec[ws],
+        x=x,
+    )
+verdict = (
+    "CEILING_FLAT_BOTH"
+    if all(r["flat"] for r in res.values())
+    else "CEILING_RISE"
+)
+assert verdict == R["verdict"]
+
 
 def table(t):
-    r = res[t]; rows = []
-    for c in r['caps']:
-        cell = r['x']['policy_grid'][str(c)]
-        rows.append('| %d | %.3f | %.3f | %.4f | %.4f | %.3f |' % (
-            c, c / r['ws'], c * r['be'] / 1024 ** 3, cell['lcnu']['whole'], cell['ring10']['whole'], r['rec'][c]))
-    return '\n'.join(rows)
+    r = res[t]
+    rows = []
+    for c in r["caps"]:
+        cell = r["x"]["policy_grid"][str(c)]
+        rows.append(
+            "| %d | %.3f | %.3f | %.4f | %.4f | %.3f |"
+            % (
+                c,
+                c / r["ws"],
+                c * r["be"] / 1024**3,
+                cell["lcnu"]["whole"],
+                cell["ring10"]["whole"],
+                r["rec"][c],
+            )
+        )
+    return "\n".join(rows)
 
-lo_ws = R8['WS20_lo']
-lo_beyond = [int(c) for c in R8['spread_pp'] if int(c) > 3328]
-lo_smax = max(R8['spread_pp'][str(c)] for c in lo_beyond)
-sha = hashlib.sha256(open(os.path.join(BASE, 'exp709', 'run_ceiling2.py'), 'rb').read()).hexdigest()
-assert sha == open(os.path.join(BASE, 'exp709', 'ARTIFACT.sha256')).read().split()[0]
-h, g = res['hi'], res['granite']
+
+lo_ws = R8["WS20_lo"]
+lo_beyond = [int(c) for c in R8["spread_pp"] if int(c) > 3328]
+lo_smax = max(R8["spread_pp"][str(c)] for c in lo_beyond)
+sha = hashlib.sha256(
+    open(os.path.join(BASE, "exp709", "run_ceiling2.py"), "rb").read()
+).hexdigest()
+assert (
+    sha
+    == open(os.path.join(BASE, "exp709", "ARTIFACT.sha256")).read().split()[0]
+)
+h, g = res["hi"], res["granite"]
 N = 53
 md = f"""# ADDENDUM {N} — exp709: beyond-law ceiling probe on hi + granite (cap ceiling = WS20; completes exp708 to 3/3 traces)
 
@@ -112,6 +154,18 @@ exp705-costcurves.json, exp708-beyondlaw.json. Follow-up controller
 re-adjudicated every gate programmatically from primary sources with an
 independently written adjudicator (28/28 checks): verdict {R['verdict']} stands.
 """
-out = os.path.join(BASE, 'exp709', f'ADDENDUM{N}.md')
-open(out, 'w').write(md)
-print('wrote', out, len(md), 'chars; verdict', verdict, 'hi', h['smax'], 'granite', g['smax'], 'lo', lo_smax)
+out = os.path.join(BASE, "exp709", f"ADDENDUM{N}.md")
+open(out, "w").write(md)
+print(
+    "wrote",
+    out,
+    len(md),
+    "chars; verdict",
+    verdict,
+    "hi",
+    h["smax"],
+    "granite",
+    g["smax"],
+    "lo",
+    lo_smax,
+)
