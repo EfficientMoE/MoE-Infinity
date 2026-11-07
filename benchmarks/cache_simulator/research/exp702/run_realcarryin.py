@@ -10,6 +10,7 @@ actually diverge on real burst windows.
 Bars/gates pre-registered in LEDGER.md before freeze. Exit codes:
 0 settled | 2 det | 3 structure | 5 exp650 band.
 """
+
 import importlib.util
 import json
 import sys
@@ -23,17 +24,20 @@ HOME = Path.home()
 sys.path.insert(0, str(HOME / "warp-work/moei-granite3b"))
 
 spec85 = importlib.util.spec_from_file_location(
-    "x85", str(HOME / "warp-work/exp685-moei-ring/run_ring.py"))
+    "x85", str(HOME / "warp-work/exp685-moei-ring/run_ring.py")
+)
 x85 = importlib.util.module_from_spec(spec85)
 sys.modules["x85"] = x85
 spec85.loader.exec_module(x85)
 spec93 = importlib.util.spec_from_file_location(
-    "x93", str(HOME / "warp-work/exp693-moei-ssr/run_ssr.py"))
+    "x93", str(HOME / "warp-work/exp693-moei-ssr/run_ssr.py")
+)
 x93 = importlib.util.module_from_spec(spec93)
 sys.modules["x93"] = x93
 spec93.loader.exec_module(x93)
 spec97 = importlib.util.spec_from_file_location(
-    "x97", str(HOME / "warp-work/exp697-moei-earnimmune/run_earnimmune.py"))
+    "x97", str(HOME / "warp-work/exp697-moei-earnimmune/run_earnimmune.py")
+)
 x97 = importlib.util.module_from_spec(spec97)
 sys.modules["x97"] = x97
 spec97.loader.exec_module(x97)
@@ -87,8 +91,12 @@ def main():
     keys, per_prompt, starts = load_stream()
     n = len(keys)
     n_win = n // W
-    if not (n == 638208 and len(set(keys)) == 1262
-            and per_prompt == EXPECT_PROMPTS and n_win == 155):
+    if not (
+        n == 638208
+        and len(set(keys)) == 1262
+        and per_prompt == EXPECT_PROMPTS
+        and n_win == 155
+    ):
         print("STRUCTURE FAIL", n, len(set(keys)), per_prompt, n_win)
         sys.exit(3)
     conv = json.loads(CONV.read_text())
@@ -124,8 +132,11 @@ def main():
     c_burst = np.mean([cls[w][2] / W for w in burst])
     a_burst = np.mean([cls[w][0] / W for w in burst])
     a_base = np.mean([cls[w][0] / W for w in base])
-    print(f"classifier ok; c_burst={c_burst:.3f} a_burst={a_burst:.3f} "
-          f"a_base={a_base:.3f} [{time.time()-t0:.0f}s]", flush=True)
+    print(
+        f"classifier ok; c_burst={c_burst:.3f} a_burst={a_burst:.3f} "
+        f"a_base={a_base:.3f} [{time.time()-t0:.0f}s]",
+        flush=True,
+    )
 
     start_wins = {i // W for i in starts}
 
@@ -137,8 +148,7 @@ def main():
         wh = h[: n_win * W].reshape(n_win, W)
         bh = wh[sorted(burst)].mean()
         sh = wh[sorted(base)].mean()
-        return {"whole": float(h.mean()), "burst": float(bh),
-                "base": float(sh)}
+        return {"whole": float(h.mean()), "burst": float(bh), "base": float(sh)}
 
     grid = {}
     for cap in CAPS:
@@ -151,8 +161,10 @@ def main():
         sys.exit(2)
     det_cell = policy_cell("lcnu", 256)
     ref_cell = grid["256"]["lcnu"]
-    if (det_cell["whole"] != ref_cell["whole"]
-            or det_cell["burst"] != ref_cell["burst"]):
+    if (
+        det_cell["whole"] != ref_cell["whole"]
+        or det_cell["burst"] != ref_cell["burst"]
+    ):
         print("DET FAIL policy rerun")
         sys.exit(2)
     print(f"det ok [{time.time()-t0:.0f}s]", flush=True)
@@ -171,7 +183,9 @@ def main():
 
     res = {
         "exp": "exp702-realcarryin",
-        "N": n, "distinct": 1262, "windows": n_win,
+        "N": n,
+        "distinct": 1262,
+        "windows": n_win,
         "burst_windows": sorted(burst),
         "burst_with_session_start": sorted(burst & start_wins),
         "session_start_windows": sorted(start_wins),
@@ -187,19 +201,32 @@ def main():
         "H3_POLICY_SPREAD": bool(h3),
         "spread_pp": spread,
         "policy_grid": grid,
-        "exp650_band": {"lcnu256_whole": grid["256"]["lcnu"]["whole"],
-                        "ref": EXP650_LCNU_256, "ok": bool(band_ok)},
+        "exp650_band": {
+            "lcnu256_whole": grid["256"]["lcnu"]["whole"],
+            "ref": EXP650_LCNU_256,
+            "ok": bool(band_ok),
+        },
         "det": True,
         "elapsed_s": round(time.time() - t0, 1),
     }
-    res["verdict"] = ("REAL_CARRYIN" if h1 else "NO_CARRYIN")
+    res["verdict"] = "REAL_CARRYIN" if h1 else "NO_CARRYIN"
     (D / "exp702-realcarryin.json").write_text(json.dumps(res, indent=1))
-    print("VERDICT:", res["verdict"],
-          "| H1 c_burst=%.3f" % c_burst,
-          "| H2", res["H2_NOVELTY_SPIKES"],
-          "| H3", res["H3_POLICY_SPREAD"], spread)
-    print("band ok:", band_ok, "| lcnu256 whole:",
-          round(grid["256"]["lcnu"]["whole"], 6))
+    print(
+        "VERDICT:",
+        res["verdict"],
+        "| H1 c_burst=%.3f" % c_burst,
+        "| H2",
+        res["H2_NOVELTY_SPIKES"],
+        "| H3",
+        res["H3_POLICY_SPREAD"],
+        spread,
+    )
+    print(
+        "band ok:",
+        band_ok,
+        "| lcnu256 whole:",
+        round(grid["256"]["lcnu"]["whole"], 6),
+    )
     print("burst windows:", res["burst_windows"])
     print("burst w/ session start:", res["burst_with_session_start"])
     if not band_ok:

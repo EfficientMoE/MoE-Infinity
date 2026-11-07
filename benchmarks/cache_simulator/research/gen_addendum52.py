@@ -5,53 +5,67 @@ Every number below is parsed at runtime from sealed primary artifacts:
   - exp706-locross.json          (sealed anchor cell @3328 + burst windows)
   - exp705-costcurves.json       (sealed WS20(lo) + byte constants)
 No hand math, no hand-transcribed hashes."""
-import json, os
+
+import json
+import os
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-R8 = json.load(open(os.path.join(BASE, 'exp708', 'exp708-beyondlaw.json')))
-R706 = json.load(open('/Users/mfethe/warp-work/exp706-moei-locross/exp706-locross.json'))
-E705 = json.load(open(os.path.join(BASE, 'exp705', 'exp705-costcurves.json')))
+R8 = json.load(open(os.path.join(BASE, "exp708", "exp708-beyondlaw.json")))
+R706 = json.load(
+    open("/Users/mfethe/warp-work/exp706-moei-locross/exp706-locross.json")
+)
+E705 = json.load(open(os.path.join(BASE, "exp705", "exp705-costcurves.json")))
 
-lo705 = E705['traces']['lo']
-WS20 = lo705['WS20']
-be = lo705['b_e_bytes']
-assert lo705['b_e_MiB'] == 9.0 and be == 9437184
-assert R8['WS20_lo'] == WS20 == 4662
+lo705 = E705["traces"]["lo"]
+WS20 = lo705["WS20"]
+be = lo705["b_e_bytes"]
+assert lo705["b_e_MiB"] == 9.0 and be == 9437184
+assert R8["WS20_lo"] == WS20 == 4662
 
 # --- re-derive every gate from the sealed artifact (independent asserts) ---
-ARMS = ['lcnu', 'ring10', 'ssr_10', 'eti_2020']
-caps = sorted(int(c) for c in R8['policy_grid'])
+ARMS = ["lcnu", "ring10", "ssr_10", "eti_2020"]
+caps = sorted(int(c) for c in R8["policy_grid"])
 assert caps == [3328, 3584, 3840, 4096, 4352, 4662]
 recomp = {}
 for c in caps:
-    cell = R8['policy_grid'][str(c)]
+    cell = R8["policy_grid"][str(c)]
     assert sorted(cell) == sorted(ARMS)
-    bursts = [cell[a]['burst'] for a in ARMS]
+    bursts = [cell[a]["burst"] for a in ARMS]
     recomp[c] = (max(bursts) - min(bursts)) * 100.0
-    assert abs(recomp[c] - R8['spread_pp'][str(c)]) < 5e-4
+    assert abs(recomp[c] - R8["spread_pp"][str(c)]) < 5e-4
 beyond = [c for c in caps if c > 3328]
 s_max_cap = max(beyond, key=lambda c: recomp[c])
 s_max = recomp[s_max_cap]
 flat = s_max <= 1.0
-assert R8['verdict'] == ('BEYOND_FLAT' if flat else 'BEYOND_RISE')
+assert R8["verdict"] == ("BEYOND_FLAT" if flat else "BEYOND_RISE")
 ws20_sp = recomp[4662]
 # anchors byte-equal sealed exp706 (parsed at runtime, not transcribed)
-a706 = R706['policy_grid']['3328']
-a708 = R8['policy_grid']['3328']
-assert R8['spread_pp']['3328'] == R706['spread_pp']['3328']
-assert a708['lcnu']['whole'] == a706['lcnu']['whole']
-assert a708['ring10']['whole'] == a706['ring10']['whole']
-assert R8['burst_windows'] == R706['burst_windows']
-law = {'granite': 768 / E705['traces']['granite']['WS20'],
-       'hi': 1792 / E705['traces']['hi']['WS20'],
-       'lo': int(R706['L1_CROSS1']) / WS20}
+a706 = R706["policy_grid"]["3328"]
+a708 = R8["policy_grid"]["3328"]
+assert R8["spread_pp"]["3328"] == R706["spread_pp"]["3328"]
+assert a708["lcnu"]["whole"] == a706["lcnu"]["whole"]
+assert a708["ring10"]["whole"] == a706["ring10"]["whole"]
+assert R8["burst_windows"] == R706["burst_windows"]
+law = {
+    "granite": 768 / E705["traces"]["granite"]["WS20"],
+    "hi": 1792 / E705["traces"]["hi"]["WS20"],
+    "lo": int(R706["L1_CROSS1"]) / WS20,
+}
 
 rows = []
 for c in caps:
-    cell = R8['policy_grid'][str(c)]
-    rows.append('| %d | %.3f | %.4f | %.4f | %.4f | %.3f |' % (
-        c, c / WS20, c * be / (1024 ** 3), cell['lcnu']['whole'],
-        cell['ring10']['whole'], recomp[c]))
+    cell = R8["policy_grid"][str(c)]
+    rows.append(
+        "| %d | %.3f | %.4f | %.4f | %.4f | %.3f |"
+        % (
+            c,
+            c / WS20,
+            c * be / (1024**3),
+            cell["lcnu"]["whole"],
+            cell["ring10"]["whole"],
+            recomp[c],
+        )
+    )
 N = 52
 md = f"""# ADDENDUM {N} — exp708: beyond-law flat check (lo grid 3328–4662, cap ceiling = WS20)
 
@@ -112,7 +126,12 @@ Follow-up controller re-adjudicated every gate programmatically from primary
 sources (18/18 checks): exact match, verdict {R8['verdict']} stands.
 """
 
-out = os.path.join(BASE, 'exp708', f'ADDENDUM{N}.md')
-open(out, 'w').write(md)
-print('wrote', out, len(md), 'chars')
-print('verdict', R8['verdict'], 's_max %.4f @%d' % (s_max, s_max_cap), 'ws20_cell %.4f' % ws20_sp)
+out = os.path.join(BASE, "exp708", f"ADDENDUM{N}.md")
+open(out, "w").write(md)
+print("wrote", out, len(md), "chars")
+print(
+    "verdict",
+    R8["verdict"],
+    "s_max %.4f @%d" % (s_max, s_max_cap),
+    "ws20_cell %.4f" % ws20_sp,
+)

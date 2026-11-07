@@ -48,4 +48,3 @@
   verdict of the frozen protocol; the repaired track is reported separately
   (exp638 precedent). The anchor failure is itself evidence the frozen
   prereg's upstream-artifact assumption was wrong, not that exp704 is wrong.
-

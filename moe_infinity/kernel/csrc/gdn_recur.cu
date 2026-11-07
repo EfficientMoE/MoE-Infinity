@@ -111,12 +111,16 @@ __device__ __forceinline__ void to_b(const float (*acc)[4], uint32_t (*b)[2]) {
   }
 }
 
-__global__ void __launch_bounds__(NW * 32) recur_pro6000_kernel(
-    const __nv_bfloat16* __restrict__ qg, const __nv_bfloat16* __restrict__ kd,
-    const __nv_bfloat16* __restrict__ w, const __nv_bfloat16* __restrict__ u,
-    const __nv_bfloat16* __restrict__ S, const float* __restrict__ g,
-    __nv_bfloat16* __restrict__ o, float* __restrict__ h, int T, int t_base,
-    int TB, int nb, int H) {
+template <bool kGateVec = false>
+__global__ void __launch_bounds__(NW * 32)
+    recur_pro6000_kernel(const __nv_bfloat16* __restrict__ qg,
+                         const __nv_bfloat16* __restrict__ kd,
+                         const __nv_bfloat16* __restrict__ w,
+                         const __nv_bfloat16* __restrict__ u,
+                         const __nv_bfloat16* __restrict__ S,
+                         const float* __restrict__ g,
+                         __nv_bfloat16* __restrict__ o, float* __restrict__ h,
+                         int T, int t_base, int TB, int nb, int H) {
   extern __shared__ __align__(128) unsigned char smem_raw[];
   __nv_bfloat16* sW = reinterpret_cast<__nv_bfloat16*>(smem_raw);  // 2 tiles
   __nv_bfloat16* sQ = sW + 2 * TILE;                               // 2 tiles
@@ -140,7 +144,8 @@ __global__ void __launch_bounds__(NW * 32) recur_pro6000_kernel(
   const __nv_bfloat16* pu = u + ((long)i_n * TB * H + i_h) * KD + i_v * BV;
   const __nv_bfloat16* pS = S + ((long)i_n * TB * H + i_h) * BT;
   __nv_bfloat16* po = o + ((long)i_n * T * H + i_h) * KD;
-  const float* pg = g + (long)i_n * T * H + i_h;
+  const float* pg = kGateVec ? (g + ((long)i_n * (TB / BT) * H + i_h) * KD)
+                             : (g + (long)i_n * T * H + i_h);
   float* ph = h + (long)i_nh * KD * KD;
 
   // state: 8 row tiles (16 state rows each) x [c0..c3]
@@ -260,13 +265,26 @@ __global__ void __launch_bounds__(NW * 32) recur_pro6000_kernel(
     }
 
     // h = d * h + kd^T @ v   (m: 8 state-row tiles, k: 4 x 16 tokens)
-    const float dl = exp2f(pg[(long)(min(t0 + BT, T) - 1) * H]);
+    if constexpr (kGateVec) {
+      const float* pgl = pg + (long)c * H * KD;
 #pragma unroll
-    for (int m = 0; m < 8; ++m) {
-      hs[m][0] *= dl;
-      hs[m][1] *= dl;
-      hs[m][2] *= dl;
-      hs[m][3] *= dl;
+      for (int m = 0; m < 8; ++m) {
+        const float dl0 = exp2f(pgl[16 * m + gq]);
+        const float dl1 = exp2f(pgl[16 * m + gq + 8]);
+        hs[m][0] *= dl0;
+        hs[m][1] *= dl0;
+        hs[m][2] *= dl1;
+        hs[m][3] *= dl1;
+      }
+    } else {
+      const float dl = exp2f(pg[(long)(min(t0 + BT, T) - 1) * H]);
+#pragma unroll
+      for (int m = 0; m < 8; ++m) {
+        hs[m][0] *= dl;
+        hs[m][1] *= dl;
+        hs[m][2] *= dl;
+        hs[m][3] *= dl;
+      }
     }
     // k-step (16 tokens) outer, state-row tile inner: 8 independent chains
 #pragma unroll
@@ -338,6 +356,7 @@ __device__ __forceinline__ void load_tile_w(__nv_bfloat16* s,
   }
 }
 
+template <bool kGateVec = false>
 __global__ void __launch_bounds__(WS_NTHR) recur_ws_pro6000_kernel(
     const __nv_bfloat16* __restrict__ qg, const __nv_bfloat16* __restrict__ kd,
     const __nv_bfloat16* __restrict__ w, const __nv_bfloat16* __restrict__ u,
@@ -409,7 +428,8 @@ __global__ void __launch_bounds__(WS_NTHR) recur_ws_pro6000_kernel(
   // ---------------- consumers (4 warps x 8 value columns)
   const int vcol = i_v * BV + warp * 8 + 2 * qq;
   __nv_bfloat16* po = o + ((long)i_n * T * H + i_h) * KD;
-  const float* pg = g + (long)i_n * T * H + i_h;
+  const float* pg = kGateVec ? (g + ((long)i_n * (TB / BT) * H + i_h) * KD)
+                             : (g + (long)i_n * T * H + i_h);
   float* ph = h + (long)i_nh * KD * KD;
   float hs[8][4];
 #pragma unroll
@@ -489,13 +509,26 @@ __global__ void __launch_bounds__(WS_NTHR) recur_ws_pro6000_kernel(
         *reinterpret_cast<uint32_t*>(po + (long)(t0 + r1) * ldk + vcol) =
             pack(oo[j][2], oo[j][3]);
     }
-    const float dl = exp2f(pg[(long)(min(t0 + BT, T) - 1) * H]);
+    if constexpr (kGateVec) {
+      const float* pgl = pg + (long)c * H * KD;
 #pragma unroll
-    for (int m = 0; m < 8; ++m) {
-      hs[m][0] *= dl;
-      hs[m][1] *= dl;
-      hs[m][2] *= dl;
-      hs[m][3] *= dl;
+      for (int m = 0; m < 8; ++m) {
+        const float dl0 = exp2f(pgl[16 * m + gq]);
+        const float dl1 = exp2f(pgl[16 * m + gq + 8]);
+        hs[m][0] *= dl0;
+        hs[m][1] *= dl0;
+        hs[m][2] *= dl1;
+        hs[m][3] *= dl1;
+      }
+    } else {
+      const float dl = exp2f(pg[(long)(min(t0 + BT, T) - 1) * H]);
+#pragma unroll
+      for (int m = 0; m < 8; ++m) {
+        hs[m][0] *= dl;
+        hs[m][1] *= dl;
+        hs[m][2] *= dl;
+        hs[m][3] *= dl;
+      }
     }
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
@@ -536,21 +569,26 @@ void gdn_recur_launch(const void* qg, const void* kd, const void* w,
                       float* h, int B, int H, int T, int t_base, int TB, int nb,
                       int variant, cudaStream_t stream) {
   dim3 grid(B * H * (gdn::KD / gdn::BV));
+  bool gate_vec = (variant & 4) != 0;
+  variant &= 3;
+  size_t sm = gdn::smem_bytes();
   if (variant == 2) {
-    size_t sm = gdn::smem_bytes();
-    cudaFuncSetAttribute(gdn::recur_ws_pro6000_kernel,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sm);
-    gdn::recur_ws_pro6000_kernel<<<grid, gdn::WS_NTHR, sm, stream>>>(
+    auto fn = gate_vec ? gdn::recur_ws_pro6000_kernel<true>
+                       : gdn::recur_ws_pro6000_kernel<false>;
+    cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         (int)sm);
+    fn<<<grid, gdn::WS_NTHR, sm, stream>>>(
         (const __nv_bfloat16*)qg, (const __nv_bfloat16*)kd,
         (const __nv_bfloat16*)w, (const __nv_bfloat16*)u,
         (const __nv_bfloat16*)S, g, (__nv_bfloat16*)o, h, T, t_base, TB, nb, H);
     return;
   }
   dim3 block(gdn::NW * 32);
-  size_t sm = gdn::smem_bytes();
-  cudaFuncSetAttribute(gdn::recur_pro6000_kernel,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sm);
-  gdn::recur_pro6000_kernel<<<grid, block, sm, stream>>>(
+  auto fn = gate_vec ? gdn::recur_pro6000_kernel<true>
+                     : gdn::recur_pro6000_kernel<false>;
+  cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       (int)sm);
+  fn<<<grid, block, sm, stream>>>(
       (const __nv_bfloat16*)qg, (const __nv_bfloat16*)kd,
       (const __nv_bfloat16*)w, (const __nv_bfloat16*)u, (const __nv_bfloat16*)S,
       g, (__nv_bfloat16*)o, h, T, t_base, TB, nb, H);

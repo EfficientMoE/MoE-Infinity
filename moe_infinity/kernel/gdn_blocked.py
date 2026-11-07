@@ -82,7 +82,7 @@ def blocked_recur_pro6000_kernel(
     S += (lb * HV + i_h) * BT
     o += (i_n * T * HV + i_h) * V
     if GATE_VEC:
-        g += (i_n * T * HV + i_h) * K
+        g += (i_n * (TB // BT) * HV + i_h) * K
     else:
         g += i_n * T * HV + i_h
     p_h = h + i_nh * K * V + o_k[:, None] * V + o_v[None, :]
@@ -112,7 +112,7 @@ def blocked_recur_pro6000_kernel(
             other=0.0,
         )
         if GATE_VEC:
-            b_dl = tl.exp2(tl.load(g + last * (HV * K) + o_k))[:, None]
+            b_dl = tl.exp2(tl.load(g + i_c * (HV * K) + o_k))[:, None]
         else:
             b_dl = tl.exp2(tl.load(g + last * HV))
         b_hb = b_h.to(b_w.dtype)
@@ -137,9 +137,8 @@ def _recur(
     if use_cuda:
         from moe_infinity.kernel import gdn_recur_cuda
 
-        gdn_recur_cuda.recur(
-            qg, kd, w, u, S, g, o, h, t_base, nb, variant=RECUR_VARIANT_PRO6000
-        )
+        v = RECUR_VARIANT_PRO6000 | (4 if g.dim() == 4 else 0)
+        gdn_recur_cuda.recur(qg, kd, w, u, S, g, o, h, t_base, nb, variant=v)
         return
     blocked_recur_pro6000_kernel[(B * HV * (V // BV),)](
         qg,
@@ -165,7 +164,9 @@ def _recur(
     )
 
 
-def _setup_block(q, k, v, gc, beta, bufs, scale, T, t_base, TB, nb, norm_qk):
+def _setup_block(
+    q, k, v, g, gc, beta, bufs, scale, T, t_base, TB, nb, norm_qk, cumsum_g
+):
     from moe_infinity.kernel.gdn_prep import (
         gdn_fwd_aux_pro6000_kernel,
         gdn_fwd_prep_pro6000_kernel,
@@ -177,7 +178,7 @@ def _setup_block(q, k, v, gc, beta, bufs, scale, T, t_base, TB, nb, norm_qk):
     gdn_fwd_prep_pro6000_kernel[grid](
         k,
         v,
-        gc,
+        g,
         beta,
         w,
         u,
@@ -194,12 +195,14 @@ def _setup_block(q, k, v, gc, beta, bufs, scale, T, t_base, TB, nb, norm_qk):
         NORM_K=norm_qk,
         BLOCK_OUT=True,
         NEUMANN=PREP_NEUMANN,
+        CUMSUM_G=cumsum_g,
         num_warps=PREP_WARPS_PRO6000,
         num_stages=1,
     )
     gdn_fwd_aux_pro6000_kernel[grid](
         q,
         k,
+        g,
         gc,
         qg,
         kd,
@@ -212,6 +215,7 @@ def _setup_block(q, k, v, gc, beta, bufs, scale, T, t_base, TB, nb, norm_qk):
         K=K,
         BT=64,
         NORM=norm_qk,
+        CUMSUM_G=cumsum_g,
         num_warps=AUX_WARPS_PRO6000,
     )
 
@@ -231,9 +235,11 @@ def chunk_gated_delta_rule_blocked(
     num_warps: int = 4,
     num_stages: int = 2,
     use_cuda: bool | None = None,
+    cumsum_g: bool = False,
 ):
     """GDN forward. ``gc`` is the chunk-local cumsum of the log2 decay
-    ([B, T, H] fp32); q / k raw (``norm_qk``) or unit-norm; bf16 [B, T, H, 128].
+    ([B, T, H] fp32), or the raw log decay when ``cumsum_g=True``;
+    q / k raw (``norm_qk``) or unit-norm; bf16 [B, T, H, 128].
     """
     if use_cuda is None:
         from moe_infinity.kernel import gdn_recur_cuda
@@ -251,6 +257,9 @@ def chunk_gated_delta_rule_blocked(
         if initial_state is not None
         else k.new_zeros(B, H, K, V, dtype=torch.float32)
     )
+    g_in = gc
+    if cumsum_g:
+        gc = torch.empty_like(g_in, dtype=torch.float32)
     # one allocation so a single persisting-L2 window covers every buffer
     n = B * TB * H
     per = n * (3 * K + V + 64)
@@ -261,14 +270,14 @@ def chunk_gated_delta_rule_blocked(
     )
     starts = list(range(0, T, TB))
     sizes = [min(TB, T - t) for t in starts]
-    args = (q, k, v, gc, beta)
+    args = (q, k, v, g_in, gc, beta)
     if use_cuda and L2_PERSIST:
         from moe_infinity.kernel import gdn_recur_cuda
 
         gdn_recur_cuda.l2_window(arena, arena.numel() * arena.element_size())
 
     for t_base, nb in zip(starts, sizes):
-        _setup_block(*args, bufs, scale, T, t_base, TB, nb, norm_qk)
+        _setup_block(*args, bufs, scale, T, t_base, TB, nb, norm_qk, cumsum_g)
         w, u, qg, kd, S = bufs
         _recur(
             qg,
@@ -277,6 +286,144 @@ def chunk_gated_delta_rule_blocked(
             u,
             S,
             gc,
+            o,
+            h,
+            t_base,
+            nb,
+            BV,
+            num_warps,
+            num_stages,
+            use_cuda,
+        )
+    if use_cuda and L2_PERSIST:
+        gdn_recur_cuda.l2_window(arena, 0)
+    return o, (h if output_final_state else None)
+
+
+KDA_PREP_WARPS_PRO6000 = 4
+KDA_AUX_WARPS_PRO6000 = 4
+
+
+def _setup_kda_block(q, k, v, g, beta, bufs, scale, T, t_base, TB, nb, norm_qk):
+    from moe_infinity.kernel.gdn_prep import (
+        kda_fwd_aux_pro6000_kernel,
+        kda_fwd_prep_pro6000_kernel,
+    )
+
+    w, u, qg, kd, S, gl = bufs
+    B, _, H, K = k.shape
+    grid = (triton.cdiv(nb, 64), B * H)
+    kda_fwd_prep_pro6000_kernel[grid](
+        k,
+        v,
+        g,
+        beta,
+        w,
+        u,
+        T,
+        t_base,
+        TB,
+        HV=H,
+        K=K,
+        V=v.shape[-1],
+        BT=64,
+        BC=16,
+        NORM_K=norm_qk,
+        NEUMANN=PREP_NEUMANN,
+        num_warps=KDA_PREP_WARPS_PRO6000,
+        num_stages=1,
+    )
+    kda_fwd_aux_pro6000_kernel[grid](
+        q,
+        k,
+        g,
+        qg,
+        kd,
+        S,
+        gl,
+        scale,
+        T,
+        t_base,
+        TB,
+        HV=H,
+        K=K,
+        BT=64,
+        BC=16,
+        NORM=norm_qk,
+        num_warps=KDA_AUX_WARPS_PRO6000,
+        num_stages=1,
+    )
+
+
+def chunk_kda_blocked(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    norm_qk: bool = True,
+    block_tokens: int | None = None,
+    BV: int = 32,
+    num_warps: int = 4,
+    num_stages: int = 2,
+    use_cuda: bool | None = None,
+):
+    """L2-blocked KDA forward. ``g`` is the raw per-channel log decay
+    ([B, T, H, 128]); cumsum and q/k L2 norms are computed inside setup."""
+    if use_cuda is None:
+        from moe_infinity.kernel import gdn_recur_cuda
+
+        use_cuda = gdn_recur_cuda.available()
+    B, T, H, K = k.shape
+    V = v.shape[-1]
+    if block_tokens is None:
+        # 65536 token-heads per block = 72.5 MiB arena, under 80 MiB L2 window
+        block_tokens = min(
+            BLOCK_TOKENS, max(64, (65536 // max(1, B * H) // 64) * 64)
+        )
+    TB = min(block_tokens, triton.cdiv(T, 64) * 64)
+    o = torch.empty_like(v)
+    h = (
+        initial_state.clone()
+        if initial_state is not None
+        else k.new_zeros(B, H, K, V, dtype=torch.float32)
+    )
+    n = B * TB * H
+    nc = B * (TB // 64) * H
+    per = n * (3 * K + V + 64) + 2 * nc * K
+    arena = k.new_empty(per)
+    w, u, qg, kd, S, gl_raw = arena.split(
+        [n * K, n * V, n * K, n * K, n * 64, 2 * nc * K]
+    )
+    bufs = (
+        w.view(B, TB, H, K),
+        u.view(B, TB, H, V),
+        qg.view(B, TB, H, K),
+        kd.view(B, TB, H, K),
+        S.view(B, TB, H, 64),
+        gl_raw.view(torch.float32).view(B, TB // 64, H, K),
+    )
+    starts = list(range(0, T, TB))
+    sizes = [min(TB, T - t) for t in starts]
+    args = (q, k, v, g, beta)
+    if use_cuda and L2_PERSIST:
+        from moe_infinity.kernel import gdn_recur_cuda
+
+        gdn_recur_cuda.l2_window(arena, arena.numel() * arena.element_size())
+
+    for t_base, nb in zip(starts, sizes):
+        _setup_kda_block(*args, bufs, scale, T, t_base, TB, nb, norm_qk)
+        w, u, qg, kd, S, gl = bufs
+        _recur(
+            qg,
+            kd,
+            w,
+            u,
+            S,
+            gl,
             o,
             h,
             t_base,
