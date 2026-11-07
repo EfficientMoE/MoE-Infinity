@@ -202,7 +202,8 @@ __device__ __forceinline__ float swiglu_oai(float gate, float up) {
 // from global memory (activation fragments are reused across the MT row
 // tiles), and partial sums are reduced across warps in shared memory.
 // --------------------------------------------------------------------------
-template <int WK, int U, int NT, int MT, bool SWIGLU, bool PDL_WAIT>
+template <int WK, int U, int NT, int MT, bool SWIGLU, bool PDL_WAIT,
+          bool FENCE_W = false>
 __global__ void __launch_bounds__(WK * 32)
     mxfp4_gemv_pro6000_kernel(const __nv_bfloat16* __restrict__ x, int M, int K,
                               const uint8_t* __restrict__ wq,
@@ -241,13 +242,19 @@ __global__ void __launch_bounds__(WK * 32)
     rg8[mi] = ok_g8[mi] ? b : 0;
   }
 
-  pdl_launch_dependents();
+  if constexpr (!(FENCE_W && PDL_WAIT)) pdl_launch_dependents();
   if constexpr (PDL_WAIT) {
     // Weights do not depend on the previous kernel: start streaming them
     // into L2 while it drains, then wait for its output (our activations).
-    if (prefetch_aligned && blockIdx.y == 0 && threadIdx.x < 16 * MT) {
-      const int r = m0 + threadIdx.x;
-      if (r < N) prefetch_l2_bulk(wq + static_cast<size_t>(r) * KP, KP);
+    if (prefetch_aligned && blockIdx.y == 0) {
+      if (threadIdx.x < 16 * MT) {
+        const int r = m0 + threadIdx.x;
+        if (r < N) prefetch_l2_bulk(wq + static_cast<size_t>(r) * KP, KP);
+      } else if constexpr (FENCE_W) {
+        if (threadIdx.x == 16 * MT && m0 + 16 * MT <= N)
+          prefetch_l2_bulk(ws + static_cast<size_t>(m0) * KB,
+                           static_cast<uint32_t>((16 * MT * KB) & ~15));
+      }
     }
   }
 
@@ -288,6 +295,12 @@ __global__ void __launch_bounds__(WK * 32)
             vb ? e8m0_bf16x2(__ldg(ws + static_cast<size_t>(rg8[mi]) * KB + b))
                : 0u;
       }
+    }
+    if constexpr (FENCE_W && PDL_WAIT) {
+      // Schedule all U weight and scale loads ahead of griddepcontrol.wait so
+      // ptxas does not sink granules u = 1..U-1 past the PDL wait into the
+      // post-wait HMMA loop while the CTA is co-resident with gate_up.
+      pdl_launch_dependents();
     }
     if (!waited) {
       pdl_wait();
@@ -330,7 +343,10 @@ __global__ void __launch_bounds__(WK * 32)
       }
     }
   }
-  if (!waited) pdl_wait();
+  if (!waited) {
+    if constexpr (FENCE_W && PDL_WAIT) pdl_launch_dependents();
+    pdl_wait();
+  }
 
   if constexpr (WK > 1) {
     __shared__ float red[WK - 1][MT * NT * 4][32];
@@ -1032,16 +1048,18 @@ cudaError_t launch(Kernel kernel, dim3 grid, dim3 block, size_t smem,
   return cudaLaunchKernelEx(&cfg, kernel, args...);
 }
 
-template <int WK, int U, int NT, int MT, bool SWIGLU, bool PDL>
+template <int WK, int U, int NT, int MT, bool SWIGLU, bool PDL,
+          bool FENCE_W = false>
 cudaError_t run_gemv(const __nv_bfloat16* x, int M, int K, const uint8_t* wq,
                      const uint8_t* ws, const __nv_bfloat16* bias, int N,
                      __nv_bfloat16* y, cudaStream_t stream) {
   const int aligned =
       (reinterpret_cast<uintptr_t>(wq) % 16 == 0) && ((K / 2) % 16 == 0);
   dim3 grid((N + 16 * MT - 1) / (16 * MT), (M + 8 * NT - 1) / (8 * NT));
-  return launch(mxfp4_gemv_pro6000_kernel<WK, U, NT, MT, SWIGLU, PDL>, grid,
-                dim3(WK * 32), 0, stream, PDL, x, M, K, wq, ws, bias, N, y,
-                aligned);
+  return launch(
+      mxfp4_gemv_pro6000_kernel<WK, U, NT, MT, SWIGLU, PDL, (FENCE_W && PDL)>,
+      grid, dim3(WK * 32), 0, stream, PDL, x, M, K, wq, ws, bias, N, y,
+      aligned);
 }
 
 // Per-(instantiation, device) launch facts: smem attribute raised, CTAs/SM.
@@ -1171,8 +1189,8 @@ cudaError_t dispatch(const __nv_bfloat16* x, int M, int K, const uint8_t* wq,
       return run_gemv<8, 3, 2, 2, SWIGLU, PDL>(x, M, K, wq, ws, bias, N, y,
                                                stream);
     case 2:
-      return run_gemv<8, 2, 4, 1, SWIGLU, PDL>(x, M, K, wq, ws, bias, N, y,
-                                               stream);
+      return run_gemv<8, 3, 1, 1, SWIGLU, PDL, true>(x, M, K, wq, ws, bias, N,
+                                                     y, stream);
     case 3:
       return run_gemv<8, 1, 4, 1, SWIGLU, PDL>(x, M, K, wq, ws, bias, N, y,
                                                stream);
@@ -1206,7 +1224,8 @@ int pick_pro6000_config(int M, bool swiglu) {
   // (blockIdx.y). 17-32 tokens: 16-token slices with two 16-row tiles per
   // warp (config 1), which halves the activation traffic per weight row
   // (M = 32: 36.3 -> 30.7 us per expert).
-  if (M <= 16) return 0;
+  if (M <= 2) return 0;
+  if (M <= 16) return 2;
   if (M <= kMxfp4GemvMaxTokens) return 1;
   if (M <= 128) return swiglu ? 6 : 4;
   if (M <= 256) return 5;
