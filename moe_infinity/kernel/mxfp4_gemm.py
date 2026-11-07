@@ -875,9 +875,19 @@ def _small_m_sm120_cuda(
     ext = _small_m_sm120_ext()
     if not ext:
         return False
-    # variant (see mxfp4_gemv.cu): 1 = 8 warps x 16 rows, 2 = 16 warps x 16
-    # rows; picked with the gate statistic on RTX PRO 6000 (N = 5760 / 2880).
-    variant = 1 if weight_packed.shape[0] >= 4096 else 2
+    # variant (see mxfp4_gemv.cu): narrow N (< 4096) keeps variant 2 (16 warps
+    # x 16 rows); wide N (>= 4096) uses variant 6 (2-row register-streaming
+    # FMA kernel, 2 warps x U2, 16 CTAs/SM) at M == 2 and variant 8 (16 warps
+    # x 16 rows @ 64 regs, 2 CTAs/SM) at M = 3..8.
+    M = x_2d.shape[0]
+    if weight_packed.shape[0] < 4096:
+        variant = 2
+    elif M == 2:
+        variant = 6
+    elif M > 2:
+        variant = 8
+    else:
+        variant = 1
     return ext.mxfp4_gemv_small(
         x_2d, weight_packed, weight_scales, bias, output, variant
     )
