@@ -232,8 +232,8 @@ __global__ void __launch_bounds__(WARPS * 32, MIN_BLOCKS)
                            const uint8_t* __restrict__ w,
                            const uint8_t* __restrict__ s,
                            const __nv_bfloat16* __restrict__ bias,
-                           __nv_bfloat16* __restrict__ out, int M, int N,
-                           int K, int64_t stride_xm, int64_t stride_wn,
+                           __nv_bfloat16* __restrict__ out, int M, int N, int K,
+                           int64_t stride_xm, int64_t stride_wn,
                            int64_t stride_sn, int64_t stride_om) {
   constexpr int MT = (RH + 1) / 2;
   const int lane = threadIdx.x & 31;
@@ -247,7 +247,8 @@ __global__ void __launch_bounds__(WARPS * 32, MIN_BLOCKS)
 
   float c[MT][4];
 
-  auto run_batch = [&](int base, bool first_batch) __attribute__((always_inline)) {
+  auto run_batch = [&](int base, bool first_batch)
+      __attribute__((always_inline)) {
     uint4 wv[MAXU][RH];
     uint32_t sv[MAXU][RH];
     {
@@ -330,8 +331,8 @@ __global__ void __launch_bounds__(WARPS * 32, MIN_BLOCKS)
             a[0] = f16x2_to_scaled_bf16x2_fast(h0[2 * hs], f0);
             a[1] = (RH > 1) ? f16x2_to_scaled_bf16x2_fast(h1[2 * hs], f1) : 0u;
             a[2] = f16x2_to_scaled_bf16x2_fast(h0[2 * hs + 1], f0);
-            a[3] = (RH > 1) ? f16x2_to_scaled_bf16x2_fast(h1[2 * hs + 1], f1)
-                            : 0u;
+            a[3] =
+                (RH > 1) ? f16x2_to_scaled_bf16x2_fast(h1[2 * hs + 1], f1) : 0u;
             mma_bf16_16816(c[t], a, xw[2 * st], xw[2 * st + 1]);
           }
         }
@@ -526,11 +527,11 @@ bool mxfp4_gemv_sm120_launch(const void* x, const void* w, const void* s,
       <<<(N + 8 * RH - 1) / (8 * RH), W * 32, 0, stream>>>(             \
           xb, wb, sb, bb, ob, M, N, K, stride_xm, stride_wn, stride_sn, \
           stride_om)
-#define MXFP4_M2_LAUNCH(RN, W, U, MB)                                   \
-  mxfp4_gemv_m2_kernel<RN, W, U, MB>                                    \
-      <<<(N + RN - 1) / RN, W * 32, 0, stream>>>(                       \
-          xb, wb, sb, bb, ob, M, N, K, stride_xm, stride_wn, stride_sn, \
-          stride_om)
+#define MXFP4_M2_LAUNCH(RN, W, U, MB)                                         \
+  mxfp4_gemv_m2_kernel<RN, W, U, MB>                                          \
+      <<<(N + RN - 1) / RN, W * 32, 0, stream>>>(xb, wb, sb, bb, ob, M, N, K, \
+                                                 stride_xm, stride_wn,        \
+                                                 stride_sn, stride_om)
   switch (variant) {
     case 0:
       MXFP4_GEMV_LAUNCH(4, 6, 1);

@@ -19,6 +19,7 @@ match exp700 exactly (exit 4); det double-pass one off-grid cell
 (exit 2); consistency within-depth totals equal across caps,
 sum == d (exit 3). Exit 0 settled.
 """
+
 import importlib.util
 import json
 import sys
@@ -27,12 +28,14 @@ from pathlib import Path
 
 HOME = Path.home()
 spec94 = importlib.util.spec_from_file_location(
-    "x94", str(HOME / "warp-work/exp694-moei-capmap/run_capmap.py"))
+    "x94", str(HOME / "warp-work/exp694-moei-capmap/run_capmap.py")
+)
 x94 = importlib.util.module_from_spec(spec94)
 sys.modules["x94"] = x94
 spec94.loader.exec_module(x94)
 spec97 = importlib.util.spec_from_file_location(
-    "x97", str(HOME / "warp-work/exp697-moei-earnimmune/run_earnimmune.py"))
+    "x97", str(HOME / "warp-work/exp697-moei-earnimmune/run_earnimmune.py")
+)
 x97 = importlib.util.module_from_spec(spec97)
 sys.modules["x97"] = x97
 spec97.loader.exec_module(x97)
@@ -64,8 +67,7 @@ def leg_for(d, caps):
         cc = {}
         for arm in ARMS:
             m = x97.pass_metrics(mk_arm(arm, cap), keys, seg, rid)
-            cc[arm] = {"burst": m["burst"], "rec": m["rec"],
-                       "cls": m["cls"]}
+            cc[arm] = {"burst": m["burst"], "rec": m["rec"], "cls": m["cls"]}
         sig = tuple(cc["eti_2020"]["cls"][x][0] for x in ("a", "b", "c"))
         if sig0 is None:
             sig0 = sig
@@ -83,12 +85,19 @@ def spread(cell):
 
 def main():
     t0 = time.time()
-    ref = json.loads((HOME / "warp-work/exp700-moei-phaseboundary/"
-                      "exp700-phaseboundary.json").read_text())
+    ref = json.loads(
+        (
+            HOME / "warp-work/exp700-moei-phaseboundary/"
+            "exp700-phaseboundary.json"
+        ).read_text()
+    )
     crest = ref["spread_pp"]["4096x2048"]
-    out = {"exp": "exp701-ridgedecomp", "crest_pp": crest,
-           "part1_pair_dominant": {"ring10-vs-ssr_10": "13/15"},
-           "probes": {}}
+    out = {
+        "exp": "exp701-ridgedecomp",
+        "crest_pp": crest,
+        "part1_pair_dominant": {"ring10-vs-ssr_10": "13/15"},
+        "probes": {},
+    }
     # repl leg: d4096 x cap2048 recomputed must match exp700 exactly
     keys, seg, _ = x94.stream_for(4096)
     rid = x97.burst_runs(seg)
@@ -120,21 +129,29 @@ def main():
         print("DET FAIL")
         sys.exit(2)
     # adjudicate
-    spreads = {f"{d}x{c}": round(spread(out["probes"][str(d)][str(c)]), 3)
-               for d in PROBE_D for c in PROBE_CAP}
-    spreads.update({f"4096x{c}": round(spread(xsec[str(c)]), 3)
-                    for c in XSEC_CAP})
+    spreads = {
+        f"{d}x{c}": round(spread(out["probes"][str(d)][str(c)]), 3)
+        for d in PROBE_D
+        for c in PROBE_CAP
+    }
+    spreads.update(
+        {f"4096x{c}": round(spread(xsec[str(c)]), 3) for c in XSEC_CAP}
+    )
     crest_holds = all(v <= crest + 0.5 for v in spreads.values())
-    out.update({"verdict": ("RIDGE_CREST" if crest_holds else "RIDGE_RISING"),
-                "probe_spread_pp": spreads, "det": True,
-                "elapsed_s": round(time.time() - t0, 1)})
+    out.update(
+        {
+            "verdict": ("RIDGE_CREST" if crest_holds else "RIDGE_RISING"),
+            "probe_spread_pp": spreads,
+            "det": True,
+            "elapsed_s": round(time.time() - t0, 1),
+        }
+    )
     (D / "exp701-ridgedecomp.json").write_text(json.dumps(out, indent=1))
     print("VERDICT:", out["verdict"], "| crest:", crest)
     for k, v in spreads.items():
         print(f"  {k}: {v:.2f}")
     g = xsec["2048"]
-    print("d4096 c2048:", " ".join(f"{a}:{g[a]['burst']:.4f}"
-                                    for a in ARMS))
+    print("d4096 c2048:", " ".join(f"{a}:{g[a]['burst']:.4f}" for a in ARMS))
     sys.exit(0)
 
 

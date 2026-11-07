@@ -5,33 +5,53 @@ Every number below is parsed at runtime from sealed primary artifacts:
   - exp704-capacitymap.json    (sealed lo anchors)
   - exp705-costcurves.json     (sealed WS20 + byte constants)
 No hand math, no hand-transcribed hashes."""
-import json, os
+
+import json
+import os
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-R6 = json.load(open(os.path.join(BASE, 'exp706', 'exp706-locross.json')))
-E704 = json.load(open('/Users/mfethe/warp-work/exp704-moei-capacitymap/exp704-capacitymap.json'))
-E705 = json.load(open(os.path.join(BASE, 'exp705', 'exp705-costcurves.json')))
+R6 = json.load(open(os.path.join(BASE, "exp706", "exp706-locross.json")))
+E704 = json.load(
+    open(
+        "/Users/mfethe/warp-work/exp704-moei-capacitymap/exp704-capacitymap.json"
+    )
+)
+E705 = json.load(open(os.path.join(BASE, "exp705", "exp705-costcurves.json")))
 
-lo704 = E704['traces']['lo']
-lo705 = E705['traces']['lo']
-assert lo705['b_e_MiB'] == 9.0 and lo705['b_e_bytes'] == 9437184
-WS20 = lo705['WS20']
-CROSS1 = int(R6['L1_CROSS1'])
+lo704 = E704["traces"]["lo"]
+lo705 = E705["traces"]["lo"]
+assert lo705["b_e_MiB"] == 9.0 and lo705["b_e_bytes"] == 9437184
+WS20 = lo705["WS20"]
+CROSS1 = int(R6["L1_CROSS1"])
 ratio = CROSS1 / WS20
-cross1_gib = CROSS1 * lo705['b_e_bytes'] / (1024 ** 3)
-sp = {int(k): v for k, v in R6['spread_pp'].items()}
+cross1_gib = CROSS1 * lo705["b_e_bytes"] / (1024**3)
+sp = {int(k): v for k, v in R6["spread_pp"].items()}
 caps = sorted(sp)
-law = {'granite': 768 / E705['traces']['granite']['WS20'],
-       'hi': 1792 / E705['traces']['hi']['WS20'],
-       'lo': ratio}
-grid = R6['policy_grid']
+law = {
+    "granite": 768 / E705["traces"]["granite"]["WS20"],
+    "hi": 1792 / E705["traces"]["hi"]["WS20"],
+    "lo": ratio,
+}
+grid = R6["policy_grid"]
 N = 50
 rows = []
 for c in caps:
-    ring, lcnu = grid[str(c)]['ring10'], grid[str(c)]['lcnu']
-    rows.append('| %d | %.2f | %.3f | %.3f | %.1f |' % (
-        c, c * lo705['b_e_bytes'] / (1024 ** 3), lcnu['whole'], ring['whole'], sp[c]))
-continuity_tie = [c for c in caps if grid[str(c)]['ring10']['burst'] == grid[str(c)]['lcnu']['burst']]
+    ring, lcnu = grid[str(c)]["ring10"], grid[str(c)]["lcnu"]
+    rows.append(
+        "| %d | %.2f | %.3f | %.3f | %.1f |"
+        % (
+            c,
+            c * lo705["b_e_bytes"] / (1024**3),
+            lcnu["whole"],
+            ring["whole"],
+            sp[c],
+        )
+    )
+continuity_tie = [
+    c
+    for c in caps
+    if grid[str(c)]["ring10"]["burst"] == grid[str(c)]["lcnu"]["burst"]
+]
 
 md = f"""# ADDENDUM {N} — exp706: qwen30b-lo CROSS1 location (capacity-grid extension past 2048)
 
@@ -95,7 +115,7 @@ Follow-up controller re-adjudicated every gate programmatically from primary
 sources: exact match, verdict {R6['verdict']} stands.
 """
 
-out = os.path.join(BASE, 'exp706', f'ADDENDUM{N}.md')
-open(out, 'w').write(md)
-print('wrote', out, len(md), 'chars')
-print('CROSS1', CROSS1, 'ratio %.4f' % ratio, 'GiB %.3f' % cross1_gib)
+out = os.path.join(BASE, "exp706", f"ADDENDUM{N}.md")
+open(out, "w").write(md)
+print("wrote", out, len(md), "chars")
+print("CROSS1", CROSS1, "ratio %.4f" % ratio, "GiB %.3f" % cross1_gib)
