@@ -458,10 +458,6 @@ struct BlockwiseGemm {
 using Sm120CoopGemm =
     BlockwiseGemm<Shape<_128, _128, _128>,
                   cutlass::gemm::KernelScheduleSm120Blockwise>::Gemm;
-using Sm120StreamKGemm =
-    BlockwiseGemm<Shape<_128, _128, _128>,
-                  cutlass::gemm::KernelScheduleSm120Blockwise,
-                  cutlass::gemm::StreamKScheduler>::Gemm;
 using Sm120PingGemm = BlockwiseGemm<
     Shape<_64, _128, _128>,
     cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120>::Gemm;
@@ -544,10 +540,10 @@ void run_gemm(const GemmProblem& p, cudaStream_t stream) {
 // Tile configs picked from a sweep of the GLM-5.x expert shapes on RTX PRO
 // 6000 (188 SMs). `exclusive` = the call is chained to run alone on the
 // device (see DeviceChain) or no other stream has an FP8 expert in flight;
-// otherwise several exec streams run experts concurrently, where persistent
-// stream-K kernels interfere (measured
-// on the 4-stream expert_layer harness: 128x128 tiles beat both stream-K and
-// 64x128 ping-pong above 256 tokens, ping-pong wins below).
+// otherwise several exec streams run experts concurrently (measured on the
+// 4-stream expert_layer harness: 128x128 tiles beat 64x128 ping-pong above
+// ~192 tokens, ping-pong wins below; the stream-K variant never won a point
+// in the 2026-11-09 GPU1 sweep and was removed).
 void blockwise_gemm_sm120_pro6000(const GemmProblem& p, bool exclusive,
                                   cudaStream_t stream) {
   const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
@@ -555,10 +551,7 @@ void blockwise_gemm_sm120_pro6000(const GemmProblem& p, bool exclusive,
       int64_t((p.M + 127) / 128) * (p.N / 128) * std::max(p.L, 1);
   if (tiles >= 6 * int64_t(sms)) {
     run_gemm<Sm120CoopGemm>(p, stream);
-  } else if (exclusive && p.K >= 4864) {
-    // Long-K gate/up with only a few waves of tiles: stream-K splits K.
-    run_gemm<Sm120StreamKGemm>(p, stream);
-  } else if (p.M <= (exclusive ? 2048 : 256)) {
+  } else if (p.M <= (exclusive ? 2048 : 192)) {
     run_gemm<Sm120PingGemm>(p, stream);
   } else {
     run_gemm<Sm120CoopGemm>(p, stream);
