@@ -1428,6 +1428,10 @@ int choose_bt(long long n, int E) {
   if (avg <= 16) return 16;
   if (avg <= 32) return 32;
   if (avg <= 64) return 64;
+  // #350: at 65..256 rows/expert the bt=64 config beats bt=128 by ~12-14%
+  // (measured on balanced layers, RTX PRO 6000: 9K 16.3->14.3 ms,
+  // 12K 16.7->14.7 ms per layer; bt=128 wins again from ~384 rows up).
+  if (avg <= 256) return 64;
   return 128;
 }
 
