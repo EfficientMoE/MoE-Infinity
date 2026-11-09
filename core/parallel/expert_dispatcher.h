@@ -151,6 +151,9 @@ class ExpertDispatcher : public base::noncopyable {
     std::uint64_t residency_lease = 0;
     std::uint64_t execution_lease_id = 0;
     ResidencyVariantKey execution_key;
+    // exp752: when non-null, retirement waits on this event on the
+    // retirement thread instead of a cudaLaunchHostFunc on the exec stream.
+    cudaEvent_t retire_event = nullptr;
   } ExpertRetireArgs;
 
   struct GroupRetireArgs {
@@ -225,7 +228,13 @@ class ExpertDispatcher : public base::noncopyable {
       exec_queue_[i].Close();
     }
     route_queue_.Close();
-    completion_retirement_queue_.Close();
+    {
+      // Fix752-D2: set the closed flag and Close atomically wrt the
+      // retirement thread's re-push path.
+      std::lock_guard<std::mutex> lock(completion_repush_mutex_);
+      completion_repush_closed_ = true;
+      completion_retirement_queue_.Close();
+    }
     retirement_queue_.Close();
     for (int i = 0; i < static_cast<int>(cache_cv_.size()); ++i) {
       NotifyCacheWaiters(i);
@@ -425,6 +434,10 @@ class ExpertDispatcher : public base::noncopyable {
       std::vector<CompletionEventRecord> records) noexcept;
 
   static void CUDART_CB ExpertReadyToRetireCallback(void* opaque);
+  // exp752: 0 = hostfn (upstream behaviour), 1 = per-expert retirement by
+  // event poll, 2 = 1 + completion-event release by query (no caller-stream
+  // host callback). Read once from MOEI_EXP752_MODE (H|R|RC).
+  static int Exp752Mode();
   static void CUDART_CB GroupReadyToRetireCallback(void* opaque);
   void RetirementFunc();
 
@@ -622,6 +635,10 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<CompletionEventRecord> destructor_fallback_events_;
   ThreadSafeQueue<std::vector<CompletionRetireItem>>
       completion_retirement_queue_;
+  // Fix752-D2: serializes the retirement thread's batch re-push against the
+  // destructor's queue Close() (see CompletionRetirementFunc).
+  std::mutex completion_repush_mutex_;
+  bool completion_repush_closed_{false};
   std::atomic<std::int64_t> pending_completion_retirement_callbacks_{0};
   std::mutex completion_retirement_callback_mutex_;
   std::condition_variable completion_retirement_callback_cv_;

@@ -5,6 +5,8 @@
 
 #include "expert_dispatcher.h"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <array>
 #include <chrono>
 #include <thread>
@@ -1753,6 +1755,40 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
       delete retire;
       throw std::runtime_error("injected retirement_launch failure");
     }
+    if (Exp752Mode() >= 1) {
+      cudaEvent_t retire_event;
+      // Fix752-D1: AcquireCompletionEvent may throw (event pool creation);
+      // without this guard the pending_retirement_callbacks_ increment above
+      // would never be undone and ~ExpertDispatcher would hang on the cv.
+      try {
+        retire_event = AcquireCompletionEvent(gpu_id);
+      } catch (...) {
+        pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
+        delete retire;
+        throw;
+      }
+      cudaError_t ev_status = cudaEventRecord(retire_event, exec_stream);
+      if (ev_status != cudaSuccess) {
+        ReleaseCompletionEvent(retire_event, gpu_id);
+        pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
+        delete retire;
+        throw std::runtime_error(
+            std::string("exp752 retire cudaEventRecord failed: ") +
+            cudaGetErrorString(ev_status));
+      }
+      retire->retire_event = retire_event;
+      try {
+        retirement_queue_.Push(*retire);
+      } catch (...) {
+        ReleaseCompletionEvent(retire_event, gpu_id);
+        pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
+        delete retire;
+        throw;
+      }
+      delete retire;
+      CompleteOne(args.generation);
+      return true;
+    }
     cudaError_t retire_status = cudaLaunchHostFunc(
         exec_stream, &ExpertDispatcher::ExpertReadyToRetireCallback, retire);
     if (retire_status != cudaSuccess) {
@@ -2125,6 +2161,13 @@ torch::Tensor ExpertDispatcher::WaitHiddenStates() {
     for (const CompletionEventRecord& record : events) {
       CUDA_CHECK(cudaStreamWaitEvent(caller_stream, record.event, 0));
       ++waits_inserted;
+    }
+    if (!events.empty() && Exp752Mode() >= 2) {
+      // Waits are already enqueued on caller_stream; per CUDA semantics a
+      // later re-record of the event cannot affect them, so the event may
+      // return to the pool once its own record has completed.
+      QueueUnwaitedEventsForQuery(std::move(events));
+      events.clear();
     }
     if (!events.empty()) {
       auto callback = std::make_unique<CompletionRetireBatch>(
@@ -2846,7 +2889,25 @@ void ExpertDispatcher::CompletionRetirementFunc() {
     }
     if (!retry.empty()) {
       std::this_thread::sleep_for(std::chrono::microseconds(50));
-      completion_retirement_queue_.Push(retry);
+      // Fix752-D2: ThreadSafeQueue::Push silently drops when closed, so a
+      // re-push racing the destructor's Close() leaked the batch's cuda event
+      // handles. Serialize against Close: a batch is either re-queued (and the
+      // closed queue still drains its remaining items) or routed to
+      // destructor_fallback_events_, which ~ExpertDispatcher releases.
+      bool requeued = false;
+      {
+        std::lock_guard<std::mutex> lock(completion_repush_mutex_);
+        if (!completion_repush_closed_) {
+          completion_retirement_queue_.Push(retry);
+          requeued = true;
+        }
+      }
+      if (!requeued) {
+        std::lock_guard<std::mutex> lock(route_state_mutex_);
+        for (auto& item : retry) {
+          destructor_fallback_events_.push_back(std::move(item.record));
+        }
+      }
     }
     items.clear();
   }
@@ -2897,7 +2958,21 @@ void ExpertDispatcher::ReleaseCompletionEvent(cudaEvent_t event,
 void ExpertDispatcher::RetirementFunc() {
   ExpertRetireArgs args;
   while (retirement_queue_.Pop(args)) {
+    const bool by_event = args.retire_event != nullptr;
     try {
+      if (by_event) {
+        cudaError_t st;
+        while ((st = cudaEventQuery(args.retire_event)) == cudaErrorNotReady) {
+          std::this_thread::sleep_for(std::chrono::microseconds(10));
+        }
+        ReleaseCompletionEvent(args.retire_event, args.gpu_id);
+        args.retire_event = nullptr;
+        if (st != cudaSuccess) {
+          throw std::runtime_error(
+              std::string("exp752 retire event query failed: ") +
+              cudaGetErrorString(st));
+        }
+      }
       if (args.evict) {
         args.expert_node->node->SetDevice(args.expert_node->node->default_host,
                                           true, nullptr);
@@ -2926,7 +3001,29 @@ void ExpertDispatcher::RetirementFunc() {
                    {FailureContext{args.expert_node, args.gpu_id, false, false,
                                    args.evict}});
     }
+    if (by_event && pending_retirement_callbacks_.fetch_sub(
+                        1, std::memory_order_acq_rel) == 1) {
+      std::lock_guard<std::mutex> lock(retirement_callback_mutex_);
+      retirement_callback_cv_.notify_all();
+    }
   }
+}
+
+int ExpertDispatcher::Exp752Mode() {
+  static const int mode = [] {
+    const char* v = std::getenv("MOEI_EXP752_MODE");
+    if (v == nullptr) return 0;
+    const std::string s(v);
+    if (s == "R") return 1;
+    if (s == "RC") return 2;
+    return 0;
+  }();
+  static const bool announced = [] {
+    std::fprintf(stderr, "exp752 mode=%d\n", mode);
+    return true;
+  }();
+  (void)announced;
+  return mode;
 }
 
 std::uint64_t ExpertDispatcher::SetInputsWithInvocation(
