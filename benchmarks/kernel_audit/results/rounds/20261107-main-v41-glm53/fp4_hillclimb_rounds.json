@@ -140,6 +140,19 @@
       "arm":
           "consolidation v3: choose_bt = argmin padding cost over {48,64,80,96,128}, ties->larger tile; audit grid 9K 50.3% / 12K 59.5% / 50K 58.8% / 200K 63.0%, 40/40 tests",
       "verdict": "landed"
+    },
+    {
+      "round": "R13",
+      "arm":
+          "software-pipelined jp loop (double-buffered A fragments, +MT*8 regs)",
+      "us": {
+        "9K": 12210,
+        "12K": 13844,
+        "50K": 57097,
+        "200K": 272008
+      },
+      "verdict":
+          "rejected: worse everywhere (+2..+30%); ptxas had already scheduled the original loop; saturates bt96/bt128 registers"
     }
   ],
   "stall_profile": {
