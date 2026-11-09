@@ -1428,10 +1428,14 @@ int choose_bt(long long n, int E) {
   if (avg <= 16) return 16;
   if (avg <= 32) return 32;
   if (avg <= 64) return 64;
-  // #350: at 65..256 rows/expert the bt=64 config beats bt=128 by ~12-14%
-  // (measured on balanced layers, RTX PRO 6000: 9K 16.3->14.3 ms,
-  // 12K 16.7->14.7 ms per layer; bt=128 wins again from ~384 rows up).
-  if (avg <= 256) return 64;
+  // #350 hill-climb (RTX PRO 6000, balanced layers, GPU0 1845 MHz; full log
+  // in benchmarks/kernel_audit/results/rounds/20261107-main-v41-glm53/):
+  // bt=64 is dominated everywhere. bt=48 wins the 65..160 band (M=144:
+  // 16.3->11.9 ms/layer, zero tile padding), bt=96 wins 161..1024 (M=192:
+  // 16.7->13.3 ms, M=800: 58.5->57.3 ms), bt=128 stays best above ~1024.
+  // All arms produce bit-identical outputs.
+  if (avg <= 160) return 48;
+  if (avg <= 1024) return 96;
   return 128;
 }
 
@@ -1528,8 +1532,14 @@ void v4_moe_forward_sm120_pro6000_cuda(
     case 32:
       run_cfg<8, 1, 2, 4, 4>(a1, a2, T, topk, E, H, I, stream);
       break;
+    case 48:
+      run_cfg<4, 2, 4, 3, 3>(a1, a2, T, topk, E, H, I, stream);
+      break;
     case 64:
       run_cfg<4, 2, 4, 4, 3>(a1, a2, T, topk, E, H, I, stream);
+      break;
+    case 96:
+      run_cfg<4, 2, 4, 6, 3>(a1, a2, T, topk, E, H, I, stream);
       break;
     default:
       run_cfg<4, 2, 4, 8, 3>(a1, a2, T, topk, E, H, I, stream);

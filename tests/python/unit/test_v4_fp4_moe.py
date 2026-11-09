@@ -137,7 +137,8 @@ def _no_tf32():
         (24, 4, 8, 256, 256),  # BT=16
         (48, 4, 8, 512, 128),  # BT=32
         (100, 4, 8, 256, 384),  # BT=64
-        (512, 4, 8, 256, 384),  # avg 256 rows/expert: BT=64 via #350 rule
+        (300, 4, 8, 256, 384),  # avg 150 rows/expert: BT=48 via #350 rule
+        (512, 4, 8, 256, 384),  # avg 256 rows/expert: BT=96 via #350 rule
         (700, 6, 8, 512, 256),  # BT=128, multiple row tiles per expert
         (8192, 6, 16, 256, 2048),  # h = 100 MB: expert-chunked GEMM1/GEMM2
     ],
