@@ -113,6 +113,39 @@
       "arm":
           "consolidation: rule v2 (48<=160, 96<=1024, else 128) + audit grid + 40 parity tests",
       "verdict": "landed"
+    },
+    {
+      "round": "R11",
+      "arm":
+          "bt80 <4,2,4,5,3> NEW (spill-free, acc 80 regs; ptxas -v showed bt48/64 spill-free 121-134 regs, bt96/bt128 255 regs + 44-112B spills)",
+      "us": {
+        "9K": 11652,
+        "12K": 16896,
+        "50K": 55937,
+        "200K": 223927
+      },
+      "verdict": "WINNER at 9K and 50K"
+    },
+    {
+      "round": "R12",
+      "arm": "bt96 with sb_off as uint32 offsets",
+      "us": {
+        "12K": 13362,
+        "50K": 57664
+      },
+      "verdict": "rejected: no measurable effect"
+    },
+    {
+      "round": "R13",
+      "arm":
+          "consolidation v3: choose_bt = argmin padding cost over {48,64,80,96,128}, ties->larger tile; audit grid 9K 50.3% / 12K 59.5% / 50K 58.8% / 200K 63.0%, 40/40 tests",
+      "verdict": "landed"
     }
-  ]
+  ],
+  "stall_profile": {
+    "math_pipe_throttle": "3.4-4.0 cycles/issue (dominant)",
+    "wait": "2.3 (dependency + spill latency)",
+    "long_short_scoreboard_mio":
+        "~0 -> deeper K pipeline ruled out; register trims + tile structure are the only config levers"
+  }
 }

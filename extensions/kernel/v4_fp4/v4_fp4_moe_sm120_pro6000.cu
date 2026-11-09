@@ -47,6 +47,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cooperative_groups.h>
+#include <climits>
 #include <cstdint>
 
 namespace cg = cooperative_groups;
@@ -1428,15 +1429,23 @@ int choose_bt(long long n, int E) {
   if (avg <= 16) return 16;
   if (avg <= 32) return 32;
   if (avg <= 64) return 64;
-  // #350 hill-climb (RTX PRO 6000, balanced layers, GPU0 1845 MHz; full log
-  // in benchmarks/kernel_audit/results/rounds/20261107-main-v41-glm53/):
-  // bt=64 is dominated everywhere. bt=48 wins the 65..160 band (M=144:
-  // 16.3->11.9 ms/layer, zero tile padding), bt=96 wins 161..1024 (M=192:
-  // 16.7->13.3 ms, M=800: 58.5->57.3 ms), bt=128 stays best above ~1024.
-  // All arms produce bit-identical outputs.
-  if (avg <= 160) return 48;
-  if (avg <= 1024) return 96;
-  return 128;
+  // #350 hill-climb v3 (RTX PRO 6000, balanced layers, GPU0 1845 MHz; full
+  // log in benchmarks/kernel_audit/results/rounds/20261107-main-v41-glm53/):
+  // pick the tile size minimising padding (ties -> larger tile, fewer tile
+  // launches). Reproduces every measured winner: M=144 -> 48/80
+  // (16.3 -> 11.7 ms/layer), M=192 -> 96 (13.3 ms), M=800 -> 80 (55.9 ms),
+  // M=3200 -> 128 (209 ms). bt=64 is kept only for the <=64 bands and as a
+  // padding-min candidate; all arms produce bit-identical outputs.
+  int best = 48;
+  long long best_cost = LLONG_MAX;
+  for (int bt : {48, 64, 80, 96, 128}) {
+    long long cost = (avg + bt - 1) / bt * bt;
+    if (cost <= best_cost) {
+      best = bt;
+      best_cost = cost;
+    }
+  }
+  return best;
 }
 
 }  // namespace v4moe
@@ -1537,6 +1546,9 @@ void v4_moe_forward_sm120_pro6000_cuda(
       break;
     case 64:
       run_cfg<4, 2, 4, 4, 3>(a1, a2, T, topk, E, H, I, stream);
+      break;
+    case 80:
+      run_cfg<4, 2, 4, 5, 3>(a1, a2, T, topk, E, H, I, stream);
       break;
     case 96:
       run_cfg<4, 2, 4, 6, 3>(a1, a2, T, topk, E, H, I, stream);
