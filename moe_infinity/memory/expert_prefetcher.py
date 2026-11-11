@@ -457,7 +457,9 @@ class ExpertPrefetcher(object):
                     self._db_slot = 0
                     self._db_buf = [None, None]
                     self._db_evt = [None, None]
-                logits = router_logits.float().view(-1, self.num_experts).mean(0)
+                logits = (
+                    router_logits.float().view(-1, self.num_experts).mean(0)
+                )
                 n = num_experts_to_prefetch
                 slot = self._db_slot
                 if self._db_evt[slot] is not None:
@@ -471,7 +473,8 @@ class ExpertPrefetcher(object):
                         self.num_experts, dtype=torch.long, pin_memory=True
                     )
                 self._db_buf[oslot].copy_(
-                    torch.topk(logits, self.num_experts).indices, non_blocking=True
+                    torch.topk(logits, self.num_experts).indices,
+                    non_blocking=True,
                 )
                 self._db_evt[oslot] = torch.cuda.Event()
                 self._db_evt[oslot].record()
@@ -479,7 +482,9 @@ class ExpertPrefetcher(object):
             else:
                 topk_indices: List[int] = (
                     torch.topk(
-                        router_logits.float().view(-1, self.num_experts).mean(0),
+                        router_logits.float()
+                        .view(-1, self.num_experts)
+                        .mean(0),
                         num_experts_to_prefetch,
                     )
                     .indices.cpu()
