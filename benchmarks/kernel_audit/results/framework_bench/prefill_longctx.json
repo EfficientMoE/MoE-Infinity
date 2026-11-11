@@ -1,0 +1,921 @@
+{
+  "date": "2026-11-11",
+  "gpu": 5,
+  "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+  "warmup": 2,
+  "iters_at_or_below_32k": 8,
+  "iters_at_or_above_64k": 5,
+  "median":
+      "statistical median of per-iter CUDA-event times; even counts average the two central samples",
+  "order": [
+    "9k",
+    "16k",
+    "32k",
+    "64k",
+    "128k",
+    "200k"
+  ],
+  "token_counts": {
+    "9k": 9216,
+    "16k": 16384,
+    "32k": 32768,
+    "64k": 65536,
+    "128k": 131072,
+    "200k": 204800
+  },
+  "vllm_version": "0.30.0",
+  "sglang_version": "0.5.23",
+  "vllm_fp4_scope":
+      "Two m_grouped_fp8_fp4_gemm_nt_contiguous calls (gate+up, then down). SwiGLU, the FP8 requant between them, and the token permute are outside the timer. Not a full expert layer.",
+  "failures": [],
+  "rows": [
+    {
+      "stack": "moe-infinity",
+      "kernel": "v4_moe_forward_sm120_pro6000",
+      "model": "deepseek-v4.1-flash",
+      "point": "9k",
+      "tokens": 9216,
+      "experts": 384,
+      "us_median": 12897.39179611206,
+      "us_samples": [
+        12844.767570495605,
+        12893.247604370117,
+        12895.232200622559,
+        12896.479606628418,
+        12898.303985595703,
+        13033.984184265137,
+        13257.087707519531,
+        13787.936210632324
+      ],
+      "ok": true,
+      "note":
+          "Grouped v4_moe_forward_sm120_pro6000, act_block=32, all 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2,
+      "act_block": 32
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "v4_moe_forward_sm120_pro6000",
+      "model": "deepseek-v4.1-flash",
+      "point": "16k",
+      "tokens": 16384,
+      "experts": 384,
+      "us_median": 18961.312294006348,
+      "us_samples": [
+        18278.656005859375,
+        18280.384063720703,
+        18297.24884033203,
+        18660.064697265625,
+        19262.55989074707,
+        19723.295211791992,
+        20017.087936401367,
+        20153.40805053711
+      ],
+      "ok": true,
+      "note":
+          "Grouped v4_moe_forward_sm120_pro6000, act_block=32, all 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2,
+      "act_block": 32
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "v4_moe_forward_sm120_pro6000",
+      "model": "deepseek-v4.1-flash",
+      "point": "32k",
+      "tokens": 32768,
+      "experts": 384,
+      "us_median": 38550.031661987305,
+      "us_samples": [
+        35281.761169433594,
+        37361.91940307617,
+        38410.369873046875,
+        38538.97476196289,
+        38561.08856201172,
+        38786.17477416992,
+        39038.143157958984,
+        39137.11929321289
+      ],
+      "ok": true,
+      "note":
+          "Grouped v4_moe_forward_sm120_pro6000, act_block=32, all 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2,
+      "act_block": 32
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "v4_moe_forward_sm120_pro6000",
+      "model": "deepseek-v4.1-flash",
+      "point": "64k",
+      "tokens": 65536,
+      "experts": 384,
+      "us_median": 75332.77130126953,
+      "us_samples": [
+        74254.21142578125,
+        74594.0170288086,
+        75332.77130126953,
+        75617.56896972656,
+        75651.64947509766
+      ],
+      "ok": true,
+      "note":
+          "Grouped v4_moe_forward_sm120_pro6000, act_block=32, all 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2,
+      "act_block": 32
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "v4_moe_forward_sm120_pro6000",
+      "model": "deepseek-v4.1-flash",
+      "point": "128k",
+      "tokens": 131072,
+      "experts": 384,
+      "us_median": 147733.38317871094,
+      "us_samples": [
+        147211.1358642578,
+        147608.06274414062,
+        147733.38317871094,
+        147747.90954589844,
+        147763.39721679688
+      ],
+      "ok": true,
+      "note":
+          "Grouped v4_moe_forward_sm120_pro6000, act_block=32, all 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2,
+      "act_block": 32
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "v4_moe_forward_sm120_pro6000",
+      "model": "deepseek-v4.1-flash",
+      "point": "200k",
+      "tokens": 204800,
+      "experts": 384,
+      "us_median": 228867.0654296875,
+      "us_samples": [
+        228755.06591796875,
+        228823.33374023438,
+        228867.0654296875,
+        229026.71813964844,
+        229140.2587890625
+      ],
+      "ok": true,
+      "note":
+          "Grouped v4_moe_forward_sm120_pro6000, act_block=32, all 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2,
+      "act_block": 32
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "fp8_prod",
+      "model": "glm-5.3-flash",
+      "point": "9k",
+      "tokens": 9216,
+      "experts": 288,
+      "us_median": 44246.511459350586,
+      "us_samples": [
+        39711.52114868164,
+        43252.09426879883,
+        43918.5905456543,
+        44082.01599121094,
+        44411.006927490234,
+        44719.13528442383,
+        44892.99011230469,
+        45019.840240478516
+      ],
+      "ok": true,
+      "note":
+          "fp8_prod layer: each expert is fp8_dequant_blockwise into BF16 then fused_moe_ffn_into. Four CUDA streams, cold weight pool sized like benchmarks/kernel_audit/suites.py. Not the uncommitted grouped FP8 kernel. Dequant output allocation is inside the timer, matching the audit builder.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2,
+      "tokens_per_expert": 256,
+      "streams": 4,
+      "weight_pool": 22,
+      "active_experts": 288.0
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "fp8_prod",
+      "model": "glm-5.3-flash",
+      "point": "16k",
+      "tokens": 16384,
+      "experts": 288,
+      "us_median": 53940.36865234375,
+      "us_samples": [
+        51092.31948852539,
+        53094.5930480957,
+        53270.43151855469,
+        53645.82443237305,
+        54234.91287231445,
+        54305.023193359375,
+        54357.662200927734,
+        54532.57751464844
+      ],
+      "ok": true,
+      "note":
+          "fp8_prod layer: each expert is fp8_dequant_blockwise into BF16 then fused_moe_ffn_into. Four CUDA streams, cold weight pool sized like benchmarks/kernel_audit/suites.py. Not the uncommitted grouped FP8 kernel. Dequant output allocation is inside the timer, matching the audit builder.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2,
+      "tokens_per_expert": 455,
+      "streams": 4,
+      "weight_pool": 22,
+      "active_experts": 288.0
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "fp8_prod",
+      "model": "glm-5.3-flash",
+      "point": "32k",
+      "tokens": 32768,
+      "experts": 288,
+      "us_median": 84586.02905273438,
+      "us_samples": [
+        83072.6089477539,
+        83591.74346923828,
+        84286.56005859375,
+        84514.23645019531,
+        84657.82165527344,
+        84681.3735961914,
+        84704.51354980469,
+        84952.4154663086
+      ],
+      "ok": true,
+      "note":
+          "fp8_prod layer: each expert is fp8_dequant_blockwise into BF16 then fused_moe_ffn_into. Four CUDA streams, cold weight pool sized like benchmarks/kernel_audit/suites.py. Not the uncommitted grouped FP8 kernel. Dequant output allocation is inside the timer, matching the audit builder.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2,
+      "tokens_per_expert": 910,
+      "streams": 4,
+      "weight_pool": 22,
+      "active_experts": 288.0
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "fp8_prod",
+      "model": "glm-5.3-flash",
+      "point": "64k",
+      "tokens": 65536,
+      "experts": 288,
+      "us_median": 129135.42175292969,
+      "us_samples": [
+        127939.81170654297,
+        128784.72900390625,
+        129135.42175292969,
+        129172.4853515625,
+        129282.5927734375
+      ],
+      "ok": true,
+      "note":
+          "fp8_prod layer: each expert is fp8_dequant_blockwise into BF16 then fused_moe_ffn_into. Four CUDA streams, cold weight pool sized like benchmarks/kernel_audit/suites.py. Not the uncommitted grouped FP8 kernel. Dequant output allocation is inside the timer, matching the audit builder.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2,
+      "tokens_per_expert": 1820,
+      "streams": 4,
+      "weight_pool": 22,
+      "active_experts": 288.0
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "fp8_prod",
+      "model": "glm-5.3-flash",
+      "point": "128k",
+      "tokens": 131072,
+      "experts": 288,
+      "us_median": 230038.90991210938,
+      "us_samples": [
+        229754.74548339844,
+        229933.31909179688,
+        230038.90991210938,
+        230047.39379882812,
+        230214.17236328125
+      ],
+      "ok": true,
+      "note":
+          "fp8_prod layer: each expert is fp8_dequant_blockwise into BF16 then fused_moe_ffn_into. Four CUDA streams, cold weight pool sized like benchmarks/kernel_audit/suites.py. Not the uncommitted grouped FP8 kernel. Dequant output allocation is inside the timer, matching the audit builder.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2,
+      "tokens_per_expert": 3641,
+      "streams": 4,
+      "weight_pool": 22,
+      "active_experts": 288.0
+    },
+    {
+      "stack": "moe-infinity",
+      "kernel": "fp8_prod",
+      "model": "glm-5.3-flash",
+      "point": "200k",
+      "tokens": 204800,
+      "experts": 288,
+      "us_median": 347282.16552734375,
+      "us_samples": [
+        346986.75537109375,
+        347152.1301269531,
+        347282.16552734375,
+        347345.9777832031,
+        347567.3828125
+      ],
+      "ok": true,
+      "note":
+          "fp8_prod layer: each expert is fp8_dequant_blockwise into BF16 then fused_moe_ffn_into. Four CUDA streams, cold weight pool sized like benchmarks/kernel_audit/suites.py. Not the uncommitted grouped FP8 kernel. Dequant output allocation is inside the timer, matching the audit builder.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2,
+      "tokens_per_expert": 5689,
+      "streams": 4,
+      "weight_pool": 22,
+      "active_experts": 288.0
+    },
+    {
+      "stack": "vllm",
+      "kernel": "deepgemm_fp8xfp4_gateup_and_down",
+      "model": "deepseek-v4.1-flash",
+      "point": "9k",
+      "tokens": 9216,
+      "experts": 384,
+      "us_median": 8821.983814239502,
+      "us_samples": [
+        8813.023567199707,
+        8818.816184997559,
+        8818.976402282715,
+        8821.248054504395,
+        8822.71957397461,
+        8823.807716369629,
+        8825.920104980469,
+        8833.855628967285
+      ],
+      "ok": true,
+      "note":
+          "Two calls to m_grouped_fp8_fp4_gemm_nt_contiguous (gate+up, then down), recipe_a=(1,128), recipe_b=(1,32). SwiGLU, the FP8 requant between the GEMMs, and the token permute are outside the timer. Not a full expert layer. Layout is the expert id of each row, equal split across all 384 experts. int8 weight bytes are in 0..126.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2,
+      "m_sum": 55296,
+      "rows_per_expert": 144
+    },
+    {
+      "stack": "vllm",
+      "kernel": "deepgemm_fp8xfp4_gateup_and_down",
+      "model": "deepseek-v4.1-flash",
+      "point": "16k",
+      "tokens": 16384,
+      "experts": 384,
+      "us_median": 14213.327884674072,
+      "us_samples": [
+        14165.120124816895,
+        14169.343948364258,
+        14179.295539855957,
+        14184.831619262695,
+        14241.82415008545,
+        14679.424285888672,
+        14961.631774902344,
+        15347.519874572754
+      ],
+      "ok": true,
+      "note":
+          "Two calls to m_grouped_fp8_fp4_gemm_nt_contiguous (gate+up, then down), recipe_a=(1,128), recipe_b=(1,32). SwiGLU, the FP8 requant between the GEMMs, and the token permute are outside the timer. Not a full expert layer. Layout is the expert id of each row, equal split across all 384 experts. int8 weight bytes are in 0..126.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2,
+      "m_sum": 98304,
+      "rows_per_expert": 256
+    },
+    {
+      "stack": "vllm",
+      "kernel": "deepgemm_fp8xfp4_gateup_and_down",
+      "model": "deepseek-v4.1-flash",
+      "point": "32k",
+      "tokens": 32768,
+      "experts": 384,
+      "us_median": 28999.48787689209,
+      "us_samples": [
+        26320.480346679688,
+        26507.200241088867,
+        27669.08836364746,
+        28801.664352416992,
+        29197.311401367188,
+        29256.76727294922,
+        29304.096221923828,
+        29369.375228881836
+      ],
+      "ok": true,
+      "note":
+          "Two calls to m_grouped_fp8_fp4_gemm_nt_contiguous (gate+up, then down), recipe_a=(1,128), recipe_b=(1,32). SwiGLU, the FP8 requant between the GEMMs, and the token permute are outside the timer. Not a full expert layer. Layout is the expert id of each row, equal split across all 384 experts. int8 weight bytes are in 0..126.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2,
+      "m_sum": 196608,
+      "rows_per_expert": 512
+    },
+    {
+      "stack": "vllm",
+      "kernel": "deepgemm_fp8xfp4_gateup_and_down",
+      "model": "deepseek-v4.1-flash",
+      "point": "64k",
+      "tokens": 65536,
+      "experts": 384,
+      "us_median": 55112.86544799805,
+      "us_samples": [
+        53524.03259277344,
+        54995.77713012695,
+        55112.86544799805,
+        55669.79217529297,
+        56105.02243041992
+      ],
+      "ok": true,
+      "note":
+          "Two calls to m_grouped_fp8_fp4_gemm_nt_contiguous (gate+up, then down), recipe_a=(1,128), recipe_b=(1,32). SwiGLU, the FP8 requant between the GEMMs, and the token permute are outside the timer. Not a full expert layer. Layout is the expert id of each row, equal split across all 384 experts. int8 weight bytes are in 0..126.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2,
+      "m_sum": 393216,
+      "rows_per_expert": 1024
+    },
+    {
+      "stack": "vllm",
+      "kernel": "deepgemm_fp8xfp4_gateup_and_down",
+      "model": "deepseek-v4.1-flash",
+      "point": "128k",
+      "tokens": 131072,
+      "experts": 384,
+      "us_median": 108444.03076171875,
+      "us_samples": [
+        107265.02227783203,
+        108422.01232910156,
+        108444.03076171875,
+        108671.00524902344,
+        108753.41033935547
+      ],
+      "ok": true,
+      "note":
+          "Two calls to m_grouped_fp8_fp4_gemm_nt_contiguous (gate+up, then down), recipe_a=(1,128), recipe_b=(1,32). SwiGLU, the FP8 requant between the GEMMs, and the token permute are outside the timer. Not a full expert layer. Layout is the expert id of each row, equal split across all 384 experts. int8 weight bytes are in 0..126.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2,
+      "m_sum": 786432,
+      "rows_per_expert": 2048
+    },
+    {
+      "stack": "vllm",
+      "kernel": "deepgemm_fp8xfp4_gateup_and_down",
+      "model": "deepseek-v4.1-flash",
+      "point": "200k",
+      "tokens": 204800,
+      "experts": 384,
+      "us_median": 168516.4794921875,
+      "us_samples": [
+        168218.88732910156,
+        168445.0225830078,
+        168516.4794921875,
+        168596.83227539062,
+        168716.9952392578
+      ],
+      "ok": true,
+      "note":
+          "Two calls to m_grouped_fp8_fp4_gemm_nt_contiguous (gate+up, then down), recipe_a=(1,128), recipe_b=(1,32). SwiGLU, the FP8 requant between the GEMMs, and the token permute are outside the timer. Not a full expert layer. Layout is the expert id of each row, equal split across all 384 experts. int8 weight bytes are in 0..126.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2,
+      "m_sum": 1228800,
+      "rows_per_expert": 3200
+    },
+    {
+      "stack": "vllm",
+      "kernel": "fused_experts_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "9k",
+      "tokens": 9216,
+      "experts": 288,
+      "us_median": 12046.847820281982,
+      "us_samples": [
+        12021.663665771484,
+        12032.544136047363,
+        12033.760070800781,
+        12040.99178314209,
+        12052.703857421875,
+        12056.544303894043,
+        12222.911834716797,
+        12564.096450805664
+      ],
+      "ok": true,
+      "note":
+          "vLLM fused_experts FP8 block-128 grouped Triton. Default tile for this GPU name (no tuned config). Routing matches bench_external_grouped_moe.py. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2
+    },
+    {
+      "stack": "vllm",
+      "kernel": "fused_experts_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "16k",
+      "tokens": 16384,
+      "experts": 288,
+      "us_median": 24534.016609191895,
+      "us_samples": [
+        22555.26351928711,
+        22728.22380065918,
+        22987.36000061035,
+        24225.85678100586,
+        24842.17643737793,
+        25179.10385131836,
+        25248.25668334961,
+        25373.632431030273
+      ],
+      "ok": true,
+      "note":
+          "vLLM fused_experts FP8 block-128 grouped Triton. Default tile for this GPU name (no tuned config). Routing matches bench_external_grouped_moe.py. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2
+    },
+    {
+      "stack": "vllm",
+      "kernel": "fused_experts_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "32k",
+      "tokens": 32768,
+      "experts": 288,
+      "us_median": 46917.551040649414,
+      "us_samples": [
+        43674.97634887695,
+        45995.90301513672,
+        46693.27926635742,
+        46710.174560546875,
+        47124.92752075195,
+        47485.023498535156,
+        47490.718841552734,
+        47651.67999267578
+      ],
+      "ok": true,
+      "note":
+          "vLLM fused_experts FP8 block-128 grouped Triton. Default tile for this GPU name (no tuned config). Routing matches bench_external_grouped_moe.py. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2
+    },
+    {
+      "stack": "vllm",
+      "kernel": "fused_experts_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "64k",
+      "tokens": 65536,
+      "experts": 288,
+      "us_median": 90523.36120605469,
+      "us_samples": [
+        89379.48608398438,
+        90024.13177490234,
+        90523.36120605469,
+        90697.95227050781,
+        90849.28131103516
+      ],
+      "ok": true,
+      "note":
+          "vLLM fused_experts FP8 block-128 grouped Triton. Default tile for this GPU name (no tuned config). Routing matches bench_external_grouped_moe.py. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2
+    },
+    {
+      "stack": "vllm",
+      "kernel": "fused_experts_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "128k",
+      "tokens": 131072,
+      "experts": 288,
+      "us_median": 177668.48754882812,
+      "us_samples": [
+        177236.95373535156,
+        177339.9658203125,
+        177668.48754882812,
+        177719.10095214844,
+        177790.46630859375
+      ],
+      "ok": true,
+      "note":
+          "vLLM fused_experts FP8 block-128 grouped Triton. Default tile for this GPU name (no tuned config). Routing matches bench_external_grouped_moe.py. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2
+    },
+    {
+      "stack": "vllm",
+      "kernel": "fused_experts_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "200k",
+      "tokens": 204800,
+      "experts": 288,
+      "us_median": 274629.3640136719,
+      "us_samples": [
+        274472.0458984375,
+        274558.7463378906,
+        274629.3640136719,
+        274632.4462890625,
+        275062.5915527344
+      ],
+      "ok": true,
+      "note":
+          "vLLM fused_experts FP8 block-128 grouped Triton. Default tile for this GPU name (no tuned config). Routing matches bench_external_grouped_moe.py. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "flashinfer_cutlass_mxfp4_mxfp8",
+      "model": "deepseek-v4.1-flash",
+      "point": "9k",
+      "tokens": 9216,
+      "experts": 384,
+      "us_median": 14877.24781036377,
+      "us_samples": [
+        14792.096138000488,
+        14810.04810333252,
+        14815.936088562012,
+        14859.487533569336,
+        14895.008087158203,
+        15220.800399780273,
+        15795.93563079834,
+        16304.384231567383
+      ],
+      "ok": true,
+      "note":
+          "FlashInfer cutlass_fused_moe, MXFP8 activations times MXFP4 weights, SwiGLU inside the kernel. mxfp8_quantize is outside the timer. Weight scales go through block_scale_interleave then reshape_as. All 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "flashinfer_cutlass_mxfp4_mxfp8",
+      "model": "deepseek-v4.1-flash",
+      "point": "16k",
+      "tokens": 16384,
+      "experts": 384,
+      "us_median": 16740.384101867676,
+      "us_samples": [
+        16291.616439819336,
+        16328.544616699219,
+        16336.799621582031,
+        16354.496002197266,
+        17126.272201538086,
+        17773.759841918945,
+        18500.54359436035,
+        19304.960250854492
+      ],
+      "ok": true,
+      "note":
+          "FlashInfer cutlass_fused_moe, MXFP8 activations times MXFP4 weights, SwiGLU inside the kernel. mxfp8_quantize is outside the timer. Weight scales go through block_scale_interleave then reshape_as. All 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "flashinfer_cutlass_mxfp4_mxfp8",
+      "model": "deepseek-v4.1-flash",
+      "point": "32k",
+      "tokens": 32768,
+      "experts": 384,
+      "us_median": 37060.28747558594,
+      "us_samples": [
+        31877.85530090332,
+        32814.07928466797,
+        35715.999603271484,
+        36909.50393676758,
+        37211.0710144043,
+        37261.53564453125,
+        37694.11087036133,
+        38352.19192504883
+      ],
+      "ok": true,
+      "note":
+          "FlashInfer cutlass_fused_moe, MXFP8 activations times MXFP4 weights, SwiGLU inside the kernel. mxfp8_quantize is outside the timer. Weight scales go through block_scale_interleave then reshape_as. All 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "flashinfer_cutlass_mxfp4_mxfp8",
+      "model": "deepseek-v4.1-flash",
+      "point": "64k",
+      "tokens": 65536,
+      "experts": 384,
+      "us_median": 71206.14624023438,
+      "us_samples": [
+        69337.98217773438,
+        70478.46221923828,
+        71206.14624023438,
+        72989.79187011719,
+        73017.85278320312
+      ],
+      "ok": true,
+      "note":
+          "FlashInfer cutlass_fused_moe, MXFP8 activations times MXFP4 weights, SwiGLU inside the kernel. mxfp8_quantize is outside the timer. Weight scales go through block_scale_interleave then reshape_as. All 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "flashinfer_cutlass_mxfp4_mxfp8",
+      "model": "deepseek-v4.1-flash",
+      "point": "128k",
+      "tokens": 131072,
+      "experts": 384,
+      "us_median": 142182.40356445312,
+      "us_samples": [
+        140741.5008544922,
+        142156.4483642578,
+        142182.40356445312,
+        142945.78552246094,
+        143594.94018554688
+      ],
+      "ok": true,
+      "note":
+          "FlashInfer cutlass_fused_moe, MXFP8 activations times MXFP4 weights, SwiGLU inside the kernel. mxfp8_quantize is outside the timer. Weight scales go through block_scale_interleave then reshape_as. All 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "flashinfer_cutlass_mxfp4_mxfp8",
+      "model": "deepseek-v4.1-flash",
+      "point": "200k",
+      "tokens": 204800,
+      "experts": 384,
+      "us_median": 225044.86083984375,
+      "us_samples": [
+        223930.11474609375,
+        224992.73681640625,
+        225044.86083984375,
+        225727.294921875,
+        227758.7127685547
+      ],
+      "ok": true,
+      "note":
+          "FlashInfer cutlass_fused_moe, MXFP8 activations times MXFP4 weights, SwiGLU inside the kernel. mxfp8_quantize is outside the timer. Weight scales go through block_scale_interleave then reshape_as. All 384 experts. ids = arange(T*6) % 384, weights 1/6.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "fused_moe_triton_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "9k",
+      "tokens": 9216,
+      "experts": 288,
+      "us_median": 11183.263778686523,
+      "us_samples": [
+        11170.559883117676,
+        11176.544189453125,
+        11177.632331848145,
+        11177.727699279785,
+        11188.799858093262,
+        11609.12036895752,
+        11712.287902832031,
+        11791.55158996582
+      ],
+      "ok": true,
+      "note":
+          "SGLang fused_moe Triton FP8 block-128. Default tile (no tuned config for this GPU name). Narrow get_exec stub: deterministic.enable_deterministic_inference=False and moe.enable_fused_moe_sum_all_reduce=False. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "fused_moe_triton_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "16k",
+      "tokens": 16384,
+      "experts": 288,
+      "us_median": 22386.4164352417,
+      "us_samples": [
+        21348.703384399414,
+        21955.2001953125,
+        22055.103302001953,
+        22138.368606567383,
+        22634.464263916016,
+        22925.72784423828,
+        23014.20783996582,
+        23014.56069946289
+      ],
+      "ok": true,
+      "note":
+          "SGLang fused_moe Triton FP8 block-128. Default tile (no tuned config for this GPU name). Narrow get_exec stub: deterministic.enable_deterministic_inference=False and moe.enable_fused_moe_sum_all_reduce=False. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "fused_moe_triton_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "32k",
+      "tokens": 32768,
+      "experts": 288,
+      "us_median": 43240.48042297363,
+      "us_samples": [
+        42322.91030883789,
+        43057.18231201172,
+        43112.064361572266,
+        43138.72146606445,
+        43342.23937988281,
+        43499.42398071289,
+        43569.72885131836,
+        44097.5341796875
+      ],
+      "ok": true,
+      "note":
+          "SGLang fused_moe Triton FP8 block-128. Default tile (no tuned config for this GPU name). Narrow get_exec stub: deterministic.enable_deterministic_inference=False and moe.enable_fused_moe_sum_all_reduce=False. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 8,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "fused_moe_triton_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "64k",
+      "tokens": 65536,
+      "experts": 288,
+      "us_median": 83418.52569580078,
+      "us_samples": [
+        83223.06823730469,
+        83303.52020263672,
+        83418.52569580078,
+        86559.87548828125,
+        86625.40435791016
+      ],
+      "ok": true,
+      "note":
+          "SGLang fused_moe Triton FP8 block-128. Default tile (no tuned config for this GPU name). Narrow get_exec stub: deterministic.enable_deterministic_inference=False and moe.enable_fused_moe_sum_all_reduce=False. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "fused_moe_triton_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "128k",
+      "tokens": 131072,
+      "experts": 288,
+      "us_median": 162856.7657470703,
+      "us_samples": [
+        162528.4423828125,
+        162562.43896484375,
+        162856.7657470703,
+        170860.73303222656,
+        172063.8427734375
+      ],
+      "ok": true,
+      "note":
+          "SGLang fused_moe Triton FP8 block-128. Default tile (no tuned config for this GPU name). Narrow get_exec stub: deterministic.enable_deterministic_inference=False and moe.enable_fused_moe_sum_all_reduce=False. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2
+    },
+    {
+      "stack": "sglang",
+      "kernel": "fused_moe_triton_fp8_block128",
+      "model": "glm-5.3-flash",
+      "point": "200k",
+      "tokens": 204800,
+      "experts": 288,
+      "us_median": 252853.50036621094,
+      "us_samples": [
+        252513.76342773438,
+        252565.0634765625,
+        252853.50036621094,
+        265643.0358886719,
+        268137.7868652344
+      ],
+      "ok": true,
+      "note":
+          "SGLang fused_moe Triton FP8 block-128. Default tile (no tuned config for this GPU name). Narrow get_exec stub: deterministic.enable_deterministic_inference=False and moe.enable_fused_moe_sum_all_reduce=False. All 288 experts are active at these lengths.",
+      "gpu": 5,
+      "iters": 5,
+      "warmup": 2
+    }
+  ]
+}

@@ -109,3 +109,33 @@ The V4.1 vLLM and SGLang cells were measured on GPU 4, the other Max-Q part, the
 - MoE-Infinity expert-layer percentages assume resident weights and uniform routing. Offload makes PCIe the roof, and the kernel gap matters on hits ([REPORT.md](REPORT.md) §8).
 - "Auto" means the backend each tree selects when the user does not pass a MoE or attention backend. An explicit flag can pick Marlin, TileLang, or DeepGEMM on either stack.
 - Correctness of the sm_120 attention fallbacks (SGLang `trtllm` DSA for GLM-5.3-Flash, FlashInfer specialization presence) was not executed here. The source section is the gate each tree applies. The timing section is the kernel measurement.
+
+## Long prefill, 2026-11-11
+
+One expert layer on GPU 5, the other RTX PRO 6000 Blackwell Max-Q (GPU 4 was already running a bench). Synthetic weights, same shapes as the section above. Token counts follow the audit convention: 9k = 9216, 16k = 16384, 32k = 32768, 64k = 65536, 128k = 131072, 200k = 204800. At every length every routed expert is active (384 for V4.1-Flash, 288 for GLM-5.3-Flash). CUDA events, warmup 2, then 8 timed iterations at 32k and below and 5 at 64k and above. Each iteration is synchronized. The cell is the statistical median (the average of the two central samples when the count is even). No size failed. Full microsecond medians and the per-iteration samples are in `results/framework_bench/prefill_longctx.json`. The tables below are those medians in milliseconds, three significant figures. The numbers in "Measured layer time, 2026-11-11" are unchanged; those V4.1 vLLM and SGLang cells were a separate run on GPU 4.
+
+### DeepSeek-V4.1-Flash
+
+H=5120, I=2304, E=384, top-6. MoE-Infinity is `v4_moe_forward_sm120_pro6000(x, ids, wts, table, 2304, 10.0, 32)` from the pr-353 `_v4_fp4` build, the grouped kernel. Routing is `arange(T*6) % 384` with weights 1/6, so the timer is the grouped forward, SwiGLU included. vLLM 0.30.0 is two calls to `m_grouped_fp8_fp4_gemm_nt_contiguous`, `recipe_a=(1,128)` and `recipe_b=(1,32)`, equal rows per expert across all 384 experts. SwiGLU, the FP8 requant between the GEMMs, and the token permute are outside that timer, so the column is two GEMMs and a lower bound on a full layer. SGLang 0.5.23 is FlashInfer `cutlass_fused_moe` (MXFP8 activations × MXFP4 weights) with SwiGLU inside; `mxfp8_quantize` is outside the timer, and the weight scales go through `block_scale_interleave` then `reshape_as`.
+
+| Tokens | Experts | MoE-Infinity grouped | vLLM two GEMMs | SGLang fused MoE |
+|---|---:|---:|---:|---:|
+| 9k | 384 | 12.9 ms | 8.82 ms | 14.9 ms |
+| 16k | 384 | 19.0 ms | 14.2 ms | 16.7 ms |
+| 32k | 384 | 38.6 ms | 29.0 ms | 37.1 ms |
+| 64k | 384 | 75.3 ms | 55.1 ms | 71.2 ms |
+| 128k | 384 | 148 ms | 108 ms | 142 ms |
+| 200k | 384 | 229 ms | 169 ms | 225 ms |
+
+### GLM-5.3-Flash
+
+H=4096, I=2048, E=288, top-8, FP8 block-128. MoE-Infinity is the production `fp8_prod` path from the existing audit shim (`kaudit_ext` linked to the pr-353 `_store`): 288 expert calls on 4 streams, each call `fp8_dequant_blockwise` into BF16 and then `fused_moe_ffn_into`. The dequant write sits inside the timer, matching `benchmarks/kernel_audit/suites.py`. The cold weight pool is 22 experts (4× L2). Tokens per expert are 256, 455, 910, 1820, 3641, and 5689. The uncommitted grouped FP8 kernel was left untouched. vLLM 0.30.0 is `fused_experts` and SGLang 0.5.23 is `fused_moe`, both grouped FP8-block-128 Triton on the default tile. SGLang logged that no tuned config exists for `NVIDIA_RTX_PRO_6000_Blackwell_Max-Q_Workstation_Edition`. The SGLang stub sets only `deterministic.enable_deterministic_inference=False` and `moe.enable_fused_moe_sum_all_reduce=False`. Routing is the same `(t*17 + j*3) % 288` pattern as `bench_external_grouped_moe.py`.
+
+| Tokens | Experts | MoE-Infinity fp8_prod | vLLM grouped Triton | SGLang grouped Triton |
+|---|---:|---:|---:|---:|
+| 9k | 288 | 44.2 ms | 12.0 ms | 11.2 ms |
+| 16k | 288 | 53.9 ms | 24.5 ms | 22.4 ms |
+| 32k | 288 | 84.6 ms | 46.9 ms | 43.2 ms |
+| 64k | 288 | 129 ms | 90.5 ms | 83.4 ms |
+| 128k | 288 | 230 ms | 178 ms | 163 ms |
+| 200k | 288 | 347 ms | 275 ms | 253 ms |
