@@ -1,0 +1,57 @@
+{
+  "stack": "sglang",
+  "python": "/mnt/raid0nvme0/leyang/moecpu-wt/venv-stock/bin/python",
+  "torch": "2.14.1+cu130",
+  "gpu":
+      "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition cc=12.0 sms=188",
+  "host": "gala2",
+  "started": "2026-11-11T06:44:43+0000",
+  "version": "0.5.23",
+  "ok": true,
+  "rows": [
+    {
+      "us_median": 232.7679991722107,
+      "us_min": 226.72000527381897,
+      "us_max": 263.10399174690247,
+      "iters": 10,
+      "stack": "sglang",
+      "model": "glm-5.3-flash",
+      "kernel": "fused_moe_triton_fp8_block128",
+      "point": "b1",
+      "tokens": 1
+    },
+    {
+      "us_median": 4565.055847167969,
+      "us_min": 4554.624080657959,
+      "us_max": 4582.943916320801,
+      "iters": 10,
+      "stack": "sglang",
+      "model": "glm-5.3-flash",
+      "kernel": "fused_moe_triton_fp8_block128",
+      "point": "b64",
+      "tokens": 64
+    },
+    {
+      "us_median": 4721.888065338135,
+      "us_min": 4714.111804962158,
+      "us_max": 4738.560199737549,
+      "iters": 10,
+      "stack": "sglang",
+      "model": "glm-5.3-flash",
+      "kernel": "fused_moe_triton_fp8_block128",
+      "point": "1K",
+      "tokens": 1024
+    },
+    {
+      "us_median": 17619.808197021484,
+      "us_min": 17577.695846557617,
+      "us_max": 18345.312118530273,
+      "iters": 10,
+      "stack": "sglang",
+      "model": "glm-5.3-flash",
+      "kernel": "fused_moe_triton_fp8_block128",
+      "point": "12K",
+      "tokens": 12288
+    }
+  ]
+}

@@ -82,9 +82,26 @@ The 99 KB shared-memory cap shows up in three places that are already in the sou
 
 ---
 
+## Measured layer time, 2026-11-11
+
+One expert layer on GPU 5, the same Max-Q part as [REPORT.md](REPORT.md). Synthetic weights, cold experts, 10 CUDA-event iterations. MoE-Infinity is the production dequant path (`fp8_prod`, `v4_fp4_prod`). vLLM 0.30.0 and SGLang 0.5.23 are their grouped FP8-block-128 Triton kernels at the GLM shape (E=288, H=4096, I=2048, top-8). Neither had a tuned config for this GPU name, so those columns are the default tile. Script: `benchmarks/kernel_audit/bench_external_grouped_moe.py`.
+
+| Model | Point | Experts launched | MoE-Infinity | vLLM | SGLang |
+|---|---|---:|---:|---:|---:|
+| GLM-5.3-Flash | b1 | 8 | 0.89 ms | 0.22 ms | 0.23 ms |
+| GLM-5.3-Flash | b64 | 241 | 26.2 ms | 4.54 ms | 4.57 ms |
+| GLM-5.3-Flash | 1K | 288 | 32.3 ms | 4.77 ms | 4.72 ms |
+| GLM-5.3-Flash | 12K | 288 | 52.6 ms | 19.2 ms | 17.6 ms |
+| DeepSeek-V4.1-Flash | b1 | 6 | 1.06 ms | — | — |
+| DeepSeek-V4.1-Flash | b64 | 244 | 43.4 ms | — | — |
+| DeepSeek-V4.1-Flash | 1K | 384 | 68.3 ms | — | — |
+| DeepSeek-V4.1-Flash | 12K | 384 | 82.6 ms | — | — |
+
+Dividing MoE-Infinity wall time by the experts launched (and by 4 streams for GLM) gives about 440 µs per GLM expert and 178 µs per V4.1 expert, flat from batch 1 through 1K. The layer is a loop of dequant-to-BF16 plus a tiny GEMM. The grouped FP8 kernels are one launch. V4.1 grouped MXFP4 was not timed; `v4_moe_forward_sm120_pro6000` exists and is not what `v4_fp4_prod` calls. The implementation plan is `docs/superpowers/plans/2026-11-11-grouped-moe-v41-glm53.md`.
+
 ## What is not claimed
 
-- No vLLM or SGLang kernel was timed on this GPU. A grouped Triton FP8 MoE can still be far from the roofline; the claim is the implementation class, not a percentage.
+- The 2026-11-09 source comparison did not time vLLM or SGLang. The table above is the 2026-11-11 kernel timing, GLM only, on untuned default Triton tiles. A tuned tile or DeepGEMM can move those cells; it does not change that they are one grouped launch.
 - MoE-Infinity expert-layer percentages assume resident weights and uniform routing. Offload makes PCIe the roof, and the kernel gap matters on hits ([REPORT.md](REPORT.md) §8).
 - "Auto" means the backend each tree selects when the user does not pass a MoE or attention backend. An explicit flag can pick Marlin, TileLang, or DeepGEMM on either stack.
 - Correctness of the sm_120 fallbacks (SGLang `trtllm` DSA for GLM-5.3-Flash, FlashInfer specialization presence, DeepGEMM actually loading) was not executed here. The table is the gate the source applies.
