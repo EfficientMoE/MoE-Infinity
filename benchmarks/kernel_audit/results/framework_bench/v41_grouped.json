@@ -1,0 +1,34 @@
+[
+  {
+    "tokens": 1,
+    "experts": 6,
+    "act_block": 32,
+    "us_median": 52.639998495578766,
+    "point": "b1",
+    "ok": true
+  },
+  {
+    "tokens": 64,
+    "experts": 244,
+    "act_block": 32,
+    "us_median": 2805.6321144104004,
+    "point": "b64",
+    "ok": true
+  },
+  {
+    "tokens": 1024,
+    "experts": 384,
+    "act_block": 32,
+    "us_median": 6677.343845367432,
+    "point": "1K",
+    "ok": true
+  },
+  {
+    "tokens": 12288,
+    "experts": 384,
+    "act_block": 32,
+    "us_median": 15945.856094360352,
+    "point": "12K",
+    "ok": true
+  }
+]

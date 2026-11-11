@@ -97,7 +97,9 @@ One expert layer on GPU 5, the same Max-Q part as [REPORT.md](REPORT.md). Synthe
 | DeepSeek-V4.1-Flash | 1K | 384 | 68.3 ms | — | — |
 | DeepSeek-V4.1-Flash | 12K | 384 | 82.6 ms | — | — |
 
-Dividing MoE-Infinity wall time by the experts launched (and by 4 streams for GLM) gives about 440 µs per GLM expert and 178 µs per V4.1 expert, flat from batch 1 through 1K. The layer is a loop of dequant-to-BF16 plus a tiny GEMM. The grouped FP8 kernels are one launch. V4.1 grouped MXFP4 was not timed; `v4_moe_forward_sm120_pro6000` exists and is not what `v4_fp4_prod` calls. The implementation plan is `docs/superpowers/plans/2026-11-11-grouped-moe-v41-glm53.md`.
+Dividing MoE-Infinity wall time by the experts launched (and by 4 streams for GLM) gives about 440 µs per GLM expert and 178 µs per V4.1 expert, flat from batch 1 through 1K. The layer is a loop of dequant-to-BF16 plus a tiny GEMM. The grouped FP8 kernels are one launch.
+
+`v4_moe_forward_sm120_pro6000` with `act_block=32`, the same shapes and expert counts, measured on this GPU the same day: **0.053 ms, 2.81 ms, 6.68 ms, 15.9 ms**. That is the existing grouped kernel, not the Path B loop. The moe-store V4.1 forward calls it when the extension exports the symbol and the RTX PRO 6000 gate passes; a build that only has `v4_expert_forward` stays on the loop. The implementation plan is `docs/superpowers/plans/2026-11-11-grouped-moe-v41-glm53.md`.
 
 ## What is not claimed
 
