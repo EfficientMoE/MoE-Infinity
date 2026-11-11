@@ -84,7 +84,7 @@ The 99 KB shared-memory cap shows up in three places that are already in the sou
 
 ## Measured layer time, 2026-11-11
 
-One expert layer on GPU 5, the same Max-Q part as [REPORT.md](REPORT.md). Synthetic weights, cold experts, 10 CUDA-event iterations. MoE-Infinity is the production dequant path (`fp8_prod`, `v4_fp4_prod`). vLLM 0.30.0 and SGLang 0.5.23 are their grouped FP8-block-128 Triton kernels at the GLM shape (E=288, H=4096, I=2048, top-8). Neither had a tuned config for this GPU name, so those columns are the default tile. Script: `benchmarks/kernel_audit/bench_external_grouped_moe.py`.
+One expert layer. MoE-Infinity and the GLM columns ran on GPU 5, the same Max-Q part as [REPORT.md](REPORT.md). Synthetic weights, cold experts, 10 CUDA-event iterations. MoE-Infinity is the production dequant path (`fp8_prod`, `v4_fp4_prod`). The GLM vLLM 0.30.0 and SGLang 0.5.23 cells are their grouped FP8-block-128 Triton kernels (E=288, H=4096, I=2048, top-8). Neither had a tuned config for this GPU name, so those cells are the default tile. Script: `benchmarks/kernel_audit/bench_external_grouped_moe.py`. The V4.1 vLLM and SGLang cells are the MXFP4 kernels described under the table.
 
 | Model | Point | Experts launched | MoE-Infinity | vLLM | SGLang |
 |---|---|---:|---:|---:|---:|
@@ -92,18 +92,20 @@ One expert layer on GPU 5, the same Max-Q part as [REPORT.md](REPORT.md). Synthe
 | GLM-5.3-Flash | b64 | 241 | 26.2 ms | 4.54 ms | 4.57 ms |
 | GLM-5.3-Flash | 1K | 288 | 32.3 ms | 4.77 ms | 4.72 ms |
 | GLM-5.3-Flash | 12K | 288 | 52.6 ms | 19.2 ms | 17.6 ms |
-| DeepSeek-V4.1-Flash | b1 | 6 | 1.06 ms | — | — |
-| DeepSeek-V4.1-Flash | b64 | 244 | 43.4 ms | — | — |
-| DeepSeek-V4.1-Flash | 1K | 384 | 68.3 ms | — | — |
-| DeepSeek-V4.1-Flash | 12K | 384 | 82.6 ms | — | — |
+| DeepSeek-V4.1-Flash | b1 | 6 | 1.06 ms | 1.39 ms | 0.25 ms |
+| DeepSeek-V4.1-Flash | b64 | 244 | 43.4 ms | 1.43 ms | 6.92 ms |
+| DeepSeek-V4.1-Flash | 1K | 384 | 68.3 ms | 2.19 ms | 8.05 ms |
+| DeepSeek-V4.1-Flash | 12K | 384 | 82.6 ms | 11.2 ms | 19.0 ms |
 
 Dividing MoE-Infinity wall time by the experts launched (and by 4 streams for GLM) gives about 440 µs per GLM expert and 178 µs per V4.1 expert, flat from batch 1 through 1K. The layer is a loop of dequant-to-BF16 plus a tiny GEMM. The grouped FP8 kernels are one launch.
 
 `v4_moe_forward_sm120_pro6000` with `act_block=32`, the same shapes and expert counts, measured on this GPU the same day: **0.053 ms, 2.81 ms, 6.68 ms, 15.9 ms**. That is the existing grouped kernel, not the Path B loop. The moe-store V4.1 forward calls it when the extension exports the symbol and the RTX PRO 6000 gate passes; a build that only has `v4_expert_forward` stays on the loop. The implementation plan is `docs/superpowers/plans/2026-11-11-grouped-moe-v41-glm53.md`.
 
+The V4.1 vLLM and SGLang cells were measured on GPU 4, the other Max-Q part, the same day. SGLang is FlashInfer CUTLASS `cutlass_fused_moe` with MXFP8 activations and MXFP4 weights, SwiGLU inside the kernel, checkpoint scales already interleaved, and the activation quant call outside the timer (`results/framework_bench/mxfp4_grouped.json`). vLLM is two calls to vendored DeepGEMM `m_grouped_fp8_fp4_gemm_nt_contiguous` (gate+up, then down). SwiGLU, the FP8 requant between them, and the token permute are outside that timer, so those cells are a lower bound on `DeepGemmFP4Experts.apply` (`results/framework_bench/vllm_mxfp4_grouped.json`). Batch 1 uses 6 rows; the other three points give every one of the 384 experts an equal share of `tokens × 6` rows. Round-robin at batch 64 therefore touches 384 experts, while the MoE-Infinity row uses the audit's expected 244.
+
 ## What is not claimed
 
-- The 2026-11-09 source comparison did not time vLLM or SGLang. The table above is the 2026-11-11 kernel timing, GLM only, on untuned default Triton tiles. A tuned tile or DeepGEMM can move those cells; it does not change that they are one grouped launch.
+- The 2026-11-09 source comparison did not time vLLM or SGLang. The GLM rows are the 2026-11-11 grouped FP8 Triton timing on untuned default tiles. The V4.1 vLLM column is two DeepGEMM GEMMs and the SGLang column is the fused CUTLASS MoE. A tuned tile or a full expert-module wrapper can move those cells.
 - MoE-Infinity expert-layer percentages assume resident weights and uniform routing. Offload makes PCIe the roof, and the kernel gap matters on hits ([REPORT.md](REPORT.md) §8).
 - "Auto" means the backend each tree selects when the user does not pass a MoE or attention backend. An explicit flag can pick Marlin, TileLang, or DeepGEMM on either stack.
-- Correctness of the sm_120 fallbacks (SGLang `trtllm` DSA for GLM-5.3-Flash, FlashInfer specialization presence, DeepGEMM actually loading) was not executed here. The table is the gate the source applies.
+- Correctness of the sm_120 attention fallbacks (SGLang `trtllm` DSA for GLM-5.3-Flash, FlashInfer specialization presence) was not executed here. The source section is the gate each tree applies. The timing section is the kernel measurement.
