@@ -2415,18 +2415,14 @@ void ExpertDispatcher::NotifyPendingWaiters() noexcept {
   // pending_ and route_pending_ change outside pending_mutex_. Taking it
   // here orders the change against a waiter's predicate check, so the
   // notification cannot land between that check and the wait (lost wakeup).
-  {
-    std::lock_guard<std::mutex> lock(pending_mutex_);
-  }
+  { std::lock_guard<std::mutex> lock(pending_mutex_); }
   pending_cv_.notify_all();
 }
 
 void ExpertDispatcher::NotifyCacheWaiters(int gpu_id) noexcept {
   // Same ordering for the legacy cache-full wait in GPUFetchFunc: the node
   // state its FindExpertEvict predicate reads changes outside cache_mutex_.
-  {
-    std::lock_guard<std::mutex> lock(cache_mutex_[gpu_id]);
-  }
+  { std::lock_guard<std::mutex> lock(cache_mutex_[gpu_id]); }
   cache_cv_[gpu_id].notify_all();
 }
 
