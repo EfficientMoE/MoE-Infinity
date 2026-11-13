@@ -1,0 +1,164 @@
+{
+  "issue": 350,
+  "gpu":
+      "GPU0 RTX PRO 6000 Server (1845 MHz sustained; GPUs 1-2 boost 2317 MHz -- cross-GPU A/B invalid, 21% skew)",
+  "parity": "bit-identical outputs across all bt arms",
+  "rounds": [
+    {
+      "round": "baseline",
+      "arm": "choose_bt rule v1 (bt64<=256, landed f7b9a5c9)",
+      "us": {
+        "9K": 14304,
+        "12K": 14679,
+        "50K": 58549,
+        "200K": 210027
+      }
+    },
+    {
+      "round": "R1",
+      "arm": "bt64 <8,1,2,8,3> (WN=1 NT=8)",
+      "us": {
+        "9K": 14507,
+        "12K": 14894,
+        "50K": 62270,
+        "200K": 239968
+      },
+      "verdict": "rejected: worse than <4,2,4,4,3>"
+    },
+    {
+      "round": "R2",
+      "arm": "bt64 <2,4,8,2,3> (MT=8 NT=2)",
+      "us": {
+        "9K": 12671,
+        "12K": 12802,
+        "50K": 52261,
+        "200K": 199779
+      },
+      "verdict": "invalid GPU (GPU1), retested as R4"
+    },
+    {
+      "round": "R3",
+      "arm": "bt128 <8,1,2,16,3> (NT=16)",
+      "us": {
+        "9K": 14275,
+        "12K": 14880,
+        "50K": 51856,
+        "200K": 188091
+      },
+      "verdict": "rejected: identical to current bt128 (measured on GPU2)"
+    },
+    {
+      "round": "R4",
+      "arm": "R2 retest on GPU0",
+      "us": {
+        "9K": 15384,
+        "12K": 15739,
+        "50K": 65820,
+        "200K": 253585
+      },
+      "verdict": "rejected"
+    },
+    {
+      "round": "R5",
+      "arm": "bt48 <4,2,4,3,3> NEW (zero padding at M=144)",
+      "us": {
+        "9K": 11860,
+        "12K": 15646,
+        "50K": 65506,
+        "200K": 257516
+      },
+      "verdict": "WINNER at 9K (-17.1% vs rule v1)"
+    },
+    {
+      "round": "R6",
+      "arm": "bt128 <2,2,4,8,3> CLUSTER=2",
+      "us": {
+        "9K": 19549,
+        "12K": 20434,
+        "50K": 73562,
+        "200K": 269944
+      },
+      "verdict": "rejected: ~20% worse everywhere"
+    },
+    {
+      "round": "R7",
+      "arm": "bt48 <4,2,4,3,4> 4-stage + register scale prefetch",
+      "us": {
+        "9K": 12782,
+        "12K": 16658
+      },
+      "verdict": "rejected: loses to 3-stage + smem scales"
+    },
+    {
+      "round": "R8",
+      "arm": "bt96 <4,2,4,6,3> NEW",
+      "us": {
+        "12K": 13346,
+        "50K": 57284,
+        "200K": 217906
+      },
+      "verdict": "WINNER at 12K and 50K (-9.1%/-2.2%)"
+    },
+    {
+      "round": "R9",
+      "arm": "bt32 <4,2,4,2,3>",
+      "us": {
+        "9K": 16091,
+        "12K": 19436
+      },
+      "verdict": "rejected"
+    },
+    {
+      "round": "R10",
+      "arm":
+          "consolidation: rule v2 (48<=160, 96<=1024, else 128) + audit grid + 40 parity tests",
+      "verdict": "landed"
+    },
+    {
+      "round": "R11",
+      "arm":
+          "bt80 <4,2,4,5,3> NEW (spill-free, acc 80 regs; ptxas -v showed bt48/64 spill-free 121-134 regs, bt96/bt128 255 regs + 44-112B spills)",
+      "us": {
+        "9K": 11652,
+        "12K": 16896,
+        "50K": 55937,
+        "200K": 223927
+      },
+      "verdict": "WINNER at 9K and 50K"
+    },
+    {
+      "round": "R12",
+      "arm": "bt96 with sb_off as uint32 offsets",
+      "us": {
+        "12K": 13362,
+        "50K": 57664
+      },
+      "verdict": "rejected: no measurable effect"
+    },
+    {
+      "round": "R13",
+      "arm":
+          "consolidation v3: choose_bt = argmin padding cost over {48,64,80,96,128}, ties->larger tile; audit grid 9K 50.3% / 12K 59.5% / 50K 58.8% / 200K 63.0%, 40/40 tests",
+      "verdict": "landed"
+    },
+    {
+      "round": "R13",
+      "arm":
+          "software-pipelined jp loop (double-buffered A fragments, +MT*8 regs)",
+      "us": {
+        "9K": 12210,
+        "12K": 13844,
+        "50K": 57097,
+        "200K": 272008
+      },
+      "verdict":
+          "rejected: worse everywhere (+2..+30%); ptxas had already scheduled the original loop; saturates bt96/bt128 registers"
+    }
+  ],
+  "stall_profile": {
+    "math_pipe_throttle": "3.4-4.0 cycles/issue (dominant)",
+    "wait": "2.3 (dependency + spill latency)",
+    "long_short_scoreboard_mio":
+        "~0 -> deeper K pipeline ruled out; register trims + tile structure are the only config levers"
+  }
+}
