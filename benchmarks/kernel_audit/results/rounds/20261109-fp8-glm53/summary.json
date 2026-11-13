@@ -1,0 +1,135 @@
+{
+  "gpu": "GPU1 RTX PRO 6000 Server, sustained ~2317 MHz (not GPU0 at 1845 MHz)",
+  "ceilings": {
+    "fp8_tflops": 772.3,
+    "dram_gbs": 1530.7
+  },
+  "baseline_fp8_native_layer": [
+    {
+      "model": "glm-5.3",
+      "size": "1K",
+      "us": 6943.6,
+      "roof_pct": 92.8
+    },
+    {
+      "model": "glm-5.3",
+      "size": "2K",
+      "us": 7057.0,
+      "roof_pct": 93.2
+    },
+    {
+      "model": "glm-5.3",
+      "size": "9K",
+      "us": 11598.3,
+      "roof_pct": 64.7
+    },
+    {
+      "model": "glm-5.3",
+      "size": "12K",
+      "us": 12014.7,
+      "roof_pct": 80.0
+    },
+    {
+      "model": "glm-5.3",
+      "size": "50K",
+      "us": 51307.6,
+      "roof_pct": 78.0
+    },
+    {
+      "model": "glm-5.3",
+      "size": "200K",
+      "us": 204404.9,
+      "roof_pct": 78.4
+    },
+    {
+      "model": "glm-5.3",
+      "size": "b1",
+      "us": 214.4,
+      "roof_pct": 92.1
+    },
+    {
+      "model": "glm-5.3",
+      "size": "b64",
+      "us": 5620.2,
+      "roof_pct": 97.6
+    },
+    {
+      "model": "glm-5.3",
+      "size": "b256",
+      "us": 6572.3,
+      "roof_pct": 96.6
+    },
+    {
+      "model": "glm-5.3-flash",
+      "size": "1K",
+      "us": 5098.0,
+      "roof_pct": 94.6
+    },
+    {
+      "model": "glm-5.3-flash",
+      "size": "2K",
+      "us": 5181.9,
+      "roof_pct": 94.8
+    },
+    {
+      "model": "glm-5.3-flash",
+      "size": "9K",
+      "us": 7159.1,
+      "roof_pct": 77.2
+    },
+    {
+      "model": "glm-5.3-flash",
+      "size": "12K",
+      "us": 9133.6,
+      "roof_pct": 70.1
+    },
+    {
+      "model": "glm-5.3-flash",
+      "size": "50K",
+      "us": 35414.9,
+      "roof_pct": 75.4
+    },
+    {
+      "model": "glm-5.3-flash",
+      "size": "200K",
+      "us": 139364.5,
+      "roof_pct": 76.6
+    },
+    {
+      "model": "glm-5.3-flash",
+      "size": "b1",
+      "us": 142.8,
+      "roof_pct": 92.2
+    },
+    {
+      "model": "glm-5.3-flash",
+      "size": "b64",
+      "us": 3973.6,
+      "roof_pct": 99.9
+    },
+    {
+      "model": "glm-5.3-flash",
+      "size": "b256",
+      "us": 4780.6,
+      "roof_pct": 99.5
+    }
+  ],
+  "experiments": [
+    {
+      "name": "tile sweep (coop128/ping64/ping128/streamK/clusters)",
+      "result":
+          "per-expert coop128 beats auto by ~15% at flash M=341, but the 4-stream layer A/B (layer_ab.jsonl) is within noise; stream-K never won"
+    },
+    {
+      "name": "PDL chain + early quant overlap (uncommitted, reverted)",
+      "result": "layer regression: flash 9K +3.2%, 12K +4.7%, decode b1 +14%"
+    },
+    {
+      "name": "grouped FP8 prototype",
+      "result":
+          "flash 9K layer 7.91 ms vs per-expert 7.16 ms; 12K 10.81 vs 9.13 ms. Compile of a second grouped kernel was in progress when the session stopped; not landed"
+    }
+  ],
+  "verdict":
+      "No change landed. On this GPU the shipped fp8_native layer is 70-80% of roofline at prefill (glm-5.3 12K already 80%) and 92-100% at decode b64. Issue #351 63-73% figures were the 1845 MHz GPU0 clock."
+}
