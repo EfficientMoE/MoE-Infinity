@@ -1,0 +1,39 @@
+[
+  {
+    "stack": "sglang",
+    "kernel": "flashinfer_cutlass_mxfp4_mxfp8",
+    "point": "b1",
+    "tokens": 1,
+    "us_median": 246.62399291992188,
+    "ok": true
+  },
+  {
+    "stack": "sglang",
+    "kernel": "flashinfer_cutlass_mxfp4_mxfp8",
+    "point": "b64",
+    "tokens": 64,
+    "us_median": 6921.440124511719,
+    "ok": true
+  },
+  {
+    "stack": "sglang",
+    "kernel": "flashinfer_cutlass_mxfp4_mxfp8",
+    "point": "1K",
+    "tokens": 1024,
+    "us_median": 8045.151710510254,
+    "ok": true
+  },
+  {
+    "stack": "sglang",
+    "kernel": "flashinfer_cutlass_mxfp4_mxfp8",
+    "point": "12K",
+    "tokens": 12288,
+    "us_median": 19006.975173950195,
+    "ok": true
+  },
+  {
+    "stack": "vllm",
+    "ok": false,
+    "error": "ModuleNotFoundError: No module named 'vllm.utils'"
+  }
+]

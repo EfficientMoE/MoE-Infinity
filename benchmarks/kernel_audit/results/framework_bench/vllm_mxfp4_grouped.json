@@ -1,0 +1,45 @@
+[
+  {
+    "stack": "vllm",
+    "kernel": "deepgemm_fp8xfp4_gateup_and_down",
+    "point": "b1",
+    "tokens": 1,
+    "m_sum": 6,
+    "rows_per_expert": 1,
+    "experts_with_rows": 6,
+    "note":
+        "sparse grouped_layout of 6 experts; padding every expert to one row timed 1431 us",
+    "us_median": 1392.5440311431885,
+    "ok": true
+  },
+  {
+    "stack": "vllm",
+    "kernel": "deepgemm_fp8xfp4_gateup_and_down",
+    "point": "b64",
+    "tokens": 64,
+    "m_sum": 384,
+    "rows_per_expert": 1,
+    "us_median": 1434.1440200805664,
+    "ok": true
+  },
+  {
+    "stack": "vllm",
+    "kernel": "deepgemm_fp8xfp4_gateup_and_down",
+    "point": "1K",
+    "tokens": 1024,
+    "m_sum": 6144,
+    "rows_per_expert": 16,
+    "us_median": 2186.1441135406494,
+    "ok": true
+  },
+  {
+    "stack": "vllm",
+    "kernel": "deepgemm_fp8xfp4_gateup_and_down",
+    "point": "12K",
+    "tokens": 12288,
+    "m_sum": 73728,
+    "rows_per_expert": 192,
+    "us_median": 11189.056396484375,
+    "ok": true
+  }
+]
