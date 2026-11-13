@@ -52,6 +52,20 @@ class ThreadSafeQueue : public base::noncopyable {
     return true;
   }
 
+  // EXP-795: pop only when the FRONT item satisfies pred (returns false
+  // otherwise, leaving the queue untouched). Lets the wait thread steal
+  // grouped exec items without disturbing non-group items ahead of them.
+  template <typename Pred>
+  bool TryPopIf(T& item, Pred pred) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty() || !pred(queue_.front())) {
+      return false;
+    }
+    item = std::move(queue_.front());
+    queue_.pop();
+    return true;
+  }
+
   // Returns true if the queue is empty.
   bool Empty() const {
     std::lock_guard<std::mutex> lock(mutex_);

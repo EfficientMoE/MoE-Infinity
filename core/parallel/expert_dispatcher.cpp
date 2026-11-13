@@ -2091,13 +2091,60 @@ torch::Tensor ExpertDispatcher::WaitHiddenStates() {
 #endif
   // Safety net for callers that enqueue without NotifyFetchStart. While the
   // route worker is still enqueueing it flushes the group itself.
-  if (!route_pending_.load(std::memory_order_acquire)) FlushGroupedExperts();
-  std::unique_lock<std::mutex> lock(pending_mutex_);
-  pending_cv_.wait(lock, [&] {
-    return !route_pending_.load(std::memory_order_acquire) &&
-           pending_.load(std::memory_order_acquire) == 0;
-  });
-  lock.unlock();
+  // EXP-795: active work-stealing wait. While the drain is pending, pop
+  // GROUPED exec items and run GroupedExec inline on the caller thread
+  // instead of sleeping through the route->exec-worker->cv round trip.
+  // Kill-switch: MOE_INLINE_WAIT=0 restores the legacy passive wait.
+  static const bool kInlineWait = []() {
+    const char* e = std::getenv("MOE_INLINE_WAIT");
+    return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+  }();
+  if (kInlineWait) {
+    for (;;) {
+      if (!route_pending_.load(std::memory_order_acquire))
+        FlushGroupedExperts();
+      {
+        std::unique_lock<std::mutex> lock(pending_mutex_);
+        if (!route_pending_.load(std::memory_order_acquire) &&
+            pending_.load(std::memory_order_acquire) == 0) {
+          break;
+        }
+      }
+      bool stole = false;
+      for (int dev = 0; dev < static_cast<int>(exec_queue_.size()); ++dev) {
+        ExecArgs args;
+        if (!exec_queue_[dev].TryPopIf(
+                args, [](const ExecArgs& a) { return a.group != nullptr; })) {
+          continue;
+        }
+        {
+          std::lock_guard<std::mutex> lock(resize_mutex_);
+          const std::int64_t items =
+              static_cast<std::int64_t>(args.group->members.size());
+          pending_by_device_[dev] =
+              std::max<std::int64_t>(0, pending_by_device_[dev] - items);
+        }
+        cudaSetDevice(dev);
+        GroupedExec(args, dev, exec_streams_[0]);
+        stole = true;
+        break;
+      }
+      if (!stole) {
+        std::unique_lock<std::mutex> lock(pending_mutex_);
+        pending_cv_.wait_for(lock, std::chrono::microseconds(200), [&] {
+          return !route_pending_.load(std::memory_order_acquire) &&
+                 pending_.load(std::memory_order_acquire) == 0;
+        });
+      }
+    }
+  } else {
+    std::unique_lock<std::mutex> lock(pending_mutex_);
+    pending_cv_.wait(lock, [&] {
+      return !route_pending_.load(std::memory_order_acquire) &&
+             pending_.load(std::memory_order_acquire) == 0;
+    });
+    lock.unlock();
+  }
 
   const std::uint64_t generation =
       current_generation_.load(std::memory_order_acquire);
