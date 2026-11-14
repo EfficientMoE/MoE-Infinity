@@ -472,9 +472,11 @@ void grouped_moe_prefill_pro6000(
   };
   auto pick = [&]<typename Configs>(Rate const* rate, int& cfg) {
     using Hm = Heights<Configs>;
+    // NVCC 12.8 cannot deduce the extent of Hm::big in this template.
+    constexpr int num_configs = std::tuple_size_v<Configs>;
     if (cfg < 0) {
       double best = 0;
-      for (int c = 0; c < int(std::size(Hm::big)); ++c) {
+      for (int c = 0; c < num_configs; ++c) {
         double t = cost(rate[c], split_of(rate[c], Hm::big[c], Hm::small[c]));
         if (cfg < 0 || t < best) {
           best = t;
@@ -482,8 +484,8 @@ void grouped_moe_prefill_pro6000(
         }
       }
     }
-    TORCH_CHECK(cfg < int(std::size(Hm::big)),
-                "grouped_moe_prefill: invalid tile config ", cfg);
+    TORCH_CHECK(cfg < num_configs, "grouped_moe_prefill: invalid tile config ",
+                cfg);
     return split_of(rate[cfg], Hm::big[cfg], Hm::small[cfg]);
   };
   moe_gemm::TileSplit const split[2] = {

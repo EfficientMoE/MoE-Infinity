@@ -31,6 +31,20 @@ Use the entries below as symptom-first checks. Each one lists the likely cause, 
 - **Resolution:** rebuild with the matching CUDA toolkit, reinstall with `pip install --no-build-isolation -e .`, and install the optional attention packages that you want to use.
 - **Related guide:** [Environment variables](environment-variables.md)
 
+## CUDA 12.8 build fails at grouped-prefill configuration selection
+
+- **Symptom:** `grouped_moe_prefill.cu` fails with no matching `std::size`
+  overload for `const int []` while compiling the `pick` template.
+- **Likely cause:** NVCC 12.8 cannot deduce the extent of the dependent
+  `Heights<Configs>::big` array in the selector.
+- **Resolution:** use the tuple-derived configuration bounds in the updated
+  selector and rebuild. This failure is shared by Python 3.10, 3.11, and 3.12;
+  changing Python versions does not address it.
+- **How to confirm:** run
+  `python tests/python/unit/test_grouped_moe_prefill_build.py -v` with CUDA
+  12.8's `nvcc` on `PATH`, then run the full wheel build. The focused test
+  skips its CUDA compiler check if `nvcc` is unavailable.
+
 ## Unsupported SM120 or Blackwell build
 
 - **Symptom:** the native DeepSeek-V4 path does not load on Blackwell, or the build fails around the SM120 path.
