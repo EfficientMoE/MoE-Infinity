@@ -14,12 +14,14 @@
 //   per warp step, decodes E2M1 once with cvt.rn.f16x2.e2m1x2 and accumulates
 //   both token rows in registers before a warp shuffle + 32B shared-memory
 //   reduction.
-// * M = 3..8, wide N (variant 8): mma.sync.m16n8k16 kernel
+// * M = 3..8, all N (variant 8): mma.sync.m16n8k16 kernel
 //   (mxfp4_gemv_fast_kernel) with single-batch K unrolling for K <= 4096,
-//   immediate-offset global loads, 2-op f16x2 -> scaled bf16x2 conversion
-//   ((h >> 3) & 0x0fff0fff | (h & 0x80008000)) * 2^112 * 2^(s-127), and
-//   16 warps x 16 rows @ 64 regs = 2 CTAs/SM; narrow N keeps variant 2
-//   (16 warps x 16 rows).
+//   activation loads issued ahead of cold-DRAM weight loads so shared x hits L2
+//   without queueing behind weight sector misses, 2-op f16x2 -> scaled bf16x2
+//   conversion ((h >> 3) & 0x0fff0fff | (h & 0x80008000)) * 2^112 * 2^(s-127),
+//   16 warps x 16 rows @ 64 regs = 2 CTAs/SM, and an early 9-warp partial
+//   reduction + bias prefetch (bar.sync 1, 288) overlapped with warps 0..6's
+//   second K unit; narrow N at M <= 2 keeps variant 2 (16 warps x 16 rows).
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -249,6 +251,24 @@ __global__ void __launch_bounds__(WARPS * 32, MIN_BLOCKS)
 
   auto run_batch = [&](int base, bool first_batch)
       __attribute__((always_inline)) {
+    // Issue shared activation loads first so L2 hits on x do not queue behind
+    // thousands of cold DRAM sector misses for w and s.
+    uint4 xv[MAXU][4];
+    {
+      const uint4* xp_base =
+          reinterpret_cast<const uint4*>(x + (int64_t)r * stride_xm) +
+          base * 16 + q * 4;
+#pragma unroll
+      for (int i = 0; i < MAXU; ++i) {
+        const int u = base + i * WARPS;
+        const int g = u * 4 + q;
+        const bool gv = u < units && g < G && tv;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+          xv[i][j] = ldg128_nc_rt(xp_base + i * WARPS * 16 + j, gv);
+        }
+      }
+    }
     uint4 wv[MAXU][RH];
     uint32_t sv[MAXU][RH];
     {
@@ -272,22 +292,6 @@ __global__ void __launch_bounds__(WARPS * 32, MIN_BLOCKS)
           const bool ok = gv && row_ok[h];
           wv[i][h] = ldg128_nc_rt(wp[h] + i * WARPS * 64, ok);
           sv[i][h] = ldg8_nc_rt(sp[h] + i * WARPS * 4, ok);
-        }
-      }
-    }
-    uint4 xv[MAXU][4];
-    {
-      const uint4* xp_base =
-          reinterpret_cast<const uint4*>(x + (int64_t)r * stride_xm) +
-          base * 16 + q * 4;
-#pragma unroll
-      for (int i = 0; i < MAXU; ++i) {
-        const int u = base + i * WARPS;
-        const int g = u * 4 + q;
-        const bool gv = u < units && g < G && tv;
-#pragma unroll
-        for (int j = 0; j < 4; ++j) {
-          xv[i][j] = ldg128_nc_rt(xp_base + i * WARPS * 16 + j, gv);
         }
       }
     }
@@ -355,25 +359,61 @@ __global__ void __launch_bounds__(WARPS * 32, MIN_BLOCKS)
       run_batch(base, false);
   }
 
-  constexpr int C_PER_T = (RH == 1) ? 2 : 4;
-  __shared__ float red[WARPS][MT][32][C_PER_T];
+  if constexpr (WARPS == 16 && RH == 2) {
+    // At K = 2880 (23 units), warps 7..15 only execute 1 unit and finish
+    // halfway through the kernel while warps 0..6 execute 2 units. Have warps
+    // 12..15 prefetch bias from DRAM and sum warps 7..15 behind a 9-warp named
+    // barrier (bar.sync 1, 288) while warps 0..6 are still computing unit 2.
+    __shared__ float red[4][WARPS][32];
 #pragma unroll
-  for (int t = 0; t < MT; ++t)
+    for (int j = 0; j < 4; ++j) red[j][warp][lane] = c[0][j];
+
+    float v_hi = 0.f;
+    const int k = warp - 12;
+    const int out_row = n0 + r + ((k >= 2) ? 8 : 0);
+    const int out_tok = 2 * q + (k & 1);
+    if (warp >= 7) {
+      float b_val = 0.f;
+      if (k >= 0 && bias != nullptr && out_row < N && out_tok < M) {
+        b_val = __bfloat162float(__ldg(bias + out_row));
+      }
+      asm volatile("bar.sync 1, 288;\n" ::: "memory");
+      if (k >= 0) {
+        v_hi = b_val;
 #pragma unroll
-    for (int j = 0; j < C_PER_T; ++j) red[warp][t][lane][j] = c[t][j];
-  __syncthreads();
-  for (int idx = threadIdx.x; idx < MT * 32 * C_PER_T; idx += WARPS * 32) {
-    const int t = idx / (32 * C_PER_T);
-    const int ln = (idx / C_PER_T) % 32;
-    const int j = idx % C_PER_T;
-    float v = 0.f;
+        for (int wi = 7; wi < WARPS; ++wi) v_hi += red[k][wi][lane];
+      }
+    }
+    __syncthreads();
+    if (k >= 0) {
+      float v = v_hi;
 #pragma unroll
-    for (int wi = 0; wi < WARPS; ++wi) v += red[wi][t][ln][j];
-    const int row = n0 + 16 * t + (ln >> 2) + (j < 2 ? 0 : 8);
-    const int tok = 2 * (ln & 3) + (j & 1);
-    if (row < N && tok < M) {
-      if (bias != nullptr) v += __bfloat162float(bias[row]);
-      out[tok * stride_om + row] = __float2bfloat16_rn(v);
+      for (int wi = 0; wi < 7; ++wi) v += red[k][wi][lane];
+      if (out_row < N && out_tok < M) {
+        out[out_tok * stride_om + out_row] = __float2bfloat16_rn(v);
+      }
+    }
+  } else {
+    constexpr int C_PER_T = (RH == 1) ? 2 : 4;
+    __shared__ float red[WARPS][MT][32][C_PER_T];
+#pragma unroll
+    for (int t = 0; t < MT; ++t)
+#pragma unroll
+      for (int j = 0; j < C_PER_T; ++j) red[warp][t][lane][j] = c[t][j];
+    __syncthreads();
+    for (int idx = threadIdx.x; idx < MT * 32 * C_PER_T; idx += WARPS * 32) {
+      const int t = idx / (32 * C_PER_T);
+      const int ln = (idx / C_PER_T) % 32;
+      const int j = idx % C_PER_T;
+      float v = 0.f;
+#pragma unroll
+      for (int wi = 0; wi < WARPS; ++wi) v += red[wi][t][ln][j];
+      const int row = n0 + 16 * t + (ln >> 2) + (j < 2 ? 0 : 8);
+      const int tok = 2 * (ln & 3) + (j & 1);
+      if (row < N && tok < M) {
+        if (bias != nullptr) v += __bfloat162float(bias[row]);
+        out[tok * stride_om + row] = __float2bfloat16_rn(v);
+      }
     }
   }
 }

@@ -5,8 +5,9 @@
 //
 // Native FP8 (e4m3, 128x128 block-scaled) SwiGLU expert, see fp8_moe.h.
 //
-// Hardware specificity (docs/hardware-gated-kernels.md): tuned on the RTX PRO
-// 6000 Blackwell Max-Q (sm_120, 188 SMs, 128 MiB L2, 99 KiB smem/block).
+// Hardware specificity (docs/hardware-gated-kernels.md): tuned on
+// RTX_PRO_6000 (Server 600W + Max-Q 300W unified) (sm_120, 188 SMs,
+// 128 MiB L2, 99 KiB smem/block).
 //   - CUTLASS sm120 blockwise FP8 GEMM (Sm120*Gemm): SM120 gate, built only
 //     with MOE_ENABLE_SM120_FP8 (sm_120a).
 //   - tensor-core decode GEMV (fp8_gemv_pro6000_kernel), the tile / stream-K /
@@ -49,6 +50,7 @@ namespace fp8_moe_detail {
 
 constexpr int kBlock = 128;    // scale block (both dims)
 constexpr int kE4M3Max = 448;  // largest finite e4m3fn value
+constexpr int64_t kSkBarrierBytes = 8192;  // Stream-K barrier region (<= 376 tiles)
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -304,9 +306,16 @@ __global__ void __launch_bounds__(kQuantThreads)
                          int gate_off, int up_off, uint8_t* __restrict__ q,
                          int64_t ldq, float* __restrict__ sf, int M, int K,
                          int quant_blocks, ScaleCopy c0, ScaleCopy c1,
-                         ScaleCopy c2, DeadRegion dead) {
+                         ScaleCopy c2, DeadRegion dead, uint4* zero_ptr,
+                         int zero_vec4) {
   pdl_wait();
   pdl_launch_dependents();
+  if (zero_ptr != nullptr) {
+    for (int i = int(blockIdx.x) * blockDim.x + threadIdx.x; i < zero_vec4;
+         i += int(gridDim.x) * blockDim.x) {
+      zero_ptr[i] = make_uint4(0, 0, 0, 0);
+    }
+  }
   if ((int)blockIdx.x >= quant_blocks) {
     const int tid = (blockIdx.x - quant_blocks) * blockDim.x + threadIdx.x;
     const int stride = (gridDim.x - quant_blocks) * blockDim.x;
@@ -393,19 +402,24 @@ template <bool SILU_MUL>
 void launch_quant(const __nv_bfloat16* in, int64_t ldi, int gate_off,
                   int up_off, uint8_t* q, int64_t ldq, float* sf, int M, int K,
                   ScaleCopy c0, ScaleCopy c1, ScaleCopy c2, DeadRegion dead,
-                  cudaStream_t stream) {
+                  uint8_t* zero_end, int64_t zero_bytes, cudaStream_t stream) {
   const int groups = M * (K / kBlock);
   const int quant_blocks =
       (groups + kQuantGroupsPerBlock - 1) / kQuantGroupsPerBlock;
   const int copy_elems = c0.NB * c0.KB + c1.NB * c1.KB + c2.NB * c2.KB;
   const int copy_blocks =
       copy_elems > 0 ? std::min(16, (copy_elems + 255) / 256) : 0;
-  // The input quantisation opens the expert (no PDL edge); the silu*up
-  // quantisation overlaps the gate/up GEMM tail.
+  uint4* zero_ptr = zero_bytes > 0
+                        ? reinterpret_cast<uint4*>(zero_end - zero_bytes)
+                        : nullptr;
+  const int zero_vec4 = static_cast<int>(zero_bytes / 16);
+  // Both quantisation launches carry the PDL attribute: input quantisation
+  // overlaps any prior kernel tail on the stream (e.g. back-to-back experts),
+  // and silu*up quantisation overlaps the gate/up GEMM tail.
   launch_kernel(fp8_quant_act_kernel<SILU_MUL>,
-                dim3(quant_blocks + copy_blocks), dim3(kQuantThreads), SILU_MUL,
-                stream, in, ldi, gate_off, up_off, q, ldq, sf, M, K,
-                quant_blocks, c0, c1, c2, dead);
+                dim3(quant_blocks + copy_blocks), dim3(kQuantThreads),
+                /*pdl=*/true, stream, in, ldi, gate_off, up_off, q, ldq, sf, M,
+                K, quant_blocks, c0, c1, c2, dead, zero_ptr, zero_vec4);
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +439,7 @@ using ElementAcc = float;
 using LayoutA = cutlass::layout::RowMajor;
 using LayoutB = cutlass::layout::ColumnMajor;
 using LayoutD = cutlass::layout::RowMajor;
+using LayoutDCol = cutlass::layout::ColumnMajor;
 constexpr int kAlignAB = 16;
 constexpr int kAlignD = 8;
 
@@ -455,6 +470,39 @@ struct BlockwiseGemm {
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<Kernel>;
 };
 
+// Swapped operand orientation: A' = weight [N, K] (128x128 scales),
+// B' = act [M, K] (1x128 scales), D' = [N, M] ColMajor (identical memory
+// layout to D [M, N] RowMajor). Because Cooperative SM120 blockwise MMA
+// requires TileM' >= 128 and N is a multiple of 128, swapping M<->N lets
+// TileN' (the token dimension M) be 32 or 64, avoiding padding M <= 64 up to
+// 64/128 rows and fitting 3..4 mainloop pipeline stages in shared memory.
+using SwapScaleConfig =
+    cutlass::detail::Sm120BlockwiseScaleConfig<kBlock, 1, kBlock>;
+using LayoutSwapSFA = decltype(SwapScaleConfig::deduce_layoutSFA());
+using LayoutSwapSFB = decltype(SwapScaleConfig::deduce_layoutSFB());
+
+template <class TileShape, class Schedule, class Scheduler = void>
+struct SwapBlockwiseGemm {
+  using Epilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+      cutlass::arch::Sm120, cutlass::arch::OpClassTensorOp, TileShape,
+      Shape<_1, _1, _1>, cutlass::epilogue::collective::EpilogueTileAuto,
+      ElementAcc, ElementAcc, void, LayoutDCol, kAlignD, ElementD, LayoutDCol,
+      kAlignD,
+      cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
+  using Mainloop = typename cutlass::gemm::collective::CollectiveBuilder<
+      cutlass::arch::Sm120, cutlass::arch::OpClassTensorOp, ElementA,
+      cute::tuple<LayoutA, LayoutSwapSFA>, kAlignAB, ElementB,
+      cute::tuple<LayoutB, LayoutSwapSFB>, kAlignAB, ElementAcc, TileShape,
+      Shape<_1, _1, _1>,
+      cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+          sizeof(typename Epilogue::SharedStorage))>,
+      Schedule>::CollectiveOp;
+  using Kernel =
+      cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int>, Mainloop,
+                                           Epilogue, Scheduler>;
+  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<Kernel>;
+};
+
 using Sm120CoopGemm =
     BlockwiseGemm<Shape<_128, _128, _128>,
                   cutlass::gemm::KernelScheduleSm120Blockwise>::Gemm;
@@ -465,6 +513,17 @@ using Sm120StreamKGemm =
 using Sm120PingGemm = BlockwiseGemm<
     Shape<_64, _128, _128>,
     cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120>::Gemm;
+
+using Sm120SwapCoop128x32Gemm =
+    SwapBlockwiseGemm<Shape<_128, _32, _128>,
+                      cutlass::gemm::KernelScheduleSm120Blockwise>::Gemm;
+using Sm120SwapStreamK128x32Gemm =
+    SwapBlockwiseGemm<Shape<_128, _32, _128>,
+                      cutlass::gemm::KernelScheduleSm120Blockwise,
+                      cutlass::gemm::StreamKScheduler>::Gemm;
+using Sm120SwapCoop128x64Gemm =
+    SwapBlockwiseGemm<Shape<_128, _64, _128>,
+                      cutlass::gemm::KernelScheduleSm120Blockwise>::Gemm;
 
 struct GemmProblem {
   int M, N, K, L;
@@ -478,38 +537,73 @@ struct GemmProblem {
   int32_t batch_sfb;
   __nv_bfloat16* D;
   int64_t ldd, batch_d;
+  int device;
+  int sms;
 };
 
-template <class Gemm>
-void run_gemm(const GemmProblem& p, cudaStream_t stream) {
+template <class Gemm, bool IsStreamK = false, bool Swapped = false>
+size_t run_gemm(const GemmProblem& p, uint8_t* sk_end, bool force_sk,
+                cudaStream_t stream) {
   using GK = typename Gemm::GemmKernel;
   using StrideA = typename GK::StrideA;
   using StrideB = typename GK::StrideB;
   using StrideC = typename GK::StrideC;
   using StrideD = typename GK::StrideD;
 
-  StrideA sa = cute::make_stride(p.lda, cute::Int<1>{}, p.batch_a);
-  StrideB sb = cute::make_stride(p.ldb, cute::Int<1>{}, p.batch_b);
-  StrideD sd = cute::make_stride(p.ldd, cute::Int<1>{}, p.batch_d);
+  typename Gemm::Arguments args;
+  if constexpr (!Swapped) {
+    StrideA sa = cute::make_stride(p.lda, cute::Int<1>{}, p.batch_a);
+    StrideB sb = cute::make_stride(p.ldb, cute::Int<1>{}, p.batch_b);
+    StrideD sd = cute::make_stride(p.ldd, cute::Int<1>{}, p.batch_d);
 
-  auto shape = cute::make_shape(p.M, p.N, p.K, p.L);
-  auto lsfa0 = ScaleConfig::tile_atom_to_shape_SFA(shape);
-  auto lsfb0 = ScaleConfig::tile_atom_to_shape_SFB(shape);
-  LayoutSFA lsfa = cute::make_layout(
-      lsfa0.shape(), cute::make_stride(get<0>(lsfa0.stride()),
-                                       get<1>(lsfa0.stride()), p.batch_sfa));
-  LayoutSFB lsfb = cute::make_layout(
-      lsfb0.shape(), cute::make_stride(get<0>(lsfb0.stride()),
-                                       get<1>(lsfb0.stride()), p.batch_sfb));
+    auto shape = cute::make_shape(p.M, p.N, p.K, p.L);
+    auto lsfa0 = ScaleConfig::tile_atom_to_shape_SFA(shape);
+    auto lsfb0 = ScaleConfig::tile_atom_to_shape_SFB(shape);
+    LayoutSFA lsfa = cute::make_layout(
+        lsfa0.shape(), cute::make_stride(get<0>(lsfa0.stride()),
+                                         get<1>(lsfa0.stride()), p.batch_sfa));
+    LayoutSFB lsfb = cute::make_layout(
+        lsfb0.shape(), cute::make_stride(get<0>(lsfb0.stride()),
+                                         get<1>(lsfb0.stride()), p.batch_sfb));
 
-  typename Gemm::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGemm,
-      {p.M, p.N, p.K, p.L},
-      {reinterpret_cast<const ElementA*>(p.A), sa,
-       reinterpret_cast<const ElementB*>(p.B), sb, p.SFA, lsfa, p.SFB, lsfb},
-      {{}, nullptr, StrideC{}, reinterpret_cast<ElementD*>(p.D), sd}};
+    args = typename Gemm::Arguments{
+        cutlass::gemm::GemmUniversalMode::kGemm,
+        {p.M, p.N, p.K, p.L},
+        {reinterpret_cast<const ElementA*>(p.A), sa,
+         reinterpret_cast<const ElementB*>(p.B), sb, p.SFA, lsfa, p.SFB, lsfb},
+        {{}, nullptr, StrideC{}, reinterpret_cast<ElementD*>(p.D), sd}};
+  } else {
+    StrideA sa = cute::make_stride(p.ldb, cute::Int<1>{}, p.batch_b);
+    StrideB sb = cute::make_stride(p.lda, cute::Int<1>{}, p.batch_a);
+    StrideD sd = cute::make_stride(cute::Int<1>{}, p.ldd, p.batch_d);
+
+    auto shape = cute::make_shape(p.N, p.M, p.K, p.L);
+    auto lsfa0 = SwapScaleConfig::tile_atom_to_shape_SFA(shape);
+    auto lsfb0 = SwapScaleConfig::tile_atom_to_shape_SFB(shape);
+    LayoutSwapSFA lsfa = cute::make_layout(
+        lsfa0.shape(), cute::make_stride(get<0>(lsfa0.stride()),
+                                         get<1>(lsfa0.stride()), p.batch_sfb));
+    LayoutSwapSFB lsfb = cute::make_layout(
+        lsfb0.shape(), cute::make_stride(get<0>(lsfb0.stride()),
+                                         get<1>(lsfb0.stride()), p.batch_sfa));
+
+    args = typename Gemm::Arguments{
+        cutlass::gemm::GemmUniversalMode::kGemm,
+        {p.N, p.M, p.K, p.L},
+        {reinterpret_cast<const ElementA*>(p.B), sa,
+         reinterpret_cast<const ElementB*>(p.A), sb, p.SFB, lsfa, p.SFA, lsfb},
+        {{}, nullptr, StrideC{}, reinterpret_cast<ElementD*>(p.D), sd}};
+  }
   args.epilogue.thread.alpha = 1.0f;
   args.epilogue.thread.beta = 0.0f;
+  args.hw_info.device_id = p.device;
+  args.hw_info.sm_count = p.sms;
+
+  if constexpr (IsStreamK) {
+    using Decomp = typename GK::TileScheduler::Params::DecompositionMode;
+    args.scheduler.decomposition_mode =
+        force_sk ? Decomp::StreamK : Decomp::Heuristic;
+  }
 
   using Kernel = typename Gemm::GemmKernel;
   TORCH_CHECK(Kernel::can_implement(args),
@@ -519,62 +613,132 @@ void run_gemm(const GemmProblem& p, cudaStream_t stream) {
   // call; on the decode/short-prefill path that host cost is comparable to
   // the kernel, so set it once per device and launch from Params directly.
   static std::once_flag smem_once[64];
-  std::call_once(smem_once[at::cuda::current_device()], [] {
+  std::call_once(smem_once[p.device], [] {
     C10_CUDA_CHECK(
         cudaFuncSetAttribute(cutlass::device_kernel<Kernel>,
                              cudaFuncAttributeMaxDynamicSharedMemorySize,
                              Kernel::SharedStorageSize));
   });
   const size_t ws_bytes = Kernel::get_workspace_size(args);
-  at::Tensor ws;
-  if (ws_bytes > 0) {
-    ws = at::empty({static_cast<int64_t>(ws_bytes)},
-                   at::TensorOptions().dtype(at::kByte).device(at::kCUDA));
-    TORCH_CHECK(Kernel::initialize_workspace(args, ws.data_ptr(), stream) ==
-                    cutlass::Status::kSuccess,
-                "fp8 blockwise gemm: workspace init failed");
+  void* ws_ptr = nullptr;
+  if constexpr (IsStreamK) {
+    if (ws_bytes > 0) {
+      // The Stream-Kworkspace is placed at the end of `sk_region` so its
+      // trailing barrier bytes are zeroed by `fp8_quant_act_kernel<false>`
+      // without a separate `cudaMemsetAsync` or `at::empty` allocation.
+      ws_ptr = sk_end - ws_bytes;
+    }
   }
-  auto params =
-      Kernel::to_underlying_arguments(args, ws_bytes ? ws.data_ptr() : nullptr);
+  auto params = Kernel::to_underlying_arguments(args, ws_ptr);
   TORCH_CHECK(Gemm::run(params, stream, nullptr,
                         /*launch_with_pdl=*/true) == cutlass::Status::kSuccess,
               "fp8 blockwise gemm: launch failed");
+  return ws_bytes;
 }
 
-// Tile configs picked from a sweep of the GLM-5.x expert shapes on RTX PRO
-// 6000 (188 SMs). `exclusive` = the call is chained to run alone on the
+// Tile configs tuned across RTX_PRO_6000 (Server 600W + Max-Q 300W unified)
+// (188 SMs, 128 MiB L2). `exclusive` = the call is chained to run alone on the
 // device (see DeviceChain) or no other stream has an FP8 expert in flight;
-// otherwise several exec streams run experts concurrently, where persistent
-// stream-K kernels interfere (measured
-// on the 4-stream expert_layer harness: 128x128 tiles beat both stream-K and
-// 64x128 ping-pong above 256 tokens, ping-pong wins below).
-void blockwise_gemm_sm120_pro6000(const GemmProblem& p, bool exclusive,
-                                  cudaStream_t stream) {
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-  const int64_t tiles =
-      int64_t((p.M + 127) / 128) * (p.N / 128) * std::max(p.L, 1);
-  if (tiles >= 6 * int64_t(sms)) {
-    run_gemm<Sm120CoopGemm>(p, stream);
-  } else if (exclusive && p.K >= 4864) {
-    // Long-K gate/up with only a few waves of tiles: stream-K splits K.
-    run_gemm<Sm120StreamKGemm>(p, stream);
-  } else if (p.M <= (exclusive ? 2048 : 256)) {
-    run_gemm<Sm120PingGemm>(p, stream);
-  } else {
-    run_gemm<Sm120CoopGemm>(p, stream);
+// otherwise several exec streams run experts concurrently.
+size_t blockwise_gemm_sm120_pro6000(const GemmProblem& p, bool exclusive,
+                                    uint8_t* sk_end, cudaStream_t stream) {
+  const int64_t sms = p.sms;
+  const int64_t l = std::max(p.L, 1);
+  const int64_t tiles_128 = int64_t((p.M + 127) / 128) * (p.N / 128) * l;
+  const int64_t tiles_64 = int64_t((p.M + 63) / 64) * (p.N / 128) * l;
+
+  // Concurrent multi-stream execution (`!exclusive`, e.g. 4-stream expert_layer):
+  // - M <= 32 fits in a single N'-tile of swapped 128x32 (4 stages, 32 CTAs).
+  // - 32 < M <= 64 fits in a single N'-tile of swapped 128x64 (3 stages, 32 CTAs).
+  // - 64 < M <= 256 uses 64x128 ping-pong.
+  // - M > 256 uses 128x128 cooperative (maximizing compute/byte per CTA when
+  //   4 streams provide 4x the CTAs to fill the GPU).
+  if (!exclusive) {
+    if (p.M <= 32) {
+      return run_gemm<Sm120SwapCoop128x32Gemm, false, true>(p, nullptr, false,
+                                                            stream);
+    }
+    if (p.M <= 64) {
+      return run_gemm<Sm120SwapCoop128x64Gemm, false, true>(p, nullptr, false,
+                                                            stream);
+    }
+    if (p.M <= 256) {
+      return run_gemm<Sm120PingGemm>(p, nullptr, false, stream);
+    }
+    return run_gemm<Sm120CoopGemm>(p, nullptr, false, stream);
   }
+
+  // Exclusive single-expert execution (`exclusive == true`):
+  // 1. Small/medium M (<= 64): swapped 128x32 tiles avoid padding M up to
+  //    64/128 and fit 4 mainloop stages in shared memory (with Stream-K on
+  //    long-K gate/up to split K across all 188 SMs).
+  if (p.M <= 64) {
+    const int64_t tiles_32 = int64_t((p.M + 31) / 32) * (p.N / 128) * l;
+    if (p.K >= 4096 && sk_end != nullptr) {
+      return run_gemm<Sm120SwapStreamK128x32Gemm, true, true>(
+          p, sk_end, /*force_sk=*/tiles_32 < sms, stream);
+    }
+    return run_gemm<Sm120SwapCoop128x32Gemm, false, true>(p, nullptr, false,
+                                                          stream);
+  }
+
+  // 2. When all 64x128 tiles fit in a single wave on the GPU (tiles_64 <= 188,
+  //    e.g. M=256/288 where 160 tiles fit in 1 wave without wave quantization):
+  if (tiles_64 <= sms) {
+    return run_gemm<Sm120PingGemm>(p, nullptr, false, stream);
+  }
+
+  // 3. Large M (>= 6 waves of 128x128 tiles): 128x128 cooperative persistent.
+  if (tiles_128 >= 6 * sms) {
+    return run_gemm<Sm120CoopGemm>(p, nullptr, false, stream);
+  }
+
+  // 4. Long-K gate/up with < 6 waves: Stream-K splits K across all 188 SMs.
+  //    - When tiles_128 < sms (e.g. M=341/384 with 96 tiles on 188 SMs), even
+  //      K=4096 benefits from forced DecompositionMode::StreamK (CUTLASS's
+  //      Heuristic disables Stream-K whenever 2 * tiles >= sms).
+  //    - When tiles_128 > sms (e.g. M=1422/1600 with 384/416 tiles = ~2.1
+  //      waves), K >= 4864 (GLM-5.3) benefits from Stream-K, whereas K = 4096
+  //      (GLM-5.3-Flash) is faster with 3-stage 64x128 ping-pong (~4 waves).
+  if (sk_end != nullptr && ((tiles_128 < sms && p.K >= 4096) || p.K >= 4864)) {
+    return run_gemm<Sm120StreamKGemm, true, false>(
+        p, sk_end, /*force_sk=*/tiles_128 < sms, stream);
+  }
+
+  // 5. Single wave of 128x128 tiles on short-K down GEMM (e.g. M=288/341/384
+  //    where 64x128 would overflow 188 SMs into a tiny 2nd wave of 4..100 CTAs,
+  //    while 128x128 fits in <= 144 CTAs = 1 wave):
+  if (tiles_128 <= sms) {
+    return run_gemm<Sm120CoopGemm>(p, nullptr, false, stream);
+  }
+
+  // 6. Short-K down GEMM with M <= 2048 (e.g. M=1422/1600):
+  if (p.M <= 2048) {
+    return run_gemm<Sm120PingGemm>(p, nullptr, false, stream);
+  }
+  return run_gemm<Sm120CoopGemm>(p, nullptr, false, stream);
 }
 
 // Large-M experts already fill every SM; when several exec streams run them
 // concurrently their working sets (weights + activations) thrash the L2.
 // Chain those calls through one per-device event so they run back to back
 // on the device (no host blocking). Skipped while a stream is capturing.
+// RTX_PRO_6000 (Server 600W + Max-Q 300W unified): 3072 tokens.
 int64_t pro6000_serialize_min_tokens() {
   static const int64_t v = [] {
     const char* env = std::getenv("MOE_FP8_PRO6000_SERIALIZE_MIN_TOKENS");
     return env ? std::atoll(env) : int64_t(3072);
   }();
   return v;
+}
+
+int device_sm_count(int device) {
+  static int sms[64] = {};
+  if (sms[device] == 0) {
+    sms[device] =
+        at::cuda::getDeviceProperties(device)->multiProcessorCount;
+  }
+  return sms[device];
 }
 
 class DeviceChain {
@@ -747,27 +911,67 @@ void fused_fp8_moe_ffn_sm120_pro6000_into(
   }
 
 #if defined(MOE_ENABLE_SM120_FP8)
+  const int device = hidden.get_device();
+  const int sms = device_sm_count(device);
   const int64_t HB = H / kBlock;
   const int64_t IB = I / kBlock;
-  // Workspace (one allocation, 256-byte aligned regions).
+
+  ChainScope chain_scope;
+  if (M >= pro6000_serialize_min_tokens() &&
+      device_chain(device).Enter(stream, device)) {
+    chain_scope.chain = &device_chain(device);
+    chain_scope.stream = stream;
+  }
+  const bool capturing = is_capturing(stream);
+  const bool exclusive =
+      chain_scope.chain != nullptr ||
+      (!capturing && !inflight(device).OtherStreamBusy(stream));
+
+  // Workspace (one allocation, 256-byte aligned regions):
+  //   [gu | aq | sfa | sfb | sk (optional) | xq | sfx]
+  // Placing `sk` immediately before `xq` + `sfx` lets `fp8_quant_act_kernel<false>`
+  // zero the trailing 8 KiB Stream-K barrier region (eliminating a separate
+  // `cudaMemsetAsync` + `at::empty`) and lets `fp8_quant_act_kernel<true>`
+  // discard the dirty L2 lines of `sk` + `xq` + `sfx` in one contiguous sweep.
   auto align = [](int64_t b) { return (b + 255) / 256 * 256; };
   const int64_t sz_gu = align(M * 2 * I * 2);  // bf16 [M, 2I]
-  const int64_t sz_xq = align(M * H);          // e4m3 [M, H]
   const int64_t sz_aq = align(M * I);          // e4m3 [M, I]
-  const int64_t sz_sfx = align(HB * M * 4);    // fp32 [H/128, M]
   const int64_t sz_sfa = align(IB * M * 4);    // fp32 [I/128, M]
   const int64_t sz_sfb = align(3 * IB * HB * 4);
-  at::Tensor ws =
-      at::empty({sz_gu + sz_xq + sz_aq + sz_sfx + sz_sfa + sz_sfb}, opts);
+  const int64_t sz_xq = align(M * H);          // e4m3 [M, H]
+  const int64_t sz_sfx = align(HB * M * 4);    // fp32 [H/128, M]
+
+  const int64_t tiles_gu_128 = ((M + 127) / 128) * IB * 2;
+  const int64_t tiles_gu_64 = ((M + 63) / 64) * IB * 2;
+  const bool may_use_sk =
+      exclusive && H >= 4096 &&
+      (M <= 64 ||
+       (tiles_gu_64 > sms &&
+        (tiles_gu_128 < sms || (H >= 4864 && tiles_gu_128 < 6 * sms))));
+  int64_t sz_sk = 0;
+  if (may_use_sk) {
+    if (M <= 64) {
+      const int64_t sk_tiles =
+          std::min<int64_t>(2 * sms, ((M + 31) / 32) * IB * 2);
+      sz_sk = align(sk_tiles * 128 * 32 * 4 + kSkBarrierBytes);
+    } else {
+      const int64_t sk_tiles = std::min<int64_t>(2 * sms, tiles_gu_128);
+      sz_sk = align(sk_tiles * 128 * 128 * 4 + kSkBarrierBytes);
+    }
+  }
+
+  at::Tensor ws = at::empty(
+      {sz_gu + sz_aq + sz_sfa + sz_sfb + sz_sk + sz_xq + sz_sfx}, opts);
   uint8_t* base = reinterpret_cast<uint8_t*>(ws.data_ptr());
   auto* gu = reinterpret_cast<__nv_bfloat16*>(base);
-  uint8_t* xq = base + sz_gu;
-  uint8_t* aq = xq + sz_xq;
-  float* sfx = reinterpret_cast<float*>(aq + sz_aq);
-  float* sfa =
-      reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(sfx) + sz_sfx);
+  uint8_t* aq = base + sz_gu;
+  float* sfa = reinterpret_cast<float*>(aq + sz_aq);
   float* sfb =
       reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(sfa) + sz_sfa);
+  uint8_t* sk_base = reinterpret_cast<uint8_t*>(sfb) + sz_sfb;
+  uint8_t* sk_end = sk_base + sz_sk;
+  uint8_t* xq = sk_end;
+  float* sfx = reinterpret_cast<float*>(xq + sz_xq);
   float* sfb_gate = sfb;
   float* sfb_up = sfb + IB * HB;
   float* sfb_down = sfb + 2 * IB * HB;
@@ -785,60 +989,56 @@ void fused_fp8_moe_ffn_sm120_pro6000_into(
                        reinterpret_cast<uintptr_t>(b0) % 16 == 0 &&
                        b_stride < (int64_t(1) << 40);
 
-  const int device = hidden.get_device();
-  ChainScope chain_scope;
-  if (M >= pro6000_serialize_min_tokens() &&
-      device_chain(device).Enter(stream, device)) {
-    chain_scope.chain = &device_chain(device);
-    chain_scope.stream = stream;
-  }
-  const bool capturing = is_capturing(stream);
-  const bool exclusive =
-      chain_scope.chain != nullptr ||
-      (!capturing && !inflight(device).OtherStreamBusy(stream));
+  launch_quant<false>(
+      x, H, 0, 0, xq, H, sfx, M, H,
+      {gate_s.data_ptr<float>(), gate_first ? sfb_gate : sfb_up, (int)IB,
+       (int)HB},
+      {up_s.data_ptr<float>(), gate_first ? sfb_up : sfb_gate, (int)IB,
+       (int)HB},
+      {down_s.data_ptr<float>(), sfb_down, (int)HB, (int)IB}, DeadRegion{},
+      may_use_sk ? sk_end : nullptr, may_use_sk ? kSkBarrierBytes : 0, stream);
 
-  launch_quant<false>(x, H, 0, 0, xq, H, sfx, M, H,
-                      {gate_s.data_ptr<float>(), gate_first ? sfb_gate : sfb_up,
-                       (int)IB, (int)HB},
-                      {up_s.data_ptr<float>(), gate_first ? sfb_up : sfb_gate,
-                       (int)IB, (int)HB},
-                      {down_s.data_ptr<float>(), sfb_down, (int)HB, (int)IB},
-                      DeadRegion{}, stream);
+  // Record the inflight event before the GEMMs so concurrent streams in a
+  // multi-stream layer immediately see this stream as busy while enqueuing.
+  if (!capturing) inflight(device).Record(stream, device);
 
   // Column halves of gu: batch 0 -> [0, I), batch 1 -> [I, 2I).
+  size_t ws_gu_bytes = 0;
   if (batched) {
-    blockwise_gemm_sm120_pro6000(
+    ws_gu_bytes = blockwise_gemm_sm120_pro6000(
         {(int)M, (int)I, (int)H, 2, xq, H, 0, b0, H, b_stride, sfx, 0, sfb,
-         (int32_t)(IB * HB), gu, 2 * I, I},
-        exclusive, stream);
+         (int32_t)(IB * HB), gu, 2 * I, I, device, sms},
+        exclusive, may_use_sk ? sk_end : nullptr, stream);
   } else {
     blockwise_gemm_sm120_pro6000(
         {(int)M, (int)I, (int)H, 1, xq, H, 0, gate_first ? gp : upp, H, 0, sfx,
-         0, sfb, 0, gu, 2 * I, 0},
-        exclusive, stream);
+         0, sfb, 0, gu, 2 * I, 0, device, sms},
+        exclusive, nullptr, stream);
     blockwise_gemm_sm120_pro6000(
         {(int)M, (int)I, (int)H, 1, xq, H, 0, gate_first ? upp : gp, H, 0, sfx,
-         0, sfb + IB * HB, 0, gu + I, 2 * I, 0},
-        exclusive, stream);
+         0, sfb + IB * HB, 0, gu + I, 2 * I, 0, device, sms},
+        exclusive, nullptr, stream);
   }
 
   const int gate_off = gate_first ? 0 : (int)I;
   const int up_off = gate_first ? (int)I : 0;
-  launch_quant<true>(gu, 2 * I, gate_off, up_off, aq, I, sfa, M, I,
-                     {nullptr, nullptr, 0, 0}, {nullptr, nullptr, 0, 0},
-                     {nullptr, nullptr, 0, 0}, DeadRegion{xq, sz_xq}, stream);
+  launch_quant<true>(
+      gu, 2 * I, gate_off, up_off, aq, I, sfa, M, I, {nullptr, nullptr, 0, 0},
+      {nullptr, nullptr, 0, 0}, {nullptr, nullptr, 0, 0},
+      DeadRegion{sk_end - ws_gu_bytes,
+                 static_cast<int64_t>(ws_gu_bytes) + sz_xq + sz_sfx},
+      nullptr, 0, stream);
 
   blockwise_gemm_sm120_pro6000(
       {(int)M, (int)H, (int)I, 1, aq, I, 0, weight_ptr(down_w), I, 0, sfa, 0,
-       sfb_down, 0, out, H, 0},
-      exclusive, stream);
+       sfb_down, 0, out, H, 0, device, sms},
+      exclusive, nullptr, stream);
 
   if (!capturing) inflight(device).Record(stream, device);
 
   const c10::cuda::CUDAStream cur = c10::cuda::getCurrentCUDAStream();
   if (cur.stream() != stream) {
-    ws.record_stream(
-        c10::cuda::getStreamFromExternal(stream, hidden.get_device()));
+    ws.record_stream(c10::cuda::getStreamFromExternal(stream, device));
   }
 #else
   TORCH_CHECK(false,

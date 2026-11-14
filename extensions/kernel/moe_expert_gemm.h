@@ -22,9 +22,10 @@
 // re-read operand stays in L2.
 
 //
-// RTX PRO 6000 only: launched by fused_moe_ffn_pro6000 behind the
-// RTX_PRO_6000 gate (fit_raster assumes that card's L2 budget, the configs its
-// 99 KiB of shared memory); other GPUs run fused_moe_ffn_into_generic.
+// RTX_PRO_6000 (Server 600W + Max-Q 300W unified): launched by
+// fused_moe_ffn_pro6000 behind the RTX_PRO_6000 gate (fit_raster assumes that
+// card's L2 budget, the configs its 99 KiB of shared memory); other GPUs run
+// fused_moe_ffn_into_generic.
 #pragma once
 
 #include <cutlass/cutlass.h>
@@ -41,6 +42,7 @@
 #include <type_traits>
 
 #include "kernel/dual_gemm/dual_mma_multistage.h"
+#include "kernel/moe_activation.h"
 
 namespace moe_gemm {
 
@@ -109,13 +111,28 @@ RasterPlan plan_raster(cutlass::gemm::GemmCoord problem, double l2,
   return best;
 }
 
-// act(g, u) applied to the fp32 gate / up accumulators of the dual GEMM.
-// New activations (e.g. clamped SwiGLU) add a functor with the same shape;
-// per-launch constants go in Params.
+// act(g, u) applied to the fp32 gate / up accumulators of the dual GEMM
+// (SiLU, clamped SiLU, or SwiGLU-OAI; see kernel/moe_activation.h).
 struct SiluAndMul {
-  struct Params {};
-  CUTLASS_DEVICE static float apply(float g, float u, Params const&) {
-    return g / (1.0f + __expf(-g)) * u;
+  struct Params {
+    MoEActivationKind kind = MoEActivationKind::kSiLU;
+    float alpha = 1.0f;
+    float limit = 0.0f;
+  };
+  CUTLASS_DEVICE static float apply(float g, float u, Params const& p) {
+    if (p.kind == MoEActivationKind::kSiLU) {
+      return (g / (1.0f + __expf(-g))) * u;
+    }
+    if (p.kind == MoEActivationKind::kClampedSiLU) {
+      float gc = fminf(g, p.limit);
+      float uc = fminf(fmaxf(u, -p.limit), p.limit);
+      return (gc / (1.0f + __expf(-gc))) * uc;
+    }
+    // kSwiGLUOAI: g_clamped * sigmoid(alpha * g_clamped) * (clamp(u, -limit,
+    // limit) + 1)
+    float gc = fminf(g, p.limit);
+    float uc = fminf(fmaxf(u, -p.limit), p.limit);
+    return (gc / (1.0f + __expf(-p.alpha * gc))) * (uc + 1.0f);
   }
 };
 
@@ -437,9 +454,24 @@ struct ExpertGemm {
     }
 
     if constexpr (Dual) {
-      CUTLASS_PRAGMA_UNROLL
-      for (int i = 0; i < FragmentC::kElements; ++i)
-        acc[0][i] = Act::apply(acc[0][i], acc[1][i], p.act);
+      if (p.act.kind == MoEActivationKind::kSiLU) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < FragmentC::kElements; ++i)
+          acc[0][i] = Act::apply(acc[0][i], acc[1][i],
+                                 {MoEActivationKind::kSiLU, 1.0f, 0.0f});
+      } else if (p.act.kind == MoEActivationKind::kClampedSiLU) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < FragmentC::kElements; ++i)
+          acc[0][i] =
+              Act::apply(acc[0][i], acc[1][i],
+                         {MoEActivationKind::kClampedSiLU, 1.0f, p.act.limit});
+      } else {
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < FragmentC::kElements; ++i)
+          acc[0][i] = Act::apply(
+              acc[0][i], acc[1][i],
+              {MoEActivationKind::kSwiGLUOAI, p.act.alpha, p.act.limit});
+      }
     }
 
     // The mainloop shared memory is reused by the epilogue.

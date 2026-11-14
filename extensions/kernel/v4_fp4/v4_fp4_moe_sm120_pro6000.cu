@@ -5,12 +5,14 @@
 //
 // Native block-scaled FP4 routed-expert MoE for DeepSeek-V4 / V4.1 on sm_120a.
 //
-// Hardware: gated SM120 + RTX_PRO_6000 (docs/hardware-gated-kernels.md).
-// Every kernel here uses sm_120a-only block-scaled MMA (kind::mxf8f6f4), and
-// tile sizes, the 99 KiB shared-memory budget, the one-wave persistent decode
-// grid and the 128 MiB-L2 w2 prefetch budget were tuned on the RTX PRO 6000
-// Blackwell (188 SMs). The binding checks both gates (v4_moe_supported); other
-// devices run Path B: v4_expert_forward per expert (BF16 dequant + cuBLAS).
+// Hardware: gated SM120 + RTX_PRO_6000 (Server 600W + Max-Q 300W unified;
+// docs/hardware-gated-kernels.md). Every kernel here uses sm_120a-only
+// block-scaled MMA (kind::mxf8f6f4), and tile sizes, the 99 KiB shared-memory
+// budget, the one-wave persistent decode grid and the 128 MiB-L2 w2 prefetch
+// budget were tuned across both RTX PRO 6000 Blackwell editions (188 SMs,
+// Server 600W + Max-Q 300W unified). The binding checks both gates
+// (v4_moe_supported); other devices run Path B: v4_expert_forward per expert
+// (BF16 dequant + cuBLAS).
 //
 // Numerics follow the official DeepSeek-V4 inference (W4A8):
 //   x  -> act_quant (FP8 e4m3, one ue8m0 power-of-two scale per 128 along K)
@@ -26,11 +28,12 @@
 // the MMA, so FP4 weights are read exactly once and never materialised.
 //
 // K permutation: ldmatrix gives lane (g, t) bytes 4t..4t+3 of a 16-byte row
-// chunk, i.e. packed FP4 elements 8t..8t+7 of a 32-element block. These are
-// used as MMA k-slots {4t..4t+3} and {16+4t..16+4t+3}. Activations are stored
-// with the matching permutation inside each 32-element block (stored byte
-// 4t+i = element 8t+i, stored byte 16+4t+i = element 8t+4+i), so a plain
-// ldmatrix of the activation tile yields the matching B fragment.
+// chunk, i.e. packed FP4 elements 8t..8t+7 of a 32-element block. Shifting
+// by <<2 and >>2 (& 0x3C3C3C3C) places even elements (8t+0,2,4,6) in lo and
+// odd elements (8t+1,3,5,7) in hi without byte permutations. Activations are
+// stored with the matching even/odd permutation inside each 32-element block
+// (stored byte 4t+i = element 8t+2i, stored byte 16+4t+i = element 8t+2i+1),
+// so a plain ldmatrix of the activation tile yields the matching B fragment.
 //
 // Per layer, no host synchronisation:
 //   prep     : routing histogram/scan/scatter + tile list (block 0),
@@ -47,7 +50,6 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cooperative_groups.h>
-#include <climits>
 #include <cstdint>
 
 namespace cg = cooperative_groups;
@@ -116,13 +118,11 @@ __device__ __forceinline__ void ldsm_x4(uint32_t addr, uint32_t& r0,
 }
 
 // 8 packed e2m1 codes (elements 8t..8t+7) -> two 4x8-bit mxf8f6f4 containers
-// (code in bits [5:2]): lo = elements 0..3, hi = elements 4..7.
+// (code in bits [5:2]): lo = even elements (8t+0,2,4,6), hi = odd (8t+1,3,5,7).
 __device__ __forceinline__ void expand_fp4(uint32_t w, uint32_t& lo,
                                            uint32_t& hi) {
-  uint32_t even = (w << 2) & 0x3C3C3C3Cu;  // elements 0,2,4,6
-  uint32_t odd = (w >> 2) & 0x3C3C3C3Cu;   // elements 1,3,5,7
-  lo = __byte_perm(even, odd, 0x5140);
-  hi = __byte_perm(even, odd, 0x7362);
+  lo = (w << 2) & 0x3C3C3C3Cu;
+  hi = (w >> 2) & 0x3C3C3C3Cu;
 }
 
 template <int BID>
@@ -168,8 +168,7 @@ __device__ __forceinline__ float bf16_round(float v) {
 
 // Position of logical element e (0..31) of a 32-block in the permuted layout.
 __device__ __forceinline__ int perm32(int e) {
-  int t = e >> 3, i = e & 7;
-  return i < 4 ? 4 * t + i : 16 + 4 * t + (i - 4);
+  return ((e & 1) << 4) | (e >> 1);
 }
 
 // Activation scales are stored as one ue8m0 byte per 32 elements: [rows, K/32]
@@ -201,9 +200,9 @@ __device__ __forceinline__ int quant8_group16(uint4 raw, uint8_t* dst, int t,
   const int e = ue8m0_exponent(amax);
   const float inv = pow2(-e);
   *reinterpret_cast<uint32_t*>(dst + 4 * t) =
-      pack_fp8x4(f[0] * inv, f[1] * inv, f[2] * inv, f[3] * inv);
+      pack_fp8x4(f[0] * inv, f[2] * inv, f[4] * inv, f[6] * inv);
   *reinterpret_cast<uint32_t*>(dst + 16 + 4 * t) =
-      pack_fp8x4(f[4] * inv, f[5] * inv, f[6] * inv, f[7] * inv);
+      pack_fp8x4(f[1] * inv, f[3] * inv, f[5] * inv, f[7] * inv);
   return e;
 }
 
@@ -409,18 +408,28 @@ __global__ void __launch_bounds__(WM* WN * 32)
     const int kpack = K / 2, kscale = K / 32;
 
     // B row source for this thread's copy slots; out-of-range rows zero-fill.
-    auto b_row = [&](int r) -> long long {
+    auto b_row = [&](int r) -> int {
       int rr = r < tile.nrows ? r : 0;
       int p = tile.row_start + rr;
-      return PHASE == 1 ? (long long)(args.sorted[p] / args.topk) : p;
+      return PHASE == 1 ? (args.sorted[p] / args.topk) : p;
     };
 
+    constexpr bool kSbSmem = BT <= 64;
     constexpr int kBChunks = (BT * 8 + kThreads - 1) / kThreads;
-    long long b_src[kBChunks];
+    long long b_src[kSbSmem ? kBChunks : 1];
+    int b_r[!kSbSmem ? kBChunks : 1];
+    if constexpr (kSbSmem) {
 #pragma unroll
-    for (int i = 0; i < kBChunks; ++i) {
-      int c = tid + i * kThreads;
-      b_src[i] = b_row(c >> 3) * K + (c & 7) * 16;
+      for (int i = 0; i < kBChunks; ++i) {
+        int c = tid + i * kThreads;
+        b_src[i] = (long long)b_row(c >> 3) * K + (c & 7) * 16;
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < kBChunks; ++i) {
+        int c = tid + i * kThreads;
+        b_r[i] = b_row(c >> 3);
+      }
     }
 
     auto load_stage = [&](int kc, int buf) {
@@ -459,17 +468,25 @@ __global__ void __launch_bounds__(WM* WN * 32)
         int c = tid + i * kThreads;
         if (c < BT * 8) {
           int r = c >> 3, cc = c & 7;
-          cp_async16(smem_u32(sB + r * 128 + ((cc ^ (r & 7)) << 4)),
-                     args.bq + b_src[i] + kc * kBK, r < tile.nrows ? 16 : 0);
+          const uint8_t* b_ptr;
+          if constexpr (kSbSmem) {
+            b_ptr = args.bq + b_src[i] + kc * kBK;
+          } else {
+            b_ptr = args.bq + (long long)b_r[i] * K + (cc << 4) + kc * kBK;
+          }
+          cp_async16(smem_u32(sB + r * 128 + ((cc ^ (r & 7)) << 4)), b_ptr,
+                     r < tile.nrows ? 16 : 0);
         }
       }
     };
 
     // activation scale row offsets for this lane's columns (token g of n8)
-    long long sb_off[NT];
+    int sb_r[!kSbSmem ? NT : 1];
+    if constexpr (!kSbSmem) {
 #pragma unroll
-    for (int ni = 0; ni < NT; ++ni)
-      sb_off[ni] = b_row(wn * NT * 8 + ni * 8 + g) * KC;
+      for (int ni = 0; ni < NT; ++ni)
+        sb_r[ni] = b_row(wn * NT * 8 + ni * 8 + g);
+    }
 
     float acc[MT][NT][4];
 #pragma unroll
@@ -484,21 +501,13 @@ __global__ void __launch_bounds__(WM* WN * 32)
       if (s < KC) load_stage(s, s);
       cp_async_commit();
     }
-    // Activation scales: small token tiles keep all K/128 scales of their
-    // rows in shared memory (a per-stage global load would put one L2
-    // round trip on the critical path of every short stage); wide tiles
-    // prefetch them one stage ahead in registers.
-    constexpr bool kSbSmem = BT <= 64;
     uint32_t* sSB = reinterpret_cast<uint32_t*>(smem + C::kSmem);
     uint32_t sb_cur[NT];
     if constexpr (kSbSmem) {
       for (int i = tid; i < BT * KC; i += kThreads) {
         int r = i / KC, c = i - r * KC;
-        sSB[i] = args.bs[b_row(r) * KC + c];
+        sSB[i] = args.bs[(long long)b_row(r) * KC + c];
       }
-    } else {
-#pragma unroll
-      for (int ni = 0; ni < NT; ++ni) sb_cur[ni] = args.bs[sb_off[ni]];
     }
 
     // warp's A rows (within the 256-row CTA tile) for m16 tile mi
@@ -518,19 +527,18 @@ __global__ void __launch_bounds__(WM* WN * 32)
         if (nk < KC) load_stage(nk, nk % STAGES);
         cp_async_commit();
       }
-      uint32_t sb_next[NT];
+      const uint8_t* sA = smem + (kc % STAGES) * C::kStage;
+      const uint8_t* sB = sA + C::kA;
+      const uint8_t* sS = sB + C::kB;
       if constexpr (kSbSmem) {
 #pragma unroll
         for (int ni = 0; ni < NT; ++ni)
           sb_cur[ni] = sSB[(wn * NT * 8 + ni * 8 + g) * KC + kc];
-      } else if (kc + 1 < KC) {
+      } else {
 #pragma unroll
         for (int ni = 0; ni < NT; ++ni)
-          sb_next[ni] = args.bs[sb_off[ni] + kc + 1];
+          sb_cur[ni] = __ldg(args.bs + (long long)sb_r[ni] * KC + kc);
       }
-      const uint8_t* sA = smem + (kc % STAGES) * C::kStage;
-      const uint8_t* sB = sA + C::kA;
-      const uint8_t* sS = sB + C::kB;
       uint32_t sfa[MT];
 #pragma unroll
       for (int mi = 0; mi < MT; ++mi)
@@ -575,10 +583,6 @@ __global__ void __launch_bounds__(WM* WN * 32)
           }
         }
       }
-      if (!kSbSmem && kc + 1 < KC) {
-#pragma unroll
-        for (int ni = 0; ni < NT; ++ni) sb_cur[ni] = sb_next[ni];
-      }
     }
     cp_async_wait<0>();
     __syncthreads();
@@ -620,55 +624,66 @@ __global__ void __launch_bounds__(WM* WN * 32)
         }
       }
       if (args.act32) {
-        // 32-feature groups: every group lies inside this CTA (no cluster
-        // exchange); per-(group, token) amax through shared-memory atomics
-        constexpr int NB = FW / 32;
-        unsigned* r32 =
-            reinterpret_cast<unsigned*>(outq + BT * FW);  // [NB][BT]
-        __syncthreads();
-        for (int i = tid; i < NB * BT; i += kThreads) r32[i] = 0u;
-        __syncthreads();
+        if constexpr (H2 == 2) {
+          // Each warp wm owns all 32 features of 32-element block blk = wm.
 #pragma unroll
-        for (int ni = 0; ni < NT; ++ni)
+          for (int ni = 0; ni < NT; ++ni)
 #pragma unroll
-          for (int c = 0; c < 2; ++c) {
-            const int col = wn * NT * 8 + ni * 8 + 2 * t4 + c;
-#pragma unroll
-            for (int mi = 0; mi < H2; ++mi) {
-              float m = fmaxf(fabsf(acc[mi][ni][c]), fabsf(acc[mi][ni][2 + c]));
+            for (int c = 0; c < 2; ++c) {
+              const int col = wn * NT * 8 + ni * 8 + 2 * t4 + c;
+              float m = cmax[ni][c];
               m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 4));
               m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 8));
               m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 16));
-              const int blk = (wm * H2 * 16 + mi * 16) >> 5;
-              if (g == 0) atomicMax(r32 + blk * BT + col, __float_as_uint(m));
+              const int e = ue8m0_exponent(m);
+              const float inv = pow2(-e);
+#pragma unroll
+              for (int mi = 0; mi < H2; ++mi)
+#pragma unroll
+                for (int hr = 0; hr < 2; ++hr) {
+                  const int f = wm * 32 + mi * 16 + g + 8 * hr;
+                  outq[col * FW + (f & ~31) + perm32(f & 31)] =
+                      __nv_cvt_float_to_fp8(acc[mi][ni][2 * hr + c] * inv,
+                                            __NV_SATFINITE, __NV_E4M3);
+                }
+              if (g == 0 && col < tile.nrows)
+                args.hs[(long long)(tile.row_start + col) * (args.N / 32) +
+                        n0 / 32 + wm] = (uint8_t)(e + 127);
             }
-          }
-        __syncthreads();
+        } else {
+          // H2 == 1: warps (wm & ~1) and (wm | 1) share 32-element block wm>>1
 #pragma unroll
-        for (int ni = 0; ni < NT; ++ni)
+          for (int ni = 0; ni < NT; ++ni)
 #pragma unroll
-          for (int c = 0; c < 2; ++c) {
-            const int col = wn * NT * 8 + ni * 8 + 2 * t4 + c;
+            for (int c = 0; c < 2; ++c) {
+              float m = cmax[ni][c];
+              m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 4));
+              m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 8));
+              m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 16));
+              if (g == 0) red[wm * BT + wn * NT * 8 + ni * 8 + 2 * t4 + c] = m;
+            }
+          __syncthreads();
 #pragma unroll
-            for (int mi = 0; mi < H2; ++mi) {
-              const int f0 = wm * H2 * 16 + mi * 16;
-              const float inv = pow2(
-                  -ue8m0_exponent(__uint_as_float(r32[(f0 >> 5) * BT + col])));
+          for (int ni = 0; ni < NT; ++ni)
+#pragma unroll
+            for (int c = 0; c < 2; ++c) {
+              const int col = wn * NT * 8 + ni * 8 + 2 * t4 + c;
+              const int blk = wm >> 1;
+              const float m = fmaxf(red[(2 * blk) * BT + col],
+                                    red[(2 * blk + 1) * BT + col]);
+              const int e = ue8m0_exponent(m);
+              const float inv = pow2(-e);
 #pragma unroll
               for (int hr = 0; hr < 2; ++hr) {
-                const int f = f0 + g + 8 * hr;
+                const int f = wm * 16 + g + 8 * hr;
                 outq[col * FW + (f & ~31) + perm32(f & 31)] =
-                    __nv_cvt_float_to_fp8(acc[mi][ni][2 * hr + c] * inv,
+                    __nv_cvt_float_to_fp8(acc[0][ni][2 * hr + c] * inv,
                                           __NV_SATFINITE, __NV_E4M3);
               }
+              if ((wm & 1) == 0 && g == 0 && col < tile.nrows)
+                args.hs[(long long)(tile.row_start + col) * (args.N / 32) +
+                        n0 / 32 + blk] = (uint8_t)(e + 127);
             }
-          }
-        for (int i = tid; i < NB * BT; i += kThreads) {
-          const int blk = i / BT, col = i - blk * BT;
-          if (col < tile.nrows)
-            args.hs[(long long)(tile.row_start + col) * (args.N / 32) +
-                    n0 / 32 + blk] =
-                (uint8_t)(ue8m0_exponent(__uint_as_float(r32[i])) + 127);
         }
       } else {
 #pragma unroll
@@ -1422,30 +1437,29 @@ void launch_decode_any(const DecodeArgs& a, bool one_row, cudaStream_t s) {
     launch_decode<IdT, 128, 5, 1>(a, s);
 }
 
+// Token tile size selector for RTX_PRO_6000 (Server 600W + Max-Q 300W unified).
 int choose_bt(long long n, int E) {
   long long active = n < E ? n : E;
   long long avg = (n + active - 1) / (active > 0 ? active : 1);
   if (avg <= 8) return 8;
-  if (avg <= 16) return 16;
-  if (avg <= 32) return 32;
-  if (avg <= 64) return 64;
-  // #350 hill-climb v3 (RTX PRO 6000, balanced layers, GPU0 1845 MHz; full
-  // log in benchmarks/kernel_audit/results/rounds/20261107-main-v41-glm53/):
-  // pick the tile size minimising padding (ties -> larger tile, fewer tile
-  // launches). Reproduces every measured winner: M=144 -> 48/80
-  // (16.3 -> 11.7 ms/layer), M=192 -> 96 (13.3 ms), M=800 -> 80 (55.9 ms),
-  // M=3200 -> 128 (209 ms). bt=64 is kept only for the <=64 bands and as a
-  // padding-min candidate; all arms produce bit-identical outputs.
-  int best = 48;
-  long long best_cost = LLONG_MAX;
-  for (int bt : {48, 64, 80, 96, 128}) {
-    long long cost = (avg + bt - 1) / bt * bt;
-    if (cost <= best_cost) {
-      best = bt;
-      best_cost = cost;
-    }
+  if (active <= 16) {
+    // Few active experts (e.g. single-expert forward, E=1): each tile spawns
+    // only ~16-18 Phase 1 CTAs across I, so keep tiles narrow until the grid
+    // reaches ~1-2 waves across the RTX PRO 6000's 188 SMs.
+    if (n <= 32) return 8;
+    if (n <= 144) return 16;
+    if (n <= 384) return 32;
+    if (n <= 640) return 64;
+    return 128;
   }
-  return best;
+  if (avg <= 32) return 16;
+  if (avg <= 160) return 48;
+  // #350: at 161..200 rows/expert (e.g. V4.1 12K avg=192) bt=64 avoids
+  // 255-register spills and tile padding; from ~216 rows up (e.g. V4 9K
+  // avg=216) bt=128 amortises weight loads unless avg % 96 == 0 && avg % 128
+  // != 0 (e.g. V4 12K avg=288, where bt=64 saves 384 vs 288 row padding).
+  if (avg <= 200 || (avg <= 288 && avg % 96 == 0 && avg % 128 != 0)) return 64;
+  return 128;
 }
 
 }  // namespace v4moe
@@ -1546,12 +1560,6 @@ void v4_moe_forward_sm120_pro6000_cuda(
       break;
     case 64:
       run_cfg<4, 2, 4, 4, 3>(a1, a2, T, topk, E, H, I, stream);
-      break;
-    case 80:
-      run_cfg<4, 2, 4, 5, 3>(a1, a2, T, topk, E, H, I, stream);
-      break;
-    case 96:
-      run_cfg<4, 2, 4, 6, 3>(a1, a2, T, topk, E, H, I, stream);
       break;
     default:
       run_cfg<4, 2, 4, 8, 3>(a1, a2, T, topk, E, H, I, stream);

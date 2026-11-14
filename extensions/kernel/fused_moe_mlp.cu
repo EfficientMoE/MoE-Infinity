@@ -3,16 +3,16 @@
 
 // Fused MoE expert FFN with CUTLASS: two launches per expert.
 //
-// RTX PRO 6000 only (gate RTX_PRO_6000, docs/hardware-gated-kernels.md): the
-// tile/split table, the cost model, the L2 persisting window and the L2-fit
-// rasterisation below were tuned on the RTX PRO 6000 Blackwell (188 SMs,
-// 128 MiB L2, 99 KiB shared memory per block). fused_moe_ffn_into checks the
-// gate once per device and runs fused_moe_ffn_into_generic
-// (fused_moe_mlp_generic.cu, the previous 3-GEMM path) everywhere else.
-// Clamped SiLU and SwiGLU-OAI also take that generic path: the dual GEMM
-// below fuses SiLU only.
+// RTX_PRO_6000 (Server 600W + Max-Q 300W unified) (gate RTX_PRO_6000,
+// docs/hardware-gated-kernels.md): the tile/split table, the cost model, the
+// L2 persisting window and the L2-fit rasterisation below were tuned on the
+// RTX PRO 6000 Blackwell (188 SMs, 128 MiB L2, 99 KiB shared memory per
+// block). fused_moe_ffn_into checks the gate once per device and runs
+// fused_moe_ffn_into_generic (fused_moe_mlp_generic.cu, the previous 3-GEMM
+// path) everywhere else. All three gated activations (SiLU, clamped SiLU, and
+// SwiGLU-OAI) are fused directly into the dual GEMM register epilogue.
 //
-//   1. dual GEMM   fused_buf = silu(X · gate_projᵀ) ⊙ (X · up_projᵀ)   [M, I]
+//   1. dual GEMM   fused_buf = act(X · gate_projᵀ, X · up_projᵀ)         [M, I]
 //   2. GEMM        output    = fused_buf · down_projᵀ                    [M, H]
 //
 // Each launch picks a threadblock tile / stage count / split-K factor per
@@ -70,7 +70,7 @@ using DualConfigs =
                Cfg<128, 64, 64, 64, 32, 64, 3, true>,   // 2: 4 warps
                Cfg<64, 64, 64, 32, 32, 64, 4, true>,    // 3: 4 warps
                Cfg<64, 64, 32, 32, 32, 32, 4, true>,    // 4: 4 warps
-               Cfg<32, 64, 64, 32, 32, 64, 4, true>>;   // 5: 2 warps
+               Cfg<32, 64, 64, 16, 32, 64, 3, true>>;   // 5: 4 warps
 constexpr ConfigCost kDualCost[] = {{1.85, 6.59, 1.50}, {1.68, 2.93, 0.00},
                                     {1.66, 1.83, 0.47}, {1.37, 1.02, 0.87},
                                     {1.36, 1.44, 0.10}, {0.81, 0.47, 0.22}};
@@ -83,7 +83,7 @@ using DownConfigs =
                Cfg<128, 64, 64, 64, 32, 64, 4, false>,   // 3: 4 warps
                Cfg<128, 128, 64, 64, 64, 64, 3, false>,  // 4: 4 warps
                Cfg<64, 64, 32, 32, 32, 32, 4, false>,    // 5: 4 warps
-               Cfg<32, 64, 64, 32, 32, 64, 4, false>>;   // 6: 2 warps
+               Cfg<32, 64, 64, 16, 32, 64, 4, false>>;   // 6: 4 warps
 constexpr ConfigCost kDownCost[] = {{1.70, 2.08, 1.00}, {1.52, 0.16, 1.30},
                                     {1.64, 0.78, 0.22}, {1.34, 0.29, 1.22},
                                     {1.55, 0.38, 0.72}, {1.02, 0.00, 0.20},
@@ -207,10 +207,11 @@ TileInfo tile_info(int device) {
 template <typename Gemm>
 void launch(int device, int sms, cutlass::gemm::GemmCoord problem, int splits,
             Elem const* A, int lda, Elem const* B0, Elem const* B1, int ldb,
-            Elem* D, int ldd, cudaStream_t stream, double l2_bytes) {
+            Elem* D, int ldd, cudaStream_t stream, double l2_bytes,
+            moe_gemm::SiluAndMul::Params act = {}) {
   int const slots = sms * (setup_kernel<Gemm>(device) - 1);
   auto params =
-      Gemm::make_params(problem, splits, slots, A, lda, B0, B1, ldb, D, ldd);
+      Gemm::make_params(problem, splits, sms, A, lda, B0, B1, ldb, D, ldd, act);
   Gemm::fit_raster(params, problem, l2_bytes, slots);
   if (Gemm::split_tiles(params) > 0) {
     size_t floats = Gemm::workspace_floats(params);
@@ -219,7 +220,7 @@ void launch(int device, int sms, cutlass::gemm::GemmCoord problem, int splits,
         !get_workspace(device, stream, floats, Gemm::workspace_counters(params),
                        ws)) {
       params =
-          Gemm::make_params(problem, 1, slots, A, lda, B0, B1, ldb, D, ldd);
+          Gemm::make_params(problem, 1, sms, A, lda, B0, B1, ldb, D, ldd, act);
       Gemm::fit_raster(params, problem, l2_bytes, slots);
     } else {
       params.partials = ws.partials;
@@ -524,7 +525,9 @@ void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
                            torch::Tensor& up_proj, torch::Tensor& down_proj,
                            torch::Tensor& fused_buf, torch::Tensor& output,
                            cudaStream_t stream, int dual_cfg, int dual_splits,
-                           int down_cfg, int down_splits) {
+                           int down_cfg, int down_splits,
+                           const MoEActivation& activation) {
+  check_moe_activation(activation);
   TORCH_CHECK(fused_moe_ffn_pro6000_enabled(hidden.get_device()),
               "fused_moe_ffn_pro6000: tuned for the RTX PRO 6000 only "
               "(MOE_INFINITY_UNVALIDATED_HW=1 to re-tune elsewhere)");
@@ -609,16 +612,28 @@ void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
   auto* act = reinterpret_cast<Elem*>(fused_buf.data_ptr());
   auto* out = reinterpret_cast<Elem*>(output.data_ptr());
 
+  moe_gemm::SiluAndMul::Params const act_params{
+      activation.kind, activation.alpha, activation.limit};
   IntermediateWindow window(device, stream, act, act_bytes);
   visit_config<DualConfigs>(dual_cfg, [&]<typename Gemm>() {
     launch<Gemm>(device, sms, {M, I, H}, dual_splits, x, H, wg, wu, H, act, I,
-                 stream, l2_dual);
+                 stream, l2_dual, act_params);
   });
   window.last_use();
   visit_config<DownConfigs>(down_cfg, [&]<typename Gemm>() {
     launch<Gemm>(device, sms, {M, H, I}, down_splits, act, I, wd, nullptr, I,
                  out, H, stream, l2);
   });
+}
+
+void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
+                           torch::Tensor& up_proj, torch::Tensor& down_proj,
+                           torch::Tensor& fused_buf, torch::Tensor& output,
+                           cudaStream_t stream, int dual_cfg, int dual_splits,
+                           int down_cfg, int down_splits) {
+  fused_moe_ffn_pro6000(hidden, gate_proj, up_proj, down_proj, fused_buf,
+                        output, stream, dual_cfg, dual_splits, down_cfg,
+                        down_splits, MoEActivation{});
 }
 
 void check_moe_activation(const MoEActivation& act) {
@@ -662,11 +677,9 @@ void fused_moe_ffn_into(torch::Tensor& hidden,     // [M, H]
                         torch::Tensor& output,     // [M, H]
                         const MoEActivation& activation, cudaStream_t stream) {
   check_moe_activation(activation);
-  // Dual GEMM is SiLU. Other kinds use the generic epilogue on every GPU.
-  if (activation.kind == MoEActivationKind::kSiLU &&
-      fused_moe_ffn_pro6000_enabled(hidden.get_device())) {
+  if (fused_moe_ffn_pro6000_enabled(hidden.get_device())) {
     fused_moe_ffn_pro6000(hidden, gate_proj, up_proj, down_proj, fused_buf,
-                          output, stream, -1, 0, -1, 0);
+                          output, stream, -1, 0, -1, 0, activation);
     return;
   }
   fused_moe_ffn_into_generic(hidden, gate_proj, up_proj, down_proj, gate_buf,

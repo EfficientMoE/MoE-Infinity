@@ -6,6 +6,7 @@ python -m benchmarks.kernel_audit.analyze
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -15,6 +16,13 @@ from benchmarks.kernel_audit.common import RESULTS_DIR
 
 # RTX PRO 6000 Blackwell Max-Q datasheet values (188 SMs, 2280 MHz boost).
 SPEC = {"bf16": 438.9e12, "fp8": 877.8e12, "fp4": 1755.6e12, "dram": 1792e9}
+# RTX PRO 6000 Blackwell Server Edition datasheet values (188 SMs, 2430 MHz boost, 25 Gbps GDDR7).
+SPEC_SERVER = {
+    "bf16": 467.8e12,
+    "fp8": 935.6e12,
+    "fp4": 1871.2e12,
+    "dram": 1597e9,
+}
 
 # Compute precision of each impl's MMA (dequantizing paths run BF16 MMA).
 IMPL_PREC = defaultdict(
@@ -27,8 +35,19 @@ IMPL_PREC["v4_fp4_native"] = "fp8"
 SAT = 0.80  # "saturated" threshold (fraction of ceiling)
 
 
-def load_ceilings() -> dict:
-    c = json.loads((RESULTS_DIR / "ceilings.json").read_text())
+def load_ceilings(edition: str | None = None) -> dict:
+    ed = (edition or os.environ.get("KAUDIT_EDITION", "")).strip().lower()
+    if ed in ("server", "maxq"):
+        cand = RESULTS_DIR / f"ceilings_{ed}.json"
+        if not cand.exists():
+            cand = (
+                Path(__file__).resolve().parent
+                / "results"
+                / f"ceilings_{ed}.json"
+            )
+        c = json.loads(cand.read_text())
+    else:
+        c = json.loads((RESULTS_DIR / "ceilings.json").read_text())
     peak = lambda k: max(x["tflops"] for x in c[k]) * 1e12  # noqa: E731
     return {
         "bf16": peak("bf16"),
