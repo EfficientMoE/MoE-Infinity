@@ -262,6 +262,7 @@ _STORE_SOURCES = [
     "extensions/kernel/v4_fp4/gptoss_expert.cpp",
     "extensions/kernel/v4_fp4/fp8_dequant.cu",
     "extensions/kernel/fp8_moe/fp8_moe.cu",
+    "extensions/kernel/fp8_moe/fp8_moe_grouped_sm120_pro6000.cu",
     # Python binding
     "core/python/py_archer_prefetch.cpp",
     "core/python/py_tensor_store.cpp",

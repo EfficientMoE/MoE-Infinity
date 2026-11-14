@@ -10,6 +10,7 @@
 #include "model/moe.h"
 #include "kernel/ops.h"
 #include "kernel/fp8_moe/fp8_moe.h"
+#include "kernel/fp8_moe/fp8_moe_grouped_sm120_pro6000.h"
 #include "kernel/grouped_moe_decode_pro6000.h"
 #include "kernel/fused_moe_mlp.h"
 #include "kernel/grouped_moe_prefill.h"
@@ -201,6 +202,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       },
       "Native FP8 (e4m3, 128x128 block-scaled) SwiGLU expert into output "
       "(RTX PRO 6000 / sm_120 only)");
+  m.def("fp8_moe_grouped_forward_sm120_pro6000",
+        &fp8_moe_grouped_forward_sm120_pro6000, py::arg("x"),
+        py::arg("topk_ids"), py::arg("topk_w"), py::arg("table"),
+        py::arg("inter"),
+        "Grouped block-128 FP8 SwiGLU over an [E, 6] expert pointer table "
+        "(RTX PRO 6000). Returns fp32 [T, H].");
   m.def("fp8_moe_sm120_pro6000_supported", &fp8_moe_sm120_pro6000_supported,
         py::arg("hidden"), py::arg("inter"), py::arg("device") = -1,
         "Whether the sm120 / RTX PRO 6000 FP8 expert kernels run on device");

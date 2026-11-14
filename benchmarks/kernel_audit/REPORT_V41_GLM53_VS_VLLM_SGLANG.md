@@ -139,3 +139,105 @@ H=4096, I=2048, E=288, top-8, FP8 block-128. MoE-Infinity is the production `fp8
 | 64k | 288 | 129 ms | 90.5 ms | 83.4 ms |
 | 128k | 288 | 230 ms | 178 ms | 163 ms |
 | 200k | 288 | 347 ms | 275 ms | 253 ms |
+
+## Roofline and autoresearch, 2026-11-11
+
+The loop is the one used for draft PRs [#344](https://github.com/EfficientMoE/MoE-Infinity/pull/344), [#345](https://github.com/EfficientMoE/MoE-Infinity/pull/345), [#346](https://github.com/EfficientMoE/MoE-Infinity/pull/346), and [#347](https://github.com/EfficientMoE/MoE-Infinity/pull/347): one hypothesis, one code change, a CUDA-event measurement, keep the change only when the median beats the baseline on the points that change is allowed to move. That is the same keep-or-revert rule as Karpathy's autoresearch `program.md`. Ceilings are recomputed for these shapes from [REPORT.md](REPORT.md) §1, measured on this Max-Q on 2026-11-01: DRAM read **1641 GB/s**, NVFP4 **966 TFLOP/s**, FP8 **530 TFLOP/s**, BF16 **269 TFLOP/s**, L2 read **6.0 TB/s**. No ceiling is copied from a different shape.
+
+Weight bytes, active experts only. V4.1-Flash FP4: `E * (3*H*I/2 + 3*H*I/32)` (packed e2m1 plus one ue8m0 byte per 32 elements). GLM-5.3-Flash FP8: `E * (3*H*I + 3*(H/128)*(I/128)*4)`. FLOPs for either SwiGLU expert: `6 * T * topk * H * I`. Ceiling is the slower of bytes/1641 GB/s and FLOPs over the tensor-core peak that the kernel can actually issue. Activation traffic is left out of the byte term; at 200K it is still smaller than the compute term below.
+
+| Model | Point | Bytes | FLOPs | DRAM | Compute | Ceiling |
+|---|---|---:|---:|---:|---:|---:|
+| V4.1-Flash | b1, 6 experts | 0.113 GB | 0.425 GFLOP | 0.069 ms | 0.0004 ms FP4 | **0.069 ms** (weights fit in 128 MB L2; L2 read is 0.019 ms) |
+| V4.1-Flash | b64, 244 experts | 4.587 GB | 0.027 TFLOP | 2.80 ms | 0.028 ms FP4 | **2.80 ms** |
+| V4.1-Flash | 12K, 384 experts | 7.219 GB | 5.218 TFLOP | 4.40 ms | 5.40 ms FP4 | **5.40 ms** |
+| V4.1-Flash | 200K, 384 experts | 7.219 GB | 87.0 TFLOP | 4.40 ms | 90.0 ms FP4 | **90.0 ms** |
+| GLM-5.3-Flash | b1, 8 experts | 0.201 GB | 0.403 GFLOP | 0.123 ms | 0.001 ms | **0.123 ms** |
+| GLM-5.3-Flash | b64, 241 experts | 6.066 GB | 0.026 TFLOP | 3.70 ms | 0.05 ms FP8 | **3.70 ms** |
+| GLM-5.3-Flash | 12K, 288 experts | 7.250 GB | 4.948 TFLOP | 4.42 ms | 9.34 ms FP8, 18.4 ms BF16 | **9.34 ms** on FP8 tensor cores, **18.4 ms** if the MMA is BF16 |
+| GLM-5.3-Flash | 200K, 288 experts | 7.250 GB | 82.5 TFLOP | 4.42 ms | 156 ms FP8, 307 ms BF16 | **156 ms** FP8, **307 ms** BF16 |
+
+vLLM's two-GEMM cells sit under the byte floor at V4 b64 (1.43 ms vs 2.80 ms) and at V4 1K (2.19 ms vs 4.40 ms for 7.219 GB). Those cells are not a failed trial. The grouped V4 baseline at b64 is 2.81 ms, the same as the 2.80 ms floor (4.587 GB / 2.81 ms = 1633 GB/s).
+
+### Trials
+
+Recorded in `results/framework_bench/autoresearch_trials.jsonl`. V4 source was returned to the pr-353 grouped kernel after the three tile trials. The grouped FP8 source is the standalone module that produced the GLM row; it is not wired into `ExpertDispatcher`.
+
+| Trial | Change | Result |
+|---|---|---|
+| V4-1 | One-wave contiguous M-tile walk so a second tile of the same expert rereads weights from L2 | Rejected. GPU 5, Max-Q. b1 0.053 ms and b64 2.82 ms stayed on the decode path. 9K 21.3 ms (baseline 12.9), 12K 22.8 ms (15.9), 200K 287 ms (229). |
+| V4-2 | `choose_bt` returns 64 above 64 rows/expert, replacing the BT=128 tile (128 FP32 accumulators per thread) | Rejected. Idle GPU 4, same Max-Q. b1 0.051 ms, b64 2.80 ms, 1K 6.72 ms. 9K 16.5 ms, 12K 18.0 ms, 200K 260 ms, all slower than the BT=128 baseline. |
+| V4-3 | Large-M tile `run_cfg<2,2,4,4,2>` (128 threads, ~50 KiB, two CTAs per SM). Bit-exact against the pr-353 `.so` on T=512, E=16, top-6 (RMS 0) | Rejected. Idle GPU 4. 9K 14.4 ms, 12K 17.6 ms, 200K 244 ms. Still slower than BT=128 at every long point. 9K also fell through the SGLang cell (14.9 ms). |
+| GLM-1 | One grouped block-128 FP8 launch: weight-only BF16 `mma.sync` GEMV for ≤8 rows/expert, same math with the 16-row weight tile staged in smem above that | Kept where it beat `fp8_prod`. Parity vs exact FP8-dequant BF16 reference: RMS 0.00207 (T=4, H=I=256, E=8, K=2) and 0.00193 (cached path, T=32, E=2). |
+
+### Best measured table
+
+V4 grouped kernel is the published baseline. No trial beat it. GPU 4 and GPU 5 are both the Max-Q.
+
+| Point | Baseline grouped | Best trial | Ceiling | vLLM two GEMMs | SGLang |
+|---|---:|---:|---:|---:|---:|
+| b1 | 0.053 ms | 0.053 ms | 0.069 ms DRAM, 0.019 ms if L2-resident | 1.39 ms | 0.25 ms |
+| b64 | 2.81 ms | 2.81 ms | 2.80 ms | 1.43 ms, under the byte floor | 6.92 ms |
+| 1K | 6.68 ms | 6.68 ms | 4.40 ms | 2.19 ms, under the byte floor | 8.05 ms |
+| 12K | 15.9 ms | 15.9 ms | 5.40 ms FP4 | 11.2 ms | 19.0 ms |
+| 200K | 229 ms | 229 ms | 90.0 ms FP4 | 169 ms | 225 ms |
+
+12K at 15.9 ms is 328 TFLOP/s, 34% of the 966 TFLOP/s NVFP4 peak. The three schedule and tile changes were slower, so the gap is inside the BT=128 MMA/epilogue, not the grid shape those trials moved. 1K remains 6.68 ms against a 4.40 ms DRAM floor (1081 GB/s, 66% of 1641). The trials did not change that single-tile BT=16 launch.
+
+GLM grouped FP8, GPU 5 idle, same timer scope as the kernel (prep, both GEMVs, SiLU, routing-weight combine). `fp8_prod` is the baseline.
+
+| Point | fp8_prod | Grouped FP8 | Ceiling | vLLM | SGLang |
+|---|---:|---:|---:|---:|---:|
+| b1 | 0.89 ms | **0.231 ms** | 0.123 ms | 0.22 ms | 0.23 ms |
+| b64 | 26.2 ms | **3.71 ms** | 3.70 ms | 4.54 ms | 4.57 ms |
+| 1K | 32.3 ms | **11.1 ms** | 4.42 ms DRAM | 4.77 ms | 4.72 ms |
+| 9K | 44.2 ms | 70.1 ms | 13.8 ms BF16 / 7.0 ms FP8 | 12.0 ms | 11.2 ms |
+| 12K | 52.6 ms | 92.8 ms | 18.4 ms BF16 / 9.34 ms FP8 | 19.2 ms | 17.6 ms |
+| 200K | 347 ms | 1706 ms | 307 ms BF16 / 156 ms FP8 | 275 ms | 253 ms |
+
+b64 moves 6.066 GB in 3.71 ms, 1637 GB/s, the 1641 GB/s read roof. It is faster than both grouped-Triton cells. From 9K up the kernel is the BF16 GEMV with the weight tile in smem, and it is slower than `fp8_prod`'s CUTLASS BF16 GEMM. SGLang at 12K (17.6 ms) and at 200K (253 ms) is below the BF16 compute roof (18.4 ms and 307 ms), so this MMA cannot beat those two cells. An FP8 tensor-core grouped GEMM would have roofs of 9.34 ms and 156 ms. The dispatcher still calls `fp8_prod`.
+
+### Continued loop
+
+The prefill kernel already issues `mma.sync` `mxf8f6f4` e2m1×e4m3. `bf16_round` is only the SwiGLU epilogue. The 966 TFLOP/s ceiling applies. At 1K each expert is one BT=16 tile, so the weight matrix is read once; the 6.68 vs 4.40 ms gap is 1081 GB/s of that single read, and there is no second pass to delete.
+
+| Trial | Change | Result |
+|---|---|---|
+| skip V4 b64 | already 2.81 ms vs 2.80 ms DRAM floor | no retune |
+| skip GLM b64 | already 3.71 ms vs 3.70 ms floor | keep the BF16 GEMV at this size |
+| V4-4 | Each CTA walks only its own expert's M-tiles (wide grid, one column per expert) so a later tile rereads weights from L2 | Rejected on idle GPU 5. 12K 19.6 ms, 200K 252 ms, 9K 18.0 ms. b1 0.051 ms, b64 2.80 ms. |
+| V4-5 | Large-M tile keeps BT=128 and one CTA/SM, but drops from 3 pipeline stages to 2 | Rejected on GPU 5. 12K 21.0 ms, 200K 257 ms, 9K 18.7 ms. Source returned to the 3-stage tile. |
+| GLM-2 | rows/expert > 8 uses one CUTLASS sm_120 blockwise FP8 grouped GEMM for gate+up and one for down. rows/expert ≤ 8 stays on the BF16 GEMV | Kept. b1 0.230 ms and b64 3.71 ms stay on the GEMV. Block-quant reference RMS 0.0036 on T=32, H=I=256, E=2. Raw BF16 reference RMS 0.046, the e4m3 activation quant the W8A8 GEMM has to do. |
+| GLM-3 | Cache the transposed weight scales and the host expert-pointer table on the weight-table pointer. A resident table pays the 3×E transpose launches once. The GEMM, the activation quant, and the BF16 GEMV are unchanged | Kept. Same process on GPU 5: cache hit vs cache miss is 1K 5.05 vs 6.80 ms and 12K 16.2 vs 19.2 ms. 200K is 284 vs 283 ms, so the cache is not the large-M gap. |
+
+GPU 5, idle Max-Q, CUDA events, same medians as the harness.
+
+| Point | fp8_prod | Grouped after the split | vLLM | SGLang | FP8 roof |
+|---|---:|---:|---:|---:|---:|
+| b1 | 0.89 ms | **0.230 ms** | 0.22 ms | 0.23 ms | 0.123 ms |
+| b64 | 26.2 ms | **3.71 ms** | 4.54 ms | 4.57 ms | 3.70 ms |
+| 1K | 32.3 ms | **6.83 ms** | 4.77 ms | 4.72 ms | 4.42 ms |
+| 9K | 44.2 ms | **12.95 ms** | 12.0 ms | 11.2 ms | 7.00 ms |
+| 12K | 52.6 ms | **18.01 ms** | 19.2 ms | 17.6 ms | 9.34 ms |
+| 16K | 53.9 ms | **24.09 ms** | 24.5 ms | 22.4 ms | |
+| 32K | 84.6 ms | **46.93 ms** | 46.9 ms | 43.2 ms | |
+| 64K | 129 ms | **89.83 ms** | 90.5 ms | 83.4 ms | |
+| 128K | 230 ms | **196 ms** | 178 ms | 163 ms | |
+| 200K | 347 ms | **282 ms** | 275 ms | 253 ms | 156 ms |
+
+Every long point of GLM-2 beats `fp8_prod`. 12K, 16K, and 64K also beat the vLLM Triton cell. None of those GLM-2 long points beat SGLang. The V4 grouped kernel is unchanged.
+
+GLM-3 keeps the same GEMM and caches the static scale transpose. Warm-cache medians on GPU 5: 12K beats the SGLang Triton cell. 9K is level with it. 200K does not move, and it is still 80 ms above the 156 ms FP8 roof.
+
+| Point | GLM-2 | GLM-3 warm cache | SGLang |
+|---|---:|---:|---:|
+| 1K | 6.83 ms | **5.05 ms** | 4.72 ms |
+| 9K | 12.95 ms | **11.3 ms** | 11.2 ms |
+| 12K | 18.01 ms | **16.2 ms** | 17.6 ms |
+| 16K | 24.09 ms | **23.6 ms** | 22.4 ms |
+| 32K | 46.93 ms | **47.0 ms** | 43.2 ms |
+| 64K | 89.83 ms | **90.2 ms** | 83.4 ms |
+| 128K | 196 ms | **182 ms** | 163 ms |
+| 200K | 282 ms | **284 ms** | 253 ms |
+
+GLM-4 split the experts into two waves and ran activation quant and SiLU on a side stream beside the other wave's GEMM. Relative RMS against the single launch was 0.00022. On GPU 5, back to back with the single-launch binary, the medians were 1K 16.6 vs 16.6 ms, 12K 39.0 vs 39.0 ms, and 200K 515 vs 519 ms. The GEMM grid fills the SMs, so the CUDA-core quant stays queued. Rejected, and the source is back on the single launch.
