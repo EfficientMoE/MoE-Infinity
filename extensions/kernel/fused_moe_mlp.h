@@ -15,13 +15,13 @@
 // with act = silu(g) * u unless an MoEActivation is given
 // (kernel/moe_activation.h).
 //
-// RTX PRO 6000, SiLU only: two launches. A dual GEMM computes both projections
+// RTX PRO 6000: two launches. A dual GEMM computes both projections
 // from one read of the input and writes only silu(gate) * up to fused_buf; a
 // second GEMM applies down_proj. Tile shape and split-K are chosen per
-// (M, N, K) from a table tuned on that card. Clamped SiLU and SwiGLU-OAI, and
-// every other GPU, use the previous 3-GEMM path (fused_moe_ffn_into_generic),
-// which fuses act(gate, up) into the up-projection epilogue and writes
-// gate_buf.
+// (M, N, K) from a table tuned on that card. Every other GPU uses the previous
+// 3-GEMM path (fused_moe_ffn_into_generic), which fuses act(gate, up) into the
+// up-projection epilogue and writes gate_buf. Clamped SiLU and SwiGLU-OAI also
+// use that path unless fused_moe_ffn_nonsilu_enabled() (#308).
 //
 // Tensor conventions (HuggingFace weight shapes):
 //   hidden    [M, H]   row-major   (M = batch, H = hidden_size)
@@ -54,9 +54,15 @@ void check_moe_activation(const MoEActivation& activation);
 
 // The RTX PRO 6000 path (fused_moe_ffn_pro6000) runs only where
 // fused_moe_ffn_pro6000_enabled(device) holds (gate RTX_PRO_6000, evaluated
-// once per device) and the activation is SiLU. Every other case runs the
-// previous 3-GEMM implementation.
+// once per device) and the activation is SiLU, or clamped SiLU / SwiGLU-OAI
+// with fused_moe_ffn_nonsilu_enabled(). Every other case runs the previous
+// 3-GEMM implementation.
 bool fused_moe_ffn_pro6000_enabled(int device);
+
+// True if MOE_FUSED_NONSILU=1 (read once per process): clamped SiLU and
+// SwiGLU-OAI take the dual-GEMM path on the RTX PRO 6000. Off by default
+// until the kernels are GPU-validated (#308).
+bool fused_moe_ffn_nonsilu_enabled();
 
 // Previous implementation: 3 CUTLASS GEMMs with fixed 64x64 tiles, writes
 // gate_buf. Generic; the fallback of fused_moe_ffn_into. The overload with
@@ -79,7 +85,15 @@ void fused_moe_ffn_into_generic(torch::Tensor& hidden, torch::Tensor& gate_proj,
 
 // RTX PRO 6000 path of fused_moe_ffn_into with an explicit tile config /
 // split-K factor per GEMM (cfg < 0 selects automatically). For tuning and
-// tests. SiLU only.
+// tests. The overload with MoEActivation selects the dual-GEMM epilogue; the
+// one without is SiLU.
+void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
+                           torch::Tensor& up_proj, torch::Tensor& down_proj,
+                           torch::Tensor& fused_buf, torch::Tensor& output,
+                           const MoEActivation& activation, cudaStream_t stream,
+                           int dual_cfg, int dual_splits, int down_cfg,
+                           int down_splits);
+
 void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
                            torch::Tensor& up_proj, torch::Tensor& down_proj,
                            torch::Tensor& fused_buf, torch::Tensor& output,

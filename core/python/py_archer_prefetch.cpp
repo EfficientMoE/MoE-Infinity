@@ -253,12 +253,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "fused_moe_ffn_pro6000",
       [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
          torch::Tensor down_proj, torch::Tensor fused_buf, torch::Tensor output,
-         int dual_cfg, int dual_splits, int down_cfg, int down_splits) {
+         int dual_cfg, int dual_splits, int down_cfg, int down_splits,
+         int activation, float alpha, float limit) {
+        TORCH_CHECK(
+            activation >= static_cast<int>(MoEActivationKind::kSiLU) &&
+                activation <= static_cast<int>(MoEActivationKind::kSwiGLUOAI),
+            "fused_moe_ffn_pro6000: unknown activation kind ", activation);
+        MoEActivation act{static_cast<MoEActivationKind>(activation), alpha,
+                          limit};
         fused_moe_ffn_pro6000(hidden, gate_proj, up_proj, down_proj, fused_buf,
-                              output, at::cuda::getCurrentCUDAStream().stream(),
+                              output, act,
+                              at::cuda::getCurrentCUDAStream().stream(),
                               dual_cfg, dual_splits, down_cfg, down_splits);
       },
-      "fused_moe_ffn_into with an explicit tile config per GEMM (tests)");
+      "fused_moe_ffn_into with an explicit tile config per GEMM (tests)",
+      py::arg("hidden"), py::arg("gate_proj"), py::arg("up_proj"),
+      py::arg("down_proj"), py::arg("fused_buf"), py::arg("output"),
+      py::arg("dual_cfg"), py::arg("dual_splits"), py::arg("down_cfg"),
+      py::arg("down_splits"), py::arg("activation") = 0,
+      py::arg("alpha") = 1.0f, py::arg("limit") = 0.0f);
   m.def(
       "grouped_moe_prefill",
       [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
@@ -297,6 +310,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             zero_out, at::cuda::getCurrentCUDAStream().stream());
       },
       "grouped_moe_prefill's fallback on non-RTX PRO 6000 GPUs (tests)");
+  m.def("fused_moe_ffn_nonsilu_enabled", &fused_moe_ffn_nonsilu_enabled,
+        "True if MOE_FUSED_NONSILU=1: clamped SiLU / SwiGLU-OAI take the "
+        "dual-GEMM path of fused_moe_ffn_into on the RTX PRO 6000");
   m.def("fused_moe_ffn_pro6000_enabled", &fused_moe_ffn_pro6000_enabled,
         py::arg("device"),
         "True if fused_moe_ffn_into runs the RTX PRO 6000 path on device");

@@ -48,4 +48,20 @@ MOE_ACT_HOST_DEVICE float moe_gated_act(float g, float u, float alpha,
   }
 }
 
+// act(g, u) functor of the gate/up dual-GEMM epilogue (moe_gemm::ExpertGemm,
+// moe_expert_gemm.h): it applies moe_gated_act<Kind>, the same function the
+// generic 3-GEMM path's GatedActEpilogue (epilogue_utils.h) uses, to the fp32
+// gate / up accumulators. alpha / limit are per-launch constants. SiLU keeps
+// its own functor (moe_gemm::SiluAndMul), whose exp is __expf.
+template <MoEActivationKind Kind>
+struct MoEGatedAct {
+  struct Params {
+    float alpha = 1.0f;
+    float limit = 0.0f;
+  };
+  MOE_ACT_HOST_DEVICE static float apply(float g, float u, Params const& p) {
+    return moe_gated_act<Kind>(g, u, p.alpha, p.limit);
+  }
+};
+
 #undef MOE_ACT_HOST_DEVICE

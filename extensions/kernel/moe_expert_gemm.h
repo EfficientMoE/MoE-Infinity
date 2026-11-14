@@ -41,6 +41,7 @@
 #include <type_traits>
 
 #include "kernel/dual_gemm/dual_mma_multistage.h"
+#include "kernel/moe_activation.h"
 
 namespace moe_gemm {
 
@@ -110,8 +111,8 @@ RasterPlan plan_raster(cutlass::gemm::GemmCoord problem, double l2,
 }
 
 // act(g, u) applied to the fp32 gate / up accumulators of the dual GEMM.
-// New activations (e.g. clamped SwiGLU) add a functor with the same shape;
-// per-launch constants go in Params.
+// New activations add a functor with the same shape; per-launch constants go
+// in Params.
 struct SiluAndMul {
   struct Params {};
   CUTLASS_DEVICE static float apply(float g, float u, Params const&) {
@@ -119,12 +120,18 @@ struct SiluAndMul {
   }
 };
 
+// Clamped SiLU (GLM-5.3-Flash, DeepSeek-V4) and SwiGLU-OAI (MiniMax-M3,
+// GPT-OSS): the math of the generic path (kernel/moe_activation.h).
+using ClampedSiluAndMul = MoEGatedAct<MoEActivationKind::kClampedSiLU>;
+using SwigluOaiAndMul = MoEGatedAct<MoEActivationKind::kSwiGLUOAI>;
+
 template <typename Element_,           // bf16 / fp16
           typename ThreadblockShape_,  // GemmShape<M, N, K>
           typename WarpShape_,         // GemmShape<M, N, K>
           int Stages, bool Dual, bool SplitK, typename Act = SiluAndMul>
 struct ExpertGemm {
   using Element = Element_;
+  using ActType = Act;
   using ElementAccumulator = float;
   using ThreadblockShape = ThreadblockShape_;
   using WarpShape = WarpShape_;
