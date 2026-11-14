@@ -141,7 +141,7 @@ class ExpertDispatcher : public base::noncopyable {
     bool overload_owned = false;
   } FailureContext;
 
-  typedef struct {
+  struct ExpertRetireArgs {
     ExpertDispatcher* dispatcher = nullptr;
     ExpertNodePtr expert_node = nullptr;
     std::uint64_t generation = 0;
@@ -151,22 +151,14 @@ class ExpertDispatcher : public base::noncopyable {
     std::uint64_t residency_lease = 0;
     std::uint64_t execution_lease_id = 0;
     ResidencyVariantKey execution_key;
-  } ExpertRetireArgs;
-
-  struct GroupRetireArgs {
-    ExpertDispatcher* dispatcher = nullptr;
-    std::uint64_t generation = 0;
-    std::vector<ExpertRetireArgs> items;
+    cudaEvent_t retire_event = nullptr;
+    std::vector<ExpertRetireArgs> group_items;
   };
 
   struct CompletionEventRecord {
     cudaEvent_t event = nullptr;
     std::uint64_t generation = 0;
     int device = 0;
-  };
-  struct CompletionRetireBatch {
-    ExpertDispatcher* dispatcher = nullptr;
-    std::vector<CompletionEventRecord> records;
   };
   struct CompletionRetireItem {
     CompletionEventRecord record;
@@ -178,9 +170,9 @@ class ExpertDispatcher : public base::noncopyable {
                             int expert_type, int num_threads = 1);
   ~ExpertDispatcher() {
     // Let any in-flight dispatch finish routing and expert execution before
-    // draining callbacks: OutputFunc launches retirement/completion callbacks,
-    // so waiting for the pipeline to quiesce prevents a callback from being
-    // launched against a half-destroyed dispatcher.
+    // draining callbacks/retirement: OutputFunc enqueues retirement work, so
+    // waiting for the pipeline to quiesce prevents new work from being
+    // submitted against a half-destroyed dispatcher.
     {
       std::unique_lock<std::mutex> lock(pending_mutex_);
       pending_cv_.wait(lock, [&] {
@@ -192,13 +184,6 @@ class ExpertDispatcher : public base::noncopyable {
       std::unique_lock<std::mutex> lock(route_callback_mutex_);
       route_callback_cv_.wait(lock, [&] {
         return pending_route_callbacks_.load(std::memory_order_acquire) == 0;
-      });
-    }
-    {
-      std::unique_lock<std::mutex> lock(completion_retirement_callback_mutex_);
-      completion_retirement_callback_cv_.wait(lock, [&] {
-        return pending_completion_retirement_callbacks_.load(
-                   std::memory_order_acquire) == 0;
       });
     }
     {
@@ -419,13 +404,12 @@ class ExpertDispatcher : public base::noncopyable {
   void NotifyPendingWaiters() noexcept;
   void NotifyCacheWaiters(int gpu_id) noexcept;
 
-  static void CUDART_CB CompletionWaitsConsumedCallback(void* opaque);
   void CompletionRetirementFunc();
   void QueueUnwaitedEventsForQuery(
       std::vector<CompletionEventRecord> records) noexcept;
 
-  static void CUDART_CB ExpertReadyToRetireCallback(void* opaque);
-  static void CUDART_CB GroupReadyToRetireCallback(void* opaque);
+  void EnqueueRetirement(ExpertRetireArgs retire, cudaStream_t stream);
+  void RetireOneExpert(const ExpertRetireArgs& args) noexcept;
   void RetirementFunc();
 
   // Grouped decode path. GroupedEligible is evaluated on the cache-hit
@@ -622,9 +606,6 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<CompletionEventRecord> destructor_fallback_events_;
   ThreadSafeQueue<std::vector<CompletionRetireItem>>
       completion_retirement_queue_;
-  std::atomic<std::int64_t> pending_completion_retirement_callbacks_{0};
-  std::mutex completion_retirement_callback_mutex_;
-  std::condition_variable completion_retirement_callback_cv_;
 
   ThreadSafeQueue<ExpertRetireArgs> retirement_queue_;
   std::atomic<std::int64_t> pending_retirement_callbacks_{0};

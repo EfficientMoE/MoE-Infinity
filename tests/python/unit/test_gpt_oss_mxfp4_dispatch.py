@@ -3,6 +3,18 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+_LIVE_ENGINES = []
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_native_engine():
+    yield
+    import gc
+
+    gc.collect()
+    _LIVE_ENGINES.clear()
+    gc.collect()
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _register_engine_ops():
@@ -209,7 +221,13 @@ def _native_dispatch(
     hidden_states = torch.randn(3, hidden, dtype=hidden_dtype, device="cuda:0")
     expected = mlp._expert_forward_mxfp4(hidden_states, 0)
 
+    import gc
+
+    gc.collect()
+    _LIVE_ENGINES.clear()
+    gc.collect()
     engine = prefetch_lib.prefetch_handle(f"{tmp_path}/", 0.5)
+    _LIVE_ENGINES.append(engine)
     expert_tensor_ids = [list(range(6)), list(range(6, 12))]
     for tensor_id, tensor in zip(expert_tensor_ids[0], tensors):
         engine.offload(tensor, tensor_id)
@@ -508,6 +526,44 @@ def test_retirement_launch_failure_retires_recorded_event_without_next_dispatch(
         time.sleep(0.01)
     assert stats["completion_events_retired"] >= 1
     assert stats["completion_events_outstanding"] == 0
+
+
+@pytest.mark.gpu
+def test_event_polled_retirement_reuses_experts_and_events_without_stderr_noise(
+    tmp_path, capfd
+):
+    import time
+
+    first, _, hidden, _, dispatcher = _native_dispatch(
+        tmp_path,
+        torch.bfloat16,
+        active_experts=(0, 1),
+        gpu_routing=True,
+    )
+    mask = torch.ones(
+        (hidden.size(0), 2), dtype=torch.bool, device=hidden.device
+    )
+    weights = torch.full(
+        (hidden.size(0), 2), 0.5, dtype=torch.bfloat16, device=hidden.device
+    )
+    dispatcher.set_inputs(hidden, mask, weights)
+    dispatcher.dispatch_experts(0)
+    second = dispatcher.wait_expert()
+
+    torch.cuda.synchronize()
+    deadline = time.monotonic() + 5.0
+    stats = dispatcher.get_routing_stats()
+    while time.monotonic() < deadline:
+        stats = dispatcher.get_routing_stats()
+        if stats["completion_events_outstanding"] == 0:
+            break
+        time.sleep(0.01)
+
+    captured = capfd.readouterr()
+    assert "exp752" not in captured.err
+    assert stats["completion_events_outstanding"] == 0
+    assert stats["completion_events_retired"] >= 4
+    torch.testing.assert_close(second, first, rtol=1e-2, atol=1e-2)
 
 
 @pytest.mark.parametrize(

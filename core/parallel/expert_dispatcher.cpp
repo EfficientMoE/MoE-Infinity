@@ -679,8 +679,8 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   // while it is in flight) and before the admission a miss causes.
   {
     auto expected = NodeExecState::IDLE;
-    if (!expert_node->node->exec_state.compare_exchange_strong(
-            expected, NodeExecState::FETCHING, std::memory_order_acq_rel)) {
+    while (!expert_node->node->exec_state.compare_exchange_strong(
+        expected, NodeExecState::FETCHING, std::memory_order_acq_rel)) {
       if (expert_node->node->is_prefetching.load(std::memory_order_acquire)) {
         expert_node->node->pending_dispatches.fetch_add(
             1, std::memory_order_acq_rel);
@@ -693,10 +693,16 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
         input_queue_[args.gpu_id].Push(args);
         return;
       }
-      DLOG_FATAL(
-          "ExpertDispatcher::Enqueue: exec_state CAS failed (expert_idx ",
-          expert_idx, " layer_idx ", layer_idx, " node ",
-          expert_node->node->str(), " state=", static_cast<int>(expected), ")");
+      if (pending_retirement_callbacks_.load(std::memory_order_acquire) == 0 ||
+          main_thread_stop_flag_.load(std::memory_order_acquire)) {
+        DLOG_FATAL(
+            "ExpertDispatcher::Enqueue: exec_state CAS failed (expert_idx ",
+            expert_idx, " layer_idx ", layer_idx, " node ",
+            expert_node->node->str(), " state=", static_cast<int>(expected),
+            ")");
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+      expected = NodeExecState::IDLE;
     }
   }
   if (kExpertResidencyManager) {
@@ -1735,33 +1741,12 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
       }
     }
 
-    auto* retire = new ExpertRetireArgs{this,
-                                        args.expert_node,
-                                        args.generation,
-                                        gpu_id,
-                                        args.evict,
-                                        args.managed_transient,
-                                        args.residency_lease,
-                                        args.execution_lease_id,
-                                        args.execution_key};
-    pending_retirement_callbacks_.fetch_add(1, std::memory_order_acq_rel);
-    int retirement_fault =
-        static_cast<int>(DispatchFaultPoint::RETIREMENT_CALLBACK_LAUNCH);
-    if (dispatch_fault_for_test_.compare_exchange_strong(
-            retirement_fault, 0, std::memory_order_acq_rel)) {
-      pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
-      delete retire;
-      throw std::runtime_error("injected retirement_launch failure");
-    }
-    cudaError_t retire_status = cudaLaunchHostFunc(
-        exec_stream, &ExpertDispatcher::ExpertReadyToRetireCallback, retire);
-    if (retire_status != cudaSuccess) {
-      pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
-      delete retire;
-      throw std::runtime_error(
-          std::string("cudaLaunchHostFunc expert retirement failed: ") +
-          cudaGetErrorString(retire_status));
-    }
+    EnqueueRetirement(
+        ExpertRetireArgs{this, args.expert_node, args.generation, gpu_id,
+                         args.evict, args.managed_transient,
+                         args.residency_lease, args.execution_lease_id,
+                         args.execution_key},
+        exec_stream);
 
     CompleteOne(args.generation);
     return true;
@@ -1999,32 +1984,18 @@ void ExpertDispatcher::GroupedExec(ExecArgs& args, int gpu_id,
       completion_events_outstanding_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    auto retire = std::make_unique<GroupRetireArgs>();
-    retire->dispatcher = this;
-    retire->generation = generation;
+    ExpertRetireArgs retire;
+    retire.dispatcher = this;
+    retire.generation = generation;
+    retire.gpu_id = gpu_id;
+    retire.group_items.reserve(members.size());
     for (const ExecArgs& m : members) {
-      retire->items.push_back(
+      retire.group_items.push_back(
           ExpertRetireArgs{this, m.expert_node, m.generation, gpu_id, m.evict,
                            m.managed_transient, m.residency_lease,
                            m.execution_lease_id, m.execution_key});
     }
-    pending_retirement_callbacks_.fetch_add(1, std::memory_order_acq_rel);
-    int retirement_fault =
-        static_cast<int>(DispatchFaultPoint::RETIREMENT_CALLBACK_LAUNCH);
-    if (dispatch_fault_for_test_.compare_exchange_strong(
-            retirement_fault, 0, std::memory_order_acq_rel)) {
-      pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
-      throw std::runtime_error("injected retirement_launch failure");
-    }
-    cudaError_t retire_status = cudaLaunchHostFunc(
-        stream, &ExpertDispatcher::GroupReadyToRetireCallback, retire.get());
-    if (retire_status != cudaSuccess) {
-      pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
-      throw std::runtime_error(
-          std::string("cudaLaunchHostFunc grouped retirement failed: ") +
-          cudaGetErrorString(retire_status));
-    }
-    retire.release();
+    EnqueueRetirement(std::move(retire), stream);
     grouped_batches_.fetch_add(1, std::memory_order_relaxed);
     grouped_experts_.fetch_add(n, std::memory_order_relaxed);
     for (std::int64_t j = 0; j < n; ++j) CompleteOne(generation);
@@ -2045,25 +2016,6 @@ void ExpertDispatcher::GroupedExec(ExecArgs& args, int gpu_id,
       if (m.managed_transient) m.expert_node->node->is_overflow = false;
     }
     FailDispatch(generation, std::current_exception(), contexts);
-  }
-}
-
-void CUDART_CB ExpertDispatcher::GroupReadyToRetireCallback(void* opaque) {
-  std::unique_ptr<GroupRetireArgs> batch(static_cast<GroupRetireArgs*>(opaque));
-  ExpertDispatcher* dispatcher = batch->dispatcher;
-  try {
-    for (ExpertRetireArgs& item : batch->items) {
-      dispatcher->retirement_queue_.Push(item);
-    }
-  } catch (...) {
-    // CUDA host-callback thread: no FailureContext (see
-    // ExpertReadyToRetireCallback).
-    dispatcher->FailDispatch(batch->generation, std::current_exception());
-  }
-  if (dispatcher->pending_retirement_callbacks_.fetch_sub(
-          1, std::memory_order_acq_rel) == 1) {
-    std::lock_guard<std::mutex> lock(dispatcher->retirement_callback_mutex_);
-    dispatcher->retirement_callback_cv_.notify_all();
   }
 }
 
@@ -2173,24 +2125,10 @@ torch::Tensor ExpertDispatcher::WaitHiddenStates() {
       CUDA_CHECK(cudaStreamWaitEvent(caller_stream, record.event, 0));
       ++waits_inserted;
     }
-    if (!events.empty()) {
-      auto callback = std::make_unique<CompletionRetireBatch>(
-          CompletionRetireBatch{this, std::move(events)});
-      pending_completion_retirement_callbacks_.fetch_add(
-          1, std::memory_order_acq_rel);
-      cudaError_t status = cudaLaunchHostFunc(
-          caller_stream, &ExpertDispatcher::CompletionWaitsConsumedCallback,
-          callback.get());
-      if (status != cudaSuccess) {
-        pending_completion_retirement_callbacks_.fetch_sub(
-            1, std::memory_order_acq_rel);
-        events = std::move(callback->records);
-        throw std::runtime_error(
-            std::string("completion retirement callback launch failed: ") +
-            cudaGetErrorString(status));
-      }
-      callback.release();
-    }
+    // Waits are already enqueued on caller_stream; per CUDA semantics a
+    // later re-record of the event cannot affect them, so the event may
+    // return to the pool once its own record has completed.
+    QueueUnwaitedEventsForQuery(std::move(events));
   } catch (...) {
     std::exception_ptr cleanup_error = std::current_exception();
     std::vector<CompletionEventRecord> unwaited(
@@ -2834,48 +2772,35 @@ void ExpertDispatcher::QueueUnwaitedEventsForQuery(
   }
 }
 
-void CUDART_CB ExpertDispatcher::CompletionWaitsConsumedCallback(void* opaque) {
-  std::unique_ptr<CompletionRetireBatch> batch(
-      static_cast<CompletionRetireBatch*>(opaque));
-  ExpertDispatcher* dispatcher = batch->dispatcher;
-  try {
-    std::vector<CompletionRetireItem> items;
-    items.reserve(batch->records.size());
-    for (const CompletionEventRecord& record : batch->records) {
-      items.push_back(CompletionRetireItem{record, true});
-    }
-    dispatcher->completion_retirement_queue_.Push(items);
-    batch->records.clear();
-  } catch (...) {
-    std::exception_ptr error = std::current_exception();
-    const std::uint64_t generation = batch->records.front().generation;
-    {
-      std::lock_guard<std::mutex> lock(dispatcher->route_state_mutex_);
-      dispatcher->destructor_fallback_events_.insert(
-          dispatcher->destructor_fallback_events_.end(),
-          std::make_move_iterator(batch->records.begin()),
-          std::make_move_iterator(batch->records.end()));
-    }
-    dispatcher->FailDispatch(generation, error);
-  }
-  if (dispatcher->pending_completion_retirement_callbacks_.fetch_sub(
-          1, std::memory_order_acq_rel) == 1) {
-    std::lock_guard<std::mutex> lock(
-        dispatcher->completion_retirement_callback_mutex_);
-    dispatcher->completion_retirement_callback_cv_.notify_all();
-  }
-}
-
 void ExpertDispatcher::CompletionRetirementFunc() {
-  std::vector<CompletionRetireItem> items;
-  while (completion_retirement_queue_.Pop(items)) {
-    std::vector<CompletionRetireItem> retry;
-    for (CompletionRetireItem& item : items) {
+  std::vector<CompletionRetireItem> pending;
+  std::vector<CompletionRetireItem> incoming;
+  while (true) {
+    if (pending.empty()) {
+      if (!completion_retirement_queue_.Pop(incoming)) {
+        break;
+      }
+      pending = std::move(incoming);
+    } else {
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    while (completion_retirement_queue_.TryPop(incoming)) {
+      pending.insert(pending.end(), std::make_move_iterator(incoming.begin()),
+                     std::make_move_iterator(incoming.end()));
+      incoming.clear();
+    }
+
+    std::size_t write_idx = 0;
+    for (std::size_t i = 0; i < pending.size(); ++i) {
+      CompletionRetireItem& item = pending[i];
       cudaError_t status = item.caller_wait_consumed
                                ? cudaSuccess
                                : cudaEventQuery(item.record.event);
       if (status == cudaErrorNotReady) {
-        retry.push_back(std::move(item));
+        if (write_idx != i) {
+          pending[write_idx] = std::move(item);
+        }
+        ++write_idx;
         continue;
       }
       if (status != cudaSuccess) {
@@ -2891,30 +2816,7 @@ void ExpertDispatcher::CompletionRetirementFunc() {
       completion_events_retired_.fetch_add(1, std::memory_order_relaxed);
       completion_events_outstanding_.fetch_sub(1, std::memory_order_relaxed);
     }
-    if (!retry.empty()) {
-      std::this_thread::sleep_for(std::chrono::microseconds(50));
-      completion_retirement_queue_.Push(retry);
-    }
-    items.clear();
-  }
-}
-
-void CUDART_CB ExpertDispatcher::ExpertReadyToRetireCallback(void* opaque) {
-  std::unique_ptr<ExpertRetireArgs> retire(
-      static_cast<ExpertRetireArgs*>(opaque));
-  ExpertDispatcher* dispatcher = retire->dispatcher;
-  try {
-    dispatcher->retirement_queue_.Push(*retire);
-  } catch (...) {
-    // Runs on a CUDA host-callback thread, so pass no FailureContext: node/
-    // cache restoration issues CUDA calls that are forbidden here. State is
-    // still closed and waiters notified; the destructor resets node state.
-    dispatcher->FailDispatch(retire->generation, std::current_exception());
-  }
-  if (dispatcher->pending_retirement_callbacks_.fetch_sub(
-          1, std::memory_order_acq_rel) == 1) {
-    std::lock_guard<std::mutex> lock(dispatcher->retirement_callback_mutex_);
-    dispatcher->retirement_callback_cv_.notify_all();
+    pending.resize(write_idx);
   }
 }
 
@@ -2941,38 +2843,134 @@ void ExpertDispatcher::ReleaseCompletionEvent(cudaEvent_t event,
   completion_event_pool_[device].push_back(event);
 }
 
-void ExpertDispatcher::RetirementFunc() {
-  ExpertRetireArgs args;
-  while (retirement_queue_.Pop(args)) {
-    try {
-      if (args.evict) {
-        args.expert_node->node->SetDevice(args.expert_node->node->default_host,
-                                          true, nullptr);
-        gpu_overload_[args.gpu_id].store(false, std::memory_order_release);
-      }
-      if (args.managed_transient) {
-        args.expert_node->node->is_overflow = false;
-      }
-      args.expert_node->node->exec_state.store(NodeExecState::IDLE,
-                                               std::memory_order_release);
-      // Leases release only after the IDLE publish: a zero lease count then
-      // implies the node is enqueueable again, so callers may use lease
-      // drain as the retirement barrier.
-      if (args.execution_lease_id != 0 && kDemandResidencyClient != nullptr) {
-        kExpertResidencyManager->RecordLastUse(args.execution_key, nullptr);
-        kDemandResidencyClient->ReleaseLease(args.execution_lease_id);
-        kDemandResidencyClient->ReapWorkspace(args.gpu_id);
-        kDemandResidencyClient->ReapRetired(args.gpu_id);
-      }
-      if (args.residency_lease != 0 && kExpertResidencyManager) {
-        kExpertResidencyManager->ReleaseLease(args.residency_lease);
-      }
-      NotifyCacheWaiters(args.gpu_id);
-    } catch (...) {
-      FailDispatch(args.generation, std::current_exception(),
-                   {FailureContext{args.expert_node, args.gpu_id, false, false,
-                                   args.evict}});
+void ExpertDispatcher::EnqueueRetirement(ExpertRetireArgs retire,
+                                         cudaStream_t stream) {
+  int retirement_fault =
+      static_cast<int>(DispatchFaultPoint::RETIREMENT_CALLBACK_LAUNCH);
+  if (dispatch_fault_for_test_.compare_exchange_strong(
+          retirement_fault, 0, std::memory_order_acq_rel)) {
+    throw std::runtime_error("injected retirement_launch failure");
+  }
+  const int gpu_id = retire.gpu_id;
+  cudaEvent_t retire_event = AcquireCompletionEvent(gpu_id);
+  cudaError_t ev_status = cudaEventRecord(retire_event, stream);
+  if (ev_status != cudaSuccess) {
+    ReleaseCompletionEvent(retire_event, gpu_id);
+    throw std::runtime_error(
+        std::string("expert retirement cudaEventRecord failed: ") +
+        cudaGetErrorString(ev_status));
+  }
+  retire.retire_event = retire_event;
+  pending_retirement_callbacks_.fetch_add(1, std::memory_order_acq_rel);
+  try {
+    retirement_queue_.Push(retire);
+  } catch (...) {
+    ReleaseCompletionEvent(retire_event, gpu_id);
+    if (pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel) ==
+        1) {
+      std::lock_guard<std::mutex> lock(retirement_callback_mutex_);
+      retirement_callback_cv_.notify_all();
     }
+    throw;
+  }
+}
+
+void ExpertDispatcher::RetireOneExpert(const ExpertRetireArgs& args) noexcept {
+  try {
+    if (args.evict) {
+      args.expert_node->node->SetDevice(args.expert_node->node->default_host,
+                                        true, nullptr);
+      gpu_overload_[args.gpu_id].store(false, std::memory_order_release);
+    }
+    if (args.managed_transient) {
+      args.expert_node->node->is_overflow = false;
+    }
+    args.expert_node->node->exec_state.store(NodeExecState::IDLE,
+                                             std::memory_order_release);
+    // Leases release only after the IDLE publish: a zero lease count then
+    // implies the node is enqueueable again, so callers may use lease
+    // drain as the retirement barrier.
+    if (args.execution_lease_id != 0 && kDemandResidencyClient != nullptr) {
+      kExpertResidencyManager->RecordLastUse(args.execution_key, nullptr);
+      kDemandResidencyClient->ReleaseLease(args.execution_lease_id);
+      kDemandResidencyClient->ReapWorkspace(args.gpu_id);
+      kDemandResidencyClient->ReapRetired(args.gpu_id);
+    }
+    if (args.residency_lease != 0 && kExpertResidencyManager) {
+      kExpertResidencyManager->ReleaseLease(args.residency_lease);
+    }
+    NotifyCacheWaiters(args.gpu_id);
+  } catch (...) {
+    FailDispatch(args.generation, std::current_exception(),
+                 {FailureContext{args.expert_node, args.gpu_id, false, false,
+                                 args.evict}});
+  }
+}
+
+void ExpertDispatcher::RetirementFunc() {
+  std::vector<ExpertRetireArgs> pending;
+  ExpertRetireArgs incoming;
+  while (true) {
+    if (pending.empty()) {
+      if (!retirement_queue_.Pop(incoming)) {
+        break;
+      }
+      pending.push_back(std::move(incoming));
+    } else {
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+    }
+    while (retirement_queue_.TryPop(incoming)) {
+      pending.push_back(std::move(incoming));
+    }
+
+    std::size_t write_idx = 0;
+    for (std::size_t i = 0; i < pending.size(); ++i) {
+      ExpertRetireArgs& args = pending[i];
+      cudaError_t st = (args.retire_event != nullptr)
+                           ? cudaEventQuery(args.retire_event)
+                           : cudaSuccess;
+      if (st == cudaErrorNotReady) {
+        if (write_idx != i) {
+          pending[write_idx] = std::move(args);
+        }
+        ++write_idx;
+        continue;
+      }
+      if (args.retire_event != nullptr) {
+        ReleaseCompletionEvent(args.retire_event, args.gpu_id);
+        args.retire_event = nullptr;
+      }
+      if (st != cudaSuccess) {
+        std::vector<FailureContext> contexts;
+        if (args.group_items.empty()) {
+          contexts.push_back(FailureContext{args.expert_node, args.gpu_id,
+                                            false, false, args.evict});
+        } else {
+          contexts.reserve(args.group_items.size());
+          for (const auto& item : args.group_items) {
+            contexts.push_back(FailureContext{item.expert_node, item.gpu_id,
+                                              false, false, item.evict});
+          }
+        }
+        FailDispatch(args.generation,
+                     std::make_exception_ptr(std::runtime_error(
+                         std::string("expert retirement event query failed: ") +
+                         cudaGetErrorString(st))),
+                     contexts);
+      } else if (args.group_items.empty()) {
+        RetireOneExpert(args);
+      } else {
+        for (const auto& item : args.group_items) {
+          RetireOneExpert(item);
+        }
+      }
+      if (pending_retirement_callbacks_.fetch_sub(
+              1, std::memory_order_acq_rel) == 1) {
+        std::lock_guard<std::mutex> lock(retirement_callback_mutex_);
+        retirement_callback_cv_.notify_all();
+      }
+    }
+    pending.resize(write_idx);
   }
 }
 
