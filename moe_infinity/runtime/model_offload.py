@@ -3007,22 +3007,24 @@ class OffloadEngine(object):
         def _pre_forward_module_hook(module, args, kwargs):
             device_list = []
 
-            for name, param in module.named_parameters(recurse=False):
-                if param.data.data_ptr() not in self.offload_set:
+            for param in (
+                p for p in module._parameters.values() if p is not None
+            ):
+                if param.data_ptr() not in self.offload_set:
                     num_devices = torch.cuda.device_count()
                     param.data = param.data.to(get_device(num_devices - 1))
                     continue
 
-                self.offload_set.remove(param.data.data_ptr())
+                self.offload_set.remove(param.data_ptr())
                 self.engine_hooks.begin(
                     self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF)
                 )
-                self.offload_set.add(param.data.data_ptr())
+                self.offload_set.add(param.data_ptr())
 
-                device_list.append(param.data.device)
+                device_list.append(param.device)
 
-            for name, buf in module.named_buffers(recurse=False):
-                if buf.data.data_ptr() not in self.offload_set:
+            for buf in (b for b in module._buffers.values() if b is not None):
+                if buf.data_ptr() not in self.offload_set:
                     num_devices = torch.cuda.device_count()
                     buf.data = buf.data.to(get_device(num_devices - 1))
                     continue
@@ -3033,7 +3035,7 @@ class OffloadEngine(object):
                 )
                 self.offload_set.add(buf.data_ptr())
 
-                device_list.append(buf.data.device)
+                device_list.append(buf.device)
 
             # KV CACHE RELOAD POINT (T16)
             # When enable_kv_cache_offload=True, reload swapped-out KV cache here.
@@ -3049,20 +3051,22 @@ class OffloadEngine(object):
         def _post_forward_module_hook(module, input, output):
             device_list = []
             param_not_offload = set()
-            for param in module.parameters(recurse=False):
-                if param.data.data_ptr() not in self.offload_set:
-                    param_not_offload.add(param.data.data_ptr())
+            for param in (
+                p for p in module._parameters.values() if p is not None
+            ):
+                if param.data_ptr() not in self.offload_set:
+                    param_not_offload.add(param.data_ptr())
                     continue
 
-                self.offload_set.remove(param.data.data_ptr())
+                self.offload_set.remove(param.data_ptr())
                 self.engine_hooks.end(
                     self.request_id, param, getattr(param, "ar_id", 0xFFFFFFFF)
                 )
-                self.offload_set.add(param.data.data_ptr())
+                self.offload_set.add(param.data_ptr())
 
-                device_list.append(param.data.device)
+                device_list.append(param.device)
 
-            for buf in module.buffers(recurse=False):
+            for buf in (b for b in module._buffers.values() if b is not None):
                 if buf.data_ptr() not in self.offload_set:
                     continue
 
