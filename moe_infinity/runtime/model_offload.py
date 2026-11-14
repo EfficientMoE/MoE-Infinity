@@ -3007,7 +3007,9 @@ class OffloadEngine(object):
         def _pre_forward_module_hook(module, args, kwargs):
             device_list = []
 
-            for param in (p for p in module._parameters.values() if p is not None):
+            for param in (
+                p for p in module._parameters.values() if p is not None
+            ):
                 if param.data_ptr() not in self.offload_set:
                     num_devices = torch.cuda.device_count()
                     param.data = param.data.to(get_device(num_devices - 1))
@@ -3049,7 +3051,9 @@ class OffloadEngine(object):
         def _post_forward_module_hook(module, input, output):
             device_list = []
             param_not_offload = set()
-            for param in (p for p in module._parameters.values() if p is not None):
+            for param in (
+                p for p in module._parameters.values() if p is not None
+            ):
                 if param.data_ptr() not in self.offload_set:
                     param_not_offload.add(param.data_ptr())
                     continue

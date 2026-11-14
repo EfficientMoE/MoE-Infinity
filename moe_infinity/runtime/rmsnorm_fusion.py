@@ -24,6 +24,7 @@ Variants:
     variant="faithful" - HF's exact multiply ordering applied outside the kernel;
         same speedup class (~-10 ms/tok) and still not output-identical (reduction order).
 """
+
 import torch
 
 _PATCHED = False
@@ -45,19 +46,29 @@ def fuse_rmsnorm_eval_graded(variant: str = "weight-in-kernel") -> bool:
         if w is None:
             w = self.weight.to(torch.float32)
             self._w_fp32 = w
-        y = torch.rms_norm(hidden_states.to(torch.float32),
-                           (hidden_states.shape[-1],), w, self.variance_epsilon)
+        y = torch.rms_norm(
+            hidden_states.to(torch.float32),
+            (hidden_states.shape[-1],),
+            w,
+            self.variance_epsilon,
+        )
         return y.to(input_dtype)
 
     def fused_forward_faithful(self, hidden_states):
         input_dtype = hidden_states.dtype
-        y = torch.rms_norm(hidden_states.to(torch.float32),
-                           (hidden_states.shape[-1],), None, self.variance_epsilon)
+        y = torch.rms_norm(
+            hidden_states.to(torch.float32),
+            (hidden_states.shape[-1],),
+            None,
+            self.variance_epsilon,
+        )
         return (y.to(input_dtype)) * self.weight
 
     _mol.OlmoeRMSNorm.forward = (
-        fused_forward_weight_in_kernel if variant == "weight-in-kernel"
-        else fused_forward_faithful)
+        fused_forward_weight_in_kernel
+        if variant == "weight-in-kernel"
+        else fused_forward_faithful
+    )
     _PATCHED = True
     return True
 
