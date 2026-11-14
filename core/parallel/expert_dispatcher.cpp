@@ -20,6 +20,8 @@
 #include "model/model_topology.h"
 #include "model/moe.h"
 #include "kernel/grouped_moe_decode_pro6000.h"
+#include "kernel/grouped_moe_prefill.h"
+#include "parallel/grouped_moe_select.h"
 #include "kernel/fused_moe_mlp.h"
 
 #include <c10/core/ScalarType.h>
@@ -368,9 +370,21 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
   if (const char* grouped = std::getenv("MOE_GROUPED_DECODE")) {
     if (std::string(grouped) == "0") grouped_enabled_.store(false);
   }
+  // Grouped prefill (#307) is opt-in until validated on a GPU.
+  if (const char* gp = std::getenv("MOE_GROUPED_PREFILL")) {
+    if (std::string(gp) == "1") grouped_prefill_enabled_.store(true);
+  }
+  if (const char* gp = std::getenv("MOE_GROUPED_PREFILL_MIN_TOKENS")) {
+    char* end = nullptr;
+    const long long v = std::strtoll(gp, &end, 10);
+    if (end != gp && *end == '\0' && v > 0) {
+      grouped_prefill_min_tokens_.store(static_cast<std::int64_t>(v));
+    }
+  }
   grouped_pending_.resize(kNumDevices());
   for (int i = 0; i < kNumDevices(); ++i) {
     grouped_pro6000_ok_.push_back(grouped_moe_decode_pro6000_device_ok(i));
+    grouped_prefill_ok_.push_back(grouped_moe_prefill_pro6000_enabled(i));
   }
 
   admissions_paused_.assign(kNumDevices(), 0);
@@ -1808,9 +1822,20 @@ void ExpertDispatcher::SetGroupedDecode(bool enabled, int top_k,
   grouped_top_k_.store(std::max(0, top_k), std::memory_order_release);
 }
 
+void ExpertDispatcher::SetGroupedPrefill(bool enabled,
+                                         std::int64_t min_tokens) {
+  grouped_prefill_min_tokens_.store(
+      min_tokens > 0 ? min_tokens : moe::kGroupedPrefillDefaultMinTokens,
+      std::memory_order_release);
+  grouped_prefill_enabled_.store(enabled, std::memory_order_release);
+}
+
 bool ExpertDispatcher::GroupedEligible(const ExpertNodePtr& expert_node,
                                        int gpu_id, bool remote) {
-  if (!grouped_enabled_.load(std::memory_order_acquire) || remote) {
+  const bool decode_on = grouped_enabled_.load(std::memory_order_acquire);
+  const bool prefill_on =
+      grouped_prefill_enabled_.load(std::memory_order_acquire);
+  if ((!decode_on && !prefill_on) || remote) {
     return false;
   }
   // The grouped kernels are tuned for the RTX PRO 6000 (Gate::kRtxPro6000).
@@ -1838,8 +1863,18 @@ bool ExpertDispatcher::GroupedEligible(const ExpertNodePtr& expert_node,
     return false;
   }
   const int64_t tokens = h.size(0);
-  // Prefill-sized batches never qualify; skip the tensor lookups below.
-  if (tokens > kGroupedMoePro6000MaxTokens) return false;
+  // Batches that qualify for neither kernel skip the tensor lookups below.
+  const moe::GroupedMoeMode mode = moe::SelectGroupedMoeMode(
+      tokens, kGroupedMoePro6000MaxTokens,
+      moe::GroupedPrefillPolicy{prefill_on, grouped_prefill_min_tokens_.load(
+                                                std::memory_order_acquire)});
+  if (mode == moe::GroupedMoeMode::kNone) return false;
+  if (mode == moe::GroupedMoeMode::kDecode && !decode_on) return false;
+  if (mode == moe::GroupedMoeMode::kPrefill && !grouped_prefill_ok_[gpu_id]) {
+    // grouped_moe_prefill off the RTX PRO 6000 is a host-syncing per-expert
+    // loop; the dispatcher's own per-expert path is the fallback.
+    return false;
+  }
   const int64_t hidden = h.size(1);
   const auto& out = final_hidden_states_;
   if (!out.defined() || out.device() != h.device() || out.stride(1) != 1) {
@@ -1875,14 +1910,18 @@ bool ExpertDispatcher::GroupedEligible(const ExpertNodePtr& expert_node,
   const int64_t inter = w[0].defined() ? w[0].size(0) : 0;
   if (!GroupedWeightOk(w[0], gpu_id, inter, hidden) ||
       !GroupedWeightOk(w[1], gpu_id, inter, hidden) ||
-      !GroupedWeightOk(w[2], gpu_id, hidden, inter) ||
-      !grouped_moe_decode_pro6000_supported(tokens, hidden, inter)) {
+      !GroupedWeightOk(w[2], gpu_id, hidden, inter)) {
+    return false;
+  }
+  if (mode == moe::GroupedMoeMode::kPrefill
+          ? !grouped_moe_prefill_supported(tokens, hidden, inter, num_experts_)
+          : !grouped_moe_decode_pro6000_supported(tokens, hidden, inter)) {
     return false;
   }
   const int top_k = grouped_top_k_.load(std::memory_order_acquire);
   const int64_t kcap = top_k > 0 ? std::min(top_k, num_experts_) : num_experts_;
   // Activation workspace [tokens * kcap, inter] bf16.
-  return tokens * kcap * inter * 2 <= (int64_t(1) << 30);
+  return moe::GroupedWorkspaceFits(tokens, kcap, inter);
 }
 
 void ExpertDispatcher::FlushGroupedExperts() {
@@ -1974,9 +2013,23 @@ void ExpertDispatcher::GroupedExec(ExecArgs& args, int gpu_id,
           failed_generation_.load(std::memory_order_acquire) == generation) {
         return;
       }
-      grouped_moe_decode_pro6000(hidden_states_, router_mask_, router_weight_,
-                                 table, inter, kcap, final_hidden_states_,
-                                 false, stream);
+      // Every member was admitted for the same mode: the batch size is fixed
+      // for the dispatch (SetInputs), and GroupedEligible only admits batches
+      // above the decode limit to the prefill kernels.
+      if (hidden_states_.size(0) > kGroupedMoePro6000MaxTokens) {
+        // combine_mode = 0 (fp32 scatter-add): the bf16-rows combine mode
+        // read-modify-writes `out` without atomics, which would race with the
+        // other exec streams' index_add_ (cache-miss experts, other groups)
+        // into the same rows. Tile configs stay automatic.
+        grouped_moe_prefill_cfg(hidden_states_, router_mask_, router_weight_,
+                                table, inter, kcap, final_hidden_states_, false,
+                                -1, -1, /*combine_mode=*/0, stream);
+        grouped_prefill_batches_.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        grouped_moe_decode_pro6000(hidden_states_, router_mask_, router_weight_,
+                                   table, inter, kcap, final_hidden_states_,
+                                   false, stream);
+      }
 
       cudaEvent_t output_done = AcquireCompletionEvent(gpu_id);
       int event_fault =
@@ -2807,6 +2860,8 @@ std::map<std::string, std::int64_t> ExpertDispatcher::GetRoutingStats() const {
       {"route_pending", route_pending_.load(std::memory_order_acquire) ? 1 : 0},
       {"grouped_batches", grouped_batches_.load(std::memory_order_relaxed)},
       {"grouped_experts", grouped_experts_.load(std::memory_order_relaxed)},
+      {"grouped_prefill_batches",
+       grouped_prefill_batches_.load(std::memory_order_relaxed)},
   };
 }
 

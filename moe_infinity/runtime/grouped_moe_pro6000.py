@@ -18,12 +18,65 @@ import os
 
 from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
 
+GROUPED_DECODE_MAX_TOKENS = 256  # kGroupedMoePro6000MaxTokens
+GROUPED_PREFILL_DEFAULT_MIN_TOKENS = (
+    2048  # moe::kGroupedPrefillDefaultMinTokens
+)
+GROUPED_MAX_ACT_BYTES = 1 << 30  # moe::kGroupedMaxActBytes
+
+NONE = "none"
+DECODE = "decode"
+PREFILL = "prefill"
+
 
 def grouped_decode_pro6000_enabled(device=None) -> bool:
     """True if the grouped decode path should run on ``device``."""
     if os.environ.get("MOE_GROUPED_DECODE", "1") == "0":
         return False
     return supports(RTX_PRO_6000, device)
+
+
+def grouped_prefill_enabled(device=None) -> bool:
+    """True if the grouped prefill path (#307) should run on ``device``.
+
+    Opt-in (``MOE_GROUPED_PREFILL=1``) until validated on a GPU.
+    """
+    if os.environ.get("MOE_GROUPED_PREFILL", "0") != "1":
+        return False
+    return supports(RTX_PRO_6000, device)
+
+
+def grouped_prefill_min_tokens() -> int:
+    """Smallest batch (tokens) that takes the grouped prefill path."""
+    raw = os.environ.get("MOE_GROUPED_PREFILL_MIN_TOKENS", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return GROUPED_PREFILL_DEFAULT_MIN_TOKENS
+    return value if value > 0 else GROUPED_PREFILL_DEFAULT_MIN_TOKENS
+
+
+def select_grouped_mode(
+    tokens: int,
+    prefill_enabled: bool,
+    min_tokens: int = GROUPED_PREFILL_DEFAULT_MIN_TOKENS,
+) -> str:
+    """Grouped kernel for a batch of ``tokens`` (mirror of the C++ dispatcher's
+    ``moe::SelectGroupedMoeMode``): decode up to 256 tokens, prefill from
+    ``min_tokens`` (never inside the decode range) when enabled, else none."""
+    if tokens <= 0:
+        return NONE
+    if tokens <= GROUPED_DECODE_MAX_TOKENS:
+        return DECODE
+    if not prefill_enabled:
+        return NONE
+    floor = max(min_tokens, GROUPED_DECODE_MAX_TOKENS + 1)
+    return PREFILL if tokens >= floor else NONE
+
+
+def grouped_workspace_fits(tokens: int, kcap: int, inter: int) -> bool:
+    """The [tokens * kcap, inter] bf16 activation workspace stays <= 1 GiB."""
+    return tokens * kcap * inter * 2 <= GROUPED_MAX_ACT_BYTES
 
 
 SILU = 0

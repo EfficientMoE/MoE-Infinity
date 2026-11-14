@@ -377,6 +377,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("set_grouped_decode", &ExpertDispatcher::SetGroupedDecode,
            py::arg("enabled"), py::arg("top_k") = 0,
            py::arg("activation_kind") = 0)
+      .def("set_grouped_prefill", &ExpertDispatcher::SetGroupedPrefill,
+           py::arg("enabled"), py::arg("min_tokens") = 0)
       .def("_set_dispatch_fault_for_test",
            &ExpertDispatcher::SetDispatchFaultForTest)
       .def("_fail_dispatch_for_test", &ExpertDispatcher::FailDispatchForTest)

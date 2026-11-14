@@ -1566,6 +1566,17 @@ class OffloadEngine(object):
                         int(top_k or 0),
                         grouped_decode_activation_kind(self.config),
                     )
+                    if hasattr(self.expert_dispatcher, "set_grouped_prefill"):
+                        from moe_infinity.runtime.grouped_moe_pro6000 import (
+                            grouped_prefill_enabled,
+                            grouped_prefill_min_tokens,
+                        )
+
+                        # #307, opt-in: MOE_GROUPED_PREFILL=1.
+                        self.expert_dispatcher.set_grouped_prefill(
+                            grouped_prefill_enabled(),
+                            grouped_prefill_min_tokens(),
+                        )
                 if parse_expert_type(self.config) == 6 and hasattr(
                     self.expert_dispatcher, "set_gptoss_mxfp4_pro6000"
                 ):

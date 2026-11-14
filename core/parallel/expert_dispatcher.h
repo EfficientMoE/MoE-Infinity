@@ -381,6 +381,14 @@ class ExpertDispatcher : public base::noncopyable {
   // (0 = SiLU, 1 = clamped SiLU, 2 = SwiGLU-OAI, < 0 = unknown); the grouped
   // kernels implement SiLU only, so any other kind keeps per-expert execution.
   void SetGroupedDecode(bool enabled, int top_k, int activation_kind = 0);
+  // Grouped prefill path (#307): batches of >= min_tokens tokens (and above the
+  // decode limit) run their GPU-resident experts through grouped_moe_prefill
+  // (routing + grouped gate/up + grouped down) instead of one CUTLASS FFN per
+  // expert. Same SiLU-only / BF16 / RTX PRO 6000 restrictions as the decode
+  // path; opt-in (default off). MOE_GROUPED_PREFILL=1 and
+  // MOE_GROUPED_PREFILL_MIN_TOKENS=<n> set it at construction. min_tokens <= 0
+  // restores the default.
+  void SetGroupedPrefill(bool enabled, std::int64_t min_tokens = 0);
   void SetDispatchFaultForTest(const std::string& stage);
   void FailDispatchForTest(std::uint64_t generation,
                            const std::string& message);
@@ -568,6 +576,12 @@ class ExpertDispatcher : public base::noncopyable {
   // Per device: RTX PRO 6000 gate of the grouped kernels, evaluated once at
   // construction. Other devices keep per-expert execution.
   std::vector<bool> grouped_pro6000_ok_;
+  // Grouped prefill (#307): default off, see SetGroupedPrefill. Per device
+  // RTX PRO 6000 gate of grouped_moe_prefill.
+  std::atomic<bool> grouped_prefill_enabled_{false};
+  std::atomic<std::int64_t> grouped_prefill_min_tokens_{2048};
+  std::vector<bool> grouped_prefill_ok_;
+  std::atomic<std::int64_t> grouped_prefill_batches_{0};
   std::atomic<int> grouped_top_k_{0};
   std::atomic<int> grouped_activation_kind_{0};
   std::atomic<std::int64_t> grouped_batches_{0};
