@@ -6,8 +6,10 @@ default_stages: [pre-commit, pre-push]
 
 # Vendored third-party kernels (Marlin, Apache-2.0, IST-DASLab; CUTLASS dual
 # GEMM mainloop, BSD-3-Clause, NVIDIA) are excluded from style/spelling hooks
-# so we keep them byte-for-byte upstream.
-exclude: ^(moe_infinity/kernel/marlin/|extensions/kernel/dual_gemm/)
+# so we keep them byte-for-byte upstream. The cache-simulator research tree is
+# sealed the same way: runners and json dumps are pinned by ARTIFACT.sha256 /
+# SHA256SUMS, and clang-format treats .json as a language it rewrites.
+exclude: ^(moe_infinity/kernel/marlin/|extensions/kernel/dual_gemm/|benchmarks/cache_simulator/research/)
 
 repos:
 -   repo: meta

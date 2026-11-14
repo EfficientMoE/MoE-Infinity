@@ -90,6 +90,10 @@ template <typename Configs>
 struct Heights;
 template <typename... Gs>
 struct Heights<std::tuple<Gs...>> {
+  // nvcc drops the bound of a dependent constexpr array inside a generic
+  // lambda (the type arrives as `const int[]`), so std::size cannot deduce
+  // it. The pack length is the bound.
+  static constexpr int count = int(sizeof...(Gs));
   static constexpr int big[] = {Gs::kBigM...};
   static constexpr int small[] = {(Gs::kMixed ? Gs::kSmallM : 0)...};
 };
@@ -474,7 +478,7 @@ void grouped_moe_prefill_pro6000(
     using Hm = Heights<Configs>;
     if (cfg < 0) {
       double best = 0;
-      for (int c = 0; c < int(std::size(Hm::big)); ++c) {
+      for (int c = 0; c < Hm::count; ++c) {
         double t = cost(rate[c], split_of(rate[c], Hm::big[c], Hm::small[c]));
         if (cfg < 0 || t < best) {
           best = t;
@@ -482,8 +486,8 @@ void grouped_moe_prefill_pro6000(
         }
       }
     }
-    TORCH_CHECK(cfg < int(std::size(Hm::big)),
-                "grouped_moe_prefill: invalid tile config ", cfg);
+    TORCH_CHECK(cfg < Hm::count, "grouped_moe_prefill: invalid tile config ",
+                cfg);
     return split_of(rate[cfg], Hm::big[cfg], Hm::small[cfg]);
   };
   moe_gemm::TileSplit const split[2] = {
