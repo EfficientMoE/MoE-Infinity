@@ -19,6 +19,7 @@
 #include "utils/logger.h"
 #include "model/model_topology.h"
 #include "model/moe.h"
+#include "kernel/accum_slots.h"
 #include "kernel/grouped_moe_decode_pro6000.h"
 #include "kernel/fused_moe_mlp.h"
 
@@ -370,6 +371,16 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
 
   if (const char* grouped = std::getenv("MOE_GROUPED_DECODE")) {
     if (std::string(grouped) == "0") grouped_enabled_.store(false);
+  }
+  if (const char* det = std::getenv("MOE_DETERMINISTIC_ACCUM")) {
+    if (std::string(det) == "0") det_accum_enabled_.store(false);
+  }
+  if (const char* bytes = std::getenv("MOE_DETERMINISTIC_ACCUM_BYTES")) {
+    char* end = nullptr;
+    const long long value = std::strtoll(bytes, &end, 10);
+    if (end != bytes && *end == '\0' && value >= 0) {
+      det_accum_budget_bytes_.store(value);
+    }
   }
   grouped_pending_.resize(kNumDevices());
   for (int i = 0; i < kNumDevices(); ++i) {
@@ -1760,7 +1771,12 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
 
     auto output_device =
         (args.out_gpu_id < 0) ? CPU_DEVICE : CUDA_DEVICE(args.out_gpu_id);
-    torch::Tensor output_tensor = output.to(output_device).to(torch::kFloat32);
+    // Slot mode stores the expert output (any float dtype) with its own
+    // conversion inside the store kernel; the atomic path converts here.
+    torch::Tensor output_tensor = output.to(output_device);
+    if (!accum_slot_active_.load(std::memory_order_acquire)) {
+      output_tensor = output_tensor.to(torch::kFloat32);
+    }
 
     int64_t expert_idx = args.expert_node->expert_idx;
 
@@ -1784,7 +1800,38 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
           // before combining, else add_ faults on a host/cross-device pointer.
           output_tensor = output_tensor.to(final_hidden_states_.device());
         }
-        if (batch_size == 1) {
+        if (accum_slots_.defined()) {
+          // Deterministic accumulation: one kernel stores float(output) *
+          // router weight into this expert's own (token, rank) slots (or the
+          // dump row for a rank beyond the slot count). Each pair is written
+          // by exactly one expert, so no ordering between experts matters.
+          torch::Tensor token_indices =
+              batch_size == 1
+                  ? zero_index_.at(final_hidden_states_.device().index())
+                  : torch::nonzero(token_mask).squeeze(1);
+          if (!output_tensor.is_contiguous()) {
+            output_tensor = output_tensor.contiguous();
+          }
+          const auto out_type = output_tensor.scalar_type();
+          if (out_type != torch::kFloat32 && out_type != torch::kBFloat16 &&
+              out_type != torch::kFloat16) {
+            output_tensor = output_tensor.to(torch::kFloat32);
+          }
+          const int acc_device_index = final_hidden_states_.device().index();
+          accum_slot_store(
+              output_tensor, token_indices, expert_idx, router_weight_,
+              accum_slot_index_, accum_slots_, accum_slot_count_,
+              c10::cuda::getCurrentCUDAStream(acc_device_index).stream());
+          if (acc_device_index == gpu_id) {
+            // The store ran on exec_stream; keep the slot memory from being
+            // reused (by the next dispatch) before it completes.
+            const auto exec =
+                c10::cuda::getStreamFromExternal(exec_stream, gpu_id).unwrap();
+            accum_slots_.record_stream(exec);
+            accum_slot_index_.record_stream(exec);
+          }
+        } else if (batch_size == 1) {
+          output_tensor = output_tensor.to(torch::kFloat32);
           // index_add_ accumulates with atomics, so it is race-free against
           // other exec streams and the grouped kernel adding into the same row.
           final_hidden_states_.index_add_(
@@ -1793,6 +1840,7 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
                   router_weight_.index({torch::indexing::Slice(), expert_idx})
                       .unsqueeze(1));
         } else {
+          output_tensor = output_tensor.to(torch::kFloat32);
           auto token_indices = torch::nonzero(token_mask).squeeze(1);
           auto weights =
               router_weight_.index({token_mask, expert_idx}).unsqueeze(1);
@@ -1918,6 +1966,120 @@ void ExpertDispatcher::SetGroupedDecode(bool enabled, int top_k,
   grouped_activation_kind_.store(activation_kind, std::memory_order_release);
   grouped_enabled_.store(enabled, std::memory_order_release);
   grouped_top_k_.store(std::max(0, top_k), std::memory_order_release);
+}
+
+void ExpertDispatcher::SetDeterministicAccum(bool enabled,
+                                             std::int64_t budget_bytes) {
+  det_accum_enabled_.store(enabled, std::memory_order_release);
+  if (budget_bytes >= 0) {
+    det_accum_budget_bytes_.store(budget_bytes, std::memory_order_release);
+  }
+}
+
+// Builds the slot state of the dispatch SetInputs is preparing (accumulator
+// device current, caller stream current). Everything here is enqueued on the
+// caller stream before the input-ready event is recorded, so the exec streams
+// that wait on that event see a zero-filled buffer and the rank table.
+//
+// R (slots per token) is an upper bound, not the exact maximum number of
+// active experts per token: the exact value needs a device-to-host read of the
+// mask, which the caller must not do. R = min(top_k hint, num_experts), or
+// num_experts when no hint was set. With a hint a token may still have more
+// active experts than R (a mask wider than the hint); the slot buffer then has
+// one extra row for ranks >= R, OutputFunc and the grouped kernel add those
+// contributions atomically, and the dispatch is counted as an overflow.
+void ExpertDispatcher::BuildAccumSlots(const torch::Tensor& hidden_states,
+                                       int device) {
+  accum_slots_ = torch::Tensor();
+  accum_slot_active_.store(false, std::memory_order_release);
+  accum_slot_index_ = torch::Tensor();
+  accum_slot_count_ = 0;
+  accum_slot_guard_ = false;
+  auto fall_back = [&]() {
+    accum_atomic_dispatches_.fetch_add(1, std::memory_order_relaxed);
+  };
+  if (!det_accum_enabled_.load(std::memory_order_acquire) ||
+      !hidden_states.is_cuda() || hidden_states.dim() != 2 ||
+      hidden_states.size(0) == 0 || !router_mask_.defined() ||
+      !router_mask_.is_cuda() || router_mask_.dim() != 2 ||
+      router_mask_.size(1) != num_experts_ ||
+      router_mask_.size(0) != hidden_states.size(0) ||
+      router_mask_.device().index() != device) {
+    fall_back();
+    return;
+  }
+  const std::int64_t tokens = hidden_states.size(0);
+  const std::int64_t hidden = hidden_states.size(1);
+  const int hint = grouped_top_k_.load(std::memory_order_acquire);
+  const std::int64_t slots = hint <= 0
+                                 ? static_cast<std::int64_t>(num_experts_)
+                                 : std::min<std::int64_t>(hint, num_experts_);
+  const bool guard = slots < num_experts_;
+  const std::int64_t rows = guard ? slots + 1 : slots;
+  const std::int64_t bytes =
+      tokens * rows * hidden * static_cast<std::int64_t>(sizeof(float));
+  if (bytes > det_accum_budget_bytes_.load(std::memory_order_acquire)) {
+    fall_back();
+    return;
+  }
+  auto options =
+      torch::TensorOptions().dtype(torch::kFloat32).device(CUDA_DEVICE(device));
+  // The slot buffer is not zero-filled here: accum_slots_prepare does that,
+  // together with the rank table and the per-token counts, in one launch.
+  torch::Tensor slots_buffer = torch::empty({tokens, rows, hidden}, options);
+  torch::Tensor slot_index =
+      torch::empty({tokens, num_experts_}, options.dtype(torch::kInt32));
+  torch::Tensor counter;
+  if (guard) {
+    // Counts tokens whose mask is wider than the hint, on the device (no host
+    // read here; get_routing_stats reads it).
+    if (accum_overflow_cached_device_ != device) {
+      std::lock_guard<std::mutex> lock(accum_mutex_);
+      auto& entry = accum_overflow_dev_[device];
+      if (!entry.defined()) {
+        entry = torch::zeros({1}, options.dtype(torch::kLong));
+      }
+      accum_overflow_cached_ = entry;
+      accum_overflow_cached_device_ = device;
+    }
+    counter = accum_overflow_cached_;
+  }
+  accum_slots_prepare(router_mask_, slots_buffer, slot_index, slots, counter,
+                      c10::cuda::getCurrentCUDAStream(device).stream());
+  accum_slots_ = std::move(slots_buffer);
+  accum_slot_active_.store(true, std::memory_order_release);
+  accum_slot_index_ = std::move(slot_index);
+  accum_slot_count_ = slots;
+  accum_slot_guard_ = guard;
+  accum_slot_dispatches_.fetch_add(1, std::memory_order_relaxed);
+  accum_slot_last_bytes_.store(bytes, std::memory_order_relaxed);
+  std::int64_t peak = accum_slot_peak_bytes_.load(std::memory_order_relaxed);
+  while (bytes > peak && !accum_slot_peak_bytes_.compare_exchange_weak(
+                             peak, bytes, std::memory_order_relaxed)) {
+  }
+}
+
+// Fixed-order reduction of the slots into the accumulator, on the caller
+// stream after it waited for every expert's completion event: one launch that
+// adds, per element, the dump row (zero unless a token overflowed) and then
+// the token's slots in ascending rank order, and overwrites the accumulator
+// (which slot mode allocates without a zero fill). The order is the rank order,
+// so the result does not depend on which exec stream finished first.
+void ExpertDispatcher::ReduceAccumSlots(int /*device*/,
+                                        cudaStream_t caller_stream) {
+  accum_slots_reduce(accum_slots_, accum_slot_count_, accum_slot_guard_,
+                     final_hidden_states_, caller_stream);
+}
+
+std::int64_t ExpertDispatcher::AccumOverflowCount() {
+  std::vector<torch::Tensor> counters;
+  {
+    std::lock_guard<std::mutex> lock(accum_mutex_);
+    for (auto& entry : accum_overflow_dev_) counters.push_back(entry.second);
+  }
+  std::int64_t total = 0;
+  for (auto& counter : counters) total += counter.item<std::int64_t>();
+  return total;
 }
 
 bool ExpertDispatcher::GroupedEligible(const ExpertNodePtr& expert_node,
@@ -2092,7 +2254,16 @@ void ExpertDispatcher::GroupedExec(ExecArgs& args, int gpu_id,
       if (!stale_group) {
         grouped_moe_decode_pro6000(hidden_states_, router_mask_, router_weight_,
                                    table, inter, kcap, final_hidden_states_,
-                                   false, stream);
+                                   false, stream, accum_slots_,
+                                   accum_slot_index_, accum_slot_count_);
+        if (accum_slots_.defined()) {
+          // The kernel stores into the slots on `stream`: keep their memory
+          // from being reused before it completes.
+          const auto exec =
+              c10::cuda::getStreamFromExternal(stream, gpu_id).unwrap();
+          accum_slots_.record_stream(exec);
+          accum_slot_index_.record_stream(exec);
+        }
 
         cudaEvent_t output_done = AcquireCompletionEvent(gpu_id);
         int event_fault =
@@ -2334,6 +2505,17 @@ torch::Tensor ExpertDispatcher::WaitHiddenStates() {
     FailDispatch(generation, error);
     std::rethrow_exception(error);
   }
+  if (!route_error && accum_slots_.defined()) {
+    // Fixed-order reduction on the caller stream, after the waits above (which
+    // order it after every expert's slot store). No host synchronisation.
+    try {
+      ReduceAccumSlots(device, caller_stream);
+    } catch (...) {
+      std::exception_ptr reduce_error = std::current_exception();
+      FailDispatch(generation, reduce_error);
+      std::rethrow_exception(reduce_error);
+    }
+  }
   num_enqueued_.store(0, std::memory_order_release);
   if (route_error) std::rethrow_exception(route_error);
   return final_hidden_states_;
@@ -2378,7 +2560,16 @@ void ExpertDispatcher::SetInputs(const torch::Tensor& hidden_states,
       (router_weight.is_cuda() && router_weight.device().index() != device)
           ? router_weight.to(CUDA_DEVICE(device))  // this can be float32
           : router_weight;
-  final_hidden_states_ = torch::zeros_like(hidden_states, options);
+  // Slot buffer + rank table (or none: atomic path), enqueued on the caller
+  // stream before the input-ready event below.
+  BuildAccumSlots(hidden_states, device);
+  // Slot mode: WaitHiddenStates' reduction overwrites the accumulator, so it
+  // needs no zero fill; the atomic path accumulates into zeros.
+  // By shape, not empty_like: the reduction kernel needs a contiguous
+  // accumulator whatever strides hidden_states has.
+  final_hidden_states_ = accum_slots_.defined()
+                             ? torch::empty(hidden_states.sizes(), options)
+                             : torch::zeros_like(hidden_states, options);
   {
     // Created on the caller stream before the input-ready event, which every
     // exec stream waits on before its first use.
@@ -2958,6 +3149,10 @@ void ExpertDispatcher::FlushExpertDropTrace() noexcept {
 }
 
 std::map<std::string, std::int64_t> ExpertDispatcher::GetRoutingStats() const {
+  // Read the device-side overflow counters before taking route_state_mutex_
+  // (OutputFunc takes accum_mutex_ first, then route_state_mutex_).
+  const std::int64_t accum_overflow_count =
+      const_cast<ExpertDispatcher*>(this)->AccumOverflowCount();
   std::lock_guard<std::mutex> state_lock(route_state_mutex_);
   return {
       {"route_batches", route_batches_.load(std::memory_order_relaxed)},
@@ -2974,6 +3169,15 @@ std::map<std::string, std::int64_t> ExpertDispatcher::GetRoutingStats() const {
        stale_failures_quarantined_.load(std::memory_order_relaxed)},
       {"stale_exec_items_dropped",
        stale_exec_items_dropped_.load(std::memory_order_relaxed)},
+      {"accum_slot_dispatches",
+       accum_slot_dispatches_.load(std::memory_order_relaxed)},
+      {"accum_atomic_dispatches",
+       accum_atomic_dispatches_.load(std::memory_order_relaxed)},
+      {"accum_slot_last_bytes",
+       accum_slot_last_bytes_.load(std::memory_order_relaxed)},
+      {"accum_slot_peak_bytes",
+       accum_slot_peak_bytes_.load(std::memory_order_relaxed)},
+      {"accum_slot_overflow", accum_overflow_count},
       {"current_generation", static_cast<std::int64_t>(current_generation_.load(
                                  std::memory_order_acquire))},
       {"pending",

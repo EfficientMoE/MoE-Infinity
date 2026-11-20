@@ -6,12 +6,15 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
+#include <pybind11/stl.h>
+#include <optional>
 #include "parallel/expert_dispatcher.h"
 #include "prefetch/archer_prefetch_handle.h"
 #include "model/moe.h"
 #include "kernel/ops.h"
 #include "kernel/fp8_moe/fp8_moe.h"
 #include "kernel/grouped_moe_decode_pro6000.h"
+#include "kernel/accum_slots.h"
 #include "kernel/fused_moe_mlp.h"
 #include "kernel/grouped_moe_prefill.h"
 
@@ -228,17 +231,60 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "grouped_moe_decode_pro6000",
       [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
          const torch::Tensor& router_weight, const torch::Tensor& expert_table,
-         int64_t inter, int64_t kcap, torch::Tensor out, bool zero_out) {
+         int64_t inter, int64_t kcap, torch::Tensor out, bool zero_out,
+         std::optional<torch::Tensor> slots,
+         std::optional<torch::Tensor> slot_rank, int64_t slot_count) {
         TensorDeviceStream ds(hidden);
-        grouped_moe_decode_pro6000(hidden, router_mask, router_weight,
-                                   expert_table, inter, kcap, out, zero_out,
-                                   ds.stream);
+        grouped_moe_decode_pro6000(
+            hidden, router_mask, router_weight, expert_table, inter, kcap, out,
+            zero_out, ds.stream, slots.value_or(torch::Tensor()),
+            slot_rank.value_or(torch::Tensor()), slot_count);
       },
       py::arg("hidden"), py::arg("router_mask"), py::arg("router_weight"),
       py::arg("expert_table"), py::arg("inter"), py::arg("kcap"),
       py::arg("out"), py::arg("zero_out") = false,
+      py::arg("slots") = py::none(), py::arg("slot_rank") = py::none(),
+      py::arg("slot_count") = 0,
       "Grouped decode MoE layer: out += sum_e w[:, e] * FFN_e(hidden) over "
       "the experts in expert_table (int64 [n, 4]: gate*, up*, down*, id).");
+  m.def(
+      "accum_slots_prepare",
+      [](const torch::Tensor& router_mask, torch::Tensor slots,
+         torch::Tensor slot_index, int64_t slot_count,
+         std::optional<torch::Tensor> overflow_counter) {
+        TensorDeviceStream ds(router_mask);
+        accum_slots_prepare(router_mask, slots, slot_index, slot_count,
+                            overflow_counter.value_or(torch::Tensor()),
+                            ds.stream);
+      },
+      py::arg("router_mask"), py::arg("slots"), py::arg("slot_index"),
+      py::arg("slot_count"), py::arg("overflow_counter") = py::none(),
+      "Deterministic accumulation: rank table, overflow counter and zero fill "
+      "of the slot buffer (see kernel/accum_slots.h).");
+  m.def(
+      "accum_slot_store",
+      [](const torch::Tensor& output, const torch::Tensor& token_indices,
+         int64_t expert, const torch::Tensor& router_weight,
+         const torch::Tensor& slot_index, torch::Tensor slots,
+         int64_t slot_count) {
+        TensorDeviceStream ds(output);
+        accum_slot_store(output, token_indices, expert, router_weight,
+                         slot_index, slots, slot_count, ds.stream);
+      },
+      py::arg("output"), py::arg("token_indices"), py::arg("expert"),
+      py::arg("router_weight"), py::arg("slot_index"), py::arg("slots"),
+      py::arg("slot_count"),
+      "Store float(output) * router_weight[t, expert] into the expert's "
+      "slots.");
+  m.def(
+      "accum_slots_reduce",
+      [](const torch::Tensor& slots, int64_t slot_count, bool has_dump_row,
+         torch::Tensor out) {
+        TensorDeviceStream ds(slots);
+        accum_slots_reduce(slots, slot_count, has_dump_row, out, ds.stream);
+      },
+      py::arg("slots"), py::arg("slot_count"), py::arg("has_dump_row"),
+      py::arg("out"), "Fixed-order sum of the slots into out (overwrites it).");
   m.def(
       "fused_moe_ffn_into",
       [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
@@ -401,6 +447,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("set_grouped_decode", &ExpertDispatcher::SetGroupedDecode,
            py::arg("enabled"), py::arg("top_k") = 0,
            py::arg("activation_kind") = 0)
+      .def("set_deterministic_accum", &ExpertDispatcher::SetDeterministicAccum,
+           py::arg("enabled"), py::arg("budget_bytes") = -1)
       .def("_set_dispatch_fault_for_test",
            &ExpertDispatcher::SetDispatchFaultForTest)
       .def("_fail_dispatch_for_test", &ExpertDispatcher::FailDispatchForTest)

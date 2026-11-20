@@ -57,6 +57,7 @@ set(ARCHER_CORE_CUDA_SOURCES
   ${CMAKE_SOURCE_DIR}/extensions/kernel/fused_moe_mlp_generic.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/grouped_moe_decode_pro6000.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/grouped_moe_prefill.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/accum_slots.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/activation_kernels.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/topk_softmax_kernels.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/v4_fp4/mxfp4_dequant.cu

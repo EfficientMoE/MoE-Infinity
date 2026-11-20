@@ -32,6 +32,17 @@
 //   kcap          upper bound on routed experts per token (top-k); it sizes
 //                 the [T * kcap, I] activation workspace.
 //   zero_out      zero `out` inside the first launch instead of accumulating.
+//   slots, slot_rank, slot_count   (optional; slot mode, undefined = off)
+//                 Deterministic accumulation: instead of atomicAdd into `out`,
+//                 the down launch stores each expert's weighted value into
+//                 slots[t, slot_rank[t, e], :]. slots is float32 [T, rows, H]
+//                 (zero-filled by the caller, see accum_slots.h), slot_rank
+//                 int32 [T, E] holds the rank of expert e among ALL of token
+//                 t's active experts (ascending expert index) clamped to
+//                 slot_count, slot_count (<= rows) is the number of usable
+//                 ranks. Rank == slot_count adds atomically to the dump row
+//                 slots[t, slot_count, :] when rows > slot_count (otherwise to
+//                 `out`). The caller reduces the slots in a fixed order.
 
 constexpr int kGroupedMoePro6000MaxTokens = 256;
 
@@ -43,9 +54,9 @@ bool grouped_moe_decode_pro6000_device_ok(int device);
 bool grouped_moe_decode_pro6000_supported(int64_t tokens, int64_t hidden,
                                           int64_t inter);
 
-void grouped_moe_decode_pro6000(const torch::Tensor& hidden,
-                                const torch::Tensor& router_mask,
-                                const torch::Tensor& router_weight,
-                                const torch::Tensor& expert_table,
-                                int64_t inter, int64_t kcap, torch::Tensor& out,
-                                bool zero_out, cudaStream_t stream);
+void grouped_moe_decode_pro6000(
+    const torch::Tensor& hidden, const torch::Tensor& router_mask,
+    const torch::Tensor& router_weight, const torch::Tensor& expert_table,
+    int64_t inter, int64_t kcap, torch::Tensor& out, bool zero_out,
+    cudaStream_t stream, const torch::Tensor& slots = torch::Tensor(),
+    const torch::Tensor& slot_rank = torch::Tensor(), int64_t slot_count = 0);

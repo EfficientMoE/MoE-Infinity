@@ -261,6 +261,10 @@ class ExpertDispatcher : public base::noncopyable {
         completion_events_retired_.fetch_add(1, std::memory_order_relaxed);
       }
     }
+    // The slot buffer was record_stream'ed on the exec streams: free it while
+    // they still exist (freeing records an event on each such stream).
+    accum_slots_ = torch::Tensor();
+    accum_slot_index_ = torch::Tensor();
     // Destroy every stream/event/module with its own device current (the
     // drain loop above leaves the last device current). Objects were created
     // under cudaSetDevice(i % kNumDevices()) in the constructor, or, for the
@@ -397,6 +401,16 @@ class ExpertDispatcher : public base::noncopyable {
   // (0 = SiLU, 1 = clamped SiLU, 2 = SwiGLU-OAI, < 0 = unknown); the grouped
   // kernels implement SiLU only, so any other kind keeps per-expert execution.
   void SetGroupedDecode(bool enabled, int top_k, int activation_kind = 0);
+  // Order-deterministic accumulation. When enabled and a dispatch's slot buffer
+  // (tokens x R x hidden fp32 bytes) fits `budget_bytes`, every expert stores
+  // its weighted output into its own (token, rank) slot instead of atomically
+  // adding into the shared accumulator, and WaitHiddenStates reduces the slots
+  // in a fixed order. MOE_DETERMINISTIC_ACCUM=0 disables it at construction,
+  // MOE_DETERMINISTIC_ACCUM_BYTES sets the budget (default 256 MiB);
+  // budget_bytes < 0 keeps the current budget. The grouped decode kernel
+  // stores into the same slots (its own rank is replaced by the rank table
+  // below), so grouped and per-expert items of one layer mix freely.
+  void SetDeterministicAccum(bool enabled, std::int64_t budget_bytes = -1);
   void SetDispatchFaultForTest(const std::string& stage);
   void FailDispatchForTest(std::uint64_t generation,
                            const std::string& message);
@@ -675,6 +689,41 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::int64_t> completion_events_outstanding_{0};
   std::atomic<std::int64_t> stale_failures_quarantined_{0};
   std::atomic<std::int64_t> stale_exec_items_dropped_{0};
+
+  // Deterministic accumulation (see SetDeterministicAccum). The slot state is
+  // rebuilt by every SetInputs and only valid for that generation; a failed
+  // dispatch leaves nothing the next one can read because the next SetInputs
+  // replaces (zero-fills) it.
+  std::atomic<bool> det_accum_enabled_{true};
+  std::atomic<std::int64_t> det_accum_budget_bytes_{256LL << 20};
+  // [T, rows, H] fp32 on the accumulator device. rows == R, or R + 1 when R is
+  // bounded by the top_k hint (R < num_experts): the extra row is a dump for
+  // ranks >= R, whose contributions are added atomically instead (a token with
+  // more active experts than the hint; correct, not deterministic).
+  torch::Tensor accum_slots_;
+  // Mirrors accum_slots_.defined() for readers that do not hold accum_mutex_
+  // (OutputFunc decides before its lock whether to convert the expert output
+  // to float32 itself; the locked section re-checks accum_slots_ and converts
+  // when the hint was stale, so a wrong value costs at most one conversion).
+  std::atomic<bool> accum_slot_active_{false};
+  // int32 [T, E]: min(rank of expert e among token t's active experts, R)
+  torch::Tensor accum_slot_index_;
+  std::int64_t accum_slot_count_ = 0;  // R of the current dispatch
+  bool accum_slot_guard_ = false;      // R < num_experts: rank >= R possible
+  // Per accumulator device: number of dispatches whose rank table exceeded R
+  // (device-side counter, read only by get_routing_stats).
+  std::unordered_map<int, torch::Tensor> accum_overflow_dev_;
+  // The caller thread's cached handle to its device's counter (no lock per
+  // dispatch).
+  torch::Tensor accum_overflow_cached_;
+  int accum_overflow_cached_device_ = -1;
+  std::int64_t AccumOverflowCount();
+  std::atomic<std::int64_t> accum_slot_dispatches_{0};
+  std::atomic<std::int64_t> accum_atomic_dispatches_{0};
+  std::atomic<std::int64_t> accum_slot_last_bytes_{0};
+  std::atomic<std::int64_t> accum_slot_peak_bytes_{0};
+  void BuildAccumSlots(const torch::Tensor& hidden_states, int device);
+  void ReduceAccumSlots(int device, cudaStream_t caller_stream);
 };
 
 struct GroupedExecBatch {

@@ -79,6 +79,19 @@ struct Params {
   float* out;
   int64_t ldo;
   int zero_out;
+  // Deterministic accumulation (slot mode). nullptr: the down launch adds into
+  // `out` atomically, as before. Otherwise it stores o * w into
+  // slots[t, rank, :] ([T, slot_rows, H] fp32) where rank is the expert's rank
+  // among ALL of token t's active experts (slot_rank [T, slot_rank_ld], int32,
+  // already clamped to slot_count by accum_slots_prepare), so per-expert items
+  // of the same layer share the buffer. A rank == slot_count has no slot: its
+  // value is added atomically to the dump row slots[t, slot_count, :] (or to
+  // `out` when the buffer has no dump row).
+  float* slots;
+  const int* slot_rank;
+  int64_t slot_rank_ld;
+  int slot_count;
+  int slot_rows;
 };
 
 __device__ __forceinline__ uint4 ld_stream(const bf16* p) {
@@ -456,7 +469,21 @@ __global__ void __launch_bounds__(WR* WK * 32)
       if (h < p.H && i < cnt) {
         // Same as GEMM2 (bf16 output) + OutputFunc (fp32 weighted index_add).
         const float o = __bfloat162float(__float2bfloat16(v));
-        atomicAdd(p.out + int64_t(s_tok[i] & 0xffff) * p.ldo + h, o * s_w[i]);
+        const int tk = s_tok[i] & 0xffff;
+        if (p.slots != nullptr) {
+          const int rk = p.slot_rank[int64_t(tk) * p.slot_rank_ld + e];
+          if (rk < p.slot_count) {
+            p.slots[(int64_t(tk) * p.slot_rows + rk) * p.H + h] = o * s_w[i];
+          } else if (p.slot_rows > p.slot_count) {
+            atomicAdd(
+                p.slots + (int64_t(tk) * p.slot_rows + p.slot_count) * p.H + h,
+                o * s_w[i]);
+          } else {
+            atomicAdd(p.out + int64_t(tk) * p.ldo + h, o * s_w[i]);
+          }
+        } else {
+          atomicAdd(p.out + int64_t(tk) * p.ldo + h, o * s_w[i]);
+        }
       }
     }
     if constexpr (WK > 1) __syncthreads();
@@ -547,12 +574,12 @@ bool grouped_moe_decode_pro6000_supported(int64_t tokens, int64_t hidden,
          hidden % 32 == 0 && inter % 32 == 0 && hidden > 0 && inter > 0;
 }
 
-void grouped_moe_decode_pro6000(const torch::Tensor& hidden,
-                                const torch::Tensor& router_mask,
-                                const torch::Tensor& router_weight,
-                                const torch::Tensor& expert_table,
-                                int64_t inter, int64_t kcap, torch::Tensor& out,
-                                bool zero_out, cudaStream_t stream) {
+void grouped_moe_decode_pro6000(
+    const torch::Tensor& hidden, const torch::Tensor& router_mask,
+    const torch::Tensor& router_weight, const torch::Tensor& expert_table,
+    int64_t inter, int64_t kcap, torch::Tensor& out, bool zero_out,
+    cudaStream_t stream, const torch::Tensor& slots,
+    const torch::Tensor& slot_rank, int64_t slot_count) {
   TORCH_CHECK(
       hidden.is_cuda() && hidden.dim() == 2 &&
           hidden.scalar_type() == at::kBFloat16 && hidden.stride(1) == 1,
@@ -605,6 +632,29 @@ void grouped_moe_decode_pro6000(const torch::Tensor& hidden,
               "grouped_moe_decode_pro6000: out must be float32 [T, H]");
   TORCH_CHECK(kcap > 0 && kcap * T < (1 << 30),
               "grouped_moe_decode_pro6000: kcap");
+  const bool slot_mode = slots.defined();
+  if (slot_mode) {
+    TORCH_CHECK(!zero_out,
+                "grouped_moe_decode_pro6000: zero_out is not used in slot mode "
+                "(the slots are zero-filled by the caller)");
+    TORCH_CHECK(slots.is_cuda() && slots.device() == hidden.device() &&
+                    slots.scalar_type() == at::kFloat && slots.dim() == 3 &&
+                    slots.is_contiguous() && slots.size(0) == T &&
+                    slots.size(2) == H,
+                "grouped_moe_decode_pro6000: slots must be contiguous float32 "
+                "[T, rows, H] on the hidden device");
+    TORCH_CHECK(slot_rank.defined() && slot_rank.is_cuda() &&
+                    slot_rank.device() == hidden.device() &&
+                    slot_rank.scalar_type() == at::kInt &&
+                    slot_rank.dim() == 2 && slot_rank.is_contiguous() &&
+                    slot_rank.size(0) == T &&
+                    slot_rank.size(1) == router_mask.size(1),
+                "grouped_moe_decode_pro6000: slot_rank must be contiguous "
+                "int32 [T, E] on the hidden device");
+    TORCH_CHECK(slot_count >= 1 && slot_count <= slots.size(1),
+                "grouped_moe_decode_pro6000: slot_count must be in "
+                "[1, slots.size(1)]");
+  }
   const int64_t n = expert_table.size(0);
   if (n == 0) {
     if (zero_out) out.zero_();
@@ -641,6 +691,13 @@ void grouped_moe_decode_pro6000(const torch::Tensor& hidden,
   p.out = out.data_ptr<float>();
   p.ldo = out.stride(0);
   p.zero_out = zero_out ? 1 : 0;
+  if (slot_mode) {
+    p.slots = slots.data_ptr<float>();
+    p.slot_rank = slot_rank.data_ptr<int>();
+    p.slot_rank_ld = slot_rank.stride(0);
+    p.slot_count = static_cast<int>(slot_count);
+    p.slot_rows = static_cast<int>(slots.size(1));
+  }
 
   // Token tile: enough n8 tiles for the largest possible per-expert batch
   // (all T tokens), capped at 64 tokens per pass.

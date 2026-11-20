@@ -127,6 +127,76 @@ def test_grouped_kernel_matches_per_expert_math(
 
 @requires_cuda
 @requires_pro6000
+@pytest.mark.parametrize("tokens", [1, 7])
+@pytest.mark.parametrize("slot_count_delta", [0, 1])
+def test_grouped_kernel_slot_mode_matches_atomic_mode(tokens, slot_count_delta):
+    """Slot mode stores o * w into slots[t, rank, :] instead of adding it to
+    out; reducing the slots gives the same sum (up to the order of the fp32
+    additions). With slot_count one below the number of ranks, the last rank
+    falls back to the atomic add into out and the total is unchanged."""
+    store = _store()
+    gen = torch.Generator(device="cuda").manual_seed(41 + tokens)
+    num_experts, top_k, hidden, inter = 16, 4, 512, 96
+    mask, weights = _routing(tokens, num_experts, top_k, gen, "cuda")
+    weights = weights.to(torch.bfloat16)
+    x = torch.randn(tokens, hidden, generator=gen, device="cuda").bfloat16()
+    active = mask.any(0).nonzero().squeeze(1).tolist()
+    experts = {
+        e: tuple(
+            (torch.randn(*s, generator=gen, device="cuda") * 0.05).bfloat16()
+            for s in ((inter, hidden), (inter, hidden), (hidden, inter))
+        )
+        for e in active
+    }
+    table = torch.tensor(
+        [[t.data_ptr() for t in experts[e]] + [e] for e in active],
+        dtype=torch.int64,
+        device="cuda",
+    )
+    expected = _per_expert_reference(x, mask, weights, experts)
+
+    atomic = torch.zeros(tokens, hidden, device="cuda")
+    store.grouped_moe_decode_pro6000(
+        x, mask, weights, table, inter, top_k, atomic
+    )
+
+    slot_count = top_k - slot_count_delta
+    rows = slot_count + 1  # + the dump row
+    # garbage in: accum_slots_prepare zero-fills the buffer and builds the
+    # clamped rank table (rank among ALL of the token's active experts)
+    slots = torch.full((tokens, rows, hidden), 7.0, device="cuda")
+    slot_rank = torch.empty(
+        tokens, num_experts, dtype=torch.int32, device="cuda"
+    )
+    store.accum_slots_prepare(mask, slots, slot_rank, slot_count)
+    out = torch.zeros(tokens, hidden, device="cuda")
+    store.grouped_moe_decode_pro6000(
+        x,
+        mask,
+        weights,
+        table,
+        inter,
+        top_k,
+        out,
+        slots=slots,
+        slot_rank=slot_rank,
+        slot_count=slot_count,
+    )
+    assert out.abs().max() == 0  # nothing was added to out atomically
+    if slot_count_delta == 0:
+        assert slots[:, slot_count].abs().max() == 0  # dump row unused
+    else:  # the last rank of every token went to the dump row
+        assert slots[:, slot_count].abs().max() > 0
+    total = torch.empty(tokens, hidden, device="cuda")
+    store.accum_slots_reduce(slots, slot_count, True, total)
+    # same values, different order of the fp32 additions
+    scale = atomic.abs().max()
+    assert (total - atomic).abs().max() <= 2**-20 * scale * top_k
+    _assert_bf16_close(total, expected)
+
+
+@requires_cuda
+@requires_pro6000
 def test_grouped_kernel_subset_of_experts_and_strided_inputs():
     """Experts outside the table are left to the per-expert path."""
     store = _store()
@@ -186,7 +256,9 @@ def _grouped_eligible(experts, hidden_device=0):
     return sum(1 for e in experts if _home_device(e) == hidden_device)
 
 
-def _make_dispatcher(tmp_path, num_experts, hidden, inter, generator):
+def _make_dispatcher(
+    tmp_path, num_experts, hidden, inter, generator, device_memory_ratio=0.5
+):
     try:
         from moe_infinity.runtime.model_offload import _load_prefetch_lib
 
@@ -198,7 +270,7 @@ def _make_dispatcher(tmp_path, num_experts, hidden, inter, generator):
     if not hasattr(prefetch_lib.expert_dispatcher, "set_grouped_decode"):
         pytest.skip("native extension built without the grouped decode path")
 
-    engine = prefetch_lib.prefetch_handle(f"{tmp_path}/", 0.5)
+    engine = prefetch_lib.prefetch_handle(f"{tmp_path}/", device_memory_ratio)
     experts = {}
     expert_tensor_ids = []
     for e in range(num_experts):
@@ -452,3 +524,32 @@ def test_non_silu_experts_stay_per_expert(native_moe, activation_kind):
     assert dispatcher.get_routing_stats()["grouped_experts"] == (
         _grouped_eligible([0, 1])
     )
+
+
+@requires_cuda
+@requires_pro6000
+@pytest.mark.parametrize("native", [False, True])
+def test_grouped_path_in_atomic_accumulation_mode(native_moe, native):
+    """The atomic accumulation path (MOE_DETERMINISTIC_ACCUM=0) still groups
+    and matches the per-expert path; the other tests here run in the default
+    (deterministic slot) mode."""
+    torch.cuda.set_device(0)
+    num_experts, top_k, hidden, inter, tokens = 8, 2, 256, 128, 3
+    gen = torch.Generator().manual_seed(11)
+    dispatcher, experts = native_moe(num_experts, hidden, inter, gen)
+    dispatcher.set_deterministic_accum(False)
+    dispatcher.set_grouped_decode(True, top_k)
+    x = torch.randn(tokens, hidden, generator=gen).bfloat16().cuda()
+    mask, weights = _routing(tokens, num_experts, top_k, gen, "cpu")
+    mask, weights = mask.cuda(), weights.to(torch.bfloat16).cuda()
+    expected = _per_expert_reference(x, mask, weights, experts)
+
+    _dispatch(dispatcher, x, mask, weights, native)  # cold: per-expert
+    warm = _dispatch(dispatcher, x, mask, weights, native)  # resident: grouped
+    stats = dispatcher.get_routing_stats()
+    assert stats["grouped_experts"] == _grouped_eligible(
+        mask.any(0).nonzero().squeeze(1).tolist()
+    )
+    assert stats["accum_slot_dispatches"] == 0
+    assert stats["accum_atomic_dispatches"] >= 2
+    _assert_bf16_close(warm, expected)
