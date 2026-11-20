@@ -1530,6 +1530,14 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
     if (args.expert_node == nullptr) {
       continue;
     }
+    // A failed dispatch zeroes pending_ while its items may still be queued
+    // (or just popped); SetInputs may then start the next generation and
+    // re-record the input-ready event / replace the input tensors. Drop such
+    // an item before it waits on that event or reads those tensors.
+    if (IsStaleGeneration(args.generation)) {
+      DropStaleExecArgs(args, gpu_id);
+      continue;
+    }
 
     bool timing_enabled =
         overlap_timing_enabled_.load(std::memory_order_acquire);
@@ -1689,6 +1697,41 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
   timing.Destroy();
 }
 
+bool ExpertDispatcher::IsStaleGeneration(std::uint64_t generation) const {
+  return current_generation_.load(std::memory_order_acquire) != generation ||
+         failed_generation_.load(std::memory_order_acquire) == generation;
+}
+
+// Drops an item whose generation was failed or superseded before it waits on
+// any event or reads hidden_states_/router_*_ (which by now may belong to a
+// newer dispatch). Mirrors what the failure path of GPUExecFunc releases for
+// its own item (transfer event, leases, transient flag) and restores the
+// node / cache state through RestoreFailureContext. It never touches pending_:
+// FailDispatch already zeroed the failed generation's count and the new
+// generation's items are counted separately.
+void ExpertDispatcher::DropStaleExecArgs(ExecArgs& args, int gpu_id) noexcept {
+  stale_exec_items_dropped_.fetch_add(1, std::memory_order_relaxed);
+  if (args.transfer_event != nullptr) {
+    kCudaEventPool->Release(args.transfer_event);
+    args.transfer_event = nullptr;
+  }
+  if (args.execution_lease_id != 0 && kDemandResidencyClient != nullptr) {
+    kDemandResidencyClient->ReleaseLease(args.execution_lease_id);
+    args.execution_lease_id = 0;
+  }
+  if (args.residency_lease != 0 && kExpertResidencyManager) {
+    kExpertResidencyManager->ReleaseLease(args.residency_lease);
+    args.residency_lease = 0;
+  }
+  if (args.managed_transient && args.expert_node != nullptr &&
+      args.expert_node->node != nullptr) {
+    args.expert_node->node->is_overflow = false;
+  }
+  RestoreFailureContext(FailureContext{args.expert_node, gpu_id,
+                                       args.cache_slot_reserved,
+                                       args.cache_key_inserted, args.evict});
+}
+
 bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
                                   torch::Tensor token_mask, int gpu_id,
                                   cudaStream_t exec_stream) noexcept {
@@ -1708,84 +1751,88 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
     torch::Tensor output_tensor = output.to(output_device).to(torch::kFloat32);
 
     int64_t expert_idx = args.expert_node->expert_idx;
-    int64_t batch_size = hidden_states_.size(0);
 
+    bool stale_straggler = false;
     {
       std::lock_guard<std::mutex> lock(accum_mutex_);
       // Drop stragglers from a failed or superseded generation: after
       // FailDispatch zeros pending_, a late worker must not accumulate into a
       // reused final_hidden_states_ or leave a stray completion event that
-      // would trip the next dispatch's empty-events check.
-      if (current_generation_.load(std::memory_order_acquire) !=
-              args.generation ||
-          failed_generation_.load(std::memory_order_acquire) ==
-              args.generation) {
-        return true;
-      }
-      if (output_tensor.device() != final_hidden_states_.device()) {
-        // Host-staging / overflow fallback can land an expert output on CPU
-        // (out_gpu_id < 0) or on another GPU; co-locate with the accumulator
-        // before combining, else add_ faults on a host/cross-device pointer.
-        output_tensor = output_tensor.to(final_hidden_states_.device());
-      }
-      if (batch_size == 1) {
-        // index_add_ accumulates with atomics, so it is race-free against
-        // other exec streams and the grouped kernel adding into the same row.
-        final_hidden_states_.index_add_(
-            0, zero_index_.at(final_hidden_states_.device().index()),
-            output_tensor *
-                router_weight_.index({torch::indexing::Slice(), expert_idx})
-                    .unsqueeze(1));
-      } else {
-        auto token_indices = torch::nonzero(token_mask).squeeze(1);
-        auto weights =
-            router_weight_.index({token_mask, expert_idx}).unsqueeze(1);
-        auto weighted_output = output_tensor * weights;
-        final_hidden_states_.index_add_(0, token_indices, weighted_output);
-      }
-
-      const int acc_device = final_hidden_states_.device().index();
-      if (acc_device != gpu_id) {
-        // The accumulate ran on the accumulator device's current stream, not
-        // on exec_stream (a stream of gpu_id). Chain exec_stream after it so
-        // the completion event recorded on exec_stream below covers it.
-        cudaEvent_t accumulated = kCudaEventPool->Acquire(acc_device);
-        c10::cuda::CUDAGuard acc_guard(acc_device);  // stream 0 is per-device
-        cudaError_t acc_status = cudaEventRecord(
-            accumulated, c10::cuda::getCurrentCUDAStream(acc_device).stream());
-        if (acc_status == cudaSuccess) {
-          acc_status = cudaStreamWaitEvent(exec_stream, accumulated, 0);
+      // would trip the next dispatch's empty-events check. It still launches
+      // the retirement callback below, which returns the expert node to IDLE
+      // (and releases its leases) once the GPU work already queued on
+      // exec_stream is done; without it the node would stay claimed and the
+      // next dispatch of this expert would fail its exec_state CAS.
+      stale_straggler = IsStaleGeneration(args.generation);
+      if (!stale_straggler) {
+        int64_t batch_size = hidden_states_.size(0);
+        if (output_tensor.device() != final_hidden_states_.device()) {
+          // Host-staging / overflow fallback can land an expert output on CPU
+          // (out_gpu_id < 0) or on another GPU; co-locate with the accumulator
+          // before combining, else add_ faults on a host/cross-device pointer.
+          output_tensor = output_tensor.to(final_hidden_states_.device());
         }
-        kCudaEventPool->Release(accumulated);
-        if (acc_status != cudaSuccess) {
+        if (batch_size == 1) {
+          // index_add_ accumulates with atomics, so it is race-free against
+          // other exec streams and the grouped kernel adding into the same row.
+          final_hidden_states_.index_add_(
+              0, zero_index_.at(final_hidden_states_.device().index()),
+              output_tensor *
+                  router_weight_.index({torch::indexing::Slice(), expert_idx})
+                      .unsqueeze(1));
+        } else {
+          auto token_indices = torch::nonzero(token_mask).squeeze(1);
+          auto weights =
+              router_weight_.index({token_mask, expert_idx}).unsqueeze(1);
+          auto weighted_output = output_tensor * weights;
+          final_hidden_states_.index_add_(0, token_indices, weighted_output);
+        }
+
+        const int acc_device = final_hidden_states_.device().index();
+        if (acc_device != gpu_id) {
+          // The accumulate ran on the accumulator device's current stream, not
+          // on exec_stream (a stream of gpu_id). Chain exec_stream after it so
+          // the completion event recorded on exec_stream below covers it.
+          cudaEvent_t accumulated = kCudaEventPool->Acquire(acc_device);
+          c10::cuda::CUDAGuard acc_guard(acc_device);  // stream 0 is per-device
+          cudaError_t acc_status = cudaEventRecord(
+              accumulated,
+              c10::cuda::getCurrentCUDAStream(acc_device).stream());
+          if (acc_status == cudaSuccess) {
+            acc_status = cudaStreamWaitEvent(exec_stream, accumulated, 0);
+          }
+          kCudaEventPool->Release(accumulated);
+          if (acc_status != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("OutputFunc: cross-device accumulate ordering "
+                            "failed: ") +
+                cudaGetErrorString(acc_status));
+          }
+        }
+
+        cudaEvent_t output_done = AcquireCompletionEvent(gpu_id);
+        int event_fault =
+            static_cast<int>(DispatchFaultPoint::COMPLETION_EVENT_RECORD);
+        if (dispatch_fault_for_test_.compare_exchange_strong(
+                event_fault, 0, std::memory_order_acq_rel)) {
+          ReleaseCompletionEvent(output_done, gpu_id);
+          throw std::runtime_error("injected completion_event failure");
+        }
+        cudaError_t record_status = cudaEventRecord(output_done, exec_stream);
+        if (record_status != cudaSuccess) {
+          ReleaseCompletionEvent(output_done, gpu_id);
           throw std::runtime_error(
-              std::string("OutputFunc: cross-device accumulate ordering "
-                          "failed: ") +
-              cudaGetErrorString(acc_status));
+              std::string("OutputFunc: cudaEventRecord failed: ") +
+              cudaGetErrorString(record_status));
         }
-      }
-
-      cudaEvent_t output_done = AcquireCompletionEvent(gpu_id);
-      int event_fault =
-          static_cast<int>(DispatchFaultPoint::COMPLETION_EVENT_RECORD);
-      if (dispatch_fault_for_test_.compare_exchange_strong(
-              event_fault, 0, std::memory_order_acq_rel)) {
-        ReleaseCompletionEvent(output_done, gpu_id);
-        throw std::runtime_error("injected completion_event failure");
-      }
-      cudaError_t record_status = cudaEventRecord(output_done, exec_stream);
-      if (record_status != cudaSuccess) {
-        ReleaseCompletionEvent(output_done, gpu_id);
-        throw std::runtime_error(
-            std::string("OutputFunc: cudaEventRecord failed: ") +
-            cudaGetErrorString(record_status));
-      }
-      {
-        std::lock_guard<std::mutex> state_lock(route_state_mutex_);
-        completion_events_.push_back(
-            CompletionEventRecord{output_done, args.generation, gpu_id});
-        completion_events_outstanding_.fetch_add(1, std::memory_order_relaxed);
-      }
+        {
+          std::lock_guard<std::mutex> state_lock(route_state_mutex_);
+          completion_events_.push_back(
+              CompletionEventRecord{output_done, args.generation, gpu_id});
+          completion_events_outstanding_.fetch_add(1,
+                                                   std::memory_order_relaxed);
+        }
+      }  // !stale_straggler
     }
 
     auto* retire = new ExpertRetireArgs{this,
@@ -1961,6 +2008,11 @@ void ExpertDispatcher::GroupedExec(ExecArgs& args, int gpu_id,
                                    cudaStream_t stream) {
   auto& members = args.group->members;
   const std::uint64_t generation = args.generation;
+  if (IsStaleGeneration(generation)) {
+    // Same early drop as the per-expert path in GPUExecFunc.
+    for (ExecArgs& m : members) DropStaleExecArgs(m, gpu_id);
+    return;
+  }
   std::vector<FailureContext> contexts;
   contexts.reserve(members.size());
   for (const ExecArgs& m : members) {
@@ -2015,6 +2067,7 @@ void ExpertDispatcher::GroupedExec(ExecArgs& args, int gpu_id,
     const int64_t kcap =
         top_k > 0 ? std::min(top_k, num_experts_) : num_experts_;
 
+    bool stale_group = false;
     {
       std::lock_guard<std::mutex> lock(accum_mutex_);
       int output_fault = static_cast<int>(DispatchFaultPoint::OUTPUT);
@@ -2023,33 +2076,38 @@ void ExpertDispatcher::GroupedExec(ExecArgs& args, int gpu_id,
         throw std::runtime_error("injected output failure");
       }
       // Same straggler rule as OutputFunc.
-      if (current_generation_.load(std::memory_order_acquire) != generation ||
-          failed_generation_.load(std::memory_order_acquire) == generation) {
-        return;
-      }
-      grouped_moe_decode_pro6000(hidden_states_, router_mask_, router_weight_,
-                                 table, inter, kcap, final_hidden_states_,
-                                 false, stream);
+      stale_group = IsStaleGeneration(generation);
+      if (!stale_group) {
+        grouped_moe_decode_pro6000(hidden_states_, router_mask_, router_weight_,
+                                   table, inter, kcap, final_hidden_states_,
+                                   false, stream);
 
-      cudaEvent_t output_done = AcquireCompletionEvent(gpu_id);
-      int event_fault =
-          static_cast<int>(DispatchFaultPoint::COMPLETION_EVENT_RECORD);
-      if (dispatch_fault_for_test_.compare_exchange_strong(
-              event_fault, 0, std::memory_order_acq_rel)) {
-        ReleaseCompletionEvent(output_done, gpu_id);
-        throw std::runtime_error("injected completion_event failure");
-      }
-      cudaError_t record_status = cudaEventRecord(output_done, stream);
-      if (record_status != cudaSuccess) {
-        ReleaseCompletionEvent(output_done, gpu_id);
-        throw std::runtime_error(
-            std::string("GroupedExec: cudaEventRecord failed: ") +
-            cudaGetErrorString(record_status));
-      }
-      std::lock_guard<std::mutex> state_lock(route_state_mutex_);
-      completion_events_.push_back(
-          CompletionEventRecord{output_done, generation, gpu_id});
-      completion_events_outstanding_.fetch_add(1, std::memory_order_relaxed);
+        cudaEvent_t output_done = AcquireCompletionEvent(gpu_id);
+        int event_fault =
+            static_cast<int>(DispatchFaultPoint::COMPLETION_EVENT_RECORD);
+        if (dispatch_fault_for_test_.compare_exchange_strong(
+                event_fault, 0, std::memory_order_acq_rel)) {
+          ReleaseCompletionEvent(output_done, gpu_id);
+          throw std::runtime_error("injected completion_event failure");
+        }
+        cudaError_t record_status = cudaEventRecord(output_done, stream);
+        if (record_status != cudaSuccess) {
+          ReleaseCompletionEvent(output_done, gpu_id);
+          throw std::runtime_error(
+              std::string("GroupedExec: cudaEventRecord failed: ") +
+              cudaGetErrorString(record_status));
+        }
+        std::lock_guard<std::mutex> state_lock(route_state_mutex_);
+        completion_events_.push_back(
+            CompletionEventRecord{output_done, generation, gpu_id});
+        completion_events_outstanding_.fetch_add(1, std::memory_order_relaxed);
+      }  // !stale_group
+    }
+    if (stale_group) {
+      // No kernel was launched for this group, so the members can be
+      // released right away (outside accum_mutex_).
+      for (ExecArgs& m : members) DropStaleExecArgs(m, gpu_id);
+      return;
     }
 
     auto retire = std::make_unique<GroupRetireArgs>();
@@ -2433,6 +2491,47 @@ void ExpertDispatcher::DispatchExperts(
   }
 }
 
+// Restores the node / cache bookkeeping one in-flight item owns after its
+// dispatch failed or was superseded. Shared by FailDispatch and by workers that
+// drop a stale item before running it.
+void ExpertDispatcher::RestoreFailureContext(
+    const FailureContext& context) noexcept {
+  if (context.expert_node && context.expert_node->node) {
+    auto node = context.expert_node->node;
+    if (context.overload_owned && node->device.is_cuda()) {
+      try {
+        node->SetDevice(node->default_host, true, nullptr);
+      } catch (...) {
+        // FailDispatch is noexcept; preserve the first dispatch exception
+        // while still restoring terminal state below.
+      }
+    }
+    if (context.gpu_id >= 0) {
+      try {
+        uint64_t key =
+            (static_cast<uint64_t>(context.expert_node->layer_idx) << 32) |
+            static_cast<uint32_t>(context.expert_node->expert_idx);
+        std::lock_guard<std::mutex> cache_lock(cache_mutex_[context.gpu_id]);
+        if (node->device.is_cuda() && !context.overload_owned) {
+          cached_experts_[context.gpu_id].insert(key);
+        } else if (context.cache_key_inserted) {
+          cached_experts_[context.gpu_id].erase(key);
+          if (context.cache_slot_reserved) {
+            cache_sizes_[context.gpu_id] += node->byte_size;
+          }
+        }
+      } catch (...) {
+        // FailDispatch is noexcept; continue terminal restoration.
+      }
+    }
+    node->exec_state.store(NodeExecState::IDLE, std::memory_order_release);
+  }
+  if (context.overload_owned && context.gpu_id >= 0) {
+    gpu_overload_[context.gpu_id].store(false, std::memory_order_release);
+  }
+  if (context.gpu_id >= 0) NotifyCacheWaiters(context.gpu_id);
+}
+
 void ExpertDispatcher::FailDispatch(
     const std::uint64_t failing_generation, std::exception_ptr error,
     const std::vector<FailureContext>& contexts) noexcept {
@@ -2454,40 +2553,7 @@ void ExpertDispatcher::FailDispatch(
   }
   failed_generation_.store(failing_generation, std::memory_order_release);
   for (const FailureContext& context : contexts) {
-    if (context.expert_node && context.expert_node->node) {
-      auto node = context.expert_node->node;
-      if (context.overload_owned && node->device.is_cuda()) {
-        try {
-          node->SetDevice(node->default_host, true, nullptr);
-        } catch (...) {
-          // FailDispatch is noexcept; preserve the first dispatch exception
-          // while still restoring terminal state below.
-        }
-      }
-      if (context.gpu_id >= 0) {
-        try {
-          uint64_t key =
-              (static_cast<uint64_t>(context.expert_node->layer_idx) << 32) |
-              static_cast<uint32_t>(context.expert_node->expert_idx);
-          std::lock_guard<std::mutex> cache_lock(cache_mutex_[context.gpu_id]);
-          if (node->device.is_cuda() && !context.overload_owned) {
-            cached_experts_[context.gpu_id].insert(key);
-          } else if (context.cache_key_inserted) {
-            cached_experts_[context.gpu_id].erase(key);
-            if (context.cache_slot_reserved) {
-              cache_sizes_[context.gpu_id] += node->byte_size;
-            }
-          }
-        } catch (...) {
-          // FailDispatch is noexcept; continue terminal restoration.
-        }
-      }
-      node->exec_state.store(NodeExecState::IDLE, std::memory_order_release);
-    }
-    if (context.overload_owned && context.gpu_id >= 0) {
-      gpu_overload_[context.gpu_id].store(false, std::memory_order_release);
-    }
-    if (context.gpu_id >= 0) NotifyCacheWaiters(context.gpu_id);
+    RestoreFailureContext(context);
   }
   route_failures_.fetch_add(1, std::memory_order_relaxed);
   last_active_experts_count_.store(0, std::memory_order_relaxed);
@@ -2887,6 +2953,8 @@ std::map<std::string, std::int64_t> ExpertDispatcher::GetRoutingStats() const {
        completion_events_outstanding_.load(std::memory_order_relaxed)},
       {"stale_failures_quarantined",
        stale_failures_quarantined_.load(std::memory_order_relaxed)},
+      {"stale_exec_items_dropped",
+       stale_exec_items_dropped_.load(std::memory_order_relaxed)},
       {"current_generation", static_cast<std::int64_t>(current_generation_.load(
                                  std::memory_order_acquire))},
       {"pending",

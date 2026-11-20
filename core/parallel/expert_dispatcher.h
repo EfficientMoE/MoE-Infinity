@@ -415,6 +415,9 @@ class ExpertDispatcher : public base::noncopyable {
   void FailDispatch(const std::uint64_t failing_generation,
                     std::exception_ptr error,
                     const std::vector<FailureContext>& contexts = {}) noexcept;
+  void RestoreFailureContext(const FailureContext& context) noexcept;
+  bool IsStaleGeneration(std::uint64_t generation) const;
+  void DropStaleExecArgs(ExecArgs& args, int gpu_id) noexcept;
   void CompleteOne(std::uint64_t generation) noexcept;
   void NotifyPendingWaiters() noexcept;
   void NotifyCacheWaiters(int gpu_id) noexcept;
@@ -653,6 +656,7 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::int64_t> completion_events_retired_{0};
   std::atomic<std::int64_t> completion_events_outstanding_{0};
   std::atomic<std::int64_t> stale_failures_quarantined_{0};
+  std::atomic<std::int64_t> stale_exec_items_dropped_{0};
 };
 
 struct GroupedExecBatch {
