@@ -1,0 +1,107 @@
+{
+  "note":
+      "Regime-matched and in-process A/B records for the #351 GPU1 workstream (complements summary.json). 'regime_matched' = alternating builds in one thermal session; 'in_process' = alternating env in one process, median of 5 rounds x 3 iters.",
+  "regime_matched_dispatch_fix": {
+    "change":
+        "0886f9b2: drop stream-K branch; non-exclusive ping threshold 256 -> 192",
+    "flash_9K_us": {
+      "stock": 7621.6,
+      "fixed": 7307.0,
+      "delta_pct": 4.1
+    },
+    "flash_9K_roof_pct": {
+      "stock": 72.5,
+      "fixed": 75.6
+    },
+    "all_other_points":
+        "within +/-0.3% (12K, 50K, 200K, 1K, 2K, decode b1..b256)",
+    "parity": "bit-identical to stock at M in {8,128,256,341,384,512,1422}"
+  },
+  "in_process_config_sweep_flash_9K": {
+    "auto_coop_us": 7454.5,
+    "forced_ping64_us": 7770.9,
+    "comment":
+        "coop >= ping at every 9K/12K point for both models; glm 9K all equal (~58%)"
+  },
+  "in_process_chain_overlap_200K_50K": {
+    "flash_200K": {
+      "chain_us": 137349,
+      "nochain_us": 137349
+    },
+    "glm_200K": {
+      "chain_us": 203010,
+      "nochain_us": 203192
+    },
+    "flash_50K": {
+      "chain_us": 35968,
+      "nochain_us": 36025
+    },
+    "glm_50K": {
+      "chain_us": 51654,
+      "nochain_us": 51741
+    },
+    "comment":
+        "PDL early-quant1 overlap: 0.0% -- CUTLASS signals launch_dependents only at epilogue; reverted"
+  },
+  "grouped_persistent_pipeline_roof_pct": {
+    "best_variant": "merged interleaved [gu(c)+down(c-1)], coop128, C=72..144",
+    "flash_9K": {
+      "grouped": 74.8,
+      "per_expert": 77.2
+    },
+    "flash_12K": {
+      "grouped": 62.3,
+      "per_expert": 70.1
+    },
+    "flash_50K": {
+      "grouped": 67.9,
+      "per_expert": 75.4
+    },
+    "flash_200K": {
+      "grouped": 73.7,
+      "per_expert": 76.6
+    },
+    "glm_9K": {
+      "grouped": 57.6,
+      "per_expert": 64.7
+    },
+    "parity": "bit-exact vs per-expert path",
+    "comment":
+        "grouped loses at every point: persistent kernels can't co-reside (1 CTA/SM smem); per-expert static launches overlap via CTA turnover"
+  },
+  "l2_weight_prefetch_roof_pct": {
+    "flash_9K": {
+      "off": 77.6,
+      "on": 57.5
+    },
+    "flash_12K": {
+      "off": 70.2,
+      "on": 53.5
+    },
+    "glm_9K": {
+      "off": 64.6,
+      "on": 48.0
+    },
+    "glm_12K": {
+      "off": 78.6,
+      "on": 59.5
+    },
+    "flash_50K": {
+      "off": 75.1,
+      "on": 69.4
+    },
+    "flash_200K": {
+      "off": 77.3,
+      "on": 76.8
+    },
+    "comment":
+        "whole-weight prefetch (25-38MB/expert) is harmful: L2 thrash across 4 streams; ruled out"
+  },
+  "giant_grouped_gemm_ceiling": {
+    "shape": "G=1, M=N=K=8192, 2 groups",
+    "tensor_pipe_pct": 84.7,
+    "sustained_tflops": "703-730 (91-94% of 772 roof)",
+    "comment":
+        "the CUTLASS sm120 blockwise kernel reaches near-roof only at huge K/N; at MoE shapes 72-77% tensor + tile padding"
+  }
+}
