@@ -1,0 +1,128 @@
+{
+  "gpu": {
+    "torch_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "cc": "12.0",
+    "sms": 188,
+    "l2_mb": 128.0,
+    "mem_gb": 94.97296142578125,
+    "nvidia_smi":
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition, 600.00 W, 2430 MHz, 12481 MHz, 590.48.01",
+    "torch": "2.11.0+cu130",
+    "cuda": "13.0"
+  },
+  "other_procs": [],
+  "launch": {
+    "eager_launch_us": 6.1217788606882095,
+    "graph_kernel_us": 1.160863995552063
+  },
+  "dram_read": {
+    "bytes": 4294967296,
+    "ms": 2.8062463760375977,
+    "gbs": 1530.5025719318583,
+    "ctas_per_sm": 4,
+    "sm_clock_mhz_median": 1845.0,
+    "mem_clock_mhz_median": 12481.0,
+    "power_w_median": 228.81,
+    "power_w_max": 229.1,
+    "n_samples": 34
+  },
+  "dram_copy": {
+    "bytes_moved": 4294967296,
+    "ms": 2.9608383178710938,
+    "gbs": 1450.5916348340743,
+    "sm_clock_mhz_median": 1845.0,
+    "mem_clock_mhz_median": 12481.0,
+    "power_w_median": 216.52,
+    "power_w_max": 233.1,
+    "n_samples": 40
+  },
+  "l2_read": {
+    "working_set_mib": 32,
+    "ms": 0.2796416044235229,
+    "gbs": 4799.633741076829,
+    "sm_clock_mhz_median": 1845.0,
+    "mem_clock_mhz_median": 12481.0,
+    "power_w_median": 165.59,
+    "power_w_max": 201.23,
+    "n_samples": 35
+  },
+  "bf16": [
+    {
+      "m": 8192,
+      "n": 8192,
+      "k": 8192,
+      "ms": 3.2906558990478514,
+      "tflops": 334.13145023584593,
+      "sm_clock_mhz_median": 1845.0,
+      "mem_clock_mhz_median": 12481.0,
+      "power_w_median": 443.23,
+      "power_w_max": 453.25,
+      "n_samples": 55
+    },
+    {
+      "m": 16384,
+      "n": 8192,
+      "k": 8192,
+      "ms": 6.554099273681641,
+      "tflops": 335.5187591348064,
+      "sm_clock_mhz_median": 1845.0,
+      "mem_clock_mhz_median": 12481.0,
+      "power_w_median": 445.37,
+      "power_w_max": 446.68,
+      "n_samples": 55
+    }
+  ],
+  "fp8": [
+    {
+      "m": 8192,
+      "n": 8192,
+      "k": 8192,
+      "ms": 1.6738304138183593,
+      "tflops": 656.8835281632759,
+      "sm_clock_mhz_median": 1845.0,
+      "mem_clock_mhz_median": 12481.0,
+      "power_w_median": 446.76,
+      "power_w_max": 448.44,
+      "n_samples": 55
+    },
+    {
+      "m": 16384,
+      "n": 8192,
+      "k": 8192,
+      "ms": 3.3899200439453123,
+      "tflops": 648.6947264374699,
+      "sm_clock_mhz_median": 1845.0,
+      "mem_clock_mhz_median": 12481.0,
+      "power_w_median": 505.91,
+      "power_w_max": 520.95,
+      "n_samples": 55
+    }
+  ],
+  "fp4": [
+    {
+      "m": 8192,
+      "n": 8192,
+      "k": 8192,
+      "ms": 0.9431232452392578,
+      "tflops": 1165.8196670755035,
+      "sm_clock_mhz_median": 1830.0,
+      "mem_clock_mhz_median": 12481.0,
+      "power_w_median": 431.13,
+      "power_w_max": 465.18,
+      "n_samples": 55
+    },
+    {
+      "m": 16384,
+      "n": 8192,
+      "k": 16384,
+      "ms": 3.6209217071533204,
+      "tflops": 1214.6207145035555,
+      "sm_clock_mhz_median": 1845.0,
+      "mem_clock_mhz_median": 12481.0,
+      "power_w_median": 464.94,
+      "power_w_max": 473.76,
+      "n_samples": 55
+    }
+  ],
+  "other_procs_after": []
+}
