@@ -113,7 +113,6 @@ TEST(ThreadSafeQueueTest, ParallelPushParallelPop) {
 // New edge-case and correctness tests
 // ---------------------------------------------------------------------------
 
-// TryPop on an empty queue returns false without blocking.
 // Push reports a closed queue instead of dropping the item silently, and
 // leaves the item with the caller (not moved from).
 TEST(ThreadSafeQueueTest, PushToClosedQueueReportsFailureAndKeepsItem) {
@@ -137,6 +136,7 @@ TEST(ThreadSafeQueueTest, PushToClosedQueueReportsFailureAndKeepsItem) {
   EXPECT_FALSE(queue.Pop(out));
 }
 
+// TryPop on an empty queue returns false without blocking.
 TEST(ThreadSafeQueueTest, TryPopOnEmptyReturnsFalse) {
   ThreadSafeQueue<int> queue;
   int value = -1;
