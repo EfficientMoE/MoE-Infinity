@@ -22,7 +22,10 @@ import torch
 
 F = TypeVar("F", bound=Callable)
 
-_get_device = torch._C._cuda_getDevice
+# torch._C._cuda_getDevice is the cheap form of torch.cuda.current_device().
+# CPU-only builds of torch do not have it; there no CUDA tensor can reach
+# the comparison in device_guard, so the fallback is never called.
+_get_device = getattr(torch._C, "_cuda_getDevice", torch.cuda.current_device)
 
 
 def _scan(items) -> int | None:
