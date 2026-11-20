@@ -11,6 +11,8 @@ built) or ``set_deterministic_accum(False)`` restores the atomic path; running
 the stability tests that way is the red case of these tests.
 """
 
+import gc
+
 import pytest
 import torch
 
@@ -19,6 +21,7 @@ from tests.python.ops.conftest import requires_cuda
 from tests.python.ops.test_grouped_moe_decode_pro6000 import (  # noqa: F401
     _dispatch,
     _home_device,
+    _make_dispatcher,
     _routing,
     native_moe,
 )
@@ -32,13 +35,33 @@ INTER = 192
 requires_two_gpus = pytest.mark.skipif(
     torch.cuda.device_count() < 2, reason="needs two CUDA devices"
 )
+requires_grouped = pytest.mark.skipif(
+    not supports(RTX_PRO_6000), reason="grouped decode is RTX PRO 6000 only"
+)
+
+
+@pytest.fixture
+def slot_moe(tmp_path):
+    """Like native_moe, but also hands out the prefetch engine."""
+    made = []
+
+    def make(num_experts, hidden, inter, generator):
+        engine, dispatcher, experts = _make_dispatcher(
+            tmp_path, num_experts, hidden, inter, generator
+        )
+        made.append([engine, dispatcher])
+        return engine, dispatcher, experts
+
+    yield make
+    while made:
+        pair = made.pop()
+        pair[1] = None
+        pair[0] = None
 
 
 def _problem(native_moe, tokens, seed, num_experts=NUM_EXPERTS, top_k=TOP_K):
     gen = torch.Generator().manual_seed(seed)
-    dispatcher, experts = native_moe(
-        num_experts, HIDDEN, INTER, gen, deterministic_accum=None
-    )
+    dispatcher, experts = native_moe(num_experts, HIDDEN, INTER, gen)
     x = torch.randn(tokens, HIDDEN, generator=gen).bfloat16().cuda()
     mask, weights = _routing(tokens, num_experts, top_k, gen, "cpu")
     return (
@@ -105,9 +128,12 @@ def test_accumulator_is_bitwise_stable_with_experts_on_two_gpus(
 
 
 @requires_cuda
+@pytest.mark.parametrize(
+    "grouped", [False, pytest.param(True, marks=requires_grouped)]
+)
 @pytest.mark.parametrize("tokens", [1, 7])
 def test_slot_mode_matches_atomic_path_within_summation_order(
-    native_moe, tokens
+    native_moe, tokens, grouped
 ):
     """Slots versus atomics differ only by the order of the fp32 additions.
 
@@ -118,7 +144,7 @@ def test_slot_mode_matches_atomic_path_within_summation_order(
     """
     torch.cuda.set_device(0)
     dispatcher, _, x, mask, weights = _problem(native_moe, tokens, seed=23)
-    dispatcher.set_grouped_decode(False, TOP_K)
+    dispatcher.set_grouped_decode(grouped, TOP_K)
     _run(dispatcher, x, mask, weights)  # make the experts resident
 
     addends = []
@@ -135,6 +161,8 @@ def test_slot_mode_matches_atomic_path_within_summation_order(
     with_slots = _run(dispatcher, x, mask, weights)
     dispatcher.set_deterministic_accum(False)
     atomic = _run(dispatcher, x, mask, weights)
+    if grouped:
+        assert dispatcher.get_routing_stats()["grouped_experts"] > 0
 
     bound = 2 * (count - 1) * 2**-24 * abs_sum
     assert ((with_slots - atomic).abs() <= bound).all()
@@ -155,8 +183,9 @@ def test_slot_budget_boundary_and_size(native_moe):
     dispatcher, _, x, mask, weights = _problem(native_moe, tokens, seed=24)
     dispatcher.set_grouped_decode(False, TOP_K)
     _run(dispatcher, x, mask, weights)
-    # batches: R = min(top_k hint, num_experts); bytes = T * R * H * 4
-    expected = tokens * TOP_K * HIDDEN * 4
+    # R = min(top_k hint, num_experts); with a hint the buffer has one extra
+    # (dump) row for ranks >= R: bytes = T * (R + 1) * H * 4
+    expected = tokens * (TOP_K + 1) * HIDDEN * 4
 
     dispatcher.set_deterministic_accum(True, expected)  # exactly fits
     _run(dispatcher, x, mask, weights)
@@ -175,8 +204,15 @@ def test_slot_budget_boundary_and_size(native_moe):
     again = _run(dispatcher, x, mask, weights)
     assert torch.allclose(again, reference, rtol=1e-5, atol=1e-5)
 
-    # a single token keeps R = num_experts (every active expert of it fits)
+    # a single token uses the hint too (R = TOP_K, not num_experts)
     one = x[:1].contiguous()
+    _run(dispatcher, one, mask[:1].contiguous(), weights[:1].contiguous())
+    assert (
+        dispatcher.get_routing_stats()["accum_slot_last_bytes"]
+        == (TOP_K + 1) * HIDDEN * 4
+    )
+    # without a hint R = num_experts and there is no dump row
+    dispatcher.set_grouped_decode(False, 0)
     _run(dispatcher, one, mask[:1].contiguous(), weights[:1].contiguous())
     assert (
         dispatcher.get_routing_stats()["accum_slot_last_bytes"]
@@ -203,24 +239,158 @@ def test_token_with_more_experts_than_the_top_k_hint_stays_correct(native_moe):
 
 
 @requires_cuda
-@pytest.mark.skipif(
-    not supports(RTX_PRO_6000), reason="grouped decode is RTX PRO 6000 only"
-)
-def test_slot_mode_forms_no_grouped_batches(native_moe):
-    """Part 1 rule: in slot mode every expert takes the per-expert path."""
+@requires_grouped
+def test_slot_mode_forms_grouped_batches(native_moe):
+    """Grouped decode runs in slot mode (its kernel writes the slots)."""
     torch.cuda.set_device(0)
     dispatcher, experts, x, mask, weights = _problem(
         native_moe, 3, seed=26, num_experts=8, top_k=2
     )
     dispatcher.set_grouped_decode(True, 2)
     dispatcher.set_deterministic_accum(True)
-    _run(dispatcher, x, mask, weights)
-    _run(dispatcher, x, mask, weights)  # resident: would group without slots
-    assert dispatcher.get_routing_stats()["grouped_batches"] == 0
+    _run(dispatcher, x, mask, weights)  # cold: per-expert
+    out = _run(dispatcher, x, mask, weights)  # resident: grouped
+    stats = dispatcher.get_routing_stats()
+    assert stats["accum_slot_dispatches"] >= 2
+    assert stats["accum_atomic_dispatches"] == 0
+    assert stats["grouped_batches"] >= 1
+    # only experts homed on the hidden-state device (cuda:0) can group
+    active = mask.any(0).nonzero().flatten().tolist()
+    assert stats["grouped_experts"] == sum(
+        1 for e in active if _home_device(e) == 0
+    )
+    assert stats["grouped_experts"] > 0
+    # the grouped result is the same value the per-expert path produces
+    dispatcher.set_grouped_decode(False, 2)
+    per_expert = _run(dispatcher, x, mask, weights)
+    scale = per_expert.abs().max()
+    assert (out - per_expert).abs().max() <= 4 * 2**-8 * scale
 
-    dispatcher.set_deterministic_accum(False)
-    _run(dispatcher, x, mask, weights)
-    assert dispatcher.get_routing_stats()["grouped_batches"] >= 1
+
+def _masked_routing(tokens, allowed, num_experts, top_k, gen):
+    """top_k experts per token drawn from `allowed` only."""
+    logits = torch.randn(tokens, num_experts, generator=gen)
+    keep = torch.full((num_experts,), float("-inf"))
+    keep[list(allowed)] = 0.0
+    top = (logits + keep).topk(top_k, dim=1).indices
+    mask = torch.zeros(tokens, num_experts, dtype=torch.bool)
+    mask.scatter_(1, top, True)
+    weights = torch.softmax(logits, dim=1) * mask
+    return mask.cuda(), weights.to(torch.bfloat16).cuda()
+
+
+def _grouped_problem(slot_moe, tokens, seed, allowed=None):
+    gen = torch.Generator().manual_seed(seed)
+    engine, dispatcher, experts = slot_moe(NUM_EXPERTS, HIDDEN, INTER, gen)
+    x = torch.randn(tokens, HIDDEN, generator=gen).bfloat16().cuda()
+    allowed = list(range(NUM_EXPERTS)) if allowed is None else allowed
+    mask, weights = _masked_routing(tokens, allowed, NUM_EXPERTS, TOP_K, gen)
+    dispatcher.set_grouped_decode(True, TOP_K)
+    return engine, dispatcher, experts, x, mask, weights
+
+
+@requires_cuda
+@requires_grouped
+@pytest.mark.parametrize("tokens", [1, 7])
+def test_all_grouped_accumulator_is_bitwise_stable(slot_moe, tokens):
+    torch.cuda.set_device(0)
+    # Only experts homed on cuda:0 (with two GPUs the others cannot group).
+    allowed = [e for e in range(NUM_EXPERTS) if _home_device(e) == 0]
+    _, dispatcher, _, x, mask, weights = _grouped_problem(
+        slot_moe, tokens, seed=31, allowed=allowed
+    )
+    different = _count_different(dispatcher, x, mask, weights)
+    stats = dispatcher.get_routing_stats()
+    assert different == 0, (
+        f"{different} of {REPEATS} dispatches gave a different accumulator "
+        f"(all grouped, tokens={tokens})"
+    )
+    assert stats["grouped_experts"] >= (REPEATS + 1) * int(mask.any(0).sum())
+    assert stats["accum_slot_dispatches"] > 0
+    assert stats["accum_atomic_dispatches"] == 0
+
+
+@requires_cuda
+@requires_grouped
+@pytest.mark.parametrize("tokens", [1, 7])
+def test_mixed_grouped_and_fetched_accumulator_is_bitwise_stable(
+    tmp_path, tokens
+):
+    """One layer with grouped experts (resident) and per-expert ones (still
+    being fetched). Which experts group changes their values (the kernels round
+    differently), so the mix has to be the same every time: each repeat builds
+    a fresh engine, makes the first half of the active experts resident, then
+    dispatches all of them."""
+    torch.cuda.set_device(0)
+
+    def one(n):
+        gen = torch.Generator().manual_seed(32)
+        engine, dispatcher, _ = _make_dispatcher(
+            tmp_path / f"run{n}", NUM_EXPERTS, HIDDEN, INTER, gen
+        )
+        try:
+            x = torch.randn(tokens, HIDDEN, generator=gen).bfloat16().cuda()
+            allowed = [e for e in range(NUM_EXPERTS) if _home_device(e) == 0]
+            mask, weights = _masked_routing(
+                tokens, allowed, NUM_EXPERTS, TOP_K, gen
+            )
+            dispatcher.set_grouped_decode(True, TOP_K)
+            active = mask.any(0).nonzero().flatten().tolist()
+            assert len(active) >= 4
+            half = torch.zeros_like(mask)
+            keep = active[: len(active) // 2]
+            half[:, keep] = mask[:, keep]
+            _run(dispatcher, x, half, weights)  # these become resident
+            out = _run(dispatcher, x, mask, weights)  # grouped + fetched
+            stats = dispatcher.get_routing_stats()
+            return (
+                out,
+                stats["grouped_experts"],
+                len(active),
+                stats["accum_atomic_dispatches"],
+            )
+        finally:
+            dispatcher = None
+            engine = None
+            gc.collect()
+
+    reference, grouped, active, _ = one(0)
+    assert 0 < grouped < active, (grouped, active)
+    different = 0
+    atomic_dispatches = 0
+    for n in range(1, REPEATS + 1):
+        out, grouped_n, _, atomic = one(n)
+        assert grouped_n == grouped
+        atomic_dispatches += atomic
+        different += int(not torch.equal(out, reference))
+    assert different == 0, (
+        f"{different} of {REPEATS} dispatches gave a different accumulator "
+        f"(mixed, tokens={tokens})"
+    )
+    assert atomic_dispatches == 0
+
+
+@requires_cuda
+@requires_grouped
+@requires_two_gpus
+@pytest.mark.parametrize("tokens", [1, 7])
+def test_mixed_across_two_gpus_accumulator_is_bitwise_stable(slot_moe, tokens):
+    """Experts homed on cuda:0 run grouped, those on cuda:1 per-expert."""
+    torch.cuda.set_device(0)
+    _, dispatcher, _, x, mask, weights = _grouped_problem(
+        slot_moe, tokens, seed=33
+    )
+    homes = {_home_device(e) for e in mask.any(0).nonzero().flatten().tolist()}
+    assert homes == {0, 1}
+
+    different = _count_different(dispatcher, x, mask, weights)
+    stats = dispatcher.get_routing_stats()
+    assert different == 0, (
+        f"{different} of {REPEATS} dispatches gave a different accumulator "
+        f"(grouped + other GPU, tokens={tokens})"
+    )
+    assert stats["grouped_experts"] > 0
+    assert stats["accum_atomic_dispatches"] == 0
 
 
 @requires_cuda

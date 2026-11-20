@@ -407,8 +407,9 @@ class ExpertDispatcher : public base::noncopyable {
   // adding into the shared accumulator, and WaitHiddenStates reduces the slots
   // in a fixed order. MOE_DETERMINISTIC_ACCUM=0 disables it at construction,
   // MOE_DETERMINISTIC_ACCUM_BYTES sets the budget (default 256 MiB);
-  // budget_bytes < 0 keeps the current budget. In slot mode no grouped batches
-  // are formed (the grouped kernel adds atomically).
+  // budget_bytes < 0 keeps the current budget. The grouped decode kernel
+  // stores into the same slots (its own rank is replaced by the rank table
+  // below), so grouped and per-expert items of one layer mix freely.
   void SetDeterministicAccum(bool enabled, std::int64_t budget_bytes = -1);
   void SetDispatchFaultForTest(const std::string& stage);
   void FailDispatchForTest(std::uint64_t generation,
@@ -695,14 +696,22 @@ class ExpertDispatcher : public base::noncopyable {
   // replaces (zero-fills) it.
   std::atomic<bool> det_accum_enabled_{true};
   std::atomic<std::int64_t> det_accum_budget_bytes_{256LL << 20};
-  torch::Tensor accum_slots_;      // [T, R, H] fp32 on the accumulator device
+  // [T, rows, H] fp32 on the accumulator device. rows == R, or R + 1 when R is
+  // bounded by the top_k hint (R < num_experts): the extra row is a dump for
+  // ranks >= R, whose contributions are added atomically instead (a token with
+  // more active experts than the hint; correct, not deterministic).
+  torch::Tensor accum_slots_;
   torch::Tensor accum_slot_rank_;  // [T, E] int64: rank of expert e for token t
   std::int64_t accum_slot_count_ = 0;  // R of the current dispatch
+  bool accum_slot_guard_ = false;      // R < num_experts: rank >= R possible
+  // Per accumulator device: number of dispatches whose rank table exceeded R
+  // (device-side counter, read only by get_routing_stats).
+  std::unordered_map<int, torch::Tensor> accum_overflow_dev_;
+  std::int64_t AccumOverflowCount();
   std::atomic<std::int64_t> accum_slot_dispatches_{0};
   std::atomic<std::int64_t> accum_atomic_dispatches_{0};
   std::atomic<std::int64_t> accum_slot_last_bytes_{0};
   std::atomic<std::int64_t> accum_slot_peak_bytes_{0};
-  std::atomic<std::int64_t> accum_slot_overflow_{0};
   void BuildAccumSlots(const torch::Tensor& hidden_states, int device);
   void ReduceAccumSlots(int device, cudaStream_t caller_stream);
 };
