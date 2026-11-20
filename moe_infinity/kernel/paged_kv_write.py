@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from moe_infinity.kernel._device import device_guard
+
 try:
     import triton
     import triton.language as tl
@@ -342,6 +344,7 @@ def _mergeable(key, value, k_geo, v_geo, bs: int) -> bool:
     return True
 
 
+@device_guard
 def _launch(key, value, slots, k_dst, v_dst, k_geo, v_geo, num_blocks, bs):
     global _FAST_LAUNCH
     num_tokens, num_kv_heads, head_dim = key.shape
@@ -445,6 +448,7 @@ def _block_offsets(slots: torch.Tensor, block_size: int):
     return block_ids, slots - block_ids * block_size
 
 
+@device_guard
 def paged_kv_scatter_(
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
@@ -482,6 +486,7 @@ def paged_kv_scatter_(
     v_cache[block_ids, :, :, offsets] = value.to(v_cache.dtype)
 
 
+@device_guard
 def flashinfer_kv_scatter_(
     kv_cache: torch.Tensor,
     key: torch.Tensor,
@@ -513,6 +518,7 @@ def flashinfer_kv_scatter_(
     v_cache[block_ids, offsets] = value.to(kv_cache.dtype)
 
 
+@device_guard
 def paged_kv_write_(
     storage: "PagedKVStorage",
     *,

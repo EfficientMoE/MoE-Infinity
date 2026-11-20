@@ -8,6 +8,7 @@
 // the RTX PRO 6000, and for every non-SiLU activation on that GPU too
 // (see fused_moe_mlp.cu and docs/hardware-gated-kernels.md).
 
+#include <c10/cuda/CUDAGuard.h>
 #include "kernel/epilogue_utils.h"
 #include "kernel/fused_moe_mlp.h"
 
@@ -172,6 +173,8 @@ void fused_moe_ffn_into_generic(torch::Tensor& hidden,     // [M, H]
   TORCH_CHECK(hidden.scalar_type() == at::kBFloat16,
               "fused_moe_ffn_into: BF16 only");
   check_moe_activation(activation);
+  // CUTLASS launches below use the current device: make it the tensors'.
+  const c10::cuda::CUDAGuard device_guard(hidden.device());
 
   const int M = static_cast<int>(hidden.size(0));
   const int H = static_cast<int>(hidden.size(1));

@@ -7,6 +7,7 @@ Computes Q, K, V = X @ [W_q | W_k | W_v] in a single GEMM pass."""
 import triton
 import triton.language as tl
 import torch
+from moe_infinity.kernel._device import device_guard
 
 
 _AUTOTUNE_CONFIGS = [
@@ -113,6 +114,7 @@ def _fused_qkv_kernel(
     tl.store(v_ptrs, out, mask=v_mask)
 
 
+@device_guard
 def fused_qkv_proj(
     hidden_states: torch.Tensor,
     weight_qkv: torch.Tensor,

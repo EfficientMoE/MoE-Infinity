@@ -28,6 +28,8 @@ import torch
 import triton
 import triton.language as tl
 
+from moe_infinity.kernel._device import device_guard
+
 
 @triton.jit(do_not_specialize=["T"])
 def delta_rule_fwd_h_o_pro6000_kernel(
@@ -151,6 +153,7 @@ def delta_rule_fwd_h_o_pro6000_kernel(
         tl.store(p, b_h.to(ht.dtype.element_ty))
 
 
+@device_guard
 def delta_rule_fwd_h_o(
     q: torch.Tensor,
     k: torch.Tensor,

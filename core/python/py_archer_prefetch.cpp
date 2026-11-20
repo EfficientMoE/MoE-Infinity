@@ -4,6 +4,7 @@
 // EfficientMoE Team
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 #include "parallel/expert_dispatcher.h"
 #include "prefetch/archer_prefetch_handle.h"
@@ -16,6 +17,25 @@
 
 void BindTensorStoreSurface(py::class_<ArcherPrefetchHandle>& cls);
 
+// Makes the device of `t` current for the call and provides that device's
+// current stream. The bindings below used to pass
+// `at::cuda::getCurrentCUDAStream().stream()` straight to the kernel, i.e. the
+// stream of whatever device the calling thread happened to have current, which
+// is the wrong stream (or the NULL stream of the wrong device) when the tensors
+// live on another GPU.
+struct TensorDeviceStream {
+  explicit TensorDeviceStream(const at::Tensor& t) {
+    if (t.is_cuda()) {
+      guard.set_device(t.device());
+      stream = at::cuda::getCurrentCUDAStream(t.get_device()).stream();
+    } else {
+      stream = at::cuda::getCurrentCUDAStream().stream();
+    }
+  }
+  c10::cuda::OptionalCUDAGuard guard;
+  cudaStream_t stream = nullptr;
+};
+
 // Test/benchmark-only handle that runs the production MoEMLP::forward on
 // caller-provided weights, bypassing the tensor store and dispatcher. Staging
 // buffers live for the process lifetime (as in ExpertDispatcher), so reuse one
@@ -27,9 +47,9 @@ struct MoEMLPForTest {
   torch::Tensor Forward(torch::Tensor hidden_states,
                         const std::vector<torch::Tensor>& params) {
     py::gil_scoped_release release;
+    TensorDeviceStream ds(hidden_states);
     module->SetTensors(params);
-    return module->forward(hidden_states,
-                           at::cuda::getCurrentCUDAStream().stream());
+    return module->forward(hidden_states, ds.stream);
   }
 
   std::unique_ptr<MoEMLP> module;
@@ -195,9 +215,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
          const torch::Tensor& gate_s, const torch::Tensor& up_w,
          const torch::Tensor& up_s, const torch::Tensor& down_w,
          const torch::Tensor& down_s, torch::Tensor output) {
-        fused_fp8_moe_ffn_sm120_pro6000_into(
-            hidden, gate_w, gate_s, up_w, up_s, down_w, down_s, output,
-            at::cuda::getCurrentCUDAStream().stream());
+        TensorDeviceStream ds(hidden);
+        fused_fp8_moe_ffn_sm120_pro6000_into(hidden, gate_w, gate_s, up_w, up_s,
+                                             down_w, down_s, output, ds.stream);
       },
       "Native FP8 (e4m3, 128x128 block-scaled) SwiGLU expert into output "
       "(RTX PRO 6000 / sm_120 only)");
@@ -209,9 +229,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
          const torch::Tensor& router_weight, const torch::Tensor& expert_table,
          int64_t inter, int64_t kcap, torch::Tensor out, bool zero_out) {
+        TensorDeviceStream ds(hidden);
         grouped_moe_decode_pro6000(hidden, router_mask, router_weight,
                                    expert_table, inter, kcap, out, zero_out,
-                                   at::cuda::getCurrentCUDAStream().stream());
+                                   ds.stream);
       },
       py::arg("hidden"), py::arg("router_mask"), py::arg("router_weight"),
       py::arg("expert_table"), py::arg("inter"), py::arg("kcap"),
@@ -228,9 +249,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             activation >= static_cast<int>(MoEActivationKind::kSiLU) &&
                 activation <= static_cast<int>(MoEActivationKind::kSwiGLUOAI),
             "fused_moe_ffn_into: unknown activation kind ", activation);
+        TensorDeviceStream ds(hidden);
         cudaStream_t cuda_stream =
             stream.is_none()
-                ? at::cuda::getCurrentCUDAStream().stream()
+                ? ds.stream
                 : reinterpret_cast<cudaStream_t>(
                       py::hasattr(stream, "cuda_stream")
                           ? stream.attr("cuda_stream").cast<std::intptr_t>()
@@ -254,9 +276,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
          torch::Tensor down_proj, torch::Tensor fused_buf, torch::Tensor output,
          int dual_cfg, int dual_splits, int down_cfg, int down_splits) {
+        TensorDeviceStream ds(hidden);
         fused_moe_ffn_pro6000(hidden, gate_proj, up_proj, down_proj, fused_buf,
-                              output, at::cuda::getCurrentCUDAStream().stream(),
-                              dual_cfg, dual_splits, down_cfg, down_splits);
+                              output, ds.stream, dual_cfg, dual_splits,
+                              down_cfg, down_splits);
       },
       "fused_moe_ffn_into with an explicit tile config per GEMM (tests)");
   m.def(
@@ -265,10 +288,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
          const torch::Tensor& router_weight, const torch::Tensor& expert_table,
          int64_t inter, int64_t kcap, torch::Tensor out, bool zero_out,
          int dual_cfg, int down_cfg, int combine) {
+        TensorDeviceStream ds(hidden);
         grouped_moe_prefill_cfg(hidden, router_mask, router_weight,
                                 expert_table, inter, kcap, out, zero_out,
-                                dual_cfg, down_cfg, combine,
-                                at::cuda::getCurrentCUDAStream().stream());
+                                dual_cfg, down_cfg, combine, ds.stream);
       },
       py::arg("hidden"), py::arg("router_mask"), py::arg("router_weight"),
       py::arg("expert_table"), py::arg("inter"), py::arg("kcap"),
@@ -282,9 +305,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,
          torch::Tensor down_proj, torch::Tensor gate_buf,
          torch::Tensor fused_buf, torch::Tensor output) {
+        TensorDeviceStream ds(hidden);
         fused_moe_ffn_into_generic(hidden, gate_proj, up_proj, down_proj,
-                                   gate_buf, fused_buf, output,
-                                   at::cuda::getCurrentCUDAStream().stream());
+                                   gate_buf, fused_buf, output, ds.stream);
       },
       "fused_moe_ffn_into's fallback on non-RTX PRO 6000 GPUs (tests)");
   m.def(
@@ -292,9 +315,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       [](const torch::Tensor& hidden, const torch::Tensor& router_mask,
          const torch::Tensor& router_weight, const torch::Tensor& expert_table,
          int64_t inter, torch::Tensor out, bool zero_out) {
-        grouped_moe_prefill_per_expert(
-            hidden, router_mask, router_weight, expert_table, inter, out,
-            zero_out, at::cuda::getCurrentCUDAStream().stream());
+        TensorDeviceStream ds(hidden);
+        grouped_moe_prefill_per_expert(hidden, router_mask, router_weight,
+                                       expert_table, inter, out, zero_out,
+                                       ds.stream);
       },
       "grouped_moe_prefill's fallback on non-RTX PRO 6000 GPUs (tests)");
   m.def("fused_moe_ffn_pro6000_enabled", &fused_moe_ffn_pro6000_enabled,

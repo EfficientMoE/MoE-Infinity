@@ -26,6 +26,8 @@ import torch
 import triton
 import triton.language as tl
 
+from moe_infinity.kernel._device import device_guard
+
 
 @triton.jit
 def _wu_row(A0, A1, A2, A3, x0, x1, x2, x3, R: tl.constexpr):
@@ -1031,6 +1033,7 @@ def kda_fwd_aux_pro6000_kernel(
     tl.store(gl + ((i_b * (TB // BT) + i_t) * HV + i_h) * K + o_k, s2 + d3)
 
 
+@device_guard
 def gdn_fwd_prep(
     k: torch.Tensor,
     v: torch.Tensor,

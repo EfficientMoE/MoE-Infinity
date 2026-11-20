@@ -2,7 +2,10 @@ from typing import Optional, Tuple
 
 import torch
 
+from moe_infinity.kernel._device import device_guard
 
+
+@device_guard
 def sglang_topk_softmax(
     gating_output: torch.Tensor,
     topk: int,

@@ -10,6 +10,8 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from moe_infinity.kernel._device import device_guard
+
 
 @triton.jit
 def _silu(x):
@@ -173,6 +175,7 @@ def reference_ffn(
     return (F.silu(x @ gate_w.T) * (x @ up_w.T)) @ down_w.T
 
 
+@device_guard
 def fused_ffn(
     x: torch.Tensor,
     gate_weight: torch.Tensor,
