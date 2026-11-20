@@ -15,6 +15,8 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <memory>
+#include <type_traits>
 #include <chrono>
 #include <thread>
 #include <vector>
@@ -29,7 +31,7 @@ TEST(ThreadSafeQueueTest, SingleThreadedPushPop) {
   int value;
 
   int a = 1;
-  queue.Push(a);
+  EXPECT_TRUE(queue.Push(a));
   ASSERT_TRUE(queue.Pop(value));
   ASSERT_EQ(value, 1);
 }
@@ -37,7 +39,7 @@ TEST(ThreadSafeQueueTest, SingleThreadedPushPop) {
 TEST(ThreadSafeQueueTest, SequentialPushParallelPop) {
   ThreadSafeQueue<int> queue;
 
-  for (int i = 0; i < 10; i++) queue.Push(i);
+  for (int i = 0; i < 10; i++) EXPECT_TRUE(queue.Push(i));
 
   std::vector<std::thread> threads;
   std::vector<int> results(10);
@@ -62,7 +64,7 @@ TEST(ThreadSafeQueueTest, ParallelPushSequentialPop) {
   for (int i = 0; i < 10; i++) {
     threads.emplace_back([&queue, i]() {
       int val = i;
-      queue.Push(val);
+      EXPECT_TRUE(queue.Push(val));
     });
   }
   for (auto& t : threads) t.join();
@@ -86,7 +88,7 @@ TEST(ThreadSafeQueueTest, ParallelPushParallelPop) {
   for (int i = 0; i < 10; i++) {
     push_threads.emplace_back([&queue, i]() {
       int val = i;
-      queue.Push(val);
+      EXPECT_TRUE(queue.Push(val));
     });
   }
 
@@ -111,6 +113,29 @@ TEST(ThreadSafeQueueTest, ParallelPushParallelPop) {
 // New edge-case and correctness tests
 // ---------------------------------------------------------------------------
 
+// Push reports a closed queue instead of dropping the item silently, and
+// leaves the item with the caller (not moved from).
+TEST(ThreadSafeQueueTest, PushToClosedQueueReportsFailureAndKeepsItem) {
+  ThreadSafeQueue<std::unique_ptr<int>> queue;
+  auto accepted = std::make_unique<int>(1);
+  EXPECT_TRUE(queue.Push(accepted));
+  EXPECT_EQ(accepted, nullptr);  // moved into the queue
+
+  queue.Close();
+  auto rejected = std::make_unique<int>(2);
+  static_assert(std::is_same_v<decltype(queue.Push(rejected)), bool>,
+                "Push must report whether the item was queued");
+  EXPECT_FALSE(queue.Push(rejected));
+  ASSERT_NE(rejected, nullptr);  // still owned by the caller
+  EXPECT_EQ(*rejected, 2);
+
+  // Items queued before Close are still delivered, the rejected one is not.
+  std::unique_ptr<int> out;
+  EXPECT_TRUE(queue.Pop(out));
+  EXPECT_EQ(*out, 1);
+  EXPECT_FALSE(queue.Pop(out));
+}
+
 // TryPop on an empty queue returns false without blocking.
 TEST(ThreadSafeQueueTest, TryPopOnEmptyReturnsFalse) {
   ThreadSafeQueue<int> queue;
@@ -123,7 +148,7 @@ TEST(ThreadSafeQueueTest, TryPopOnEmptyReturnsFalse) {
 TEST(ThreadSafeQueueTest, TryPopAfterPush) {
   ThreadSafeQueue<int> queue;
   int v = 99;
-  queue.Push(v);
+  EXPECT_TRUE(queue.Push(v));
 
   int out = -1;
   EXPECT_TRUE(queue.TryPop(out));
@@ -139,7 +164,7 @@ TEST(ThreadSafeQueueTest, EmptyMethod) {
   EXPECT_TRUE(queue.Empty());
 
   int v = 42;
-  queue.Push(v);
+  EXPECT_TRUE(queue.Push(v));
   EXPECT_FALSE(queue.Empty());
 
   queue.TryPop(v);
@@ -149,7 +174,7 @@ TEST(ThreadSafeQueueTest, EmptyMethod) {
 // FIFO ordering guaranteed in single-threaded use.
 TEST(ThreadSafeQueueTest, FifoOrderSingleThread) {
   ThreadSafeQueue<int> queue;
-  for (int i = 0; i < 10; i++) queue.Push(i);
+  for (int i = 0; i < 10; i++) EXPECT_TRUE(queue.Push(i));
 
   for (int i = 0; i < 10; i++) {
     int v;
@@ -179,7 +204,7 @@ TEST(ThreadSafeQueueTest, PopBlocksUntilProducer) {
   EXPECT_FALSE(consumer_done.load());
 
   int v = 7;
-  queue.Push(v);
+  EXPECT_TRUE(queue.Push(v));
   consumer.join();
 
   EXPECT_TRUE(consumer_done.load());
@@ -204,7 +229,7 @@ TEST(ThreadSafeQueueTest, MultipleConsumersEachGetOne) {
 
   // Produce N items after consumers are likely blocked.
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  for (int i = 0; i < N; i++) queue.Push(i);
+  for (int i = 0; i < N; i++) EXPECT_TRUE(queue.Push(i));
 
   for (auto& t : consumers) t.join();
 
@@ -235,7 +260,7 @@ TEST(ThreadSafeQueueTest, HighConcurrencyStress) {
     producers.emplace_back([&queue, t]() {
       for (int i = 0; i < kItemsPerProducer; i++) {
         int v = t * kItemsPerProducer + i;
-        queue.Push(v);
+        EXPECT_TRUE(queue.Push(v));
       }
     });
   }

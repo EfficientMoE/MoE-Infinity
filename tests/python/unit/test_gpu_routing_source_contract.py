@@ -110,6 +110,9 @@ def test_fail_dispatch_is_generation_explicit_and_wait_never_recurses_lock():
 
 
 def test_completion_retirement_is_autonomous():
+    header = (ROOT / "core/parallel/expert_dispatcher.h").read_text(
+        encoding="utf-8"
+    )
     source = (ROOT / "core/parallel/expert_dispatcher.cpp").read_text(
         encoding="utf-8"
     )
@@ -118,7 +121,43 @@ def test_completion_retirement_is_autonomous():
         "void ExpertDispatcher::DispatchExperts",
         "void ExpertDispatcher::FailDispatch",
     )
-    assert "CompletionWaitsConsumedCallback" in source
+    wait = _function_body(
+        "core/parallel/expert_dispatcher.cpp",
+        "torch::Tensor ExpertDispatcher::WaitHiddenStates",
+        "void ExpertDispatcher::SetInputs",
+    )
     assert "CompletionRetirementFunc" in source
     assert "QueueUnwaitedEventsForQuery" in source
+    assert "QueueUnwaitedEventsForQuery(std::move(events))" in wait
+    assert "cudaLaunchHostFunc" not in wait
+    assert "CompletionWaitsConsumedCallback" not in source + header
+    assert "pending_completion_retirement_callbacks_" not in source + header
+    assert "completion_repush_mutex_" not in source + header
     assert "completion_events_.clear()" not in dispatch
+
+
+def test_expert_and_group_retirement_use_event_polling_without_mode_guard():
+    header = (ROOT / "core/parallel/expert_dispatcher.h").read_text(
+        encoding="utf-8"
+    )
+    source = (ROOT / "core/parallel/expert_dispatcher.cpp").read_text(
+        encoding="utf-8"
+    )
+    output = _function_body(
+        "core/parallel/expert_dispatcher.cpp",
+        "bool ExpertDispatcher::OutputFunc",
+        "namespace {",
+    )
+    grouped = _function_body(
+        "core/parallel/expert_dispatcher.cpp",
+        "void ExpertDispatcher::GroupedExec",
+        "std::vector<ExpertDispatcher::CallResult> ExpertDispatcher::Wait()",
+    )
+    assert "Exp752Mode" not in source + header
+    assert "MOEI_EXP752_MODE" not in source + header
+    assert "ExpertReadyToRetireCallback" not in source + header
+    assert "GroupReadyToRetireCallback" not in source + header
+    assert "cudaLaunchHostFunc" not in output
+    assert "cudaLaunchHostFunc" not in grouped
+    assert "EnqueueRetirement(" in output
+    assert "EnqueueRetirement(" in grouped

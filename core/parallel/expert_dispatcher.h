@@ -73,6 +73,12 @@ class ExpertDispatcher : public base::noncopyable {
     std::uint64_t generation = 0;
     bool cache_slot_reserved = false;
     bool cache_key_inserted = false;
+    // Set by Enqueue once this call owns the node's IDLE -> FETCHING claim.
+    // A call that did not claim (CAS deadline, queued behind a prefetch, an
+    // exception before the claim) must not be "restored" to IDLE by a failure
+    // of the dispatch: the node belongs to someone else (a pending retirement
+    // or the prefetcher) and publishing IDLE would free it under them.
+    bool claimed = false;
   } CallArgs;
   typedef struct {
     torch::Tensor hidden_states =
@@ -141,7 +147,7 @@ class ExpertDispatcher : public base::noncopyable {
     bool overload_owned = false;
   } FailureContext;
 
-  typedef struct {
+  struct ExpertRetireArgs {
     ExpertDispatcher* dispatcher = nullptr;
     ExpertNodePtr expert_node = nullptr;
     std::uint64_t generation = 0;
@@ -151,22 +157,14 @@ class ExpertDispatcher : public base::noncopyable {
     std::uint64_t residency_lease = 0;
     std::uint64_t execution_lease_id = 0;
     ResidencyVariantKey execution_key;
-  } ExpertRetireArgs;
-
-  struct GroupRetireArgs {
-    ExpertDispatcher* dispatcher = nullptr;
-    std::uint64_t generation = 0;
-    std::vector<ExpertRetireArgs> items;
+    cudaEvent_t retire_event = nullptr;
+    std::vector<ExpertRetireArgs> group_items;
   };
 
   struct CompletionEventRecord {
     cudaEvent_t event = nullptr;
     std::uint64_t generation = 0;
     int device = 0;
-  };
-  struct CompletionRetireBatch {
-    ExpertDispatcher* dispatcher = nullptr;
-    std::vector<CompletionEventRecord> records;
   };
   struct CompletionRetireItem {
     CompletionEventRecord record;
@@ -178,9 +176,9 @@ class ExpertDispatcher : public base::noncopyable {
                             int expert_type, int num_threads = 1);
   ~ExpertDispatcher() {
     // Let any in-flight dispatch finish routing and expert execution before
-    // draining callbacks: OutputFunc launches retirement/completion callbacks,
-    // so waiting for the pipeline to quiesce prevents a callback from being
-    // launched against a half-destroyed dispatcher.
+    // draining callbacks/retirement: OutputFunc enqueues retirement work, so
+    // waiting for the pipeline to quiesce prevents new work from being
+    // submitted against a half-destroyed dispatcher.
     {
       std::unique_lock<std::mutex> lock(pending_mutex_);
       pending_cv_.wait(lock, [&] {
@@ -192,13 +190,6 @@ class ExpertDispatcher : public base::noncopyable {
       std::unique_lock<std::mutex> lock(route_callback_mutex_);
       route_callback_cv_.wait(lock, [&] {
         return pending_route_callbacks_.load(std::memory_order_acquire) == 0;
-      });
-    }
-    {
-      std::unique_lock<std::mutex> lock(completion_retirement_callback_mutex_);
-      completion_retirement_callback_cv_.wait(lock, [&] {
-        return pending_completion_retirement_callbacks_.load(
-                   std::memory_order_acquire) == 0;
       });
     }
     {
@@ -398,6 +389,17 @@ class ExpertDispatcher : public base::noncopyable {
   // kernels implement SiLU only, so any other kind keeps per-expert execution.
   void SetGroupedDecode(bool enabled, int top_k, int activation_kind = 0);
   void SetDispatchFaultForTest(const std::string& stage);
+  // Test hook: closes retirement_queue_ early (normally only the destructor
+  // does), to exercise a retirement push that finds the queue closed.
+  void CloseRetirementQueueForTest();
+  // Test hooks for the Enqueue() CAS deadline: shorten it, and make an expert
+  // look stuck in EXECUTING with one retirement pending (stick=true), or undo
+  // that (stick=false).
+  void SetEnqueueCasDeadlineMsForTest(int deadline_ms);
+  void StickExpertForTest(int layer_idx, int expert_idx, bool stick);
+  // exec_state of an expert's node (0 IDLE, 1 FETCHING, 2 EXECUTING, 3
+  // RESIZE_RESERVED).
+  int ExpertExecStateForTest(int layer_idx, int expert_idx) const;
   void FailDispatchForTest(std::uint64_t generation,
                            const std::string& message);
 
@@ -434,19 +436,20 @@ class ExpertDispatcher : public base::noncopyable {
   void RestoreFailureContext(const FailureContext& context) noexcept;
   bool IsStaleGeneration(std::uint64_t generation) const;
   void DropStaleExecArgs(ExecArgs& args, int gpu_id) noexcept;
+  // `claimed` (optional) reports whether the call took the node's claim, also
+  // when it throws.
   int EnqueueExpertOnDevice(int layer_idx, int expert_idx, int gpu_id,
-                            bool remote, int phase);
+                            bool remote, int phase, bool* claimed = nullptr);
   void CompleteOne(std::uint64_t generation) noexcept;
   void NotifyPendingWaiters() noexcept;
   void NotifyCacheWaiters(int gpu_id) noexcept;
 
-  static void CUDART_CB CompletionWaitsConsumedCallback(void* opaque);
   void CompletionRetirementFunc();
   void QueueUnwaitedEventsForQuery(
       std::vector<CompletionEventRecord> records) noexcept;
 
-  static void CUDART_CB ExpertReadyToRetireCallback(void* opaque);
-  static void CUDART_CB GroupReadyToRetireCallback(void* opaque);
+  void EnqueueRetirement(ExpertRetireArgs retire, cudaStream_t stream);
+  void RetireOneExpert(const ExpertRetireArgs& args) noexcept;
   void RetirementFunc();
 
   // Grouped decode path. GroupedEligible is evaluated on the cache-hit
@@ -653,12 +656,23 @@ class ExpertDispatcher : public base::noncopyable {
   std::vector<CompletionEventRecord> destructor_fallback_events_;
   ThreadSafeQueue<std::vector<CompletionRetireItem>>
       completion_retirement_queue_;
-  std::atomic<std::int64_t> pending_completion_retirement_callbacks_{0};
-  std::mutex completion_retirement_callback_mutex_;
-  std::condition_variable completion_retirement_callback_cv_;
 
   ThreadSafeQueue<ExpertRetireArgs> retirement_queue_;
   std::atomic<std::int64_t> pending_retirement_callbacks_{0};
+  // How long Enqueue() waits for the previous dispatch of an expert to be
+  // retired (its node back to IDLE) before it fails the dispatch. A
+  // retirement completes when the expert's exec stream reaches its retire
+  // event: one expert forward (milliseconds) plus whatever is queued ahead of
+  // it on that stream. 30 s is six times the 5 s the repo itself allows
+  // exec streams to drain in memory resize (moe_infinity/engine/
+  // memory_resize.py timeout_ms) and ~10^4 times a decode expert, so in
+  // normal operation it only fires on a retire event that never signals
+  // (stream error, lost event). It does fire if a GPU stalls for longer than
+  // the deadline; the failure then leaves that expert's node alone (it is
+  // published IDLE only by its own retirement when that eventually
+  // completes), so a slow-but-live retirement is never overtaken.
+  static constexpr int kEnqueueCasDeadlineMs = 30000;
+  std::atomic<int> enqueue_cas_deadline_ms_{kEnqueueCasDeadlineMs};
   std::mutex retirement_callback_mutex_;
   std::condition_variable retirement_callback_cv_;
 
