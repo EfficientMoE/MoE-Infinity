@@ -1336,8 +1336,25 @@ class MoE:
                 )
             self._configure_hook(input_ids)
             self.model.eval()
+            # transformers derives position_ids / masks from the tensors it is
+            # given, so they have to live with the model (the native path moves
+            # the prompt the same way). Tensor kwargs (attention_mask, ...) go
+            # along; the result returns to the device the caller's ids were on,
+            # as the native path does.
+            caller_device = input_ids.device
+            model_device = self._resolve_native_input_device()
+            input_ids = input_ids.to(model_device)
+            kwargs = {
+                name: value.to(model_device)
+                if isinstance(value, torch.Tensor)
+                else value
+                for name, value in kwargs.items()
+            }
             with torch.no_grad():
-                return self.model.generate(input_ids, **kwargs)
+                output = self.model.generate(input_ids, **kwargs)
+            if isinstance(output, torch.Tensor):
+                output = output.to(caller_device)
+            return output
 
         if native_engine is None:
             raise RuntimeError(
