@@ -22,6 +22,7 @@ set(ARCHER_CORE_CXX_SOURCES
   ${CMAKE_SOURCE_DIR}/core/memory/device_caching_allocator.cpp
   # parallel
   ${CMAKE_SOURCE_DIR}/core/parallel/expert_dispatcher.cpp
+  ${CMAKE_SOURCE_DIR}/core/parallel/expert_drop_select.cc
   ${CMAKE_SOURCE_DIR}/core/parallel/expert_module.cpp
   # store
   ${CMAKE_SOURCE_DIR}/core/store/tensor_store.cpp
@@ -48,12 +49,21 @@ set(ARCHER_CORE_CXX_SOURCES
   ${CMAKE_SOURCE_DIR}/core/base/thread_pool.cc
 )
 
+# Mirrors _STORE_SOURCES in setup.py (the Python build): a symbol that archer_core
+# references must be defined by a file in these two lists.
 set(ARCHER_CORE_CUDA_SOURCES
   ${CMAKE_SOURCE_DIR}/core/model/fused_mlp.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/fused_moe_mlp.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/fused_moe_mlp_generic.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/grouped_moe_decode_pro6000.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/grouped_moe_prefill.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/activation_kernels.cu
   ${CMAKE_SOURCE_DIR}/extensions/kernel/topk_softmax_kernels.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/v4_fp4/mxfp4_dequant.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/v4_fp4/mxfp4_gptoss_moe.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/v4_fp4/gptoss_expert.cpp
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/v4_fp4/fp8_dequant.cu
+  ${CMAKE_SOURCE_DIR}/extensions/kernel/fp8_moe/fp8_moe.cu
 )
 
 add_library(archer_core STATIC
