@@ -271,8 +271,8 @@ class ExpertDispatcher : public base::noncopyable {
     for (auto& event : exec_done_events_) {
       cudaEventDestroy(event);
     }
-    if (input_ready_event_ != nullptr) {
-      cudaEventDestroy(input_ready_event_);
+    for (auto& event : input_ready_events_) {
+      if (event != nullptr) cudaEventDestroy(event);
     }
     for (auto* m : modules_) {
       delete m;
@@ -514,7 +514,17 @@ class ExpertDispatcher : public base::noncopyable {
 
   std::vector<cudaStream_t> exec_streams_;
   std::vector<cudaEvent_t> exec_done_events_;
-  cudaEvent_t input_ready_event_ = nullptr;
+  // One event per device, each created with that device current and recorded
+  // on the caller stream of that device (see SetInputs). Exec streams wait on
+  // the event of the device that holds hidden_states_ (input_device_).
+  std::vector<cudaEvent_t> input_ready_events_;
+  std::atomic<int> input_device_{0};
+  cudaEvent_t InputReadyEvent() const {
+    const int d = input_device_.load(std::memory_order_acquire);
+    return d < static_cast<int>(input_ready_events_.size())
+               ? input_ready_events_[d]
+               : nullptr;
+  }
   std::vector<cudaStream_t> fetch_streams_;
 
   std::unique_ptr<std::atomic<bool>[]> gpu_overload_;

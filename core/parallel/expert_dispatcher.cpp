@@ -378,6 +378,7 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
   active_fetch_workers_.assign(kNumDevices(), 0);
   active_exec_workers_.assign(kNumDevices(), 0);
   cache_limit_bytes_.assign(kNumDevices(), -1);
+  input_ready_events_.assign(std::max(kNumDevices(), 1), nullptr);
 
   gpu_overload_ = std::make_unique<std::atomic<bool>[]>(kNumDevices());
   for (int i = 0; i < kNumDevices(); ++i) {
@@ -920,17 +921,22 @@ ExpertDispatcher::ResizeToken ExpertDispatcher::BeginMemoryResize(
   }
 
   cudaEvent_t fetch_event = nullptr;
-  cudaEventCreateWithFlags(&fetch_event, cudaEventDefault);
-  cudaEventRecord(fetch_event, fetch_streams_[device_id]);
-
   std::vector<cudaEvent_t> exec_events;
-  for (int thread_idx = 0; thread_idx < static_cast<int>(exec_streams_.size());
-       ++thread_idx) {
-    if (thread_idx % kNumDevices() != device_id) continue;
-    cudaEvent_t exec_event = nullptr;
-    cudaEventCreateWithFlags(&exec_event, cudaEventDefault);
-    cudaEventRecord(exec_event, exec_streams_[thread_idx]);
-    exec_events.push_back(exec_event);
+  {
+    // Create each event with the device of the stream it is recorded on
+    // current (all of these streams belong to device_id).
+    c10::cuda::CUDAGuard device_guard(device_id);
+    cudaEventCreateWithFlags(&fetch_event, cudaEventDefault);
+    cudaEventRecord(fetch_event, fetch_streams_[device_id]);
+
+    for (int thread_idx = 0;
+         thread_idx < static_cast<int>(exec_streams_.size()); ++thread_idx) {
+      if (thread_idx % kNumDevices() != device_id) continue;
+      cudaEvent_t exec_event = nullptr;
+      cudaEventCreateWithFlags(&exec_event, cudaEventDefault);
+      cudaEventRecord(exec_event, exec_streams_[thread_idx]);
+      exec_events.push_back(exec_event);
+    }
   }
 
   bool events_complete = false;
@@ -1565,8 +1571,19 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id, int thread_idx) {
 
       // Order the exec stream after the producer stream that wrote
       // hidden_states_/router_mask_ (recorded in SetInputs).
-      if (input_ready_event_ != nullptr) {
-        cudaStreamWaitEvent(stream, input_ready_event_, 0);
+      if (cudaEvent_t input_ready = InputReadyEvent()) {
+        CUDA_CHECK(cudaStreamWaitEvent(stream, input_ready, 0));
+        const int input_device = input_device_.load(std::memory_order_acquire);
+        if (input_device != gpu_id) {
+          // hidden_states_/router_mask_ live on another device and are read
+          // below on that device's current stream (the caller thread's
+          // stream is not ours), so order that stream after the producer too.
+          // (stream handle 0 is per-device: make that device current.)
+          c10::cuda::CUDAGuard input_guard(input_device);
+          CUDA_CHECK(cudaStreamWaitEvent(
+              c10::cuda::getCurrentCUDAStream(input_device).stream(),
+              input_ready, 0));
+        }
       }
 
       auto token_mask = router_mask_.index({"...", expert_idx});
@@ -1725,6 +1742,27 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
             router_weight_.index({token_mask, expert_idx}).unsqueeze(1);
         auto weighted_output = output_tensor * weights;
         final_hidden_states_.index_add_(0, token_indices, weighted_output);
+      }
+
+      const int acc_device = final_hidden_states_.device().index();
+      if (acc_device != gpu_id) {
+        // The accumulate ran on the accumulator device's current stream, not
+        // on exec_stream (a stream of gpu_id). Chain exec_stream after it so
+        // the completion event recorded on exec_stream below covers it.
+        cudaEvent_t accumulated = kCudaEventPool->Acquire(acc_device);
+        c10::cuda::CUDAGuard acc_guard(acc_device);  // stream 0 is per-device
+        cudaError_t acc_status = cudaEventRecord(
+            accumulated, c10::cuda::getCurrentCUDAStream(acc_device).stream());
+        if (acc_status == cudaSuccess) {
+          acc_status = cudaStreamWaitEvent(exec_stream, accumulated, 0);
+        }
+        kCudaEventPool->Release(accumulated);
+        if (acc_status != cudaSuccess) {
+          throw std::runtime_error(
+              std::string("OutputFunc: cross-device accumulate ordering "
+                          "failed: ") +
+              cudaGetErrorString(acc_status));
+        }
       }
 
       cudaEvent_t output_done = AcquireCompletionEvent(gpu_id);
@@ -1949,8 +1987,8 @@ void ExpertDispatcher::GroupedExec(ExecArgs& args, int gpu_id,
         m.transfer_event = nullptr;
       }
     }
-    if (input_ready_event_ != nullptr) {
-      CUDA_CHECK(cudaStreamWaitEvent(stream, input_ready_event_, 0));
+    if (cudaEvent_t input_ready = InputReadyEvent()) {
+      CUDA_CHECK(cudaStreamWaitEvent(stream, input_ready, 0));
     }
 
     // Expert table {gate*, up*, down*, expert_id}: one pinned async H2D copy.
@@ -2139,8 +2177,10 @@ torch::Tensor ExpertDispatcher::WaitHiddenStates() {
           pending_by_device_[dev] =
               std::max<std::int64_t>(0, pending_by_device_[dev] - items);
         }
-        cudaSetDevice(dev);
-        GroupedExec(args, dev, exec_streams_[0]);
+        // exec_streams_[dev] (dev < kNumDevices) was created on device `dev`;
+        // the guard restores the caller thread's current device afterwards.
+        c10::cuda::CUDAGuard inline_guard(dev);
+        GroupedExec(args, dev, exec_streams_[dev]);
         stole = true;
         break;
       }
@@ -2244,15 +2284,33 @@ void ExpertDispatcher::SetInputs(const torch::Tensor& hidden_states,
     std::lock_guard<std::mutex> lock(route_state_mutex_);
     route_error_ = nullptr;
   }
-  int device = at::cuda::current_device();
+  // Everything below belongs to the device that holds hidden_states: the
+  // accumulator, the zero index and the input-ready event are created with that
+  // device current, and the event is recorded on that device's current stream.
+  // (The calling thread's current device may be a different GPU when the
+  // model's layers are spread over several.)
+  const int device = hidden_states.is_cuda() ? hidden_states.device().index()
+                                             : at::cuda::current_device();
+  TORCH_CHECK(
+      device >= 0 && device < static_cast<int>(input_ready_events_.size()),
+      "SetInputs: device ", device, " is out of range");
+  c10::cuda::CUDAGuard device_guard(device);
   auto options =
       torch::TensorOptions().dtype(torch::kFloat32).device(CUDA_DEVICE(device));
   hidden_states_ = hidden_states;
-  router_mask_ = router_mask;
-  router_weight_ = router_weight;  // this can be float32
+  // router_mask_ / router_weight_ must be on the accumulator device: the
+  // weighting and index_add_ in OutputFunc mix them with the accumulator.
+  router_mask_ =
+      (router_mask.is_cuda() && router_mask.device().index() != device)
+          ? router_mask.to(CUDA_DEVICE(device))
+          : router_mask;
+  router_weight_ =
+      (router_weight.is_cuda() && router_weight.device().index() != device)
+          ? router_weight.to(CUDA_DEVICE(device))  // this can be float32
+          : router_weight;
   final_hidden_states_ = torch::zeros_like(hidden_states, options);
   {
-    // Created on the caller stream before input_ready_event_, which every
+    // Created on the caller stream before the input-ready event, which every
     // exec stream waits on before its first use.
     std::lock_guard<std::mutex> lock(accum_mutex_);
     auto& zero_index = zero_index_[device];
@@ -2261,17 +2319,31 @@ void ExpertDispatcher::SetInputs(const torch::Tensor& hidden_states,
     }
   }
 
-  if (input_ready_event_ == nullptr) {
-    cudaEventCreateWithFlags(&input_ready_event_, cudaEventDisableTiming);
+  // The event is created lazily with `device` current (guard above) and is
+  // only ever recorded on a stream of `device`.
+  if (input_ready_events_[device] == nullptr) {
+    CUDA_CHECK(cudaEventCreateWithFlags(&input_ready_events_[device],
+                                        cudaEventDisableTiming));
   }
-  cudaEventRecord(input_ready_event_, c10::cuda::getCurrentCUDAStream());
+  input_device_.store(device, std::memory_order_release);
+  CUDA_CHECK(cudaEventRecord(input_ready_events_[device],
+                             c10::cuda::getCurrentCUDAStream(device)));
 }
 
 void ExpertDispatcher::SyncExecStreamsWithCurrent() {
-  auto current = c10::cuda::getCurrentCUDAStream();
+  // The caller stream of the device holding the hidden states (the one the
+  // consumer of the accumulator runs on), not the default device's stream.
+  const int device =
+      final_hidden_states_.defined() && final_hidden_states_.is_cuda()
+          ? final_hidden_states_.device().index()
+          : at::cuda::current_device();
+  c10::cuda::CUDAGuard device_guard(device);  // stream 0 is per-device
+  auto current = c10::cuda::getCurrentCUDAStream(device);
   for (size_t i = 0; i < exec_streams_.size(); ++i) {
-    cudaEventRecord(exec_done_events_[i], exec_streams_[i]);
-    cudaStreamWaitEvent(current.stream(), exec_done_events_[i], 0);
+    // exec_done_events_[i] was created on device i % kNumDevices(), the
+    // device of exec_streams_[i].
+    CUDA_CHECK(cudaEventRecord(exec_done_events_[i], exec_streams_[i]));
+    CUDA_CHECK(cudaStreamWaitEvent(current.stream(), exec_done_events_[i], 0));
   }
 }
 
@@ -2303,7 +2375,7 @@ void ExpertDispatcher::DispatchExperts(
                   "DispatchExperts: unreaped completion events remain active");
       completion_events_.reserve(num_experts_);
     }
-    const int device = router_mask_.device().index();
+    const int device = final_hidden_states_.device().index();
     c10::cuda::CUDAGuard device_guard(device);
     auto host_options = torch::TensorOptions()
                             .dtype(torch::kBool)
