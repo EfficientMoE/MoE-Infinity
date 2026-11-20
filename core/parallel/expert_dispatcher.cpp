@@ -649,6 +649,14 @@ void ExpertDispatcher::InjectTransitionFailureOnceForTest(
 
 void ExpertDispatcher::EnqueueExpert(int layer_idx, int expert_idx, int gpu_id,
                                      bool remote, int phase) {
+  EnqueueExpertOnDevice(layer_idx, expert_idx, gpu_id, remote, phase);
+}
+
+// Returns the device whose queue the item was actually pushed to: a cache-hit
+// expert runs where its node resides, which may differ from the requested one.
+int ExpertDispatcher::EnqueueExpertOnDevice(int layer_idx, int expert_idx,
+                                            int gpu_id, bool remote,
+                                            int phase) {
   ExpertDispatcher::CallArgs args;
   args.layer_idx = layer_idx;
   args.expert_idx = expert_idx;
@@ -661,6 +669,7 @@ void ExpertDispatcher::EnqueueExpert(int layer_idx, int expert_idx, int gpu_id,
   args.invocation_id = current_invocation_id_;
   args.generation = current_generation_.load(std::memory_order_acquire);
   Enqueue(args);
+  return args.gpu_id;
 }
 
 void ExpertDispatcher::AdmitAndCount(int device_id) {
@@ -2663,11 +2672,18 @@ void ExpertDispatcher::RouteFunc() noexcept {
         last_active_experts_ = dispatch_experts;
       }
       for (int expert_idx : dispatch_experts) {
-        int gpu_id = expert_idx % kNumDevices();
-        routed_contexts.push_back(FailureContext{
-            experts_[expert_idx][args.layer_idx], gpu_id, false, false, false});
-        EnqueueExpert(args.layer_idx, expert_idx, expert_idx % kNumDevices(),
-                      false);
+        // Default device for the failure context if Enqueue throws: where the
+        // expert will run (its node's device when resident).
+        const auto& expert = experts_[expert_idx][args.layer_idx];
+        int gpu_id = (expert && expert->node && expert->node->device.is_cuda())
+                         ? expert->node->device.index()
+                         : expert_idx % kNumDevices();
+        routed_contexts.push_back(
+            FailureContext{expert, gpu_id, false, false, false});
+        // Record the device the item was really enqueued on.
+        routed_contexts.back().gpu_id = EnqueueExpertOnDevice(
+            args.layer_idx, expert_idx, expert_idx % kNumDevices(), false,
+            static_cast<int>(ExpertPhase::MIXED));
       }
       NotifyFetchStart();
       route_batches_.fetch_add(1, std::memory_order_relaxed);

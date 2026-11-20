@@ -418,6 +418,8 @@ class ExpertDispatcher : public base::noncopyable {
   void RestoreFailureContext(const FailureContext& context) noexcept;
   bool IsStaleGeneration(std::uint64_t generation) const;
   void DropStaleExecArgs(ExecArgs& args, int gpu_id) noexcept;
+  int EnqueueExpertOnDevice(int layer_idx, int expert_idx, int gpu_id,
+                            bool remote, int phase);
   void CompleteOne(std::uint64_t generation) noexcept;
   void NotifyPendingWaiters() noexcept;
   void NotifyCacheWaiters(int gpu_id) noexcept;
