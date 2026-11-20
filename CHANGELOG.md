@@ -5,6 +5,8 @@ All notable changes to MoE-Infinity will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- `MoE.generate` on the Hugging Face path (`use_native_engine=False`, or a batch the native engine does not take) no longer fails with "Expected all tensors to be on the same device" for CPU `input_ids`: the prompt and any tensor `generate` kwargs (`attention_mask`, ...) are moved to the input-embedding device, and the result comes back on the caller's device, as on the native path.
+- `DistributedExpertExecutor.dispatch` (legacy multi-node path) passed two arguments to the three-argument `set_inputs` binding; it now passes a boolean mask and the routing weights, locally and in the RPC call.
 - Expert-cache simulator: `extract_access_sequence` / `vectorized_access_sequence` with `include_prefill=False` now drop every non-decode record (by SGLang `forward_mode`), not just `records[0]`. Merged multi-request streams (`convert_sglang_traces --merge`) previously leaked one prefill pass per request into the "decode" stream — 52% of the accesses of the published Qwen3-30B-A3B and Qwen3-235B real-trace sweeps — which inflated LRU and Belady at small capacities (e.g. Qwen3-30B-A3B at 256 entries: LRU 0.4565 -> 0.0000, Belady 0.7028 -> 0.5013 on the decode-only stream). Records without `forward_mode` keep the old behaviour. Corrected tables: `benchmarks/cache_simulator/research/decode_policy_study.md`.
 
 - Phase-specific expert policy: admission modes now reach the native `configure_phase_policy` binding as `AdmissionMode` values instead of names, which the binding rejected.
