@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import traceback
 
 PROMPTS = [
@@ -65,7 +66,7 @@ def parse_args():
     p.add_argument(
         "--offload-path",
         default=os.path.join(
-            os.environ.get("TMPDIR", "/tmp"), "opencode", "issue362", "offload"
+            tempfile.gettempdir(), "moe-infinity-issue362", "offload"
         ),
     )
     p.add_argument(
