@@ -370,6 +370,11 @@ class ExpertDispatcher : public base::noncopyable {
   // Test hook: closes retirement_queue_ early (normally only the destructor
   // does), to exercise a retirement push that finds the queue closed.
   void CloseRetirementQueueForTest();
+  // Test hooks for the Enqueue() CAS deadline: shorten it, and make an expert
+  // look stuck in EXECUTING with one retirement pending (stick=true), or undo
+  // that (stick=false).
+  void SetEnqueueCasDeadlineMsForTest(int deadline_ms);
+  void StickExpertForTest(int layer_idx, int expert_idx, bool stick);
   void FailDispatchForTest(std::uint64_t generation,
                            const std::string& message);
 
@@ -612,6 +617,17 @@ class ExpertDispatcher : public base::noncopyable {
 
   ThreadSafeQueue<ExpertRetireArgs> retirement_queue_;
   std::atomic<std::int64_t> pending_retirement_callbacks_{0};
+  // How long Enqueue() waits for the previous dispatch of an expert to be
+  // retired (its node back to IDLE) before it fails the dispatch. A
+  // retirement completes when the expert's exec stream reaches its retire
+  // event: one expert forward (milliseconds) plus whatever is queued ahead of
+  // it on that stream. 30 s is six times the 5 s the repo itself allows
+  // exec streams to drain in memory resize (moe_infinity/engine/
+  // memory_resize.py timeout_ms) and ~10^4 times a decode expert, so it can
+  // only fire on a retire event that never signals (stream error, lost
+  // event), never on a slow but live GPU.
+  static constexpr int kEnqueueCasDeadlineMs = 30000;
+  std::atomic<int> enqueue_cas_deadline_ms_{kEnqueueCasDeadlineMs};
   std::mutex retirement_callback_mutex_;
   std::condition_variable retirement_callback_cv_;
 

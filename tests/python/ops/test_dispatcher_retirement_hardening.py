@@ -98,23 +98,74 @@ def _scenario_closed_retirement(grouped_decode):
     )
 
 
+def _scenario_cas_deadline():
+    torch, grouped, gen, engine, dispatcher, experts = _setup()
+    dispatcher.set_grouped_decode(False, 4)
+    x = torch.randn(1, HIDDEN, generator=gen).bfloat16().cuda()
+    all_experts = _mask(torch, list(range(NUM_EXPERTS)))
+    grouped._dispatch(  # make every expert resident
+        dispatcher, x, all_experts, all_experts.float() * 0.5, native=True
+    )
+    dispatcher._set_enqueue_cas_deadline_ms_for_test(300)
+    dispatcher._stick_expert_for_test(0, 2, True)  # EXECUTING, never retires
+    mask = _mask(torch, [1, 2])
+    dispatcher.set_inputs(x, mask, mask.float() * 0.5)
+    dispatcher.set_expected_queue(2)
+    dispatcher.enqueue_expert(0, 1, 0, False)
+    started = time.time()
+    raised = False
+    try:
+        dispatcher.enqueue_expert(0, 2, 0, False)
+    except RuntimeError as exc:
+        raised = str(exc)
+    elapsed = time.time() - started
+    waited = False
+    try:
+        dispatcher.wait_expert()
+    except RuntimeError as exc:
+        waited = str(exc)
+    dispatcher._stick_expert_for_test(0, 2, False)
+    stats = dispatcher.get_routing_stats()
+    # The dispatcher is usable again (experts 4, 5 were not involved).
+    time.sleep(0.3)
+    mask2 = _mask(torch, [4, 5])
+    out = _raw_dispatch(dispatcher, x, mask2)
+    ref = grouped._per_expert_reference(x, mask2, mask2.float() * 0.5, experts)
+    err = float((out - ref).abs().max() / ref.abs().max().clamp_min(1e-6))
+    _finish(
+        {
+            "raised": raised,
+            "waited": waited,
+            "elapsed": elapsed,
+            "pending_retirement_callbacks": stats[
+                "pending_retirement_callbacks"
+            ],
+            "recovered_err": err,
+        }
+    )
+
+
 SCENARIOS = {
+    "cas_deadline": _scenario_cas_deadline,
     "closed_retirement_per_expert": lambda: _scenario_closed_retirement(False),
     "closed_retirement_grouped": lambda: _scenario_closed_retirement(True),
 }
 
 
-def _run(name, timeout=120):
+def _run(name, timeout=90):
     env = dict(os.environ)
     env.setdefault("CUDA_VISIBLE_DEVICES", "0")
-    proc = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), name],
-        env=env,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), name],
+            env=env,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"scenario {name} did not finish within {timeout}s (hang)")
     out = proc.stdout + proc.stderr
     lines = [
         ln[ln.index("RESULT ") + 7 :]
@@ -135,6 +186,19 @@ def test_retirement_push_to_closed_queue_fails_the_dispatch(variant):
     assert "retirement queue is closed" in result["raised"], result
     assert result["pending_retirement_callbacks"] == 0, result
     assert result["pending"] == 0, result
+
+
+@requires_cuda
+def test_enqueue_cas_retry_is_bounded_and_fails_the_dispatch():
+    result = _run("cas_deadline")
+    msg = result["raised"]
+    assert msg, result  # Enqueue gave up instead of spinning forever
+    for needle in ("expert 2", "layer 0", "EXECUTING"):
+        assert needle in msg, result
+    assert 0.25 <= result["elapsed"] < 10, result
+    assert result["waited"] and "expert 2" in result["waited"], result
+    assert result["pending_retirement_callbacks"] == 0, result
+    assert result["recovered_err"] < 0.05, result
 
 
 if __name__ == "__main__":

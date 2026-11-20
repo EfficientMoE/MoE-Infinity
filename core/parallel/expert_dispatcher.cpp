@@ -692,7 +692,24 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   // expert is claimed (no longer idle, so no policy picks it as a victim
   // while it is in flight) and before the admission a miss causes.
   {
+    // Claim the expert: IDLE -> FETCHING. The CAS can fail because the
+    // previous dispatch of this same expert has not been *retired* yet: after
+    // an expert's GPU work is queued, OutputFunc / GroupedExec record a retire
+    // event on the exec stream and hand it to RetirementFunc, which publishes
+    // IDLE (and releases the leases) only once that event has completed, i.e.
+    // some time after the caller already got its output. A new dispatch of the
+    // same expert (the next decode step, or a layer reusing the node) can
+    // therefore arrive while the node is still FETCHING/EXECUTING, and must
+    // wait for that IDLE publication instead of treating it as an error.
+    // Retries are 10 us apart. They stop (a) when the expert is being
+    // prefetched (queued behind the prefetch below), (b) fatally when no
+    // retirement is pending, so nothing can ever publish IDLE, and (c) with a
+    // failed dispatch when the retirement has not happened within
+    // enqueue_cas_deadline_ms_: a retire event that never signals (stream
+    // error, lost event) must not spin this thread forever.
     auto expected = NodeExecState::IDLE;
+    std::chrono::steady_clock::time_point cas_deadline;
+    bool cas_deadline_armed = false;
     while (!expert_node->node->exec_state.compare_exchange_strong(
         expected, NodeExecState::FETCHING, std::memory_order_acq_rel)) {
       if (expert_node->node->is_prefetching.load(std::memory_order_acquire)) {
@@ -714,6 +731,37 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
             expert_idx, " layer_idx ", layer_idx, " node ",
             expert_node->node->str(), " state=", static_cast<int>(expected),
             ")");
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (!cas_deadline_armed) {
+        cas_deadline =
+            now + std::chrono::milliseconds(
+                      enqueue_cas_deadline_ms_.load(std::memory_order_acquire));
+        cas_deadline_armed = true;
+      } else if (now >= cas_deadline) {
+        const char* state_name =
+            expected == NodeExecState::FETCHING          ? "FETCHING"
+            : expected == NodeExecState::EXECUTING       ? "EXECUTING"
+            : expected == NodeExecState::RESIZE_RESERVED ? "RESIZE_RESERVED"
+                                                         : "IDLE";
+        const std::string message =
+            "ExpertDispatcher::Enqueue: expert " + std::to_string(expert_idx) +
+            " layer " + std::to_string(layer_idx) + " stuck in exec_state " +
+            state_name + " for " +
+            std::to_string(
+                enqueue_cas_deadline_ms_.load(std::memory_order_acquire)) +
+            " ms with " +
+            std::to_string(
+                pending_retirement_callbacks_.load(std::memory_order_acquire)) +
+            " retirement(s) pending: its previous retirement never completed "
+            "(retire event not signalled)";
+        // Fail the dispatch (records the error for the waiter and zeroes the
+        // pending counts), and also throw so the enqueuing caller stops:
+        // RouteFunc's catch fails the dispatch again with the routed contexts,
+        // a direct caller sees the error immediately.
+        FailDispatch(args.generation,
+                     std::make_exception_ptr(std::runtime_error(message)));
+        throw std::runtime_error(message);
       }
       std::this_thread::sleep_for(std::chrono::microseconds(10));
       expected = NodeExecState::IDLE;
@@ -2502,6 +2550,28 @@ void ExpertDispatcher::RouteFunc() noexcept {
       NotifyPendingWaiters();
     } catch (...) {
       FailDispatch(args.generation, std::current_exception(), routed_contexts);
+    }
+  }
+}
+
+void ExpertDispatcher::SetEnqueueCasDeadlineMsForTest(int deadline_ms) {
+  enqueue_cas_deadline_ms_.store(
+      deadline_ms > 0 ? deadline_ms : kEnqueueCasDeadlineMs,
+      std::memory_order_release);
+}
+
+void ExpertDispatcher::StickExpertForTest(int layer_idx, int expert_idx,
+                                          bool stick) {
+  auto node = experts_.at(expert_idx).at(layer_idx)->node;
+  if (stick) {
+    node->exec_state.store(NodeExecState::EXECUTING, std::memory_order_release);
+    pending_retirement_callbacks_.fetch_add(1, std::memory_order_acq_rel);
+  } else {
+    node->exec_state.store(NodeExecState::IDLE, std::memory_order_release);
+    if (pending_retirement_callbacks_.fetch_sub(1, std::memory_order_acq_rel) ==
+        1) {
+      std::lock_guard<std::mutex> lock(retirement_callback_mutex_);
+      retirement_callback_cv_.notify_all();
     }
   }
 }
