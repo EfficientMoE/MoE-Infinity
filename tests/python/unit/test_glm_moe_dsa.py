@@ -142,11 +142,22 @@ def test_glm_fp8_selective_dequant_keeps_experts_fp8():
 
 
 def test_glm_cpp_dequant_matches_python():
-    _store = pytest.importorskip("moe_infinity._store")
-    if isinstance(_store, MagicMock):
+    """Native FP8 block dequant (CUDA) is bit-identical to the Python reference.
+
+    The native counterpart is ``moe_infinity._v4_fp4.fp8_dequant_blockwise``
+    (CUDA only, BF16 out, 128x128 blocks). This test was written against
+    ``_store.dequant_fp8_blockwise`` of the unmerged #130 branch, a CPU+GPU
+    binding that never existed on main.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required: the native FP8 dequant is a CUDA kernel")
+    try:
+        from moe_infinity._v4_fp4 import fp8_dequant_blockwise
+    except Exception as exc:
+        pytest.skip(f"native fp8_dequant_blockwise unavailable: {exc}")
+    if isinstance(fp8_dequant_blockwise, MagicMock):
         pytest.skip(
-            "moe_infinity._store is stubbed by conftest; native "
-            "extension not built"
+            "moe_infinity._v4_fp4 is stubbed; native extension not built"
         )
     from moe_store.fp8 import dequant_fp8_blockwise
 
@@ -160,13 +171,9 @@ def test_glm_cpp_dequant_matches_python():
         weight = torch.randn(*w_shape).to(torch.float8_e4m3fn)
         scale = torch.rand(*s_shape, dtype=torch.float32) + 0.5
         ref = dequant_fp8_blockwise(weight, scale, dtype=torch.bfloat16)
-        out = _store.dequant_fp8_blockwise(weight, scale)
-        assert out.dtype == torch.bfloat16
-        assert torch.equal(out, ref)
-        if torch.cuda.is_available():
-            out_gpu = _store.dequant_fp8_blockwise(weight.cuda(), scale.cuda())
-            assert out_gpu.dtype == torch.bfloat16
-            assert torch.equal(out_gpu.cpu(), ref)
+        out_gpu = fp8_dequant_blockwise(weight.cuda(), scale.cuda())
+        assert out_gpu.dtype == torch.bfloat16
+        assert torch.equal(out_gpu.cpu(), ref)
 
 
 def test_glm_routing_parity_vs_hf():

@@ -8,6 +8,18 @@ import torch
 
 from moe_infinity import _store
 
+# Compiled only with MOE_INFINITY_TESTING=1 (setup.py, core/python/
+# py_archer_prefetch.cpp); a normal build does not have it.
+requires_transition_failure_binding = pytest.mark.skipif(
+    not hasattr(
+        _store.expert_dispatcher, "inject_transition_failure_once_for_test"
+    ),
+    reason=(
+        "binding inject_transition_failure_once_for_test is compiled only "
+        "with MOE_INFINITY_TESTING=1; rebuild with it to run this test"
+    ),
+)
+
 
 def _wait_for_lease_drain(dispatcher, timeout_s: float = 5.0):
     import time
@@ -105,6 +117,7 @@ def test_dispatcher_publishes_adaptive_control_surface():
 
 
 @pytest.mark.gpu
+@requires_transition_failure_binding
 def test_failed_transition_binding_is_testing_only():
     assert hasattr(
         _store.expert_dispatcher, "inject_transition_failure_once_for_test"
@@ -171,6 +184,7 @@ def test_dispatcher_publishes_only_ready_generation(native_adaptive_fixture):
 
 
 @pytest.mark.gpu
+@requires_transition_failure_binding
 def test_failed_transition_keeps_canonical_generation(native_adaptive_fixture):
     dispatcher = native_adaptive_fixture.dispatcher
     canonical = native_adaptive_fixture.run()
