@@ -1,0 +1,29 @@
+{
+  "searched_filesystems": [
+    "/",
+    "/home",
+    "/mnt/raid0nvme0"
+  ],
+  "alias": "/data -> /mnt/raid0nvme0 (same inodes, not a second copy)",
+  "deepseek_v4.1_flash": {
+    "path": "/mnt/raid0nvme0/leyang/ckpt/DeepSeek-V4.1-Flash",
+    "inode": 418185091,
+    "also_visible_as": "/data/leyang/ckpt/DeepSeek-V4.1-Flash",
+    "shards": 48,
+    "bytes": 510296708312,
+    "duplicate_copies": 0
+  },
+  "glm_5.3_flash": {
+    "path":
+        "/mnt/raid0nvme0/public/huggingface/hub/models--zai-org--GLM-5.3-Flash/snapshots/46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+    "inode": 445837974,
+    "also_visible_as":
+        "/data/public/huggingface/hub/models--zai-org--GLM-5.3-Flash",
+    "safetensors": 63,
+    "safetensors_bytes": 328345862285,
+    "blob_bytes": 350265890944,
+    "duplicate_copies": 0,
+    "serving_now":
+        "sglang 0.5.23 TP4 on GPUs 0-3, port 31000, this same snapshot"
+  }
+}

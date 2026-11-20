@@ -1,0 +1,57 @@
+{
+  "stack": "vllm",
+  "python": "/home/leyang/anaconda3/envs/vllm-omni/bin/python",
+  "torch": "2.13.0+cu130",
+  "gpu":
+      "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition cc=12.0 sms=188",
+  "host": "gala2",
+  "started": "2026-11-11T06:42:34+0000",
+  "version": "0.30.0",
+  "ok": true,
+  "rows": [
+    {
+      "us_median": 219.90400552749634,
+      "us_min": 214.23999965190887,
+      "us_max": 259.68000292778015,
+      "iters": 10,
+      "stack": "vllm",
+      "model": "glm-5.3-flash",
+      "kernel": "fused_experts_fp8_block128",
+      "point": "b1",
+      "tokens": 1
+    },
+    {
+      "us_median": 4535.776138305664,
+      "us_min": 4526.527881622314,
+      "us_max": 4569.82421875,
+      "iters": 10,
+      "stack": "vllm",
+      "model": "glm-5.3-flash",
+      "kernel": "fused_experts_fp8_block128",
+      "point": "b64",
+      "tokens": 64
+    },
+    {
+      "us_median": 4770.9760665893555,
+      "us_min": 4762.527942657471,
+      "us_max": 4795.648097991943,
+      "iters": 10,
+      "stack": "vllm",
+      "model": "glm-5.3-flash",
+      "kernel": "fused_experts_fp8_block128",
+      "point": "1K",
+      "tokens": 1024
+    },
+    {
+      "us_median": 19204.832077026367,
+      "us_min": 17890.335083007812,
+      "us_max": 19446.367263793945,
+      "iters": 10,
+      "stack": "vllm",
+      "model": "glm-5.3-flash",
+      "kernel": "fused_experts_fp8_block128",
+      "point": "12K",
+      "tokens": 12288
+    }
+  ]
+}
