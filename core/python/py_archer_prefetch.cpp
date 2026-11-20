@@ -380,6 +380,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("_set_dispatch_fault_for_test",
            &ExpertDispatcher::SetDispatchFaultForTest)
       .def("_fail_dispatch_for_test", &ExpertDispatcher::FailDispatchForTest)
+      .def("_close_retirement_queue_for_test",
+           &ExpertDispatcher::CloseRetirementQueueForTest)
       .def("notify_fetch_start", &ExpertDispatcher::NotifyFetchStart)
       .def("clear_expert_cache_counts",
            &ExpertDispatcher::ClearExpertCacheCounts)

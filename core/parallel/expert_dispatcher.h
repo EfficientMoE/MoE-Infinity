@@ -367,6 +367,9 @@ class ExpertDispatcher : public base::noncopyable {
   // kernels implement SiLU only, so any other kind keeps per-expert execution.
   void SetGroupedDecode(bool enabled, int top_k, int activation_kind = 0);
   void SetDispatchFaultForTest(const std::string& stage);
+  // Test hook: closes retirement_queue_ early (normally only the destructor
+  // does), to exercise a retirement push that finds the queue closed.
+  void CloseRetirementQueueForTest();
   void FailDispatchForTest(std::uint64_t generation,
                            const std::string& message);
 

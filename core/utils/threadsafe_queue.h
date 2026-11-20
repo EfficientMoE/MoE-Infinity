@@ -15,16 +15,20 @@ class ThreadSafeQueue : public base::noncopyable {
   ThreadSafeQueue(const ThreadSafeQueue&) = delete;
   ThreadSafeQueue& operator=(const ThreadSafeQueue&) = delete;
 
-  // Pushes an item into the queue (thread-safe).
-  void Push(T& item) {
+  // Pushes an item into the queue (thread-safe). Returns false, and leaves
+  // `item` untouched (not moved from), if the queue is closed: the caller still
+  // owns the item and whatever it holds (events, leases, counters) and must
+  // release it. A closed queue never drops an item silently.
+  [[nodiscard]] bool Push(T& item) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (closed_) {
-        return;
+        return false;
       }
       queue_.push(std::move(item));
     }
     cond_.notify_one();
+    return true;
   }
 
   // Pops an item from the queue (blocking).
@@ -101,7 +105,9 @@ class ThreadSafeRecyclingQueue : public ThreadSafeQueue<T> {
   bool Pop(T& item) override {
     bool result = ThreadSafeQueue<T>::Pop(item);
     if (result) {
-      this->Push(item);
+      // Once closed the recycled copy is simply not re-queued; `item` is still
+      // valid and returned to the caller.
+      (void)this->Push(item);
     }
     return result;
   }
@@ -109,7 +115,7 @@ class ThreadSafeRecyclingQueue : public ThreadSafeQueue<T> {
   bool TryPop(T& item) override {
     bool success = ThreadSafeQueue<T>::TryPop(item);
     if (success) {
-      this->Push(item);
+      (void)this->Push(item);  // see Pop(): closed => not re-queued
     }
     return success;
   }
