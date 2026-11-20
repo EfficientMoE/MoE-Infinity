@@ -36,14 +36,14 @@ int GetDevice() {
 
 std::size_t GetTotalDeviceMemory(int device_id) {
   size_t free_memory, total_memory;
-  cudaSetDevice(device_id);
+  ScopedCudaDevice scoped_device(device_id);
   cudaMemGetInfo(&free_memory, &total_memory);
   return total_memory;
 }
 
 std::size_t GetFreeDeviceMemory(int device_id) {
   size_t free_memory, total_memory;
-  cudaSetDevice(device_id);
+  ScopedCudaDevice scoped_device(device_id);
   cudaMemGetInfo(&free_memory, &total_memory);
   return free_memory;
 }
@@ -59,7 +59,7 @@ int CudaMemcpyAsync(void* dst, const void* src, size_t count,
 
 void BlockingCudaCopy(int device, void* dst, const void* src, size_t size,
                       cudaMemcpyKind kind, cudaStream_t stream) {
-  CUDA_CHECK(cudaSetDevice(device));
+  ScopedCudaDevice scoped_device(device);
   CUDA_CHECK(cudaMemcpyAsync(dst, src, size, kind, stream));
   CUDA_CHECK(cudaStreamSynchronize(stream));
 }

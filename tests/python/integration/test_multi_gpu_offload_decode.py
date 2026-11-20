@@ -133,3 +133,32 @@ def test_two_gpu_decode_matches_single_gpu(two_gpu_run):
     a = json.loads(one_out.read_text())["results"]
     b = json.loads(two_out.read_text())["results"]
     assert [r["token_ids"] for r in a] == [r["token_ids"] for r in b]
+
+
+def test_engine_calls_leave_current_device_unchanged(tmp_path):
+    """Model init and a generate call must not change the caller thread's
+    current CUDA device (raw cudaSetDevice in the engine used to)."""
+    _require_two_gpus()
+    _require_cached_model()
+    probe = Path(__file__).with_name("_current_device_probe.py")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(probe),
+            DEVICES,
+            MODEL,
+            str(tmp_path / "offload"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    lines = [ln for ln in proc.stdout.splitlines() if "RESULT {" in ln]
+    assert proc.returncode == 0 and lines, (
+        proc.stdout[-2000:] + proc.stderr[-2000:]
+    )
+    result = json.loads(lines[-1][lines[-1].index("RESULT ") + 7 :])
+    assert result["before"] == 0, result
+    assert result["after_init"] == 0, result
+    assert result["after_generate"] == 0, result
+    assert result["forward_entry"] == [0], result

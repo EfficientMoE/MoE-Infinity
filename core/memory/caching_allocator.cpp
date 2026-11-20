@@ -1,3 +1,4 @@
+#include "utils/cuda_utils.h"
 #include "caching_allocator.h"
 
 #include <cuda_runtime_api.h>
@@ -144,7 +145,7 @@ void* CachingAllocator::AllocateMemory(size_t bytes) {
 }
 void* CachingAllocator::AllocCudaMemory(size_t bytes) {
   void* ptr;
-  cudaSetDevice(device_id_);
+  ScopedCudaDevice scoped_device(device_id_);
   cudaMalloc(&ptr, bytes);
   return ptr;
 }
@@ -224,7 +225,7 @@ void CachingAllocator::FreeMemory(void* ptr) {
   }
 }
 void CachingAllocator::FreeCudaMemory(void* ptr) {
-  cudaSetDevice(device_id_);
+  ScopedCudaDevice scoped_device(device_id_);
   cudaFree(ptr);
 }
 void CachingAllocator::FreePinMemory(void* ptr) { cudaFreeHost(ptr); }

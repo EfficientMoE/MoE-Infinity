@@ -91,7 +91,7 @@ void* DeviceMemoryPool::AllocateMemory(const std::size_t key,
     DLOG_ERROR("PreAllocateMemory failed, already allocated ", key);
     return allocated_id_[device_id][key];
   }
-  cudaSetDevice(device_id);
+  ScopedCudaDevice scoped_device(device_id);
   // at::Allocator* allocator = c10::cuda::CUDACachingAllocator::get();
   // auto data_ptr = allocator->raw_allocate(size);
   auto allocator = c10::DeviceCachingAllocator::get(device_id);
@@ -111,7 +111,7 @@ int DeviceMemoryPool::FreeMemory(const std::size_t key, void* data,
     return -1;
   }
   allocated_id_[device_id].erase(key);
-  cudaSetDevice(device_id);
+  ScopedCudaDevice scoped_device(device_id);
   if (data != nullptr) {
     // at::Allocator* allocator = c10::cuda::CUDACachingAllocator::get();
     // allocator->raw_deallocate(data);

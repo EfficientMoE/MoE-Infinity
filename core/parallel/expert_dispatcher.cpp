@@ -357,6 +357,9 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       num_threads_(num_threads),
       modules_(kNumDevices() * num_threads, nullptr) {
   main_thread_stop_flag_.store(false);
+  // The stream/module loops below switch the current device with
+  // cudaSetDevice; give the constructing (caller) thread's device back.
+  ScopedCudaDevice restore_caller_device;
 
   if (const char* trace_path = std::getenv("MOE_EXPERT_DROP_TRACE")) {
     if (trace_path[0] != '\0') {
