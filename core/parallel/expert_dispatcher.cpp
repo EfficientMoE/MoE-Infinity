@@ -672,8 +672,8 @@ void ExpertDispatcher::EnqueueExpert(int layer_idx, int expert_idx, int gpu_id,
 // Returns the device whose queue the item was actually pushed to: a cache-hit
 // expert runs where its node resides, which may differ from the requested one.
 int ExpertDispatcher::EnqueueExpertOnDevice(int layer_idx, int expert_idx,
-                                            int gpu_id, bool remote,
-                                            int phase) {
+                                            int gpu_id, bool remote, int phase,
+                                            bool* claimed) {
   ExpertDispatcher::CallArgs args;
   args.layer_idx = layer_idx;
   args.expert_idx = expert_idx;
@@ -685,6 +685,13 @@ int ExpertDispatcher::EnqueueExpertOnDevice(int layer_idx, int expert_idx,
   args.phase = static_cast<ExpertPhase>(phase);
   args.invocation_id = current_invocation_id_;
   args.generation = current_generation_.load(std::memory_order_acquire);
+  struct ClaimReport {
+    bool* out;
+    const CallArgs& call;
+    ~ClaimReport() {
+      if (out != nullptr) *out = call.claimed;
+    }
+  } claim_report{claimed, args};
   Enqueue(args);
   return args.gpu_id;
 }
@@ -794,6 +801,7 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
       std::this_thread::sleep_for(std::chrono::microseconds(10));
       expected = NodeExecState::IDLE;
     }
+    args.claimed = true;
   }
   if (kExpertResidencyManager) {
     const auto& device = expert_node->node->device;
@@ -2705,10 +2713,20 @@ void ExpertDispatcher::RouteFunc() noexcept {
                          : expert_idx % kNumDevices();
         routed_contexts.push_back(
             FailureContext{expert, gpu_id, false, false, false});
-        // Record the device the item was really enqueued on.
-        routed_contexts.back().gpu_id = EnqueueExpertOnDevice(
-            args.layer_idx, expert_idx, expert_idx % kNumDevices(), false,
-            static_cast<int>(ExpertPhase::MIXED));
+        // Record the device the item was really enqueued on. A call that did
+        // not take the node's claim (CAS deadline, queued behind a prefetch)
+        // owns nothing to restore: a failure must not publish IDLE on a node
+        // whose previous retirement (or prefetch) is still outstanding.
+        bool claimed = false;
+        try {
+          routed_contexts.back().gpu_id = EnqueueExpertOnDevice(
+              args.layer_idx, expert_idx, expert_idx % kNumDevices(), false,
+              static_cast<int>(ExpertPhase::MIXED), &claimed);
+        } catch (...) {
+          if (!claimed) routed_contexts.pop_back();
+          throw;
+        }
+        if (!claimed) routed_contexts.pop_back();
       }
       NotifyFetchStart();
       route_batches_.fetch_add(1, std::memory_order_relaxed);
@@ -2746,6 +2764,14 @@ void ExpertDispatcher::StickExpertForTest(int layer_idx, int expert_idx,
       retirement_callback_cv_.notify_all();
     }
   }
+}
+
+int ExpertDispatcher::ExpertExecStateForTest(int layer_idx,
+                                             int expert_idx) const {
+  return static_cast<int>(
+      experts_.at(expert_idx)
+          .at(layer_idx)
+          ->node->exec_state.load(std::memory_order_acquire));
 }
 
 void ExpertDispatcher::CloseRetirementQueueForTest() {

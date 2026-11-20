@@ -73,6 +73,12 @@ class ExpertDispatcher : public base::noncopyable {
     std::uint64_t generation = 0;
     bool cache_slot_reserved = false;
     bool cache_key_inserted = false;
+    // Set by Enqueue once this call owns the node's IDLE -> FETCHING claim.
+    // A call that did not claim (CAS deadline, queued behind a prefetch, an
+    // exception before the claim) must not be "restored" to IDLE by a failure
+    // of the dispatch: the node belongs to someone else (a pending retirement
+    // or the prefetcher) and publishing IDLE would free it under them.
+    bool claimed = false;
   } CallArgs;
   typedef struct {
     torch::Tensor hidden_states =
@@ -391,6 +397,9 @@ class ExpertDispatcher : public base::noncopyable {
   // that (stick=false).
   void SetEnqueueCasDeadlineMsForTest(int deadline_ms);
   void StickExpertForTest(int layer_idx, int expert_idx, bool stick);
+  // exec_state of an expert's node (0 IDLE, 1 FETCHING, 2 EXECUTING, 3
+  // RESIZE_RESERVED).
+  int ExpertExecStateForTest(int layer_idx, int expert_idx) const;
   void FailDispatchForTest(std::uint64_t generation,
                            const std::string& message);
 
@@ -427,8 +436,10 @@ class ExpertDispatcher : public base::noncopyable {
   void RestoreFailureContext(const FailureContext& context) noexcept;
   bool IsStaleGeneration(std::uint64_t generation) const;
   void DropStaleExecArgs(ExecArgs& args, int gpu_id) noexcept;
+  // `claimed` (optional) reports whether the call took the node's claim, also
+  // when it throws.
   int EnqueueExpertOnDevice(int layer_idx, int expert_idx, int gpu_id,
-                            bool remote, int phase);
+                            bool remote, int phase, bool* claimed = nullptr);
   void CompleteOne(std::uint64_t generation) noexcept;
   void NotifyPendingWaiters() noexcept;
   void NotifyCacheWaiters(int gpu_id) noexcept;
@@ -654,9 +665,12 @@ class ExpertDispatcher : public base::noncopyable {
   // event: one expert forward (milliseconds) plus whatever is queued ahead of
   // it on that stream. 30 s is six times the 5 s the repo itself allows
   // exec streams to drain in memory resize (moe_infinity/engine/
-  // memory_resize.py timeout_ms) and ~10^4 times a decode expert, so it can
-  // only fire on a retire event that never signals (stream error, lost
-  // event), never on a slow but live GPU.
+  // memory_resize.py timeout_ms) and ~10^4 times a decode expert, so in
+  // normal operation it only fires on a retire event that never signals
+  // (stream error, lost event). It does fire if a GPU stalls for longer than
+  // the deadline; the failure then leaves that expert's node alone (it is
+  // published IDLE only by its own retirement when that eventually
+  // completes), so a slow-but-live retirement is never overtaken.
   static constexpr int kEnqueueCasDeadlineMs = 30000;
   std::atomic<int> enqueue_cas_deadline_ms_{kEnqueueCasDeadlineMs};
   std::mutex retirement_callback_mutex_;
