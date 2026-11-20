@@ -980,8 +980,10 @@ at::Tensor lt_logits(const at::Tensor& x, const at::Tensor& w,
                      at::ScalarType out_dtype) {
   const int64_t T = x.size(0), H = x.size(1), E = w.size(0);
   at::Tensor out = at::empty({T, E}, x.options().dtype(out_dtype));
+  // The cuBLASLt handle and the stream are per device: use those of x.
+  const c10::cuda::CUDAGuard device_guard(x.device());
   cublasLtHandle_t handle = at::cuda::getCurrentCUDABlasLtHandle();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(x.get_device()).stream();
   struct Key {
     int64_t T, H, E, ldx, ldw;
     int in, out;
@@ -1495,6 +1497,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         // For kernels launched from Python (Triton prefill path): a zeroed
         // pinned flag slot, the ring's completion word and this launch's
         // sequence number (see FlagRing).
+        const c10::cuda::CUDAGuard device_guard(static_cast<int>(device));
         cudaStream_t stream =
             at::cuda::getCurrentCUDAStream(static_cast<int>(device)).stream();
         auto* ring =

@@ -19,6 +19,8 @@ from typing import Optional, Protocol, cast
 import torch
 import torch.nn.functional as F
 
+from moe_infinity.kernel._device import device_guard
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +66,7 @@ def probe_native_int8_binding() -> tuple[bool, str | None]:
     return True, None
 
 
+@device_guard
 def paged_attention_fwd(
     query: torch.Tensor,
     key_cache: torch.Tensor,
@@ -211,6 +214,7 @@ def _use_pro6000_kernel(
     )
 
 
+@device_guard
 def _paged_attention_previous(
     query: torch.Tensor,
     key_cache: torch.Tensor,

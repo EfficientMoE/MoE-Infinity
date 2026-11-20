@@ -43,6 +43,7 @@ import torch
 import triton
 import triton.language as tl
 
+from moe_infinity.kernel._device import device_guard
 from moe_infinity.kernel.mxfp4_gemm_generic import fused_mxfp4_gemm_generic
 from moe_infinity.utils.hw_profile import RTX_PRO_6000, SM120, supports
 
@@ -909,6 +910,7 @@ def _pro6000_sm120(device: torch.device) -> bool:
     return ok
 
 
+@device_guard
 def warmup_mxfp4_gemm(
     N: int,
     K: int,
@@ -949,6 +951,7 @@ def warmup_mxfp4_gemm(
         _launch(x, w, s, b, out, cfg)
 
 
+@device_guard
 def fused_mxfp4_gemm(
     x: torch.Tensor,
     weight_packed: torch.Tensor,
@@ -1036,6 +1039,7 @@ _FP4_TABLE = torch.tensor(
 )
 
 
+@device_guard
 def mxfp4_dequantize(
     packed: torch.Tensor,
     scales: torch.Tensor,

@@ -90,6 +90,30 @@ std::size_t GetFreeDeviceMemory(int device_id);
 #define DEVICE_CACHE_LIMIT(gid) GetTotalDeviceMemory(gid) * 0.7
 int kNumDevices();
 
+// Restores the thread's current CUDA device on scope exit. The constructor
+// taking a device also makes it current. Raw cudaSetDevice() on a caller's
+// thread (the Python main thread, an engine constructor) would otherwise leave
+// that thread on a different device than it entered with, and every later
+// "current device" launch from that thread then lands on the wrong GPU.
+class ScopedCudaDevice {
+ public:
+  ScopedCudaDevice() { cudaGetDevice(&previous_); }
+  explicit ScopedCudaDevice(int device) {
+    cudaGetDevice(&previous_);
+    if (previous_ != device) cudaSetDevice(device);
+  }
+  ScopedCudaDevice(const ScopedCudaDevice&) = delete;
+  ScopedCudaDevice& operator=(const ScopedCudaDevice&) = delete;
+  ~ScopedCudaDevice() {
+    int current = previous_;
+    cudaGetDevice(&current);
+    if (current != previous_) cudaSetDevice(previous_);
+  }
+
+ private:
+  int previous_ = 0;
+};
+
 int CudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind);
 int CudaMemcpyAsync(void* dst, const void* src, size_t count,
                     cudaMemcpyKind kind, cudaStream_t stream = 0);

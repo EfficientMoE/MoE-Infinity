@@ -12,6 +12,20 @@ def _register_engine_ops():
         register_engine_ops()
     except Exception as exc:
         pytest.skip(f"engine ops unavailable: {exc}")
+    # Import the native stack here, before any test owns a prefetch handle.
+    # Importing it for the first time inside _native_dispatch left the import
+    # machinery's frames alive (they chain to the importing frame through
+    # f_back), and that frame's locals included the test's prefetch handle:
+    # the handle then stayed loaded for the rest of the session ("one model
+    # per process") until cyclic gc happened to free the cycle. The helper
+    # repeats these imports and skips with the reason if they fail.
+    try:
+        from moe_infinity.runtime.model_offload import _load_prefetch_lib
+
+        _load_prefetch_lib()
+        from moe_store.wrappers.gpt_oss import SyncGptOssMLP  # noqa: F401
+    except Exception:
+        pass
 
 
 @pytest.mark.gpu
@@ -146,6 +160,23 @@ def test_dequantized_option_a_matches_resident_expert_forward():
     assert ((resident.float() - golden).abs() <= envelope).all()
 
 
+_LIVE_NATIVE = []
+
+
+def _drop_live_native():
+    """One model per process: free the prefetch handle(s) of earlier calls."""
+    while _LIVE_NATIVE:
+        pair = _LIVE_NATIVE.pop()
+        pair[1] = None  # dispatcher first: its workers use the engine's globals
+        pair[0] = None
+
+
+@pytest.fixture(autouse=True)
+def _release_native_handles():
+    yield
+    _drop_live_native()
+
+
 def _native_dispatch(
     tmp_path,
     hidden_dtype,
@@ -170,6 +201,9 @@ def _native_dispatch(
         )
 
     from moe_store.wrappers.gpt_oss import SyncGptOssMLP
+
+    # A second call within a test (eager vs native) replaces the first model.
+    _drop_live_native()
 
     class Config:
         hidden_size = 64
@@ -236,6 +270,11 @@ def _native_dispatch(
     dispatcher = prefetch_lib.expert_dispatcher(2, 1, 0, 6, 1)
     dispatcher.register_expert(0, 0, expert_tensor_ids[0], "")
     dispatcher.register_expert(0, 1, expert_tensor_ids[1], "")
+    # The dispatcher uses the engine's native globals, so the engine has to
+    # outlive every use of the dispatcher the caller makes. Own it here and
+    # let _release_native_handles drop both, dispatcher first, at the end of
+    # the test (not whenever cyclic gc gets to a stray reference).
+    _LIVE_NATIVE.append([engine, dispatcher])
     torch.cuda.set_device(hidden_states.device)
     router_mask = torch.zeros((3, 2), dtype=torch.bool, device="cuda:0")
     router_weights = torch.zeros((3, 2), dtype=torch.bfloat16, device="cuda:0")
@@ -261,15 +300,22 @@ def _native_dispatch(
         except RuntimeError as error:
             if not capture_wait_error:
                 raise
-            actual = error
+            # The caller keeps the exception. Its traceback would keep this
+            # frame alive (frame -> traceback -> exception -> frame cycle),
+            # and with it the local `engine`, until cyclic gc runs. Only the
+            # message is used.
+            actual = error.with_traceback(None)
     return actual, expected, hidden_states, tensors, dispatcher
 
 
-@pytest.mark.gpu
-def test_native_dispatcher_matches_resident_expert_forward(tmp_path):
-    actual, resident, hidden_states, tensors, _ = _native_dispatch(
-        tmp_path, torch.bfloat16
-    )
+def _mxfp4_golden_and_envelope(hidden_states, tensors):
+    """float32 reference for one MXFP4 expert and its BF16 error envelope.
+
+    The envelope scales with the sum of absolute terms of each dot product
+    (|activated| @ |W|^T + |bias|), not with the output element: these
+    weights cancel heavily (outputs ~1e2 from terms ~1e5), so the rounding
+    error of an element is set by the magnitude of its terms.
+    """
     from moe_infinity._v4_fp4 import mxfp4_dequant
 
     gate_weight = mxfp4_dequant(tensors[0].cuda(), tensors[1].cuda()).float()
@@ -292,6 +338,15 @@ def test_native_dispatcher_matches_resident_expert_forward(tmp_path):
         )
         + 1e-2
     )
+    return golden, envelope
+
+
+@pytest.mark.gpu
+def test_native_dispatcher_matches_resident_expert_forward(tmp_path):
+    actual, resident, hidden_states, tensors, _ = _native_dispatch(
+        tmp_path, torch.bfloat16
+    )
+    golden, envelope = _mxfp4_golden_and_envelope(hidden_states, tensors)
 
     assert ((actual.to(golden.device) - golden).abs() <= envelope).all()
     assert ((resident.float() - golden).abs() <= envelope).all()
@@ -540,17 +595,26 @@ def test_native_and_eager_dispatch_are_output_identical(
 def test_native_routing_preserves_round_robin_gpu_ownership(tmp_path):
     if torch.cuda.device_count() < 2:
         pytest.skip("requires two CUDA devices")
-    actual, expected, _, _, dispatcher = _native_dispatch(
+    actual, expected, hidden_states, tensors, dispatcher = _native_dispatch(
         tmp_path,
         torch.bfloat16,
         active_experts=(0, 1),
         gpu_routing=True,
     )
     assert dispatcher.take_last_active_experts() == [0, 1]
-    # Real MXFP4 expert outputs span a large dynamic range, so bound the
-    # cross-device float32 accumulation by BF16 magnitude rather than a flat
-    # absolute tolerance.
-    actual_f = actual.float()
-    expected_f = expected.float()
-    envelope = 8 * (2**-8) * expected_f.abs() + 1e-2
-    assert ((actual_f - expected_f).abs() <= envelope).all()
+    # Both experts hold the same weights and each gets router weight 1/2, so
+    # the cross-device float32 accumulation must reproduce one expert's
+    # output. Real MXFP4 expert outputs cancel heavily (outputs ~1e2 from
+    # terms ~1e5), so the bound is the BF16 envelope of the dot-product
+    # terms (as in test_native_dispatcher_matches_resident_expert_forward),
+    # not a per-element relative tolerance: a kernel-vs-reference rounding
+    # difference of a few ulps of the terms is 10%+ of a cancelled element.
+    golden, envelope = _mxfp4_golden_and_envelope(hidden_states, tensors)
+    assert ((actual.to(golden.device) - golden).abs() <= envelope).all()
+    assert (
+        (
+            actual.to(golden.device).float()
+            - expected.to(golden.device).float()
+        ).abs()
+        <= 2 * envelope
+    ).all()

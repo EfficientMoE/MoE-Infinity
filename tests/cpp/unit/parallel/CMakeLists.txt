@@ -29,3 +29,12 @@ target_include_directories(test_expert_timing_lifecycle PRIVATE
   ${Python3_INCLUDE_DIRS})
 include(GoogleTest)
 gtest_discover_tests(test_expert_timing_lifecycle)
+
+add_executable(test_event_pool test_event_pool.cpp)
+target_link_libraries(test_event_pool PRIVATE
+  archer_core GTest::gtest_main CUDA::cudart ${TORCH_LIBRARIES}
+  ${Python3_LIBRARIES})
+target_include_directories(test_event_pool PRIVATE
+  ${PROJECT_SOURCE_DIR}/core ${TORCH_INCLUDE_DIRS} ${CUDAToolkit_INCLUDE_DIRS}
+  ${Python3_INCLUDE_DIRS})
+gtest_discover_tests(test_event_pool)

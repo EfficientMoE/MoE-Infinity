@@ -30,6 +30,8 @@ import torch
 import triton
 import triton.language as tl
 
+from moe_infinity.kernel._device import device_guard
+
 # keep the block buffers resident (Rule F); toggled for measurement
 L2_PERSIST = True
 # launch configs (RTX_PRO_6000-tuned)
@@ -220,6 +222,7 @@ def _setup_block(
     )
 
 
+@device_guard
 def chunk_gated_delta_rule_blocked(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -355,6 +358,7 @@ def _setup_kda_block(q, k, v, g, beta, bufs, scale, T, t_base, TB, nb, norm_qk):
     )
 
 
+@device_guard
 def chunk_kda_blocked(
     q: torch.Tensor,
     k: torch.Tensor,

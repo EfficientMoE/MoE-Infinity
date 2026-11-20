@@ -42,6 +42,7 @@ import torch
 import triton
 import triton.language as tl
 
+from moe_infinity.kernel._device import device_guard
 from moe_infinity.utils.hw_profile import RTX_PRO_6000, SM120, supports
 
 try:
@@ -787,6 +788,7 @@ def _pro6000_gemv_configs(tk: int, block_m: int):
     return (8, 16, 4, 1), (4, 16, 2, 1)
 
 
+@device_guard
 def _fused_moe_gemv(
     x,
     topk_ids,
@@ -921,6 +923,7 @@ def _pro6000_configs(tk: int, block_m: int):
     return g1, g2
 
 
+@device_guard
 def moe_align_mxfp4(
     topk_ids: torch.Tensor,
     num_experts: int,
@@ -970,6 +973,7 @@ def moe_align_mxfp4(
     return sorted_ids, block_expert
 
 
+@device_guard
 def fused_moe_mxfp4(
     x: torch.Tensor,
     topk_ids: torch.Tensor,

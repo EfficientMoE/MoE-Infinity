@@ -65,6 +65,9 @@ ArcherPrefetchHandle::ArcherPrefetchHandle(const std::string& prefix,
 
   DLOG_INFO("Device count ", device_count);
 
+  // cudaSetDevice(i) below must not leave the constructing thread on the
+  // last device.
+  ScopedCudaDevice restore_device;
   for (int i = 0; i < device_count; i++) {
     for (int j = 0; j < device_count; j++) {
       if (i != j) {
@@ -680,7 +683,7 @@ void ArcherPrefetchHandle::SetTensorDevice(torch::Tensor& tensor,
   DLOG_TRACE("Set tensor to device ", (void*)tensor.data_ptr(), device.str());
 
   // then copy to target device
-  cudaSetDevice(device.index());
+  ScopedCudaDevice scoped_device(device.index());
   cudaMalloc(&device_ptr, byte_size);
 
   CudaMemcpy(device_ptr, tensor.data_ptr(), byte_size,

@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <cublasLt.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #define TILE_DIM 32
 #define NUM_THREADS 32
@@ -90,7 +91,8 @@ torch::Tensor linear_cublaslt_bf16(torch::Tensor input, torch::Tensor weight) {
 
   float alpha = 1.0f, beta = 0.0f;
 
-  cudaSetDevice(0);
+  // Was cudaSetDevice(0), which also left the caller thread on device 0.
+  const c10::cuda::CUDAGuard device_guard(input.device());
 
   cublasLtHandle_t handle;
   cublasLtCreate(&handle);
@@ -211,8 +213,9 @@ at::Tensor fused_silu_gemm(torch::Tensor hidden, torch::Tensor gate_proj) {
   TORCH_CHECK(hidden.size(1) == gate_proj.size(1),
               "Inner dimensions must match");
 
+  const c10::cuda::CUDAGuard device_guard(hidden.device());
   cudaDeviceProp prop;
-  cudaGetDeviceProperties(&prop, 0);  // 0 = current device
+  cudaGetDeviceProperties(&prop, hidden.get_device());
 
   int maxThreadsPerBlock = prop.maxThreadsPerBlock;
   printf("Max threads per block: %d\n", maxThreadsPerBlock);
@@ -344,6 +347,7 @@ at::Tensor fused_silu_gemm_cublas(torch::Tensor hidden,
   TORCH_CHECK(hidden.size(1) == gate_proj.size(1),
               "Inner dimensions must match");
 
+  const c10::cuda::CUDAGuard device_guard(hidden.device());
   int B = hidden.size(0);
   int D = hidden.size(1);
   int G = gate_proj.size(0);
@@ -425,6 +429,7 @@ __global__ void expert_silu_multiply_kernel(
 at::Tensor expert_fused_mlp(torch::Tensor input, torch::Tensor w1,
                             torch::Tensor w3, torch::Tensor w2) {
   TORCH_CHECK(input.is_cuda(), "Input must be CUDA");
+  const c10::cuda::CUDAGuard device_guard(input.device());
   TORCH_CHECK(input.scalar_type() == at::kBFloat16, "Expected BF16 input");
   TORCH_CHECK(w1.scalar_type() == at::kBFloat16, "Expected BF16 w1");
   TORCH_CHECK(w3.scalar_type() == at::kBFloat16, "Expected BF16 w3");
@@ -486,6 +491,7 @@ at::Tensor expert_fused_mlp_batched(torch::Tensor input, torch::Tensor w1_list,
                                     torch::Tensor w2_list,
                                     torch::Tensor expert_ids) {
   TORCH_CHECK(input.is_cuda(), "Input must be CUDA");
+  const c10::cuda::CUDAGuard device_guard(input.device());
   TORCH_CHECK(input.scalar_type() == at::kBFloat16, "Expected BF16");
 
   const int num_tokens = input.size(0);

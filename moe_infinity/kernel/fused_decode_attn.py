@@ -45,6 +45,7 @@ import triton
 import triton.language as tl
 from triton.language.extra.cuda import gdc_launch_dependents, gdc_wait
 
+from moe_infinity.kernel._device import device_guard
 from moe_infinity.utils import hw_profile
 
 _LOG2E = 1.4426950408889634
@@ -499,6 +500,7 @@ def _nhd_layout(cache: torch.Tensor) -> tuple[int, int, int, int, int, int]:
     return s[2], s[1], s[3], 0, 1, cache.shape[1]
 
 
+@device_guard
 def split_kv_decode_attention_pro6000(
     query: torch.Tensor,
     key_cache: torch.Tensor,
@@ -701,6 +703,7 @@ def split_kv_decode_attention_pro6000(
     return out
 
 
+@device_guard
 def fused_decode_attention(
     query: torch.Tensor,
     key_cache: torch.Tensor,
@@ -938,6 +941,7 @@ def _fused_decode_attention_kernel(
     tl.store(out_ptrs, out.to(tl.bfloat16), mask=offs_d < head_dim)
 
 
+@device_guard
 def _fused_decode_attention_previous(
     query: torch.Tensor,
     key_cache: torch.Tensor,
