@@ -261,6 +261,10 @@ class ExpertDispatcher : public base::noncopyable {
         completion_events_retired_.fetch_add(1, std::memory_order_relaxed);
       }
     }
+    // The slot buffer was record_stream'ed on the exec streams: free it while
+    // they still exist (freeing records an event on each such stream).
+    accum_slots_ = torch::Tensor();
+    accum_slot_rank_ = torch::Tensor();
     // Destroy every stream/event/module with its own device current (the
     // drain loop above leaves the last device current). Objects were created
     // under cudaSetDevice(i % kNumDevices()) in the constructor, or, for the
@@ -397,6 +401,15 @@ class ExpertDispatcher : public base::noncopyable {
   // (0 = SiLU, 1 = clamped SiLU, 2 = SwiGLU-OAI, < 0 = unknown); the grouped
   // kernels implement SiLU only, so any other kind keeps per-expert execution.
   void SetGroupedDecode(bool enabled, int top_k, int activation_kind = 0);
+  // Order-deterministic accumulation. When enabled and a dispatch's slot buffer
+  // (tokens x R x hidden fp32 bytes) fits `budget_bytes`, every expert stores
+  // its weighted output into its own (token, rank) slot instead of atomically
+  // adding into the shared accumulator, and WaitHiddenStates reduces the slots
+  // in a fixed order. MOE_DETERMINISTIC_ACCUM=0 disables it at construction,
+  // MOE_DETERMINISTIC_ACCUM_BYTES sets the budget (default 256 MiB);
+  // budget_bytes < 0 keeps the current budget. In slot mode no grouped batches
+  // are formed (the grouped kernel adds atomically).
+  void SetDeterministicAccum(bool enabled, std::int64_t budget_bytes = -1);
   void SetDispatchFaultForTest(const std::string& stage);
   void FailDispatchForTest(std::uint64_t generation,
                            const std::string& message);
@@ -675,6 +688,23 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::int64_t> completion_events_outstanding_{0};
   std::atomic<std::int64_t> stale_failures_quarantined_{0};
   std::atomic<std::int64_t> stale_exec_items_dropped_{0};
+
+  // Deterministic accumulation (see SetDeterministicAccum). The slot state is
+  // rebuilt by every SetInputs and only valid for that generation; a failed
+  // dispatch leaves nothing the next one can read because the next SetInputs
+  // replaces (zero-fills) it.
+  std::atomic<bool> det_accum_enabled_{true};
+  std::atomic<std::int64_t> det_accum_budget_bytes_{256LL << 20};
+  torch::Tensor accum_slots_;      // [T, R, H] fp32 on the accumulator device
+  torch::Tensor accum_slot_rank_;  // [T, E] int64: rank of expert e for token t
+  std::int64_t accum_slot_count_ = 0;  // R of the current dispatch
+  std::atomic<std::int64_t> accum_slot_dispatches_{0};
+  std::atomic<std::int64_t> accum_atomic_dispatches_{0};
+  std::atomic<std::int64_t> accum_slot_last_bytes_{0};
+  std::atomic<std::int64_t> accum_slot_peak_bytes_{0};
+  std::atomic<std::int64_t> accum_slot_overflow_{0};
+  void BuildAccumSlots(const torch::Tensor& hidden_states, int device);
+  void ReduceAccumSlots(int device, cudaStream_t caller_stream);
 };
 
 struct GroupedExecBatch {

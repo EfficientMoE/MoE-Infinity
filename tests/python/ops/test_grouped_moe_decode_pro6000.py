@@ -245,10 +245,16 @@ def native_moe(tmp_path):
     threads) before the engine whose globals they use."""
     made = []
 
-    def make(num_experts, hidden, inter, generator):
+    def make(num_experts, hidden, inter, generator, deterministic_accum=False):
         engine, dispatcher, experts = _make_dispatcher(
             tmp_path, num_experts, hidden, inter, generator
         )
+        # These tests cover the grouped kernel, which only runs on the atomic
+        # accumulation path: in deterministic (slot) mode no grouped batches
+        # are formed. Pin the atomic path; None keeps the environment default
+        # (test_deterministic_accumulation.py).
+        if deterministic_accum is not None:
+            dispatcher.set_deterministic_accum(deterministic_accum)
         made.append([engine, dispatcher])
         return dispatcher, experts
 

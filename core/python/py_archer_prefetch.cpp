@@ -401,6 +401,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("set_grouped_decode", &ExpertDispatcher::SetGroupedDecode,
            py::arg("enabled"), py::arg("top_k") = 0,
            py::arg("activation_kind") = 0)
+      .def("set_deterministic_accum", &ExpertDispatcher::SetDeterministicAccum,
+           py::arg("enabled"), py::arg("budget_bytes") = -1)
       .def("_set_dispatch_fault_for_test",
            &ExpertDispatcher::SetDispatchFaultForTest)
       .def("_fail_dispatch_for_test", &ExpertDispatcher::FailDispatchForTest)
