@@ -186,7 +186,9 @@ def _grouped_eligible(experts, hidden_device=0):
     return sum(1 for e in experts if _home_device(e) == hidden_device)
 
 
-def _make_dispatcher(tmp_path, num_experts, hidden, inter, generator):
+def _make_dispatcher(
+    tmp_path, num_experts, hidden, inter, generator, num_threads=4
+):
     try:
         from moe_infinity.runtime.model_offload import _load_prefetch_lib
 
@@ -226,7 +228,7 @@ def _make_dispatcher(tmp_path, num_experts, hidden, inter, generator):
         ]
     )
     dispatcher = prefetch_lib.expert_dispatcher(
-        num_experts, 1, DTYPE_BF16, DEEPSEEK_EXPERT_TYPE, 4
+        num_experts, 1, DTYPE_BF16, DEEPSEEK_EXPERT_TYPE, num_threads
     )
     for e, ids in enumerate(expert_tensor_ids):
         dispatcher.register_expert(0, e, ids, "")

@@ -39,7 +39,7 @@ HIDDEN = 256
 INTER = 64
 
 
-def _setup():
+def _setup(num_threads=4):
     import torch
 
     from tests.python.ops import test_grouped_moe_decode_pro6000 as grouped
@@ -47,7 +47,7 @@ def _setup():
     torch.cuda.set_device(0)
     gen = torch.Generator().manual_seed(3)
     engine, dispatcher, experts = grouped._make_dispatcher(
-        Path(tempfile.mkdtemp()), NUM_EXPERTS, HIDDEN, INTER, gen
+        Path(tempfile.mkdtemp()), NUM_EXPERTS, HIDDEN, INTER, gen, num_threads
     )
     # The dispatcher uses globals owned by the engine: the caller keeps it.
     return torch, grouped, gen, engine, dispatcher, experts
@@ -216,7 +216,9 @@ def _scenario_deadline_slow_live():
 
 
 def _scenario_failed_dispatch_drops_stale_items_then_destructs():
-    torch, grouped, gen, engine, dispatcher, experts = _setup()
+    # One exec worker per device: the items behind the failing one are still
+    # queued when the failure is published, so they are dropped as stale.
+    torch, grouped, gen, engine, dispatcher, experts = _setup(num_threads=1)
     dispatcher.set_grouped_decode(False, NUM_EXPERTS)
     x = torch.randn(1, HIDDEN, generator=gen).bfloat16().cuda()
     everyone = _mask(torch, list(range(NUM_EXPERTS)))
