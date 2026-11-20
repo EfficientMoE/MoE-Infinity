@@ -13,6 +13,8 @@ import triton
 import triton.language as tl
 from triton.language.extra.cuda import libdevice
 
+from moe_infinity.kernel._device import device_guard
+
 
 @triton.jit
 def softmax_kernel(
@@ -42,6 +44,7 @@ def softmax_kernel(
         tl.store(output_ptrs, softmax_output, mask=mask)
 
 
+@device_guard
 def launch_softmax(input_tensor):
     n_rows, n_cols = input_tensor.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
@@ -117,6 +120,7 @@ def fused_softmax_topk_kernel_nobias(
     )
 
 
+@device_guard
 def launch_fused_softmax_topk_nobias(
     hidden_states, weight, top_k, normalize_topk=True
 ):
@@ -717,6 +721,7 @@ def _gemm_config(T, H, E, block_e):
     return (bm, bk, 8, max(2, min(4, (80 * 1024) // stage)))
 
 
+@device_guard
 def _route_prefill(
     x, w, top_k, sc, bias, n_group, topk_group, renormalize, scaling, eps,
     round_logits, weights_dtype, logits_dtype, return_logits, dense,
@@ -903,6 +908,7 @@ def _route_reference(
     return RouteOutput(ids, tw, mask, dw, out_logits, None)
 
 
+@device_guard
 def fused_route(
     hidden_states: torch.Tensor,
     weight: torch.Tensor,
@@ -1110,6 +1116,7 @@ def make_router(
     return route
 
 
+@device_guard
 def _fused_route_triton(
     x, weight, top_k, sc, bias, n_group, topk_group, renormalize, scaling,
     eps, round_logits, weights_dtype, logits_dtype, return_logits, dense,

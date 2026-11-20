@@ -18,6 +18,7 @@
 #include <torch/all.h>
 #include <torch/python.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 
 int marlin_cuda(
@@ -61,6 +62,7 @@ void mul(
   if (workspace.numel() < prob_n / 128 * max_par)
     AT_ERROR("workspace must be of size at least ", prob_n / 128 * max_par, ".");
   int dev = A.get_device();
+  const c10::cuda::CUDAGuard device_guard(A.device());  // launch on A's device
   int err = marlin_cuda(
     A.data_ptr(),
     B.data_ptr(),

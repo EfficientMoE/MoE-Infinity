@@ -14,6 +14,13 @@ import os
 import sys
 import time
 
+# Device selection has to happen before torch initialises CUDA: setting
+# CUDA_VISIBLE_DEVICES after that (as the test body did) has no effect. When run
+# as a script, default to the first two GPUs; an explicit CUDA_VISIBLE_DEVICES
+# from the caller wins.
+if __name__ == "__main__":
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1")
+
 import torch
 
 
@@ -71,7 +78,12 @@ def test_multi_gpu_expert_distribution():
     print(f"\nLoading model: {model_name}")
     print(f"Offload dir: {offload_dir}")
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in test_gpus)
+    print(
+        "Visible devices: "
+        + ", ".join(
+            f"{g}={torch.cuda.get_device_name(g)}" for g in range(num_gpus)
+        )
+    )
 
     try:
         model = MoE(model_name, config)
@@ -99,8 +111,12 @@ def test_multi_gpu_expert_distribution():
 
     print("\nRunning inference...")
     input_text = "Translate English to German: How old are you?"
+    # The prompt goes where the engine expects it (the resolver generate() uses:
+    # the backbone is on the last visible GPU, not necessarily cuda:0).
+    input_device = model._resolve_native_input_device()
+    print(f"  Input device: {input_device}")
     input_ids = tokenizer(input_text, return_tensors="pt").input_ids.to(
-        "cuda:0"
+        input_device
     )
 
     try:

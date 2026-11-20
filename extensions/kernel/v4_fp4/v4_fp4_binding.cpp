@@ -5,6 +5,7 @@
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <pybind11/stl.h>
 #include <map>
 #include <string>
@@ -23,6 +24,9 @@ torch::Tensor mxfp4_dequant(torch::Tensor packed, torch::Tensor scales) {
   TORCH_CHECK(packed.scalar_type() == torch::kUInt8, "packed must be uint8");
   TORCH_CHECK(scales.scalar_type() == torch::kUInt8, "scales must be uint8");
   TORCH_CHECK(packed.dim() == 2 && scales.dim() == 2, "2D tensors required");
+  // Launch on the tensors' device (and its current stream), whatever device
+  // the calling thread has current.
+  const c10::cuda::CUDAGuard device_guard(packed.device());
   int rows = packed.size(0);
   int packed_cols = packed.size(1);
   int scale_cols = scales.size(1);
@@ -45,6 +49,9 @@ void fp8_dequant_blockwise_cuda(const void* weight, const void* scale,
 torch::Tensor fp4_dequant(torch::Tensor packed, torch::Tensor scale,
                           int64_t K) {
   TORCH_CHECK(packed.is_cuda(), "packed must be CUDA");
+  // Launch on the tensors' device (and its current stream), whatever device
+  // the calling thread has current.
+  const c10::cuda::CUDAGuard device_guard(packed.device());
   int N = packed.size(0);
   auto out = torch::empty(
       {N, K},
@@ -65,6 +72,9 @@ torch::Tensor v4_expert_forward(torch::Tensor x, torch::Tensor w1,
                                 torch::Tensor s1, torch::Tensor w2,
                                 torch::Tensor s2, torch::Tensor w3,
                                 torch::Tensor s3, double swiglu_limit) {
+  // Launch on the tensors' device (and its current stream), whatever device
+  // the calling thread has current.
+  const c10::cuda::CUDAGuard device_guard(x.device());
   int64_t hidden = x.size(1);
   int64_t inter = w1.size(0);
   auto dw1 = fp4_dequant(w1, s1, hidden);  // [inter, hidden]
@@ -137,6 +147,9 @@ std::pair<torch::Tensor, torch::Tensor> run_v4_moe(
               "v4_moe requires hidden % 256 == 0, inter % 128 == 0, both <= "
               "8192");
   TORCH_CHECK(E >= 1 && E <= 1024 && topk <= 16, "E <= 1024, topk <= 16");
+  // Launch on the tensors' device (and its current stream), whatever device
+  // the calling thread has current.
+  const c10::cuda::CUDAGuard device_guard(x.device());
   TORCH_CHECK(act_block == 32 || act_block == 128,
               "act_block (activation quantisation group) must be 32 or 128");
   const int64_t n = T * topk;
@@ -222,6 +235,9 @@ torch::Tensor v4_expert_forward_fp4_sm120_pro6000(
   for (auto* t : {&w1, &s1, &w2, &s2, &w3, &s3})
     TORCH_CHECK(t->is_cuda() && t->is_contiguous(),
                 "expert tensors must be contiguous CUDA tensors");
+  // Launch on the tensors' device (and its current stream), whatever device
+  // the calling thread has current.
+  const c10::cuda::CUDAGuard device_guard(x.device());
   const int64_t M = x.size(0), I = w1.size(0);
   auto cpu =
       torch::empty({1, 6}, torch::dtype(torch::kInt64).pinned_memory(true));
@@ -248,6 +264,9 @@ torch::Tensor fp8_dequant_blockwise(torch::Tensor weight, torch::Tensor scale) {
   TORCH_CHECK(scale.is_cuda(), "scale must be CUDA");
   TORCH_CHECK(weight.dim() == 2, "weight must be 2D [N, K]");
   TORCH_CHECK(scale.dim() == 2, "scale must be 2D [SN, SK]");
+  // Launch on the tensors' device (and its current stream), whatever device
+  // the calling thread has current.
+  const c10::cuda::CUDAGuard device_guard(weight.device());
 
   int N = weight.size(0);
   int K = weight.size(1);
@@ -283,6 +302,9 @@ torch::Tensor gptoss_mxfp4_expert_pro6000(
     torch::Tensor gu_bias, torch::Tensor d_blocks, torch::Tensor d_scales,
     torch::Tensor d_bias) {
   TORCH_CHECK(x.is_cuda() && x.dim() == 2, "x must be a 2D CUDA tensor");
+  // Launch on the tensors' device (and its current stream), whatever device
+  // the calling thread has current.
+  const c10::cuda::CUDAGuard device_guard(x.device());
   auto xb = x.to(torch::kBFloat16).contiguous();
   auto out = torch::empty_like(xb);
   GptOssExpertScratch scratch;

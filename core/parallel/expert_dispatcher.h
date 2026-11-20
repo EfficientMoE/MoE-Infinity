@@ -221,6 +221,8 @@ class ExpertDispatcher : public base::noncopyable {
         t->join();
       }
     }
+    int dtor_previous_device = 0;
+    cudaGetDevice(&dtor_previous_device);
     // Destructor-only synchronization: drain every device so no in-flight
     // kernel, stream callback, or completion event still references the
     // modules, streams, or events destroyed below.
@@ -230,6 +232,7 @@ class ExpertDispatcher : public base::noncopyable {
     }
     for (auto& record : completion_events_) {
       if (record.event != nullptr) {
+        cudaSetDevice(record.device);
         cudaEventSynchronize(record.event);
         cudaEventDestroy(record.event);
         completion_events_retired_.fetch_add(1, std::memory_order_relaxed);
@@ -237,31 +240,44 @@ class ExpertDispatcher : public base::noncopyable {
     }
     for (auto& record : destructor_fallback_events_) {
       if (record.event != nullptr) {
+        cudaSetDevice(record.device);
         cudaEventSynchronize(record.event);
         cudaEventDestroy(record.event);
         completion_events_retired_.fetch_add(1, std::memory_order_relaxed);
       }
     }
+    // Destroy every stream/event/module with its own device current (the
+    // drain loop above leaves the last device current). Objects were created
+    // under cudaSetDevice(i % kNumDevices()) in the constructor, or, for the
+    // pools, under the device they are keyed by.
     for (auto& completion_pool : completion_event_pool_) {
+      cudaSetDevice(completion_pool.first);
       for (auto& event : completion_pool.second) {
         cudaEventDestroy(event);
       }
     }
-    for (auto& stream : exec_streams_) {
-      cudaStreamDestroy(stream);
+    for (std::size_t i = 0; i < exec_streams_.size(); ++i) {
+      cudaSetDevice(static_cast<int>(i) % kNumDevices());
+      cudaStreamDestroy(exec_streams_[i]);
     }
-    for (auto& stream : fetch_streams_) {
-      cudaStreamDestroy(stream);
+    for (std::size_t i = 0; i < fetch_streams_.size(); ++i) {
+      cudaSetDevice(static_cast<int>(i));
+      cudaStreamDestroy(fetch_streams_[i]);
     }
-    for (auto& event : exec_done_events_) {
-      cudaEventDestroy(event);
+    for (std::size_t i = 0; i < exec_done_events_.size(); ++i) {
+      cudaSetDevice(static_cast<int>(i) % kNumDevices());
+      cudaEventDestroy(exec_done_events_[i]);
     }
-    if (input_ready_event_ != nullptr) {
-      cudaEventDestroy(input_ready_event_);
+    for (std::size_t d = 0; d < input_ready_events_.size(); ++d) {
+      if (input_ready_events_[d] == nullptr) continue;
+      cudaSetDevice(static_cast<int>(d));
+      cudaEventDestroy(input_ready_events_[d]);
     }
-    for (auto* m : modules_) {
-      delete m;
+    for (std::size_t i = 0; i < modules_.size(); ++i) {
+      cudaSetDevice(static_cast<int>(i) % kNumDevices());
+      delete modules_[i];
     }
+    cudaSetDevice(dtor_previous_device);
   }
 
   void SetInputs(const torch::Tensor& hidden_states,
@@ -408,6 +424,11 @@ class ExpertDispatcher : public base::noncopyable {
   void FailDispatch(const std::uint64_t failing_generation,
                     std::exception_ptr error,
                     const std::vector<FailureContext>& contexts = {}) noexcept;
+  void RestoreFailureContext(const FailureContext& context) noexcept;
+  bool IsStaleGeneration(std::uint64_t generation) const;
+  void DropStaleExecArgs(ExecArgs& args, int gpu_id) noexcept;
+  int EnqueueExpertOnDevice(int layer_idx, int expert_idx, int gpu_id,
+                            bool remote, int phase);
   void CompleteOne(std::uint64_t generation) noexcept;
   void NotifyPendingWaiters() noexcept;
   void NotifyCacheWaiters(int gpu_id) noexcept;
@@ -506,7 +527,17 @@ class ExpertDispatcher : public base::noncopyable {
 
   std::vector<cudaStream_t> exec_streams_;
   std::vector<cudaEvent_t> exec_done_events_;
-  cudaEvent_t input_ready_event_ = nullptr;
+  // One event per device, each created with that device current and recorded
+  // on the caller stream of that device (see SetInputs). Exec streams wait on
+  // the event of the device that holds hidden_states_ (input_device_).
+  std::vector<cudaEvent_t> input_ready_events_;
+  std::atomic<int> input_device_{0};
+  cudaEvent_t InputReadyEvent() const {
+    const int d = input_device_.load(std::memory_order_acquire);
+    return d < static_cast<int>(input_ready_events_.size())
+               ? input_ready_events_[d]
+               : nullptr;
+  }
   std::vector<cudaStream_t> fetch_streams_;
 
   std::unique_ptr<std::atomic<bool>[]> gpu_overload_;
@@ -643,6 +674,7 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::int64_t> completion_events_retired_{0};
   std::atomic<std::int64_t> completion_events_outstanding_{0};
   std::atomic<std::int64_t> stale_failures_quarantined_{0};
+  std::atomic<std::int64_t> stale_exec_items_dropped_{0};
 };
 
 struct GroupedExecBatch {

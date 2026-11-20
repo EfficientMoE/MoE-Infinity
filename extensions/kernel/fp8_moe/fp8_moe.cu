@@ -697,6 +697,9 @@ void fused_fp8_moe_ffn_sm120_pro6000_into(
     const torch::Tensor& gate_s, const torch::Tensor& up_w,
     const torch::Tensor& up_s, const torch::Tensor& down_w,
     const torch::Tensor& down_s, torch::Tensor& output, cudaStream_t stream) {
+  // Per-device state below (smem attribute, SM count, chain events) is keyed
+  // by the current device: make it the tensors' device.
+  const c10::cuda::CUDAGuard device_guard(hidden.device());
   const int64_t M = hidden.size(0);
   const int64_t H = hidden.size(1);
   const int64_t I = gate_w.size(0);

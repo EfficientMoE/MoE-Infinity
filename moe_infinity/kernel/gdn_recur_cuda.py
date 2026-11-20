@@ -24,6 +24,7 @@ _SRC = Path(__file__).with_name("csrc") / "gdn_recur.cu"
 
 _CPP = r"""
 #include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 void gdn_recur_launch(const void*, const void*, const void*, const void*,
                       const void*, const float*, void*, float*, int, int, int,
@@ -31,16 +32,20 @@ void gdn_recur_launch(const void*, const void*, const void*, const void*,
 void recur(torch::Tensor qg, torch::Tensor kd, torch::Tensor w, torch::Tensor u,
            torch::Tensor S, torch::Tensor g, torch::Tensor o, torch::Tensor h,
            int64_t t_base, int64_t nb, int64_t variant) {
+  // Launch on the tensors' device and its current stream.
+  c10::cuda::CUDAGuard guard(qg.device());
   int B = qg.size(0), TB = qg.size(1), H = qg.size(2), T = o.size(1);
   gdn_recur_launch(qg.data_ptr(), kd.data_ptr(), w.data_ptr(), u.data_ptr(),
                    S.data_ptr(), g.data_ptr<float>(), o.data_ptr(),
                    h.data_ptr<float>(), B, H, T, (int)t_base, TB, (int)nb,
-                   (int)variant, c10::cuda::getCurrentCUDAStream());
+                   (int)variant,
+                   c10::cuda::getCurrentCUDAStream(qg.device().index()));
 }
 // Persisting L2 window on [ptr, ptr + bytes) for the current stream
 // (bytes == 0 clears it).
 void l2_window(torch::Tensor buf, int64_t bytes) {
-  cudaStream_t s = c10::cuda::getCurrentCUDAStream();
+  c10::cuda::CUDAGuard guard(buf.device());
+  cudaStream_t s = c10::cuda::getCurrentCUDAStream(buf.device().index());
   cudaStreamAttrValue a = {};
   if (bytes > 0) {
     int dev; cudaGetDevice(&dev);

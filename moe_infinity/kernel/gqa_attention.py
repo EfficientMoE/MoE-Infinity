@@ -38,6 +38,8 @@ import torch
 import triton
 import triton.language as tl
 
+from moe_infinity.kernel._device import device_guard
+
 _LOG2E = 1.4426950408889634
 _LN2 = 0.6931471805599453
 _MAX_SPLITS = 256
@@ -258,6 +260,7 @@ def _sink_scale_kernel(
     tl.store(ptrs, (x.to(tl.float32) * f[:, None]).to(x.dtype), mask=m)
 
 
+@device_guard
 def apply_attention_sinks(
     out: torch.Tensor, lse: torch.Tensor, sinks: torch.Tensor
 ) -> torch.Tensor:
@@ -316,6 +319,7 @@ def _pro6000_decode_config(d: int, g: int) -> tuple[int, int, int, int]:
     return 32, 4, 2, 3
 
 
+@device_guard
 def gqa_decode_supported_pro6000(q, k, v, mask=None) -> bool:
     """Whether :func:`gqa_decode_attention_pro6000` handles these HF-layout inputs."""
     if not (q.is_cuda and q.dim() == 4 and q.shape[2] == 1):
@@ -340,6 +344,7 @@ def gqa_decode_supported_pro6000(q, k, v, mask=None) -> bool:
     return True
 
 
+@device_guard
 def gqa_decode_attention_pro6000(
     query: torch.Tensor,
     key: torch.Tensor,

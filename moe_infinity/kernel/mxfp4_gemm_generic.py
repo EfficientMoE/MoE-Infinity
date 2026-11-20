@@ -21,6 +21,8 @@ import torch
 import triton
 import triton.language as tl
 
+from moe_infinity.kernel._device import device_guard
+
 
 @triton.jit
 def _fp4_lookup(idx):
@@ -207,6 +209,7 @@ def _fused_mxfp4_gemm_kernel(
     tl.store(out_ptrs, acc.to(tl.bfloat16), mask=out_mask)
 
 
+@device_guard
 def fused_mxfp4_gemm_generic(
     x: torch.Tensor,
     weight_packed: torch.Tensor,

@@ -62,12 +62,31 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
   if (transfer_event != nullptr) {
     *transfer_event = nullptr;
   }
-  auto sync_stream_with_event = [](cudaStream_t sync_stream) {
-    cudaEvent_t sync_event = kCudaEventPool->Acquire();
-    cudaEventRecord(sync_event, sync_stream);
-    cudaEventSynchronize(sync_event);
-    kCudaEventPool->Release(sync_event);
+  // Acquire a pooled event for `event_device` (the device that owns `stream`)
+  // and record it on `stream`. A failed record is an error: waiting on an
+  // unrecorded event would not order anything.
+  auto record_pooled_event = [](int event_device, cudaStream_t record_stream) {
+    cudaEvent_t event = kCudaEventPool->Acquire(event_device);
+    cudaError_t status = cudaEventRecord(event, record_stream);
+    if (status != cudaSuccess) {
+      kCudaEventPool->Release(event);
+      throw std::runtime_error(
+          std::string("Node::SetDevice: cudaEventRecord failed on device ") +
+          std::to_string(event_device) + ": " + cudaGetErrorString(status));
+    }
+    return event;
   };
+  auto sync_stream_with_event =
+      [&record_pooled_event](int event_device, cudaStream_t sync_stream) {
+        cudaEvent_t sync_event = record_pooled_event(event_device, sync_stream);
+        cudaError_t status = cudaEventSynchronize(sync_event);
+        kCudaEventPool->Release(sync_event);
+        if (status != cudaSuccess) {
+          throw std::runtime_error(
+              std::string("Node::SetDevice: cudaEventSynchronize failed: ") +
+              cudaGetErrorString(status));
+        }
+      };
   DLOG_TRACE("SetDevice: " + str() + " to " + target_device.str());
   if (device == target_device) {
     DLOG_TRACE("SetDevice: " + str() + " to " + target_device.str() +
@@ -117,6 +136,9 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
       cudaStream_t h2d_stream = stream;
       bool own_stream = false;
       if (h2d_stream == nullptr) {
+        // Create the stream (and so the event recorded on it below) on the
+        // target device, not whatever device this thread happens to be on.
+        c10::cuda::CUDAGuard stream_device_guard(target_device.index());
         cudaStreamCreateWithFlags(&h2d_stream, cudaStreamNonBlocking);
         own_stream = true;
       }
@@ -143,10 +165,10 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
         nvtx3::scoped_range r_sync("cuda_stream_sync");
 #endif
         if (transfer_event != nullptr && !own_stream) {
-          *transfer_event = kCudaEventPool->Acquire();
-          cudaEventRecord(*transfer_event, h2d_stream);
+          *transfer_event =
+              record_pooled_event(target_device.index(), h2d_stream);
         } else {
-          sync_stream_with_event(h2d_stream);
+          sync_stream_with_event(target_device.index(), h2d_stream);
         }
       }
       if (own_stream) {
@@ -202,10 +224,10 @@ void Node::SetDevice(const torch::Device& target_device, bool on_demand,
           nvtx3::scoped_range r_sync("cuda_stream_sync");
 #endif
           if (transfer_event != nullptr) {
-            *transfer_event = kCudaEventPool->Acquire();
-            cudaEventRecord(*transfer_event, stream);
+            *transfer_event =
+                record_pooled_event(target_device.index(), stream);
           } else {
-            sync_stream_with_event(stream);
+            sync_stream_with_event(target_device.index(), stream);
           }
         }
       }
