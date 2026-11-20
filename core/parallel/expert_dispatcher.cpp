@@ -384,16 +384,22 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
     gpu_overload_[i].store(false);
   }
 
+  // Fill every per-device and per-thread container before starting any
+  // worker. The workers index fetch_streams_, cache_sizes_ and exec_streams_
+  // as soon as they start, so growing those vectors after a worker is running
+  // lets it read storage that a concurrent emplace_back has just reallocated
+  // and freed.
+  const int num_exec_threads = kNumDevices() * num_threads;
+  fetch_streams_.reserve(kNumDevices());
+  cache_sizes_.reserve(kNumDevices());
+  exec_streams_.reserve(num_exec_threads);
+  exec_done_events_.reserve(num_exec_threads);
+
   for (int i = 0; i < kNumDevices(); ++i) {
     cudaSetDevice(i);
     cudaStream_t fetch_stream;
     cudaStreamCreateWithFlags(&fetch_stream, cudaStreamNonBlocking);
     fetch_streams_.emplace_back(fetch_stream);
-
-    auto thread_func = std::bind(&ExpertDispatcher::GPUFetchFunc, this, i);
-    std::string thread_name = "GPUFetchFunc" + std::to_string(i);
-    threads_.emplace_back(new base::Thread(thread_func, thread_name));
-    threads_.back()->start();
 
     auto cache_limit = kTopologyHandle ? kTopologyHandle->GetSparseCacheLimit(
                                              torch::Device(torch::kCUDA, i))
@@ -401,7 +407,7 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
     cache_sizes_.push_back(cache_limit);
   }
 
-  for (int i = 0; i < kNumDevices() * num_threads; ++i) {
+  for (int i = 0; i < num_exec_threads; ++i) {
     cudaSetDevice(i % kNumDevices());
     cudaStream_t exec_stream;
     cudaStreamCreateWithFlags(&exec_stream, cudaStreamNonBlocking);
@@ -411,7 +417,16 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
     exec_done_events_.emplace_back(exec_done_event);
 
     modules_[i] = new MoEMLP(dtype, expert_type);
+  }
 
+  for (int i = 0; i < kNumDevices(); ++i) {
+    auto thread_func = std::bind(&ExpertDispatcher::GPUFetchFunc, this, i);
+    std::string thread_name = "GPUFetchFunc" + std::to_string(i);
+    threads_.emplace_back(new base::Thread(thread_func, thread_name));
+    threads_.back()->start();
+  }
+
+  for (int i = 0; i < num_exec_threads; ++i) {
     auto thread_func =
         std::bind(&ExpertDispatcher::GPUExecFunc, this, i % kNumDevices(), i);
     std::string thread_name = "GPUExecFunc" + std::to_string(i);
