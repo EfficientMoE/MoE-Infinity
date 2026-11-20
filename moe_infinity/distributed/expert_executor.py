@@ -1055,6 +1055,18 @@ class DistributedExpertExecutor:
 
         phase = current_expert_phase()
 
+        # The dispatcher takes (hidden_states, router_mask, router_weight), as
+        # dispatch_local passes them: a boolean mask plus the routing weights.
+        # This entry point only receives ``router_mask``: a floating-point one
+        # carries the routing weights (mask * weight), a boolean one selects
+        # experts with weight 1.
+        router_weights = (
+            router_mask
+            if router_mask.is_floating_point()
+            else router_mask.to(hidden_states.dtype)
+        )
+        router_mask = router_mask.bool()
+
         device_list = self.device_map_manager.get_target_device(expert_list)
         visited_ranks = set()
         rank_wait_cnt = {r: 0 for r in range(dist.get_world_size())}
@@ -1069,7 +1081,12 @@ class DistributedExpertExecutor:
                 future = rpc.rpc_async(
                     f"worker_{rank}",
                     _call_expert_dispatcher,
-                    args=("set_inputs", hidden_states.cpu(), router_mask.cpu()),
+                    args=(
+                        "set_inputs",
+                        hidden_states.cpu(),
+                        router_mask.cpu(),
+                        router_weights.cpu(),
+                    ),
                 )
                 futures.append(future)
                 future = rpc.rpc_async(
@@ -1079,7 +1096,9 @@ class DistributedExpertExecutor:
                 )
                 futures.append(future)
             else:
-                self.expert_dispatcher.set_inputs(hidden_states, router_mask)
+                self.expert_dispatcher.set_inputs(
+                    hidden_states, router_mask, router_weights
+                )
                 self.expert_dispatcher.set_expected_queue(rank_wait_cnt[rank])
 
         # wait for all futures
