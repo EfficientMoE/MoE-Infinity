@@ -166,6 +166,26 @@ def test_grouped_kernel_subset_of_experts_and_strided_inputs():
     _assert_bf16_close(out, _per_expert_reference(x, mask, weights, experts))
 
 
+def _home_device(expert):
+    """Device the dispatcher keeps expert ``expert`` on.
+
+    Experts are spread round-robin over the visible devices
+    (``expert_id % device_count``), which is also what the model code passes
+    to ``enqueue_expert``. With one device this is always 0.
+    """
+    return expert % torch.cuda.device_count()
+
+
+def _grouped_eligible(experts, hidden_device=0):
+    """How many of ``experts`` the grouped path can run.
+
+    Grouped decode runs on the device of the hidden states (see
+    ``ExpertDispatcher::GroupedEligible``): an expert homed on another device
+    keeps the per-expert path, which copies the input across.
+    """
+    return sum(1 for e in experts if _home_device(e) == hidden_device)
+
+
 def _make_dispatcher(tmp_path, num_experts, hidden, inter, generator):
     try:
         from moe_infinity.runtime.model_offload import _load_prefetch_lib
@@ -210,6 +230,12 @@ def _make_dispatcher(tmp_path, num_experts, hidden, inter, generator):
     )
     for e, ids in enumerate(expert_tensor_ids):
         dispatcher.register_expert(0, e, ids, "")
+    # _home_device() is what the tests below build their expectations on:
+    # check it against the placement the engine actually made.
+    placed = [
+        dev for _, sparse, dev in engine.get_topology_snapshot() if sparse
+    ]
+    assert placed == [_home_device(e) for e in range(num_experts)], placed
     return engine, dispatcher, experts
 
 
@@ -243,7 +269,7 @@ def _dispatch(dispatcher, x, mask, weights, native):
         active = mask.any(0).nonzero().squeeze(1).tolist()
         dispatcher.set_expected_queue(len(active))
         for e in active:
-            dispatcher.enqueue_expert(0, e, 0, False)
+            dispatcher.enqueue_expert(0, e, _home_device(e), False)
         dispatcher.notify_fetch_start()
     try:
         return dispatcher.wait_expert().clone()
@@ -252,7 +278,11 @@ def _dispatch(dispatcher, x, mask, weights, native):
         # enqueueing the same expert again before that is a fatal CAS failure
         # (real models never reuse a layer's expert within one step), so
         # back-to-back test dispatches wait for retirement.
-        torch.cuda.synchronize()
+        # Every device: after a failed dispatch the caller returns without
+        # ordering its stream after the exec streams, and a straggler of that
+        # dispatch can still be running on another GPU's exec stream.
+        for device in range(torch.cuda.device_count()):
+            torch.cuda.synchronize(device)
         time.sleep(0.05)
 
 
@@ -269,7 +299,10 @@ def test_dispatcher_grouped_path_matches_per_expert_path(
     dispatcher, experts = native_moe(num_experts, hidden, inter, gen)
     dispatcher.set_grouped_decode(True, top_k)
     x = torch.randn(tokens, hidden, generator=gen).bfloat16().cuda()
-    mask, weights = _routing(tokens, num_experts, top_k, None, "cpu")
+    # Seeded routing (it used the unseeded global RNG): the active set is
+    # fixed, so the expected grouped count is too. [4, 7] and
+    # [0, 1, 3, 4, 5, 6] each mix experts homed on cuda:0 and cuda:1.
+    mask, weights = _routing(tokens, num_experts, top_k, gen, "cpu")
     mask, weights = mask.cuda(), weights.to(torch.bfloat16).cuda()
     expected = _per_expert_reference(x, mask, weights, experts)
 
@@ -279,17 +312,65 @@ def test_dispatcher_grouped_path_matches_per_expert_path(
     # Now resident: one grouped launch pair.
     warm = _dispatch(dispatcher, x, mask, weights, native)
     stats = dispatcher.get_routing_stats()
-    active = int(mask.any(0).sum())
-    assert stats["grouped_experts"] == active
+    active = mask.any(0).nonzero().squeeze(1).tolist()
+    grouped = _grouped_eligible(active)  # == len(active) on one device
+    if torch.cuda.device_count() >= 2:
+        assert 0 < grouped < len(active), active
+    assert stats["grouped_experts"] == grouped
     assert stats["grouped_batches"] == 1
     # Resident again with the grouped path disabled: per-expert CUTLASS.
     dispatcher.set_grouped_decode(False, top_k)
     per_expert = _dispatch(dispatcher, x, mask, weights, native)
-    assert dispatcher.get_routing_stats()["grouped_experts"] == active
+    assert dispatcher.get_routing_stats()["grouped_experts"] == grouped
 
     _assert_bf16_close(cold, expected)
     _assert_bf16_close(per_expert, expected)
     _assert_bf16_close(warm, per_expert)
+
+
+@requires_cuda
+@requires_pro6000
+@pytest.mark.parametrize("native", [False, True])
+def test_grouped_path_runs_on_the_hidden_state_device(native_moe, native):
+    """With the hidden states on cuda:1 the experts homed there are grouped
+    (and the others are not), and the result still matches the reference."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+    if not supports(RTX_PRO_6000, 1):
+        pytest.skip("grouped decode needs an RTX PRO 6000 on cuda:1 too")
+    device = torch.device("cuda:1")
+    torch.cuda.set_device(0)
+    num_experts, top_k, hidden, inter, tokens = 8, 2, 256, 128, 1
+    gen = torch.Generator().manual_seed(11)
+    dispatcher, experts = native_moe(num_experts, hidden, inter, gen)
+    experts = {e: tuple(t.to(device) for t in w) for e, w in experts.items()}
+    dispatcher.set_grouped_decode(True, top_k)
+    x = torch.randn(tokens, hidden, generator=gen).bfloat16().to(device)
+    mask = torch.zeros(tokens, num_experts, dtype=torch.bool)
+    mask[:, [1, 3]] = True  # both homed on cuda:1
+    mask = mask.to(device)
+    weights = (mask.float() * 0.5).to(torch.bfloat16)
+    expected = _per_expert_reference(x, mask, weights, experts)
+
+    _dispatch(dispatcher, x, mask, weights, native)  # cold: per-expert path
+    assert dispatcher.get_routing_stats()["grouped_experts"] == 0
+    warm = _dispatch(dispatcher, x, mask, weights, native)
+    stats = dispatcher.get_routing_stats()
+    assert stats["grouped_experts"] == _grouped_eligible([1, 3], 1) == 2
+    assert stats["grouped_batches"] == 1
+    _assert_bf16_close(warm.to(device), expected)
+
+    # Experts homed on cuda:0 are not grouped for cuda:1 hidden states.
+    mask0 = torch.zeros(tokens, num_experts, dtype=torch.bool)
+    mask0[:, [0, 2]] = True
+    mask0 = mask0.to(device)
+    weights0 = (mask0.float() * 0.5).to(torch.bfloat16)
+    _dispatch(dispatcher, x, mask0, weights0, native)  # cold
+    out0 = _dispatch(dispatcher, x, mask0, weights0, native)  # resident
+    assert dispatcher.get_routing_stats()["grouped_experts"] == 2
+    _assert_bf16_close(
+        out0.to(device), _per_expert_reference(x, mask0, weights0, experts)
+    )
 
 
 @requires_cuda
@@ -313,7 +394,10 @@ def test_dispatcher_mixes_grouped_and_fetched_experts(native_moe):
     mask = mask.cuda()
     weights = torch.rand(tokens, num_experts, generator=gen).cuda() * mask
     out = _dispatch(dispatcher, x, mask, weights, native=False)
-    assert dispatcher.get_routing_stats()["grouped_experts"] == 2
+    # 0 and 1 are resident; only those homed on the hidden-state device group.
+    assert dispatcher.get_routing_stats()["grouped_experts"] == (
+        _grouped_eligible([0, 1])
+    )
     _assert_bf16_close(out, _per_expert_reference(x, mask, weights, experts))
 
 
@@ -365,4 +449,6 @@ def test_non_silu_experts_stay_per_expert(native_moe, activation_kind):
     assert dispatcher.get_routing_stats()["grouped_experts"] == 0
     dispatcher.set_grouped_decode(True, 2, 0)
     _dispatch(dispatcher, x, mask, mask.float() * 0.5, native=True)
-    assert dispatcher.get_routing_stats()["grouped_experts"] == 2
+    assert dispatcher.get_routing_stats()["grouped_experts"] == (
+        _grouped_eligible([0, 1])
+    )
