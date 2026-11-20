@@ -143,3 +143,17 @@ target_link_libraries(test_eviction_policy PRIVATE
 )
 
 add_test(NAME EvictionPolicyTests COMMAND test_eviction_policy)
+
+# Prefetch queue accounting: header-level logic of archer_core, no GPU needed.
+# test_expert_policy.cpp is deliberately not registered: it exercises
+# VictimUtility / VictimLess / SelectStableVictim / IsEvictionEligible, which
+# prefetch/expert_policy.h no longer declares (removed in 4111023f), so it does
+# not compile until it is rewritten against the current policy API.
+add_executable(test_prefetch_queue_accounting test_prefetch_queue_accounting.cpp)
+set_target_properties(test_prefetch_queue_accounting PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+)
+target_link_libraries(test_prefetch_queue_accounting PRIVATE archer_core GTest::gtest_main Python3::Python)
+target_include_directories(test_prefetch_queue_accounting PRIVATE ${CMAKE_SOURCE_DIR}/core)
+add_test(NAME prefetch_queue_accounting COMMAND test_prefetch_queue_accounting)
