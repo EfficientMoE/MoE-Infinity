@@ -125,6 +125,7 @@ def _scenario():
         "stale_exec_items_dropped", -1
     )
     result["pending"] = stats["pending"]
+    result["num_devices"] = torch.cuda.device_count()
     # The failed dispatch's experts must be usable again (their nodes were
     # given back).
     out_c, w_c = raw_dispatch(x, mask_a)
@@ -162,8 +163,17 @@ def test_stale_items_are_dropped_and_experts_recover():
     )
     result = json.loads(lines[-1][len("RESULT ") :])
     assert result["failed_dispatch_raised"], result
-    # The 5 items queued behind the failed one are dropped, not executed.
-    assert result["stale_exec_items_dropped"] == FAILED_EXPERTS - 1, result
+    # Every one of the FAILED_EXPERTS - 1 items queued behind the failed one
+    # is accounted for: dropped, or legitimately executed because its worker
+    # had already taken it when the failure was published. There is one exec
+    # worker per device, and the worker running the failed item is busy
+    # failing, so at most (devices - 1) items can have been taken that way
+    # (none on one device: all 5 are dropped). Everything else must be
+    # dropped, not executed.
+    queued_behind = FAILED_EXPERTS - 1
+    dropped = result["stale_exec_items_dropped"]
+    assert queued_behind - (result["num_devices"] - 1) <= dropped, result
+    assert dropped <= queued_behind, result
     assert result["pending"] == 0, result
     assert result["next_dispatch_err"] < 0.05, result
     assert result["same_experts_err"] < 0.05, result
