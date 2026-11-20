@@ -701,6 +701,11 @@ class ExpertDispatcher : public base::noncopyable {
   // ranks >= R, whose contributions are added atomically instead (a token with
   // more active experts than the hint; correct, not deterministic).
   torch::Tensor accum_slots_;
+  // Mirrors accum_slots_.defined() for readers that do not hold accum_mutex_
+  // (OutputFunc decides before its lock whether to convert the expert output
+  // to float32 itself; the locked section re-checks accum_slots_ and converts
+  // when the hint was stale, so a wrong value costs at most one conversion).
+  std::atomic<bool> accum_slot_active_{false};
   // int32 [T, E]: min(rank of expert e among token t's active experts, R)
   torch::Tensor accum_slot_index_;
   std::int64_t accum_slot_count_ = 0;  // R of the current dispatch

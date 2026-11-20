@@ -278,6 +278,36 @@ def test_inf_nan_and_negative_zero_pass_through_like_the_atomic_path(
 
 
 @requires_cuda
+@pytest.mark.parametrize("tokens", [1, 7])
+def test_non_contiguous_hidden_states_work_in_both_modes(native_moe, tokens):
+    """A dense but non-contiguous hidden-state tensor (here a transposed view)
+    must dispatch in slot mode as it does in atomic mode: the accumulator
+    returned to Python is a plain float32 [T, H] tensor either way."""
+    torch.cuda.set_device(0)
+    dispatcher, _, x, mask, weights = _problem(native_moe, tokens, seed=29)
+    dispatcher.set_grouped_decode(False, TOP_K)
+    x_nc = x.t().contiguous().t()  # same values, strides (1, T)
+    assert x_nc.shape == x.shape and torch.equal(x_nc, x)
+    if tokens > 1:
+        assert not x_nc.is_contiguous()
+    _run(dispatcher, x, mask, weights)  # make the experts resident
+
+    dispatcher.set_deterministic_accum(True)
+    slots = _run(dispatcher, x_nc, mask, weights)
+    slots_contiguous = _run(dispatcher, x, mask, weights)
+    dispatcher.set_deterministic_accum(False)
+    atomic = _run(dispatcher, x_nc, mask, weights)
+
+    for out in (slots, atomic):
+        assert out.dtype == torch.float32
+        assert out.shape == x.shape
+    # same dispatch, same bits, whatever the input's strides
+    assert torch.equal(slots, slots_contiguous)
+    scale = atomic.abs().max()
+    assert (slots - atomic).abs().max() <= 2**-20 * scale * TOP_K
+
+
+@requires_cuda
 def test_token_with_more_experts_than_the_top_k_hint_stays_correct(native_moe):
     """The hint bounds R for batches; a larger mask must not corrupt anything."""
     torch.cuda.set_device(0)

@@ -1774,8 +1774,9 @@ bool ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
     // Slot mode stores the expert output (any float dtype) with its own
     // conversion inside the store kernel; the atomic path converts here.
     torch::Tensor output_tensor = output.to(output_device);
-    if (!accum_slots_.defined())
+    if (!accum_slot_active_.load(std::memory_order_acquire)) {
       output_tensor = output_tensor.to(torch::kFloat32);
+    }
 
     int64_t expert_idx = args.expert_node->expert_idx;
 
@@ -1990,6 +1991,7 @@ void ExpertDispatcher::SetDeterministicAccum(bool enabled,
 void ExpertDispatcher::BuildAccumSlots(const torch::Tensor& hidden_states,
                                        int device) {
   accum_slots_ = torch::Tensor();
+  accum_slot_active_.store(false, std::memory_order_release);
   accum_slot_index_ = torch::Tensor();
   accum_slot_count_ = 0;
   accum_slot_guard_ = false;
@@ -2045,6 +2047,7 @@ void ExpertDispatcher::BuildAccumSlots(const torch::Tensor& hidden_states,
   accum_slots_prepare(router_mask_, slots_buffer, slot_index, slots, counter,
                       c10::cuda::getCurrentCUDAStream(device).stream());
   accum_slots_ = std::move(slots_buffer);
+  accum_slot_active_.store(true, std::memory_order_release);
   accum_slot_index_ = std::move(slot_index);
   accum_slot_count_ = slots;
   accum_slot_guard_ = guard;
@@ -2461,7 +2464,6 @@ torch::Tensor ExpertDispatcher::WaitHiddenStates() {
   c10::cuda::CUDAGuard device_guard(device);
   auto caller_stream = c10::cuda::getCurrentCUDAStream(device).stream();
   std::size_t waits_inserted = 0;
-  const bool had_completion_events = !events.empty();
   try {
     for (const CompletionEventRecord& record : events) {
       CUDA_CHECK(cudaStreamWaitEvent(caller_stream, record.event, 0));
@@ -2563,8 +2565,10 @@ void ExpertDispatcher::SetInputs(const torch::Tensor& hidden_states,
   BuildAccumSlots(hidden_states, device);
   // Slot mode: WaitHiddenStates' reduction overwrites the accumulator, so it
   // needs no zero fill; the atomic path accumulates into zeros.
+  // By shape, not empty_like: the reduction kernel needs a contiguous
+  // accumulator whatever strides hidden_states has.
   final_hidden_states_ = accum_slots_.defined()
-                             ? torch::empty_like(hidden_states, options)
+                             ? torch::empty(hidden_states.sizes(), options)
                              : torch::zeros_like(hidden_states, options);
   {
     // Created on the caller stream before the input-ready event, which every
