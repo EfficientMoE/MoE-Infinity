@@ -82,11 +82,13 @@ struct Params {
   // Deterministic accumulation (slot mode). nullptr: the down launch adds into
   // `out` atomically, as before. Otherwise it stores o * w into
   // slots[t, rank, :] ([T, slot_rows, H] fp32) where rank is the expert's rank
-  // among ALL of token t's active experts (slot_rank [T, slot_rank_ld], int64,
-  // built by the dispatcher), so per-expert items of the same layer share the
-  // buffer. A rank >= slot_count has no slot and falls back to the atomic add.
+  // among ALL of token t's active experts (slot_rank [T, slot_rank_ld], int32,
+  // already clamped to slot_count by accum_slots_prepare), so per-expert items
+  // of the same layer share the buffer. A rank == slot_count has no slot: its
+  // value is added atomically to the dump row slots[t, slot_count, :] (or to
+  // `out` when the buffer has no dump row).
   float* slots;
-  const int64_t* slot_rank;
+  const int* slot_rank;
   int64_t slot_rank_ld;
   int slot_count;
   int slot_rows;
@@ -469,9 +471,13 @@ __global__ void __launch_bounds__(WR* WK * 32)
         const float o = __bfloat162float(__float2bfloat16(v));
         const int tk = s_tok[i] & 0xffff;
         if (p.slots != nullptr) {
-          const int64_t rk = p.slot_rank[int64_t(tk) * p.slot_rank_ld + e];
+          const int rk = p.slot_rank[int64_t(tk) * p.slot_rank_ld + e];
           if (rk < p.slot_count) {
             p.slots[(int64_t(tk) * p.slot_rows + rk) * p.H + h] = o * s_w[i];
+          } else if (p.slot_rows > p.slot_count) {
+            atomicAdd(
+                p.slots + (int64_t(tk) * p.slot_rows + p.slot_count) * p.H + h,
+                o * s_w[i]);
           } else {
             atomicAdd(p.out + int64_t(tk) * p.ldo + h, o * s_w[i]);
           }
@@ -639,12 +645,12 @@ void grouped_moe_decode_pro6000(
                 "[T, rows, H] on the hidden device");
     TORCH_CHECK(slot_rank.defined() && slot_rank.is_cuda() &&
                     slot_rank.device() == hidden.device() &&
-                    slot_rank.scalar_type() == at::kLong &&
+                    slot_rank.scalar_type() == at::kInt &&
                     slot_rank.dim() == 2 && slot_rank.is_contiguous() &&
                     slot_rank.size(0) == T &&
                     slot_rank.size(1) == router_mask.size(1),
                 "grouped_moe_decode_pro6000: slot_rank must be contiguous "
-                "int64 [T, E] on the hidden device");
+                "int32 [T, E] on the hidden device");
     TORCH_CHECK(slot_count >= 1 && slot_count <= slots.size(1),
                 "grouped_moe_decode_pro6000: slot_count must be in "
                 "[1, slots.size(1)]");
@@ -687,7 +693,7 @@ void grouped_moe_decode_pro6000(
   p.zero_out = zero_out ? 1 : 0;
   if (slot_mode) {
     p.slots = slots.data_ptr<float>();
-    p.slot_rank = slot_rank.data_ptr<int64_t>();
+    p.slot_rank = slot_rank.data_ptr<int>();
     p.slot_rank_ld = slot_rank.stride(0);
     p.slot_count = static_cast<int>(slot_count);
     p.slot_rows = static_cast<int>(slots.size(1));

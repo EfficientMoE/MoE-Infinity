@@ -36,11 +36,13 @@
 //                 Deterministic accumulation: instead of atomicAdd into `out`,
 //                 the down launch stores each expert's weighted value into
 //                 slots[t, slot_rank[t, e], :]. slots is float32 [T, rows, H]
-//                 (zero-filled by the caller), slot_rank int64 [T, E] holds
-//                 the rank of expert e among ALL of token t's active experts
-//                 (ascending expert index), slot_count (<= rows) is the number
-//                 of usable ranks; a larger rank falls back to the atomic add
-//                 into `out`. The caller reduces the slots in a fixed order.
+//                 (zero-filled by the caller, see accum_slots.h), slot_rank
+//                 int32 [T, E] holds the rank of expert e among ALL of token
+//                 t's active experts (ascending expert index) clamped to
+//                 slot_count, slot_count (<= rows) is the number of usable
+//                 ranks. Rank == slot_count adds atomically to the dump row
+//                 slots[t, slot_count, :] when rows > slot_count (otherwise to
+//                 `out`). The caller reduces the slots in a fixed order.
 
 constexpr int kGroupedMoePro6000MaxTokens = 256;
 

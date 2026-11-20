@@ -14,6 +14,7 @@
 #include "kernel/ops.h"
 #include "kernel/fp8_moe/fp8_moe.h"
 #include "kernel/grouped_moe_decode_pro6000.h"
+#include "kernel/accum_slots.h"
 #include "kernel/fused_moe_mlp.h"
 #include "kernel/grouped_moe_prefill.h"
 
@@ -246,6 +247,44 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::arg("slot_count") = 0,
       "Grouped decode MoE layer: out += sum_e w[:, e] * FFN_e(hidden) over "
       "the experts in expert_table (int64 [n, 4]: gate*, up*, down*, id).");
+  m.def(
+      "accum_slots_prepare",
+      [](const torch::Tensor& router_mask, torch::Tensor slots,
+         torch::Tensor slot_index, int64_t slot_count,
+         std::optional<torch::Tensor> overflow_counter) {
+        TensorDeviceStream ds(router_mask);
+        accum_slots_prepare(router_mask, slots, slot_index, slot_count,
+                            overflow_counter.value_or(torch::Tensor()),
+                            ds.stream);
+      },
+      py::arg("router_mask"), py::arg("slots"), py::arg("slot_index"),
+      py::arg("slot_count"), py::arg("overflow_counter") = py::none(),
+      "Deterministic accumulation: rank table, overflow counter and zero fill "
+      "of the slot buffer (see kernel/accum_slots.h).");
+  m.def(
+      "accum_slot_store",
+      [](const torch::Tensor& output, const torch::Tensor& token_indices,
+         int64_t expert, const torch::Tensor& router_weight,
+         const torch::Tensor& slot_index, torch::Tensor slots,
+         int64_t slot_count) {
+        TensorDeviceStream ds(output);
+        accum_slot_store(output, token_indices, expert, router_weight,
+                         slot_index, slots, slot_count, ds.stream);
+      },
+      py::arg("output"), py::arg("token_indices"), py::arg("expert"),
+      py::arg("router_weight"), py::arg("slot_index"), py::arg("slots"),
+      py::arg("slot_count"),
+      "Store float(output) * router_weight[t, expert] into the expert's "
+      "slots.");
+  m.def(
+      "accum_slots_reduce",
+      [](const torch::Tensor& slots, int64_t slot_count, bool has_dump_row,
+         torch::Tensor out) {
+        TensorDeviceStream ds(slots);
+        accum_slots_reduce(slots, slot_count, has_dump_row, out, ds.stream);
+      },
+      py::arg("slots"), py::arg("slot_count"), py::arg("has_dump_row"),
+      py::arg("out"), "Fixed-order sum of the slots into out (overwrites it).");
   m.def(
       "fused_moe_ffn_into",
       [](torch::Tensor hidden, torch::Tensor gate_proj, torch::Tensor up_proj,

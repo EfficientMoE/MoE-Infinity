@@ -160,9 +160,15 @@ def test_grouped_kernel_slot_mode_matches_atomic_mode(tokens, slot_count_delta):
         x, mask, weights, table, inter, top_k, atomic
     )
 
-    rank = (mask.long().cumsum(1) - 1).contiguous()  # rank among all actives
     slot_count = top_k - slot_count_delta
-    slots = torch.zeros(tokens, top_k, hidden, device="cuda")
+    rows = slot_count + 1  # + the dump row
+    # garbage in: accum_slots_prepare zero-fills the buffer and builds the
+    # clamped rank table (rank among ALL of the token's active experts)
+    slots = torch.full((tokens, rows, hidden), 7.0, device="cuda")
+    slot_rank = torch.empty(
+        tokens, num_experts, dtype=torch.int32, device="cuda"
+    )
+    store.accum_slots_prepare(mask, slots, slot_rank, slot_count)
     out = torch.zeros(tokens, hidden, device="cuda")
     store.grouped_moe_decode_pro6000(
         x,
@@ -173,15 +179,16 @@ def test_grouped_kernel_slot_mode_matches_atomic_mode(tokens, slot_count_delta):
         top_k,
         out,
         slots=slots,
-        slot_rank=rank,
+        slot_rank=slot_rank,
         slot_count=slot_count,
     )
+    assert out.abs().max() == 0  # nothing was added to out atomically
     if slot_count_delta == 0:
-        assert out.abs().max() == 0  # nothing was added atomically
-    else:  # the last rank of every token went to the atomic path
-        assert out.abs().max() > 0
-        assert slots[:, slot_count:].abs().max() == 0
-    total = out + slots.sum(1)
+        assert slots[:, slot_count].abs().max() == 0  # dump row unused
+    else:  # the last rank of every token went to the dump row
+        assert slots[:, slot_count].abs().max() > 0
+    total = torch.empty(tokens, hidden, device="cuda")
+    store.accum_slots_reduce(slots, slot_count, True, total)
     # same values, different order of the fp32 additions
     scale = atomic.abs().max()
     assert (total - atomic).abs().max() <= 2**-20 * scale * top_k

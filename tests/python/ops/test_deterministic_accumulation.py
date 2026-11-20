@@ -221,6 +221,63 @@ def test_slot_budget_boundary_and_size(native_moe):
 
 
 @requires_cuda
+def test_inf_nan_and_negative_zero_pass_through_like_the_atomic_path(
+    native_moe,
+):
+    """What an expert contributes reaches the accumulator exactly as the atomic
+    path delivers it: a +/-inf stays inf (a masked-out overflow term must not
+    turn it into NaN), a NaN stays NaN and a -0 stays what the atomic path
+    makes of it; no other token is touched.
+
+    Tokens with a single active expert have a single addend, so slot and
+    atomic mode must agree bit for bit on them.
+    """
+    torch.cuda.set_device(0)
+    tokens = 7
+    dispatcher, _, x, mask, weights = _problem(native_moe, tokens, seed=28)
+    dispatcher.set_grouped_decode(False, TOP_K)  # hint: overflow guard is on
+    inf_tok, nan_tok, negzero_tok = 3, 4, 5
+    mask = mask.clone()
+    weights = weights.clone()
+    for tok, expert, weight in (
+        (inf_tok, 2, 3e38),  # o * 3e38 overflows fp32 -> +/-inf
+        (nan_tok, 5, float("nan")),
+        (negzero_tok, 7, -0.0),  # o * -0.0 = -0.0 for o > 0
+    ):
+        mask[tok] = False
+        mask[tok, expert] = True
+        weights[tok] = 0
+        weights[tok, expert] = weight
+    _run(dispatcher, x, mask, weights)  # make the experts resident
+
+    dispatcher.set_deterministic_accum(True)
+    slots = _run(dispatcher, x, mask, weights)
+    dispatcher.set_deterministic_accum(False)
+    atomic = _run(dispatcher, x, mask, weights)
+
+    assert torch.isinf(atomic[inf_tok]).any()
+    assert torch.isnan(atomic[nan_tok]).all()
+    for tok in (inf_tok, nan_tok, negzero_tok):
+        got, want = slots[tok], atomic[tok]
+        assert torch.equal(torch.isnan(got), torch.isnan(want)), tok
+        assert torch.equal(torch.isposinf(got), torch.isposinf(want)), tok
+        assert torch.equal(torch.isneginf(got), torch.isneginf(want)), tok
+        finite = torch.isfinite(want)
+        # bit for bit (also the sign of zero) where finite
+        assert torch.equal(
+            got[finite].view(torch.int32), want[finite].view(torch.int32)
+        ), tok
+    # an inf / NaN in one token does not change any other token: the same
+    # batch without the non-finite tokens' experts reproduces their rows
+    clean = [
+        t for t in range(tokens) if t not in (inf_tok, nan_tok, negzero_tok)
+    ]
+    dispatcher.set_deterministic_accum(True)
+    again = _run(dispatcher, x, mask, weights)
+    assert torch.equal(again[clean], slots[clean])
+
+
+@requires_cuda
 def test_token_with_more_experts_than_the_top_k_hint_stays_correct(native_moe):
     """The hint bounds R for batches; a larger mask must not corrupt anything."""
     torch.cuda.set_device(0)

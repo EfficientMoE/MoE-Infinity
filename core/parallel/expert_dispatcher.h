@@ -264,7 +264,7 @@ class ExpertDispatcher : public base::noncopyable {
     // The slot buffer was record_stream'ed on the exec streams: free it while
     // they still exist (freeing records an event on each such stream).
     accum_slots_ = torch::Tensor();
-    accum_slot_rank_ = torch::Tensor();
+    accum_slot_index_ = torch::Tensor();
     // Destroy every stream/event/module with its own device current (the
     // drain loop above leaves the last device current). Objects were created
     // under cudaSetDevice(i % kNumDevices()) in the constructor, or, for the
@@ -701,12 +701,17 @@ class ExpertDispatcher : public base::noncopyable {
   // ranks >= R, whose contributions are added atomically instead (a token with
   // more active experts than the hint; correct, not deterministic).
   torch::Tensor accum_slots_;
-  torch::Tensor accum_slot_rank_;  // [T, E] int64: rank of expert e for token t
+  // int32 [T, E]: min(rank of expert e among token t's active experts, R)
+  torch::Tensor accum_slot_index_;
   std::int64_t accum_slot_count_ = 0;  // R of the current dispatch
   bool accum_slot_guard_ = false;      // R < num_experts: rank >= R possible
   // Per accumulator device: number of dispatches whose rank table exceeded R
   // (device-side counter, read only by get_routing_stats).
   std::unordered_map<int, torch::Tensor> accum_overflow_dev_;
+  // The caller thread's cached handle to its device's counter (no lock per
+  // dispatch).
+  torch::Tensor accum_overflow_cached_;
+  int accum_overflow_cached_device_ = -1;
   std::int64_t AccumOverflowCount();
   std::atomic<std::int64_t> accum_slot_dispatches_{0};
   std::atomic<std::int64_t> accum_atomic_dispatches_{0};
