@@ -115,11 +115,6 @@ def test_two_gpu_decode_completes(two_gpu_run):
     assert data["stats_after"]["get_expert_h2d_bytes_total"] > 0
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="two-GPU decode still shows occasional divergence from single-GPU "
-    "on P2P hosts after the #362 event/placement fix; see the PR notes",
-)
 def test_two_gpu_decode_matches_single_gpu(two_gpu_run):
     two, two_out, tmp_path = two_gpu_run
     assert two.returncode == 0
